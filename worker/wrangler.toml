@@ -1,0 +1,28 @@
+name = "athena-worker"
+main = "index.js"
+compatibility_date = "2026-07-21"
+account_id = "YOUR_CLOUDFLARE_ACCOUNT_ID"
+
+[assets]
+directory = "../public"
+binding = "ASSETS"
+html_handling = "auto-trailing-slash"
+not_found_handling = "single-page-application"
+# API must hit Worker before static assets / CDN cache
+run_worker_first = ["/api/*"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "athena-db"
+database_id = "YOUR_D1_DATABASE_ID"
+
+# Secrets: TELEGRAM_CLIENT_SECRET, TELEGRAM_BOT_TOKEN (webhook only), DISCORD_CLIENT_SECRET
+[vars]
+DISCORD_CLIENT_ID = "YOUR_DISCORD_CLIENT_ID"
+# ProjectAthenna_bot OIDC (must match TELEGRAM_CLIENT_SECRET secret)
+TELEGRAM_CLIENT_ID = "YOUR_TELEGRAM_CLIENT_ID"
+# Instance owners (comma-separated). Empty = all logged-in users are full owners (self-host).
+# Telegram: Bot API numeric user id and/or OIDC provider_id. Discord: numeric user id.
+# Telegram Bot API user IDs (and optional OIDC subs), comma-separated
+TG_OWNER_IDS = "YOUR_TELEGRAM_USER_ID"
+DISCORD_OWNER_IDS = ""

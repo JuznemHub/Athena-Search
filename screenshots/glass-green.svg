@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#000000"/><stop offset="100%" stop-color="#0a0b18"/></linearGradient>
+    <linearGradient id="acc" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#4ade80"/><stop offset="100%" stop-color="#16a34a"/></linearGradient>
+    <radialGradient id="g1" cx="15%" cy="5%" r="40%"><stop offset="0%" stop-color="rgba(34,197,94,0.35)"/><stop offset="100%" stop-color="transparent"/></radialGradient>
+    <radialGradient id="g2" cx="85%" cy="10%" r="35%"><stop offset="0%" stop-color="rgba(34,197,94,0.35)"/><stop offset="100%" stop-color="transparent"/></radialGradient>
+    <filter id="blur"><feGaussianBlur stdDeviation="80"/></filter>
+  </defs>
+  <rect width="1440" height="900" fill="url(#bg)"/>
+  <circle cx="200" cy="50" r="300" fill="url(#g1)" filter="url(#blur)" opacity="0.6"/>
+  <circle cx="1200" cy="80" r="250" fill="url(#g2)" filter="url(#blur)" opacity="0.4"/>
+  <rect x="0" y="0" width="1440" height="56" fill="rgba(255,255,255,0.1)" stroke="rgba(255,255,255,0.2)" stroke-width="0.5"/>
+  <rect x="20" y="14" width="26" height="26" rx="8" fill="url(#acc)"/>
+  <text x="56" y="33" font-family="Space Grotesk,system-ui" font-size="18" font-weight="600" fill="#ffffff">Athena<tspan fill="#22c55e">Search</tspan></text>
+  <rect x="1100" y="16" width="200" height="28" rx="14" fill="rgba(255,255,255,0.1)" stroke="rgba(255,255,255,0.2)" stroke-width="0.5"/>
+  <rect x="1104" y="20" width="44" height="20" rx="10" fill="url(#acc)"/>
+  <text x="1115" y="34" font-family="Space Grotesk" font-size="10" font-weight="600" fill="#fff">Glass</text>
+  <rect x="670" y="120" width="72" height="72" rx="14" fill="url(#acc)" stroke="rgba(255,255,255,0.15)" stroke-width="1"/>
+  <circle cx="690" cy="140" r="5" fill="rgba(255,255,255,0.92)"/><circle cx="726" cy="176" r="5" fill="rgba(255,255,255,0.92)"/><circle cx="706" cy="156" r="5" fill="rgba(255,255,255,0.92)"/>
+  <text x="706" y="240" font-family="Space Grotesk" font-size="36" font-weight="700" fill="#ffffff" text-anchor="middle">Athena</text>
+  <text x="706" y="265" font-family="Space Grotesk" font-size="14" fill="rgba(235,235,245,0.65)" text-anchor="middle">Search your second brain</text>
+  <rect x="320" y="300" width="760" height="56" rx="18" fill="rgba(255,255,255,0.14)" stroke="#22c55e" stroke-width="1.5"/>
+  <text x="360" y="334" font-family="Space Grotesk" font-size="16" fill="rgba(235,235,245,0.35)">Search your brain…</text>
+  <rect x="520" y="380" width="80" height="32" rx="16" fill="url(#acc)"/>
+  <text x="540" y="400" font-family="Space Grotesk" font-size="13" font-weight="500" fill="#fff">Search</text>
+  <rect x="610" y="380" width="70" height="32" rx="16" fill="rgba(255,255,255,0.1)" stroke="rgba(255,255,255,0.2)" stroke-width="0.5"/>
+  <text x="630" y="400" font-family="Space Grotesk" font-size="13" fill="rgba(235,235,245,0.65)">Dump</text>
+  <rect x="690" y="380" width="50" height="32" rx="16" fill="rgba(255,255,255,0.1)" stroke="rgba(255,255,255,0.2)" stroke-width="0.5"/>
+  <text x="705" y="400" font-family="Space Grotesk" font-size="13" fill="rgba(235,235,245,0.65)">AI</text>
+  <rect x="750" y="380" width="70" height="32" rx="16" fill="rgba(255,255,255,0.1)" stroke="rgba(255,255,255,0.2)" stroke-width="0.5"/>
+  <text x="770" y="400" font-family="Space Grotesk" font-size="13" fill="rgba(235,235,245,0.65)">Delete</text>
+  <rect x="320" y="450" width="760" height="90" rx="14" fill="rgba(255,255,255,0.1)" stroke="rgba(255,255,255,0.2)" stroke-width="0.5"/>
+  <text x="340" y="478" font-family="Space Grotesk" font-size="14" fill="#22c55e">yt-dlp — YouTube downloader</text>
+  <text x="340" y="498" font-family="JetBrains Mono" font-size="11" fill="rgba(235,235,245,0.35)">github.com/yt-dlp/yt-dlp</text>
+  <text x="340" y="518" font-family="Space Grotesk" font-size="12" fill="rgba(235,235,245,0.65)">Command-line tool to download videos from YouTube</text>
+  <rect x="320" y="555" width="760" height="90" rx="14" fill="rgba(255,255,255,0.1)" stroke="rgba(255,255,255,0.2)" stroke-width="0.5"/>
+  <text x="340" y="583" font-family="Space Grotesk" font-size="14" fill="#22c55e">lean-ctx — Context Engineering</text>
+  <text x="340" y="603" font-family="JetBrains Mono" font-size="11" fill="rgba(235,235,245,0.35)">github.com/yvgude/lean-ctx</text>
+  <text x="340" y="623" font-family="Space Grotesk" font-size="12" fill="rgba(235,235,245,0.65)">81 MCP tools for AI agents, compresses context by 99%</text>
+  <text x="706" y="720" font-family="Space Grotesk" font-size="11" fill="rgba(235,235,245,0.35)" text-anchor="middle">Green accent · #22c55e</text>
+</svg>

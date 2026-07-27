@@ -1,0 +1,29 @@
+# Optional: a local Telegram Bot API server.
+#
+# Only needed if your backups exceed 50 MB — the cloud Bot API caps a single
+# upload there, while a local server allows 2 GB. Athena splits large backups
+# into parts either way, so this is a convenience, not a requirement.
+#
+#   1. Get TELEGRAM_API_ID / TELEGRAM_API_HASH from https://my.telegram.org
+#      (these are APP credentials, different from your bot token)
+#   2. docker compose -f server/docker-compose.bot-api.yml up -d
+#   3. Set TELEGRAM_API_BASE=http://localhost:8081 in your .env
+#
+# Athena then uploads through it automatically and raises the part size.
+
+services:
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    restart: unless-stopped
+    env_file:
+      - /etc/athena/bot-api.env
+    environment:
+      TELEGRAM_LOCAL: "1"
+    volumes:
+      - bot-api-data:/var/lib/telegram-bot-api
+    ports:
+      # Bind to loopback only — this endpoint takes your bot token.
+      - "127.0.0.1:8081:8081"
+
+volumes:
+  bot-api-data:

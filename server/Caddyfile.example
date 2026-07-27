@@ -1,0 +1,38 @@
+# Caddy in front of the Athena backend.
+#
+# Use this instead of a Cloudflare Tunnel when you would rather open ports than
+# run an outbound tunnel daemon.
+#
+# REQUIREMENTS — both, not one or the other:
+#   * inbound TCP 80 and 443 reachable from the internet
+#   * a real domain name with an A/AAAA record pointing at this server
+#
+# The domain is NOT optional. The Athena frontend is served over HTTPS from
+# Cloudflare, and a browser on an HTTPS page refuses to call a plain-HTTP
+# backend (mixed content). Automatic HTTPS needs a DNS name Let's Encrypt can
+# validate — a bare IP cannot get a publicly trusted certificate, and a
+# self-signed one is rejected by the browser. If you have no domain, use a
+# Cloudflare Tunnel (quick or named) instead, or run fully standalone over
+# http:// on your LAN.
+#
+#   dnf install caddy      # or: apt install caddy
+#   cp server/Caddyfile.example /etc/caddy/Caddyfile   # then edit the hostname
+#   firewall-cmd --add-service=http --add-service=https --permanent
+#   firewall-cmd --reload
+#   systemctl enable --now caddy
+
+athena.example.com {
+	# Athena listens on 8787 by default (PORT in /etc/athena/athena.env).
+	reverse_proxy 127.0.0.1:8787
+
+	# The backend reads these to reconstruct the original request URL, which the
+	# OAuth callback needs in order to build the right redirect_uri.
+	header_up X-Forwarded-Proto {scheme}
+	header_up X-Forwarded-Host {host}
+
+	encode gzip
+
+	log {
+		output file /var/log/caddy/athena.log
+	}
+}

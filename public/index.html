@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#06070a">
+  <title>Athena — Second Brain Search</title>
+  <meta name="description" content="One bar: search, dump, and AI answers from your markdown brain.">
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('athena_theme') || 'dark';
+        document.documentElement.setAttribute('data-theme', t);
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) {
+          meta.content = t === 'light' ? '#f5f6fa' : t === 'material' ? '#121212' : '#08080f';
+        }
+        var accent = localStorage.getItem('athena_accent_color');
+        if (accent && /^#[0-9a-fA-F]{3,8}$/.test(accent)) {
+          var r = parseInt(accent.slice(1,3), 16), g = parseInt(accent.slice(3,5), 16), b = parseInt(accent.slice(5,7), 16);
+          document.documentElement.style.setProperty('--accent', accent);
+          document.documentElement.style.setProperty('--primary-purple', accent);
+          document.documentElement.style.setProperty('--accent-glow', 'rgba('+r+','+g+','+b+',0.45)');
+          document.documentElement.style.setProperty('--accent-soft', 'rgba('+r+','+g+','+b+',0.22)');
+          document.documentElement.style.setProperty('--accent-border', 'rgba('+r+','+g+','+b+',0.35)');
+          document.documentElement.style.setProperty('--accent-gradient', 'linear-gradient(135deg, rgb('+Math.min(r+40,255)+','+Math.min(g+40,255)+','+Math.min(b+40,255)+'), rgb('+Math.max(r-40,0)+','+Math.max(g-40,0)+','+Math.max(b-40,0)+'))');
+          document.documentElement.style.setProperty('--body-glow-1', 'rgba('+r+','+g+','+b+',0.45)');
+          document.documentElement.style.setProperty('--body-glow-2', 'rgba('+r+','+g+','+b+',0.25)');
+          document.documentElement.style.setProperty('--glow-purple', 'rgba('+r+','+g+','+b+',0.45)');
+        }
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      }
+    })();
+  </script>
+  <link rel="stylesheet" href="./src/style.css">
+  <link rel="stylesheet" href="./src/themes.css">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <div class="bg-glow glow-1"></div>
+  <div class="bg-glow glow-2"></div>
+
+  <div id="authGate" class="auth-gate">
+    <div class="auth-gate-card">
+      <div class="auth-gate-logo">
+        <span class="logo-orb"></span>
+        <span class="logo-text">Athena<span class="highlight">Search</span></span>
+      </div>
+      <h1>Welcome</h1>
+      <p class="auth-gate-sub">Sign in with Telegram or Discord to use Athena.</p>
+      <div class="oauth-buttons">
+        <button type="button" id="telegramLoginBtn" class="btn btn-telegram btn-block" disabled>Continue with Telegram</button>
+        <button type="button" id="discordLoginBtn" class="btn btn-discord btn-block" disabled>Continue with Discord</button>
+      </div>
+      <p id="authGateError" class="auth-error hidden"></p>
+      <div class="theme-switcher auth-theme-switcher" role="group" aria-label="Theme">
+        <button type="button" class="theme-chip" data-theme="dark">Dark</button>
+        <button type="button" class="theme-chip" data-theme="light">Light</button>
+        <button type="button" class="theme-chip" data-theme="material">Material</button>
+        <button type="button" class="theme-chip" data-theme="glass">Glass</button>
+      </div>
+      <p class="auth-gate-note">Communities are optional — configure later in Settings.</p>
+    </div>
+  </div>
+
+  <div id="appRoot" class="app-container hidden">
+    <header class="top-bar">
+      <button id="hamburgerBtn" class="icon-btn" type="button" aria-label="Open settings menu" title="Settings">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+      </button>
+      <div class="brand-logo">
+        <span class="logo-orb" aria-hidden="true"></span>
+        <span class="logo-text">Athena<span class="highlight">Search</span></span>
+      </div>
+      <div class="theme-bar" id="themeBar" role="group" aria-label="Theme">
+        <button type="button" class="theme-chip" data-theme="dark" title="Dark">Dark</button>
+        <button type="button" class="theme-chip" data-theme="light" title="Light">Light</button>
+        <button type="button" class="theme-chip" data-theme="material" title="Material">Mat</button>
+        <button type="button" class="theme-chip" data-theme="glass" title="Glass">Glass</button>
+      </div>
+      <button type="button" id="notifBellBtn" class="icon-btn notif-bell" title="Notifications" aria-label="Notifications">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
+        <span id="notifBadge" class="notif-badge hidden">0</span>
+      </button>
+      <div class="mode-badge" id="modeBadge">
+        <span class="pulse-dot" id="modePulse"></span>
+        <span id="modeBadgeText">Search</span>
+      </div>
+    </header>
+
+    <main class="main-content">
+      <div class="search-wrapper" id="searchWrapper">
+        <div class="hero-mark" id="heroMark">
+          <svg class="dice-svg" id="diceSvg" viewBox="0 0 72 72" width="72" height="72" role="img" aria-label="Athena dice - click to roll">
+            <rect x="2" y="2" width="68" height="68" rx="14" fill="var(--accent)" stroke="rgba(255,255,255,0.15)" stroke-width="1"/>
+            <g class="dice-pips" id="dicePips" fill="rgba(255,255,255,0.92)">
+              <!-- Face 1: center pip -->
+              <circle class="pip-dot" cx="36" cy="36" r="6"/>
+            </g>
+          </svg>
+        </div>
+        <h1 class="hero-title" id="heroTitle">Athena</h1>
+        <p class="hero-subtitle" id="scopeSubtitle">Search your second brain</p>
+
+        <!-- Single unified bar -->
+        <form class="search-bar-box" id="searchBarBox" autocomplete="off">
+          <button type="button" class="bar-action-btn" id="barActionBtn" title="Search" aria-label="Action">
+            <!-- icon swapped by JS: search / plus / spark -->
+            <svg id="iconSearch" class="bar-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <svg id="iconDump" class="bar-icon hidden" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            <svg id="iconAi" class="bar-icon hidden" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2l1.8 5.5L19 9.5l-5.2 2 1.8 5.5L12 14.5 7.4 17l1.8-5.5L4 9.5l5.2-2L12 2z"></path></svg>
+            <svg id="iconDelete" class="bar-icon hidden" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="12" cy="12" r="9"></circle><line x1="5.5" y1="5.5" x2="18.5" y2="18.5"></line></svg>
+          </button>
+          <input type="text" id="searchInput" placeholder="Search your brain…" autocomplete="off" enterkeyhint="search">
+          <button type="button" id="clearSearchBtn" class="clear-btn hidden" aria-label="Clear">&times;</button>
+          <button type="submit" class="bar-submit-btn" id="barSubmitBtn" title="Go" aria-label="Go">
+            <svg id="iconArrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+          </button>
+        </form>
+        <div id="uploadActions" class="upload-actions hidden">
+          <button type="button" id="uploadFileBtn" class="upload-file-btn" aria-label="Upload text files" title="Upload text files" aria-controls="documentFileInput">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+            <span>Upload text</span>
+          </button>
+          <input id="documentFileInput" class="visually-hidden" type="file" multiple accept=".md,.markdown,.txt,.py,.js,.ts,.jsx,.tsx,.sh,.bash,.zsh,.fish,.css,.html,.htm,.json,.yaml,.yml,.toml,.xml,.csv,.sql,.go,.rs,.java,.c,.h,.cpp,.hpp,.cs,.rb,.php,.swift,.kt,.kts,.lua,.r,.dart,.vue,.svelte,.ini,.cfg,.conf,.env,.log" aria-label="Choose text or code files">
+          <span id="uploadStatus" class="upload-status" role="status" aria-live="polite"></span>
+        </div>
+
+        <!-- Mode pills under the bar -->
+        <div class="mode-pills" id="modePills">
+          <button type="button" class="mode-pill active" data-mode="search">Search</button>
+          <button type="button" class="mode-pill" data-mode="dump">Dump</button>
+          <button type="button" class="mode-pill" data-mode="ai" id="aiModePill">AI</button>
+          <button type="button" class="mode-pill mode-pill-delete" data-mode="delete">Delete</button>
+        </div>
+
+        <div id="notifPanel" class="notif-panel hidden">
+          <div class="notif-panel-head">
+            <strong>Notifications</strong>
+            <button type="button" id="closeNotifBtn" class="icon-btn">&times;</button>
+          </div>
+          <div id="notifList" class="notif-list"></div>
+        </div>
+
+        <div id="toast" class="toast hidden"></div>
+
+        <!-- AI answer card -->
+        <div id="aiAnswerCard" class="ai-answer-card hidden">
+          <div class="ai-answer-label">AI · from your brain</div>
+          <div id="aiAnswerText" class="ai-answer-text"></div>
+          <div id="aiSources" class="ai-sources"></div>
+        </div>
+
+        <!-- Google-style results -->
+        <div class="results-container" id="resultsContainer">
+          <div class="results-meta hidden" id="resultsMeta"></div>
+          <div class="empty-state" id="emptyState">
+            <p id="emptyStateText">Paste a link or note in <strong>Dump</strong>, then search or ask AI.</p>
+          </div>
+          <div class="results-list" id="resultsList"></div>
+        </div>
+      </div>
+    </main>
+
+    <div class="scope-switch-container">
+      <div class="scope-switch">
+        <button id="personalScopeBtn" class="scope-btn active">Personal</button>
+        <button id="communityScopeBtn" class="scope-btn">Community</button>
+      </div>
+    </div>
+  </div>
+
+
+
+  <div id="drawerOverlay" class="drawer-overlay"></div>
+  <aside id="sideDrawer" class="side-drawer">
+    <div class="drawer-header">
+      <h2>Settings</h2>
+      <button id="closeDrawerBtn" class="icon-btn">&times;</button>
+    </div>
+    <div class="drawer-content">
+      <div class="drawer-section">
+        <h3>Profile</h3>
+        <div class="profile-card">
+          <div class="avatar" id="userAvatar">U</div>
+          <div class="user-info">
+            <span class="user-name" id="userName">—</span>
+            <span class="user-role" id="userEmail">—</span>
+          </div>
+        </div>
+        <button id="logoutBtn" class="btn btn-danger btn-sm">Logout</button>
+        <div id="wipePersonalWrap" class="mt-2" style="display:block">
+          <button type="button" id="wipePersonalBtn" class="btn btn-danger btn-block">Wipe all personal data</button>
+          <p class="section-desc">GOD rank only. Double confirmation. Removes <strong>your</strong> personal links, AI config, and sessions.</p>
+        </div>
+      </div>
+
+      <div class="drawer-section">
+        <h3>Appearance</h3>
+        <p class="section-desc">Theme adapts for phone, tablet, and desktop.</p>
+        <div class="theme-switcher" id="themeSwitcher" role="group" aria-label="Theme">
+          <button type="button" class="theme-chip" data-theme="dark">Dark</button>
+          <button type="button" class="theme-chip" data-theme="light">Light</button>
+          <button type="button" class="theme-chip" data-theme="material">Material</button>
+          <button type="button" class="theme-chip" data-theme="glass">Glass</button>
+        </div>
+      </div>
+
+      <div class="drawer-section">
+        <h3>Accent Color</h3>
+        <p class="section-desc">Pick a color for buttons, highlights, glows, and accents across all themes.</p>
+        <div class="accent-picker-row">
+          <input type="color" id="accentColorInput" class="accent-color-input" value="#7c5ce0" aria-label="Pick accent color">
+          <span class="accent-current-label" id="accentCurrentLabel">#7c5ce0</span>
+          <button type="button" id="accentResetBtn" class="btn btn-secondary btn-sm">Reset</button>
+        </div>
+        <div class="accent-swatches" id="accentSwatches">
+          <button type="button" class="accent-swatch" data-color="#7c5ce0" title="Purple" style="--sw:#7c5ce0"></button>
+          <button type="button" class="accent-swatch" data-color="#3b82f6" title="Blue" style="--sw:#3b82f6"></button>
+          <button type="button" class="accent-swatch" data-color="#ef4444" title="Red" style="--sw:#ef4444"></button>
+          <button type="button" class="accent-swatch" data-color="#22c55e" title="Green" style="--sw:#22c55e"></button>
+          <button type="button" class="accent-swatch" data-color="#f97316" title="Orange" style="--sw:#f97316"></button>
+          <button type="button" class="accent-swatch" data-color="#ec4899" title="Pink" style="--sw:#ec4899"></button>
+          <button type="button" class="accent-swatch" data-color="#14b8a6" title="Teal" style="--sw:#14b8a6"></button>
+          <button type="button" class="accent-swatch" data-color="#eab308" title="Amber" style="--sw:#eab308"></button>
+          <button type="button" class="accent-swatch" data-color="#6366f1" title="Indigo" style="--sw:#6366f1"></button>
+          <button type="button" class="accent-swatch" data-color="#06b6d4" title="Cyan" style="--sw:#06b6d4"></button>
+          <button type="button" class="accent-swatch" data-color="#8b5cf6" title="Violet" style="--sw:#8b5cf6"></button>
+          <button type="button" class="accent-swatch" data-color="#f59e0b" title="Gold" style="--sw:#f59e0b"></button>
+        </div>
+      </div>
+
+      <div class="drawer-section" id="backendSection">
+        <h3>Backend</h3>
+        <p class="section-desc">GOD sets one API backend for this instance. Every account uses that backend and its storage.</p>
+        <label class="field-label" for="backendUrl">Backend URL</label>
+        <input id="backendUrl" class="input" type="url" placeholder="https://athena.your-server.com  (blank = Cloudflare)" autocomplete="off" spellcheck="false">
+        <button id="defaultBackendBtn" class="btn btn-primary btn-block mt-2 hidden">Set backend for everyone <span class="lock-badge">GOD</span></button>
+        <div id="backendStatus" class="status-msg mt-2"></div>
+      </div>
+
+      <div class="drawer-section auth-only" id="storageSection">
+        <h3>Storage backend <span id="storageGodBadge" class="lock-badge hidden">GOD</span></h3>
+        <p class="section-desc" id="storageDesc">Where links are stored. GitHub keeps them as Markdown you own.</p>
+        <div id="storageSettingsBody">
+          <label class="field-label" for="storageProvider">Provider</label>
+          <select id="storageProvider" class="input">
+            <option value="d1">Cloudflare D1 (default)</option>
+            <option value="github">GitHub Markdown</option>
+          </select>
+          <div id="githubFields" class="hidden">
+            <label class="field-label" for="githubRepo">Repository (owner/repo)</label>
+            <input id="githubRepo" class="input" type="text" placeholder="yourname/athena-brain" autocomplete="off">
+            <label class="field-label" for="githubBranch">Branch</label>
+            <input id="githubBranch" class="input" type="text" placeholder="main" autocomplete="off">
+            <label class="field-label" for="githubToken">Access token</label>
+            <input id="githubToken" class="input" type="password" placeholder="github_pat_... (write once, never shown again)" autocomplete="off">
+          </div>
+          <button id="saveStorageBtn" class="btn btn-primary btn-block mt-2">Save storage settings</button>
+          <button id="syncStorageBtn" class="btn btn-secondary btn-block mt-2">Push existing links to GitHub</button>
+        </div>
+        <div id="storageStatus" class="status-msg mt-2"></div>
+      </div>
+
+      <div class="drawer-section auth-only" id="aiSettingsSection">
+        <h3>AI assistant <span id="aiLockBadge" class="lock-badge hidden" title="GOD only credentials">🔒</span></h3>
+        <p class="section-desc" id="aiSettingsDesc">Chat available to all ranks. API credentials are set by GOD rank (instance host) only.</p>
+        <div id="aiSettingsBody">
+        <div class="form-group">
+          <label for="aiPreset">Provider</label>
+          <select id="aiPreset">
+            <option value="opencode_go">OpenCode Zen Go</option>
+            <option value="opencode_zen">OpenCode Zen</option>
+            <option value="openai">OpenAI</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="groq">Groq</option>
+            <option value="custom">Custom endpoint</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="aiBaseUrl">API base URL</label>
+          <input type="text" id="aiBaseUrl" placeholder="https://opencode.ai/zen/go/v1">
+        </div>
+        <div class="form-group">
+          <label for="aiModel">Model</label>
+          <input type="text" id="aiModel" placeholder="deepseek-v4-flash">
+        </div>
+        <p class="section-desc">OpenCode Go: base <code>https://opencode.ai/zen/go/v1</code>, model <code>deepseek-v4-flash</code> (not opencode-go/…).</p>
+        <div class="form-group">
+          <label for="aiApiKey">API key</label>
+          <input type="password" id="aiApiKey" placeholder="sk-… or key" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label for="aiMode">API style</label>
+          <select id="aiMode">
+            <option value="openai">OpenAI-compatible (/chat/completions)</option>
+            <option value="anthropic">Anthropic (/v1/messages)</option>
+          </select>
+        </div>
+        <button id="saveAiConfigBtn" class="btn btn-primary btn-block">Save AI config</button>
+        <button id="clearAiConfigBtn" class="btn btn-secondary btn-block mt-2">Clear key</button>
+        <div id="aiConfigStatus" class="status-msg mt-2"></div>
+        </div>
+      </div>
+
+      <div class="drawer-section auth-only" id="botSettingsSection">
+        <h3>Bot (personal) <span id="botGodBadge" class="lock-badge hidden" title="GOD only edit">🔒</span></h3>
+        <p class="section-desc" id="botSettingsDesc">Visible to all ranks. Only GOD rank can add/change the bot. Communities: <code>/community_verify</code> in group.</p>
+        <div id="botSettingsBody">
+        <div class="form-group">
+          <select id="botPlatform">
+            <option value="telegram">Telegram</option>
+            <option value="discord">Discord</option>
+          </select>
+        </div>
+        <div class="form-group"><input type="text" id="botUsernameInput" placeholder="Bot username (optional if token set)"></div>
+        <div class="form-group"><input type="password" id="botTokenInput" placeholder="Bot token from @BotFather" autocomplete="off"></div>
+        <div class="form-group"><input type="text" id="groupIdInput" placeholder="Your DM chat ID (bot → /id)"></div>
+        <div class="form-group"><input type="text" id="groupNameInput" placeholder="Label (optional)"></div>
+        <button id="saveBotBindingBtn" class="btn btn-primary btn-block">Verify & save bot</button>
+        </div>
+        <div id="botBindingsList" class="bot-bindings mt-2"></div>
+        <div id="botStatus" class="status-msg mt-2">1) DM the bot → /id  2) Paste token + chat ID  3) Add bot to a group → /community_verify</div>
+      </div>
+
+      <div class="drawer-section auth-only">
+        <h3>Communities</h3>
+        <p class="section-desc">Linked via Telegram: add bot to group, owner sends <code>/community_verify</code>. Select one to browse on the site.</p>
+        <div class="form-group">
+          <select id="communitySelect"><option value="">None (personal)</option></select>
+        </div>
+        <div id="communityDetails" class="status-msg mt-2"></div>
+        <div id="adminsList" class="bot-bindings mt-2"></div>
+      </div>
+
+      <div class="drawer-section auth-only">
+        <h3>Host</h3>
+        <p class="section-desc"><code id="currentHost">-</code></p>
+      </div>
+    </div>
+  </aside>
+
+  <script src="./src/lib/dedupe.js"></script>
+  <script src="./src/lib/search.js?v=6.18.2"></script>
+  <script src="./src/lib/ai.js?v=6.18.2"></script>
+  <script src="./src/main.js?v=6.18.2"></script>
+</body>
+</html>

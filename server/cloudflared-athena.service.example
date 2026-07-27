@@ -1,0 +1,34 @@
+[Unit]
+Description=Cloudflare Tunnel for the Athena backend (athena.yourdomain.com)
+Documentation=https://developers.cloudflare.com/cloudflare-tunnel/
+After=network-online.target athena.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Named tunnel: the hostname is fixed, unlike a quick tunnel which gets a new
+# *.trycloudflare.com name on every restart and silently breaks the backend URL
+# the frontend has stored.
+#
+# Routing (athena.yourdomain.com -> http://127.0.0.1:8787) is held by Cloudflare,
+# not in a local config file, because the tunnel was created with
+# config_src=cloudflare. Change it in the dashboard or via the API.
+#
+# The connection is OUTBOUND ONLY — no inbound port is opened, which is why this
+# works with 80/443 closed at the host firewall.
+EnvironmentFile=/etc/athena/tunnel.env
+ExecStart=/usr/local/bin/cloudflared --no-autoupdate tunnel run --token ${TUNNEL_TOKEN}
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cloudflared-athena
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
