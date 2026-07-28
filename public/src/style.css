@@ -452,6 +452,7 @@ input:checked + .slider:before { transform: translateX(24px); }
 .notif-body { font-size: 0.8rem; color: var(--text-muted, #8e95b0); margin-top: 4px; white-space: pre-wrap; }
 .notif-time { font-size: 0.72rem; color: var(--text-muted, #8e95b0); margin-top: 6px; }
 .notif-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.notif-bulk-actions { display: flex; gap: 8px; margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid rgba(255,255,255,0.06); }
 
 .g-author { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 0.78rem; color: var(--text-muted, #8e95b0); margin-bottom: 6px; }
 .g-author-name { color: var(--text-main, #eef0f6); font-weight: 500; }

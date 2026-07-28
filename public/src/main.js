@@ -780,6 +780,15 @@ document.addEventListener('DOMContentLoaded', () => {
       notifList.innerHTML = '<p class="status-msg">No notifications</p>';
       return;
     }
+    // Bulk actions header
+    const bulkActions = document.createElement('div');
+    bulkActions.className = 'notif-bulk-actions';
+    bulkActions.innerHTML = `
+      <button type="button" class="btn btn-secondary btn-sm" id="notifReadAll">Read All</button>
+      <button type="button" class="btn btn-danger btn-sm" id="notifDeleteAll">Delete All</button>
+    `;
+    notifList.appendChild(bulkActions);
+
     state.notifications.forEach(n => {
       const el = document.createElement('div');
       el.className = 'notif-item' + (n.read ? '' : ' unread');
@@ -795,6 +804,32 @@ document.addEventListener('DOMContentLoaded', () => {
       `;
       notifList.appendChild(el);
     });
+
+    // Wire up bulk actions
+    const readAllBtn = notifList.querySelector('#notifReadAll');
+    const deleteAllBtn = notifList.querySelector('#notifDeleteAll');
+    if (readAllBtn) {
+      readAllBtn.addEventListener('click', async () => {
+        await api('/api/notifications', {
+          method: 'POST',
+          body: JSON.stringify({ action: 'read_all' })
+        });
+        await loadNotifications();
+        renderNotifications();
+      });
+    }
+    if (deleteAllBtn) {
+      deleteAllBtn.addEventListener('click', async () => {
+        if (!confirm('Delete all notifications?')) return;
+        await api('/api/notifications', {
+          method: 'POST',
+          body: JSON.stringify({ action: 'delete_all' })
+        });
+        await loadNotifications();
+        renderNotifications();
+      });
+    }
+
     notifList.querySelectorAll('.notif-del-link').forEach(btn => {
       btn.addEventListener('click', async () => {
         if (!confirm('Delete this reported link from the community brain?')) return;
