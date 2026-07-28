@@ -1575,16 +1575,17 @@ async function handleTelegramWebAppAuth(request, env, corsHeaders) {
        for (const god of (godUsers || [])) {
          await createNotification(env, { userId: god.id, type: 'login', title: 'Website Login', body: loginMsg }).catch(() => {});
        }
-       // Telegram notification for GOD users + log channel
-       for (const ownerId of ownerIds) {
-         if (ownerId && env.TELEGRAM_BOT_TOKEN) {
-           await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, `🌐 ${boldHtml(loginLabel)}${loginTgId ? ` | ${codeHtml(String(loginTgId))}` : ''} logged in to website`).catch(() => {});
-         }
-       }
-       // Send to log channel if set
+       // Telegram notification: send to log channel if set, otherwise to GOD DMs
        const logChannelId = await getLogChannelId(env, godUsers?.[0]?.id);
+       const notifyText = `🌐 ${boldHtml(loginLabel)}${loginTgId ? ` | ${codeHtml(String(loginTgId))}` : ''} logged in to website`;
        if (logChannelId && env.TELEGRAM_BOT_TOKEN) {
-         await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, logChannelId, `🌐 ${boldHtml(loginLabel)}${loginTgId ? ` | ${codeHtml(String(loginTgId))}` : ''} logged in to website`).catch(() => {});
+         await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, logChannelId, notifyText).catch(() => {});
+       } else {
+         for (const ownerId of ownerIds) {
+           if (ownerId && env.TELEGRAM_BOT_TOKEN) {
+             await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
+           }
+         }
        }
      } catch (_) {}
      const owner = await isInstanceOwnerUserAsync(user, env);
@@ -1845,16 +1846,17 @@ async function handleTelegramCallback(url, env, corsHeaders) {
      for (const god of (godUsers || [])) {
        await createNotification(env, { userId: god.id, type: 'login', title: 'Website Login', body: loginMsg }).catch(() => {});
      }
-     // Telegram notification for GOD users + log channel
-     for (const ownerId of ownerIds) {
-       if (ownerId && env.TELEGRAM_BOT_TOKEN) {
-         await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, `🌐 ${boldHtml(loginLabel)}${loginTgId ? ` | ${codeHtml(String(loginTgId))}` : ''} logged in to website (Telegram)`).catch(() => {});
-       }
-     }
-     // Send to log channel if set
+     // Telegram notification: send to log channel if set, otherwise to GOD DMs
      const logChannelId = await getLogChannelId(env, godUsers?.[0]?.id);
+     const notifyText = `🌐 ${boldHtml(loginLabel)}${loginTgId ? ` | ${codeHtml(String(loginTgId))}` : ''} logged in to website (Telegram)`;
      if (logChannelId && env.TELEGRAM_BOT_TOKEN) {
-       await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, logChannelId, `🌐 ${boldHtml(loginLabel)}${loginTgId ? ` | ${codeHtml(String(loginTgId))}` : ''} logged in to website (Telegram)`).catch(() => {});
+       await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, logChannelId, notifyText).catch(() => {});
+     } else {
+       for (const ownerId of ownerIds) {
+         if (ownerId && env.TELEGRAM_BOT_TOKEN) {
+           await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
+         }
+       }
      }
    } catch (_) {}
    // Consume state only after success
@@ -1952,16 +1954,17 @@ async function handleDiscordCallback(url, env, corsHeaders) {
      for (const god of (godUsers || [])) {
        await createNotification(env, { userId: god.id, type: 'login', title: 'Website Login', body: loginMsg }).catch(() => {});
      }
-     // Telegram notification for GOD users + log channel
-     for (const ownerId of ownerIds) {
-       if (ownerId && env.TELEGRAM_BOT_TOKEN) {
-         await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, `🌐 ${boldHtml(loginLabel)} logged in to website (Discord)`).catch(() => {});
-       }
-     }
-     // Send to log channel if set
+     // Telegram notification: send to log channel if set, otherwise to GOD DMs
      const logChannelId = await getLogChannelId(env, godUsers?.[0]?.id);
+     const notifyText = `🌐 ${boldHtml(loginLabel)} logged in to website (Discord)`;
      if (logChannelId && env.TELEGRAM_BOT_TOKEN) {
-       await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, logChannelId, `🌐 ${boldHtml(loginLabel)} logged in to website (Discord)`).catch(() => {});
+       await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, logChannelId, notifyText).catch(() => {});
+     } else {
+       for (const ownerId of ownerIds) {
+         if (ownerId && env.TELEGRAM_BOT_TOKEN) {
+           await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
+         }
+       }
      }
    } catch (_) {}
    return Response.redirect(`${frontendOrigin(env, url)}/?session=${encodeURIComponent(sessionToken)}`, 302);
@@ -2180,23 +2183,24 @@ async function handleJoinCommunity(request, user, env, corsHeaders) {
      for (const god of (godUsers || [])) {
        await createNotification(env, { userId: god.id, type: 'community_join', title: 'New Community Member', body: notifyMsg }).catch(() => {});
      }
-      // Telegram notification for GOD users + log channel
-      for (const ownerId of ownerIds) {
-        if (ownerId && env.TELEGRAM_BOT_TOKEN) {
-          await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, `👤 ${boldHtml(joinerLabel)}${joinerTgId ? ` | ${codeHtml(String(joinerTgId))}` : ''} joined ${boldHtml(c.name)} community`).catch(() => {});
-        }
-      }
-      // Send to log channel if set
-      const logChannelId = await getLogChannelId(env, godUsers?.[0]?.id);
-      if (logChannelId && env.TELEGRAM_BOT_TOKEN) {
-        await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, logChannelId, `👤 ${boldHtml(joinerLabel)}${joinerTgId ? ` | ${codeHtml(String(joinerTgId))}` : ''} joined ${boldHtml(c.name)} community`).catch(() => {});
-      }
-    } catch (_) {}
-    return Response.json({
-      success: true,
-      already_member: false,
-      community: { ...c, role, is_staff: role === 'owner' }
-    }, { headers: corsHeaders });
+     // Telegram notification: send to log channel if set, otherwise to GOD DMs
+     const logChannelId = await getLogChannelId(env, godUsers?.[0]?.id);
+     const notifyText = `👤 ${boldHtml(joinerLabel)}${joinerTgId ? ` | ${codeHtml(String(joinerTgId))}` : ''} joined ${boldHtml(c.name)} community`;
+     if (logChannelId && env.TELEGRAM_BOT_TOKEN) {
+       await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, logChannelId, notifyText).catch(() => {});
+     } else {
+       for (const ownerId of ownerIds) {
+         if (ownerId && env.TELEGRAM_BOT_TOKEN) {
+           await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
+         }
+       }
+     }
+   } catch (_) {}
+   return Response.json({
+     success: true,
+     already_member: false,
+     community: { ...c, role, is_staff: role === 'owner' }
+   }, { headers: corsHeaders });
   }
 
 async function ensureBotBindingColumns(env) {
@@ -6147,16 +6151,17 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        for (const god of (godUsers || [])) {
          await createNotification(env, { userId: god.id, type: 'community_join', title: 'New Community Member', body: notifyMsg }).catch(() => {});
        }
-       // Telegram notification for GOD users + log channel
-       for (const ownerId of ownerIds) {
-         if (ownerId && env.TELEGRAM_BOT_TOKEN) {
-           await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, `👤 ${boldHtml(joinerLabel)}${joinerTgId ? ` | ${codeHtml(String(joinerTgId))}` : ''} joined ${boldHtml(c.name)} community`).catch(() => {});
-         }
-       }
-       // Send to log channel if set
+       // Telegram notification: send to log channel if set, otherwise to GOD DMs
        const logChannelId = await getLogChannelId(env, godUsers?.[0]?.id);
+       const notifyText = `👤 ${boldHtml(joinerLabel)}${joinerTgId ? ` | ${codeHtml(String(joinerTgId))}` : ''} joined ${boldHtml(c.name)} community`;
        if (logChannelId && env.TELEGRAM_BOT_TOKEN) {
-         await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, logChannelId, `👤 ${boldHtml(joinerLabel)}${joinerTgId ? ` | ${codeHtml(String(joinerTgId))}` : ''} joined ${boldHtml(c.name)} community`).catch(() => {});
+         await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, logChannelId, notifyText).catch(() => {});
+       } else {
+         for (const ownerId of ownerIds) {
+           if (ownerId && env.TELEGRAM_BOT_TOKEN) {
+             await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
+           }
+         }
        }
      } catch (_) {}
      await sendTelegramMessage(token, chatId, [
