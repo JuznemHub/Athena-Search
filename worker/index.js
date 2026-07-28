@@ -7598,10 +7598,10 @@ function isDetailedNotes(notes) {
 function stripTags(html) {
   return decodeHtmlEntities(
     String(html || '')
-      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
-      .replace(/<!--[\s\S]*?-->/g, ' ')
+      .replace(/<script\b[\s\S]*?<\/script(?:\s+[^>]*)?\s*>/gi, ' ')
+      .replace(/<style\b[\s\S]*?<\/style(?:\s+[^>]*)?\s*>/gi, ' ')
+      .replace(/<noscript\b[\s\S]*?<\/noscript(?:\s+[^>]*)?\s*>/gi, ' ')
+      .replace(/<!--[\s\S]*?--!?>/g, ' ')
       .replace(/<[^>]+>/g, ' ')
       .replace(/\s+/g, ' ')
       .trim()
