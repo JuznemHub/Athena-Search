@@ -27,7 +27,7 @@ const ROOT = resolve(HERE, '..');
 
 const PORT = parseInt(process.env.PORT || '8787', 10);
 const HOST = process.env.HOST || '0.0.0.0';
-const ASSETS_DIR = process.env.ATHENA_ASSETS || join(ROOT, 'public');
+const ASSETS_DIR = resolve(ROOT, process.env.ATHENA_ASSETS || 'public');
 
 // --- database -------------------------------------------------------------
 // Postgres only. SQLite was removed once Postgres was verified end to end.

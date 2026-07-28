@@ -208,8 +208,9 @@ cd Athena-Search
 npm install
 
 # Configure
-cp server/.env.example .env
+cp .env.example .env
 # Edit .env: DATABASE_URL, TELEGRAM_*, TG_OWNER_IDS, etc.
+# See also: server/.env.example for the full reference with comments
 
 # Run
 node server/index.js
@@ -240,6 +241,32 @@ athena.yourdomain.com {
     reverse_proxy localhost:8787
 }
 ```
+
+**Nginx reverse proxy** (for Cloudflare or any provider):
+
+If your domain is behind Cloudflare, set Cloudflare SSL/TLS to **Flexible** (origin is HTTP) and use this nginx config:
+
+```nginx
+# /etc/nginx/conf.d/athena.conf
+server {
+    listen 80;
+    server_name athena.yourdomain.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+    }
+}
+```
+
+Remove or comment out the default server block in `/etc/nginx/nginx.conf` if it catches requests before your config.
 
 **Systemd service** (example in `server/athena.service.example`)
 
@@ -324,6 +351,15 @@ For self-hosted backends with Cloudflare frontend:
 
 The backend URL is stored per-instance (on the Cloudflare origin), so every visitor uses the same backend.
 
+**What `ATHENA_FRONTEND_URL` does**: This is where OAuth redirects send the browser after login (Telegram, Discord). It must be a URL the user can actually reach. If you set it to a Cloudflare Worker URL, the Worker must serve the same frontend — otherwise the user lands on a page that can't talk to your self-hosted API.
+
+**Using a Worker URL as frontend**: This works if:
+- The Worker serves the same Athena UI (e.g., you deployed the Worker with `wrangler deploy`)
+- The Worker can reach your self-hosted backend (or the user's browser connects directly)
+- You configure the backend URL in Settings → Backend so the UI talks to your server
+
+Storage backend options (D1, GitHub, PostgreSQL) are determined by `ATHENA_RUNTIME`, not the frontend URL. On a self-hosted server, only PostgreSQL is available regardless of what `ATHENA_FRONTEND_URL` points to.
+
 ---
 
 ## Document upload
@@ -378,6 +414,23 @@ The backend URL is stored per-instance (on the Cloudflare origin), so every visi
 **Getting your DM /id**: DM the bot → send `/id` → it replies with your user ID
 
 **Forum topic support**: Run `/id` in a topic to get the topic ID, then `/topic <id>` to lock the bot to that topic only.
+
+**Webhook setup (self-hosted)**:
+
+The webhook endpoint is `/api/telegram-webhook` (not `/telegram/webhook`).
+
+If you set `TELEGRAM_WEBHOOK_SECRET` in your `.env`, you must pass the same value as `secret_token` when registering the webhook with Telegram:
+
+```bash
+curl "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=https://yourdomain.com/api/telegram-webhook&secret_token=<TELEGRAM_WEBHOOK_SECRET>"
+```
+
+If `TELEGRAM_WEBHOOK_SECRET` is not set, Athena derives a secret from the bot token automatically. In that case, re-register the webhook after any bot token change.
+
+To allow unsigned webhooks during migration (insecure, remove after testing):
+```bash
+WEBHOOK_ALLOW_UNSIGNED=1
+```
 
 ---
 
