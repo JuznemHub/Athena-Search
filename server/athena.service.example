@@ -1,0 +1,35 @@
+[Unit]
+Description=Athena self-hosted backend (API + PostgreSQL)
+Documentation=https://github.com/JuznemHub/Athena-Search
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/athena
+ExecStart=/usr/local/lib/nodejs/current/bin/node server/index.js
+EnvironmentFile=/etc/athena/athena.env
+Restart=always
+RestartSec=5
+
+# Give Postgres a moment on a cold boot before the first connection attempt.
+ExecStartPre=/bin/sleep 2
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=athena
+
+# --- hardening ------------------------------------------------------------
+# The backend only needs to read its own code and talk to localhost Postgres.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
