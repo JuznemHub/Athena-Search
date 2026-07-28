@@ -5,6 +5,8 @@
 import { readFile, stat } from 'node:fs/promises';
 import { join, normalize, extname } from 'node:path';
 
+const NO_CACHE = new Set(['.html', '.js', '.css']);
+
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -38,7 +40,7 @@ export function createAssets(root) {
           return new Response(body, {
             headers: {
               'Content-Type': TYPES[extname(full).toLowerCase()] || 'application/octet-stream',
-              'Cache-Control': rel === 'index.html' ? 'no-cache' : 'public, max-age=3600',
+              'Cache-Control': NO_CACHE.has(extname(full).toLowerCase()) ? 'no-cache' : 'public, max-age=3600',
             },
           });
         }

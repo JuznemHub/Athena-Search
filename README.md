@@ -432,6 +432,19 @@ To allow unsigned webhooks during migration (insecure, remove after testing):
 WEBHOOK_ALLOW_UNSIGNED=1
 ```
 
+**Log channel (GOD only)**:
+
+Set a Telegram channel to receive login and community join notifications instead of DMs:
+
+1. Add your bot as admin to the channel
+2. Get the channel ID (forward a message from the channel to @userinfobot)
+3. **Important**: Channel IDs from @userinfobot need `-100` prefix (e.g., `1234567890` → `-1001234567890`)
+4. DM the bot: `/setlogchannel -1001234567890`
+
+To remove: `/setlogchannel off`
+
+When set, website login and community join notifications go to this channel instead of GOD DMs.
+
 ---
 
 ## Bot commands
@@ -486,6 +499,7 @@ WEBHOOK_ALLOW_UNSIGNED=1
 | `/clear_db <id>` | Wipe links only |
 | `/sync` | Sync D1 ↔ GitHub |
 | `/backup` | Trigger backup (self-hosted) |
+| `/setlogchannel <id\|off>` | Set log channel for notifications |
 
 ### File uploads
 Send or forward any supported text file → saved to active scope.

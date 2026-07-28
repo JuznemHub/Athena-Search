@@ -141,6 +141,24 @@ server.listen(PORT, HOST, () => {
     console.log('[athena] WARNING: TG_OWNER_IDS is empty — every logged-in user is GOD. Set it before exposing this.');
   }
   startBackups({ connectionString: DATABASE_URL, env: process.env, db: DB });
+
+  // Auto-purge Cloudflare cache on startup
+  if (process.env.CF_PURGE_CACHE === '1' && process.env.CF_ZONE_ID && process.env.CF_API_EMAIL && process.env.CF_API_KEY) {
+    fetch(`https://api.cloudflare.com/client/v4/zones/${process.env.CF_ZONE_ID}/purge_cache`, {
+      method: 'POST',
+      headers: {
+        'X-Auth-Email': process.env.CF_API_EMAIL,
+        'X-Auth-Key': process.env.CF_API_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ purge_everything: true })
+    }).then(r => r.json()).then(data => {
+      if (data.success) console.log('[athena] Cloudflare cache purged');
+      else console.warn('[athena] Cloudflare cache purge failed:', data.errors?.[0]?.message || 'unknown');
+    }).catch(err => {
+      console.warn('[athena] Cloudflare cache purge error:', err.message);
+    });
+  }
 });
 
 const shutdown = () => {
