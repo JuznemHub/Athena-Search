@@ -1562,7 +1562,27 @@ async function handleTelegramWebAppAuth(request, env, corsHeaders) {
       return Response.json({ success: false, error: BANNED_SITE_MSG, code: 'SITE_BANNED' }, { status: 403, headers: corsHeaders });
     }
     const sessionToken = await createSession(user.id, env);
-    const owner = await isInstanceOwnerUserAsync(user, env);
+     // Notify GOD rank about website login (Telegram + website notification)
+     try {
+       const ownerIds = parseIdList(env.TG_OWNER_IDS || '');
+       const loginLabel = user.username ? `@${user.username}` : (user.display_name || user.id);
+       const loginTgId = user.telegram_api_id || '';
+       const loginMsg = `🌐 ${loginLabel}${loginTgId ? ` | ${loginTgId}` : ''} logged in to website`;
+       // Website notification for GOD users
+       const { results: godUsers } = await env.DB.prepare(
+         `SELECT id FROM users WHERE telegram_api_id IN (${ownerIds.map(() => '?').join(',') || "''"})`
+       ).bind(...ownerIds.map(String)).all().catch(() => ({ results: [] }));
+       for (const god of (godUsers || [])) {
+         await createNotification(env, { userId: god.id, type: 'login', title: 'Website Login', body: loginMsg }).catch(() => {});
+       }
+       // Telegram notification for GOD users
+       for (const ownerId of ownerIds) {
+         if (ownerId && env.TELEGRAM_BOT_TOKEN) {
+           await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, `🌐 ${boldHtml(loginLabel)}${loginTgId ? ` | ${codeHtml(String(loginTgId))}` : ''} logged in to website`).catch(() => {});
+         }
+       }
+     } catch (_) {}
+     const owner = await isInstanceOwnerUserAsync(user, env);
     const elevated = owner || (await isElevatedUser(user, env));
     const cookieMaxAge = Math.floor(SESSION_TTL_MS / 1000);
     return Response.json({
@@ -1806,8 +1826,28 @@ async function handleTelegramCallback(url, env, corsHeaders) {
     return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=banned`, 302);
   }
 
-  const sessionToken = await createSession(user.id, env);
-  // Consume state only after success
+   const sessionToken = await createSession(user.id, env);
+   // Notify GOD rank about website login (Telegram OAuth + website notification)
+   try {
+     const ownerIds = parseIdList(env.TG_OWNER_IDS || '');
+     const loginLabel = user.username ? `@${user.username}` : (user.display_name || user.id);
+     const loginTgId = user.telegram_api_id || telegramApiId || '';
+     const loginMsg = `🌐 ${loginLabel}${loginTgId ? ` | ${loginTgId}` : ''} logged in to website (Telegram)`;
+     // Website notification for GOD users
+     const { results: godUsers } = await env.DB.prepare(
+       `SELECT id FROM users WHERE telegram_api_id IN (${ownerIds.map(() => '?').join(',') || "''"})`
+     ).bind(...ownerIds.map(String)).all().catch(() => ({ results: [] }));
+     for (const god of (godUsers || [])) {
+       await createNotification(env, { userId: god.id, type: 'login', title: 'Website Login', body: loginMsg }).catch(() => {});
+     }
+     // Telegram notification for GOD users
+     for (const ownerId of ownerIds) {
+       if (ownerId && env.TELEGRAM_BOT_TOKEN) {
+         await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, `🌐 ${boldHtml(loginLabel)}${loginTgId ? ` | ${codeHtml(String(loginTgId))}` : ''} logged in to website (Telegram)`).catch(() => {});
+       }
+     }
+   } catch (_) {}
+   // Consume state only after success
   try {
     await env.DB.prepare('DELETE FROM oauth_states WHERE state = ?').bind(state).run();
   } catch (_) {}
@@ -1889,8 +1929,27 @@ async function handleDiscordCallback(url, env, corsHeaders) {
     return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=banned`, 302);
   }
 
-  const sessionToken = await createSession(user.id, env);
-  return Response.redirect(`${frontendOrigin(env, url)}/?session=${encodeURIComponent(sessionToken)}`, 302);
+   const sessionToken = await createSession(user.id, env);
+   // Notify GOD rank about website login (Discord + website notification)
+   try {
+     const ownerIds = parseIdList(env.TG_OWNER_IDS || '');
+     const loginLabel = user.username ? `@${user.username}` : (user.display_name || user.id);
+     const loginMsg = `🌐 ${loginLabel} logged in to website (Discord)`;
+     // Website notification for GOD users
+     const { results: godUsers } = await env.DB.prepare(
+       `SELECT id FROM users WHERE telegram_api_id IN (${ownerIds.map(() => '?').join(',') || "''"})`
+     ).bind(...ownerIds.map(String)).all().catch(() => ({ results: [] }));
+     for (const god of (godUsers || [])) {
+       await createNotification(env, { userId: god.id, type: 'login', title: 'Website Login', body: loginMsg }).catch(() => {});
+     }
+     // Telegram notification for GOD users
+     for (const ownerId of ownerIds) {
+       if (ownerId && env.TELEGRAM_BOT_TOKEN) {
+         await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, `🌐 ${boldHtml(loginLabel)} logged in to website (Discord)`).catch(() => {});
+       }
+     }
+   } catch (_) {}
+   return Response.redirect(`${frontendOrigin(env, url)}/?session=${encodeURIComponent(sessionToken)}`, 302);
 }
 
 // ============================================================
@@ -2091,14 +2150,34 @@ async function handleJoinCommunity(request, user, env, corsHeaders) {
       community: { ...c, role, is_staff: role === 'owner' || role === 'admin' || c.creator_id === user.id }
     }, { headers: corsHeaders });
   }
-  const role = c.creator_id === user.id ? 'owner' : 'member';
-  await upsertCommunityMember(env, communityId, user.id, role);
-  return Response.json({
-    success: true,
-    already_member: false,
-    community: { ...c, role, is_staff: role === 'owner' }
-  }, { headers: corsHeaders });
-}
+   const role = c.creator_id === user.id ? 'owner' : 'member';
+   await upsertCommunityMember(env, communityId, user.id, role);
+   // Notify GOD rank about new member joining via website
+   try {
+     const ownerIds = parseIdList(env.TG_OWNER_IDS || '');
+     const joinerLabel = user.username ? `@${user.username}` : (user.display_name || user.id);
+     const joinerTgId = user.telegram_api_id || '';
+     const notifyMsg = `👤 ${joinerLabel}${joinerTgId ? ` | ${joinerTgId}` : ''} joined ${c.name} community`;
+     // Website notification for GOD users
+     const { results: godUsers } = await env.DB.prepare(
+       `SELECT id FROM users WHERE telegram_api_id IN (${ownerIds.map(() => '?').join(',') || "''"})`
+     ).bind(...ownerIds.map(String)).all().catch(() => ({ results: [] }));
+     for (const god of (godUsers || [])) {
+       await createNotification(env, { userId: god.id, type: 'community_join', title: 'New Community Member', body: notifyMsg }).catch(() => {});
+     }
+     // Telegram notification for GOD users
+     for (const ownerId of ownerIds) {
+       if (ownerId && env.TELEGRAM_BOT_TOKEN) {
+         await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, `👤 ${boldHtml(joinerLabel)}${joinerTgId ? ` | ${codeHtml(String(joinerTgId))}` : ''} joined ${boldHtml(c.name)} community`).catch(() => {});
+       }
+     }
+   } catch (_) {}
+   return Response.json({
+     success: true,
+     already_member: false,
+     community: { ...c, role, is_staff: role === 'owner' }
+   }, { headers: corsHeaders });
+ }
 
 async function ensureBotBindingColumns(env) {
   try {
@@ -6000,7 +6079,27 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     await upsertCommunityMember(env, cid, athenaUser.id, 'member');
-    await sendTelegramMessage(token, chatId, [
+     // Notify GOD rank about new member joining (Telegram + website notification)
+     try {
+       const ownerIds = parseIdList(env.TG_OWNER_IDS || '');
+       const joinerLabel = athenaUser.username ? `@${athenaUser.username}` : (athenaUser.display_name || athenaUser.id);
+       const joinerTgId = tgUserId || '';
+       const notifyMsg = `👤 ${joinerLabel}${joinerTgId ? ` | ${joinerTgId}` : ''} joined ${c.name} community`;
+       // Website notification for GOD users
+       const { results: godUsers } = await env.DB.prepare(
+         `SELECT id FROM users WHERE telegram_api_id IN (${ownerIds.map(() => '?').join(',') || "''"})`
+       ).bind(...ownerIds.map(String)).all().catch(() => ({ results: [] }));
+       for (const god of (godUsers || [])) {
+         await createNotification(env, { userId: god.id, type: 'community_join', title: 'New Community Member', body: notifyMsg }).catch(() => {});
+       }
+       // Telegram notification for GOD users
+       for (const ownerId of ownerIds) {
+         if (ownerId && env.TELEGRAM_BOT_TOKEN) {
+           await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, `👤 ${boldHtml(joinerLabel)}${joinerTgId ? ` | ${codeHtml(String(joinerTgId))}` : ''} joined ${boldHtml(c.name)} community`).catch(() => {});
+         }
+       }
+     } catch (_) {}
+     await sendTelegramMessage(token, chatId, [
       `Joined community: ${c.name}`,
       `id: ${c.id}`,
       '',
@@ -6845,185 +6944,214 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
-  // ---- /ai (same RAG as website, uses saved AI config) ----
-  if (cmd === '/ai') {
-    const q = rest || '';
-    if (!q) {
-      await sendTelegramFormatted(token, chatId, `${boldHtml('🧠 Usage:')} ${codeHtml('/ai your question about your brain')}\nExample: ${codeHtml('/ai how do I download youtube videos')}`, forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-    if (!athenaUser) {
-      await sendTelegramFormatted(token, chatId, 'Login with Telegram on the website first.', forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-    await ensureAiConfigTable(env);
-    const cfg = await getInstanceAiConfig(env);
-    if (!cfg || !cfg.api_key) {
-      await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No AI credentials synced yet.\nGOD: open website → Settings → AI → paste key → Save\n${italicHtml('(that writes the instance default used by all ranks on site + /ai)')}`, forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
+   // ---- /ai (same RAG + proxy as website, with thinking blocks) ----
+   if (cmd === '/ai') {
+     const q = rest || '';
+     if (!q) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🧠 Usage:')} ${codeHtml('/ai your question about your brain')}\nExample: ${codeHtml('/ai how do I download youtube videos')}`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!athenaUser) {
+       await sendTelegramFormatted(token, chatId, 'Login with Telegram on the website first.', forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await ensureAiConfigTable(env);
+     const cfg = await getInstanceAiConfig(env);
+     if (!cfg || !cfg.api_key) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No AI credentials synced yet.\nGOD: open website → Settings → AI → paste key → Save\n${italicHtml('(that writes the instance default used by all ranks on site + /ai)')}`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
 
-    // Determine scope: use binding if available, else personal for DMs
-    let scope = 'personal';
-    let aiCommunityId = null;
-    if (binding) {
-      scope = binding.scope || (binding.community_id ? 'community' : 'personal');
-      aiCommunityId = binding.community_id;
-    } else {
-      const isDm = !String(chatId).startsWith('-');
-      if (!isDm) {
-        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Not linked. Bot owner: ${codeHtml('/community_verify')} in the group first.`, forumThreadId);
-        return new Response('OK', { status: 200, headers: corsHeaders });
-      }
-    }
-    // Personal mode: GOD rank only
-    if (scope === 'personal') {
-      if (!isGod) {
-        await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Personal AI is GOD rank only. Use ${codeHtml('/ai')} in a community group, or ${codeHtml('/community_join')} to join one.`, forumThreadId);
-        return new Response('OK', { status: 200, headers: corsHeaders });
-      }
-      await ensureFresh(env, 'personal', athenaUser.id);
-      const rows = await candidateLinks(env, 'personal', athenaUser.id, q);
-      // RAG retrieval (same logic below)
-      let docs = fuzzyMatchLinks(rows, q);
-      if (docs.length < 3 && rows.length) {
-        const recent = rows.slice(0, 10);
-        for (const it of recent) { if (!docs.find(d => d.id === it.id)) docs.push(it); }
-        docs = docs.slice(0, 10);
-      }
-      if (!docs.length && rows.length) docs = rows.slice(0, 8);
-      await sendTelegramFormatted(token, chatId, `${boldHtml('🧠')} Thinking with your personal brain…`, forumThreadId);
-      const system = `You are Athena, a second-brain assistant. Use ONLY the BRAIN CONTEXT (user saved links). Prefer recommending their URLs. Be brief. Never say brain is empty if context lists items.`;
-      const ctx = docs.length
-        ? docs.map((d, i) => `[#${i + 1}] ${d.url || ''}\nTitle: ${titleFromUrl(d.url || d.title || '')}`).join('\n\n')
-        : '(no saved items)';
-      const userMsg = `BRAIN (${rows.length} items). Retrieved:\n${ctx}\n\n---\nQUESTION: ${q}\n\nAnswer using items above; include URLs.`;
-      const endpoint = resolveChatEndpoint(cfg.base_url, cfg.mode || 'openai');
-      const model = normalizeModelId(cfg.model, cfg.base_url);
-      try {
-        let content = '';
-        if ((cfg.mode || 'openai') === 'anthropic') {
-          const res = await fetch(endpoint, {
-            method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': cfg.api_key, 'anthropic-version': '2023-06-01' },
-            body: JSON.stringify({ model, max_tokens: 500, system, messages: [{ role: 'user', content: userMsg }] })
-          });
-          const data = await res.json().catch(() => ({}));
-          if (!res.ok) throw new Error(data.error?.message || data.message || `HTTP ${res.status}`);
-          content = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
-        } else {
-          const res = await fetch(endpoint, {
-            method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.api_key}` },
-            body: JSON.stringify({ model, messages: [{ role: 'system', content: system }, { role: 'user', content: userMsg }] })
-          });
-          const data = await res.json().catch(() => ({}));
-          if (!res.ok) throw new Error(data.error?.message || data.message || `HTTP ${res.status}`);
-          content = (data.choices || [])[0]?.message?.content || '';
-        }
-        await sendTelegramMessage(token, chatId, content || '(no response)', forumThreadId);
-      } catch (err) {
-        await sendTelegramMessage(token, chatId, `AI error: ${err.message || err}`, forumThreadId);
-      }
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-    // Community mode: all ranks
-    if (!aiCommunityId) {
-      await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community not set. ${codeHtml('/community')} after linking community on website.`, forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-    if (!isGod && await isBannedFromCommunity(env, aiCommunityId, athenaUser)) {
-      // /search already gated on this; /ai did not, so a banned user could still read
-      // the community's entire corpus back out through the AI answer.
-      await sendTelegramFormatted(token, chatId, `${boldHtml('🚫')} You are banned from this community.`, forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-    if (!(await ensureMember(aiCommunityId, athenaUser.id, env)) && !isGod) {
-      await sendTelegramFormatted(token, chatId, `Join first: ${codeHtml('/community_join ' + aiCommunityId)}`, forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-    await ensureFresh(env, 'community', aiCommunityId);
-    const rows = await candidateLinks(env, 'community', aiCommunityId, q);
+     // Determine scope: use binding if available, else personal for DMs
+     let scope = 'personal';
+     let aiCommunityId = null;
+     if (binding) {
+       scope = binding.scope || (binding.community_id ? 'community' : 'personal');
+       aiCommunityId = binding.community_id;
+     } else {
+       const isDm = !String(chatId).startsWith('-');
+       if (!isDm) {
+         await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Not linked. Bot owner: ${codeHtml('/community_verify')} in the group first.`, forumThreadId);
+         return new Response('OK', { status: 200, headers: corsHeaders });
+       }
+     }
+     // Personal mode: GOD rank only
+     if (scope === 'personal') {
+       if (!isGod) {
+         await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Personal AI is GOD rank only. Use ${codeHtml('/ai')} in a community group, or ${codeHtml('/community_join')} to join one.`, forumThreadId);
+         return new Response('OK', { status: 200, headers: corsHeaders });
+       }
+     } else {
+       // Community mode: all ranks, with ban + membership checks
+       if (!aiCommunityId) {
+         await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community not set. ${codeHtml('/community')} after linking community on website.`, forumThreadId);
+         return new Response('OK', { status: 200, headers: corsHeaders });
+       }
+       if (!isGod && await isBannedFromCommunity(env, aiCommunityId, athenaUser)) {
+         await sendTelegramFormatted(token, chatId, `${boldHtml('🚫')} You are banned from this community.`, forumThreadId);
+         return new Response('OK', { status: 200, headers: corsHeaders });
+       }
+       if (!(await ensureMember(aiCommunityId, athenaUser.id, env)) && !isGod) {
+         await sendTelegramFormatted(token, chatId, `Join first: ${codeHtml('/community_join ' + aiCommunityId)}`, forumThreadId);
+         return new Response('OK', { status: 200, headers: corsHeaders });
+       }
+     }
 
-    // retrieval: same fuzzy as /search, always fall back to recent
-    let docs = fuzzyMatchLinks(rows, q);
-    if (docs.length < 3 && rows.length) {
-      const recent = rows.slice(0, 10);
-      for (const it of recent) {
-        if (!docs.find(d => d.id === it.id)) docs.push(it);
-      }
-      docs = docs.slice(0, 10);
-    }
-    if (!docs.length && rows.length) docs = rows.slice(0, 8);
+     // RAG retrieval — same logic as website (candidateLinks + fuzzyMatchLinks)
+     const scopeKey = scope === 'personal' ? athenaUser.id : aiCommunityId;
+     await ensureFresh(env, scope, scopeKey);
+     const rows = await candidateLinks(env, scope, scopeKey, q);
+     let docs = fuzzyMatchLinks(rows, q);
+     if (docs.length < 3 && rows.length) {
+       const recent = rows.slice(0, 10);
+       for (const it of recent) { if (!docs.find(d => d.id === it.id)) docs.push(it); }
+       docs = docs.slice(0, 10);
+     }
+     if (!docs.length && rows.length) docs = rows.slice(0, 8);
 
-    await sendTelegramFormatted(token, chatId, `${boldHtml('🧠')} Thinking with your brain…`, forumThreadId);
+     // Build context — same format as website (includes document content)
+     const formatDoc = (item, i) => {
+       const notes = (item.notes || '').slice(0, 800);
+       const content = (item.content || '').slice(0, 60000);
+       const parts = [`[#${i + 1}]`, `Title: ${item.title || 'Untitled'}`];
+       if (item.filename) parts.push(`Document: ${item.filename}`);
+       if (item.url) parts.push(`URL: ${item.url}`);
+       if (notes) parts.push(`Notes: ${notes}`);
+       if (content) parts.push(`Content:\n${content}`);
+       return parts.join('\n');
+     };
+     let used = 0;
+     const ctx = docs.length
+       ? docs.map((d, i) => {
+         const remaining = Math.max(0, 30000 - used);
+         const formatted = formatDoc(d, i).slice(0, remaining);
+         used += formatted.length;
+         return formatted;
+       }).filter(Boolean).join('\n\n')
+       : '(no saved items)';
 
-    const system = `You are Athena, a second-brain assistant. Use ONLY the BRAIN CONTEXT (user saved links). Prefer recommending their URLs. Be brief. Never say brain is empty if context lists items.`;
-    const ctx = docs.length
-      ? docs.map((d, i) => `[#${i + 1}] ${d.url || ''}\nTitle: ${titleFromUrl(d.url || d.title || '')}`).join('\n\n')
-      : '(no saved items)';
-    const userMsg = `BRAIN (${rows.length} items). Retrieved:\n${ctx}\n\n---\nQUESTION: ${q}\n\nAnswer using items above; include URLs.`;
+     // Same system prompt as website
+     const systemPrompt = `You are Athena, a second-brain assistant. You ONLY use BRAIN CONTEXT below (the user's saved links, notes, and uploaded documents).
 
-    const endpoint = resolveChatEndpoint(cfg.base_url, cfg.mode || 'openai');
-    const model = normalizeModelId(cfg.model, cfg.base_url);
-    try {
-      let content = '';
-      if ((cfg.mode || 'openai') === 'anthropic') {
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': cfg.api_key,
-            'anthropic-version': '2023-06-01'
-          },
-          body: JSON.stringify({
-            model,
-            max_tokens: 500,
-            system,
-            messages: [{ role: 'user', content: userMsg }]
-          })
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error?.message || data.message || `HTTP ${res.status}`);
-        content = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
-      } else {
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${cfg.api_key}`
-          },
-          body: JSON.stringify({
-            model,
-            messages: [
-              { role: 'system', content: system },
-              { role: 'user', content: userMsg }
-            ],
-            temperature: 0.2,
-            max_tokens: 500
-          })
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error?.message || data.message || `HTTP ${res.status}`);
-        content = data.choices?.[0]?.message?.content || data.choices?.[0]?.text || '';
-      }
-      const sources = docs.slice(0, 5).map(d => {
-        const t = d.title || titleFromUrl(d.url || '');
-        const isDoc = d.isDocument || d.type === 'document';
-        return isDoc ? `📄 ${t}` : (d.url ? `🔗 ${t}\n${d.url}` : null);
-      }).filter(Boolean).join('\n');
-      // Convert AI response to HTML-safe but preserve basic formatting
-      const aiHtml = escHtml(content || '(empty)')
-        .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
-        .replace(/`([^`]+)`/g, '<code>$1</code>')
-        .replace(/\[(\d+)\]/g, '<b>[$1]</b>')
-        .replace(/\[#(\d+)\]/g, '<b>[#$1]</b>');
-      const sourceHtml = sources ? `\n\n${boldHtml('📚 Sources:')}\n${escHtml(sources)}` : '';
-      await sendTelegramFormatted(token, chatId,
-        `${boldHtml('🧠 AI Answer')}\n\n${aiHtml}${sourceHtml}`, forumThreadId);
-    } catch (err) {
-      await sendTelegramFormatted(token, chatId, `${boldHtml('❌ AI failed:')} ${escHtml(err.message)}`, forumThreadId);
-    }
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
+Rules:
+1. NEVER say the brain is empty if BRAIN CONTEXT lists any items — use them.
+2. By default give concise, direct answers. When the user says "in detail", "detailed", "explain", or asks for more depth, be thorough and comprehensive.
+3. Answer DIRECTLY. NEVER include "Thinking", numbered analysis steps, evaluation of items, or meta-commentary about your reasoning. Start immediately with the answer.
+4. When an uploaded DOCUMENT answers the question, read its relevant sections and present them clearly. Cite as [#n].
+5. Recommend saved URLs when applicable. Cite as [#n].
+6. Stay strictly grounded in BRAIN CONTEXT; never invent facts not present in it.
+
+BRAIN has ${rows.length} saved item(s). Retrieved for this question:
+
+${ctx}`;
+
+     await sendTelegramFormatted(token, chatId, `${boldHtml('🧠')} Thinking with your${scope === 'personal' ? ' personal' : ''} brain…`, forumThreadId);
+
+     const endpoint = resolveChatEndpoint(cfg.base_url, cfg.mode || 'openai');
+     const model = normalizeModelId(cfg.model, cfg.base_url);
+     const aiMode = (cfg.mode || 'openai').toLowerCase();
+
+     try {
+       let content = '';
+       let thinking = '';
+
+       if (aiMode === 'anthropic') {
+         // Anthropic streaming with thinking support
+         const upstreamRes = await fetch(endpoint, {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/json', 'x-api-key': cfg.api_key, 'anthropic-version': '2023-06-01' },
+           body: JSON.stringify({ model, max_tokens: 3000, system: systemPrompt, messages: [{ role: 'user', content: q }], stream: true })
+         });
+         if (!upstreamRes.ok) {
+           const errText = await upstreamRes.text().catch(() => '');
+           throw new Error(`HTTP ${upstreamRes.status}: ${errText.slice(0, 200)}`);
+         }
+         const reader = upstreamRes.body.getReader();
+         const decoder = new TextDecoder();
+         let buf = '';
+         while (true) {
+           const { done, value } = await reader.read();
+           if (done) break;
+           buf += decoder.decode(value, { stream: true });
+           let nl;
+           while ((nl = buf.indexOf('\n')) !== -1) {
+             const line = buf.slice(0, nl).trim();
+             buf = buf.slice(nl + 1);
+             if (!line.startsWith('data:')) continue;
+             const payload = line.slice(5).trim();
+             if (!payload || payload === '[DONE]') continue;
+             let j; try { j = JSON.parse(payload); } catch (_) { continue; }
+             if (j.type === 'content_block_delta' && j.delta) {
+               if (j.delta.type === 'thinking_delta') thinking += j.delta.thinking || '';
+               else if (j.delta.type === 'text_delta') content += j.delta.text || '';
+             }
+           }
+         }
+       } else {
+         // OpenAI-compatible streaming with reasoning_content support
+         const upstreamRes = await fetch(endpoint, {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.api_key}` },
+           body: JSON.stringify({ model, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: q }], temperature: 0.2, max_tokens: 3000, stream: true })
+         });
+         if (!upstreamRes.ok) {
+           const errText = await upstreamRes.text().catch(() => '');
+           throw new Error(`HTTP ${upstreamRes.status}: ${errText.slice(0, 200)}`);
+         }
+         const reader = upstreamRes.body.getReader();
+         const decoder = new TextDecoder();
+         let buf = '';
+         while (true) {
+           const { done, value } = await reader.read();
+           if (done) break;
+           buf += decoder.decode(value, { stream: true });
+           let nl;
+           while ((nl = buf.indexOf('\n')) !== -1) {
+             const line = buf.slice(0, nl).trim();
+             buf = buf.slice(nl + 1);
+             if (!line.startsWith('data:')) continue;
+             const payload = line.slice(5).trim();
+             if (!payload || payload === '[DONE]') continue;
+             let j; try { j = JSON.parse(payload); } catch (_) { continue; }
+             const d = j.choices?.[0]?.delta || {};
+             if (d.reasoning_content) thinking += d.reasoning_content;
+             if (d.content) content += d.content;
+             if (!d.content && !d.reasoning_content) {
+               const text = j.choices?.[0]?.text || '';
+               if (text) content += text;
+             }
+           }
+         }
+         // Fallback: if only reasoning, use it as content
+         if (!content && thinking) content = thinking;
+       }
+
+       // Build response with collapsible thinking block
+       let msg = '';
+       if (thinking && thinking.trim()) {
+         msg += `<blockquote expandable>${escHtml(thinking.trim())}</blockquote>\n\n`;
+       }
+       const aiHtml = escHtml(content || '(empty)')
+         .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+         .replace(/`([^`]+)`/g, '<code>$1</code>')
+         .replace(/\[(\d+)\]/g, '<b>[$1]</b>')
+         .replace(/\[#(\d+)\]/g, '<b>[#$1]</b>');
+       msg += `${boldHtml('🧠 AI Answer')}\n\n${aiHtml}`;
+
+       // Sources
+       const sources = docs.slice(0, 5).map(d => {
+         const t = d.title || titleFromUrl(d.url || '');
+         const isDoc = d.isDocument || d.type === 'document';
+         return isDoc ? `📄 ${t}` : (d.url ? `🔗 ${t}\n${d.url}` : null);
+       }).filter(Boolean).join('\n');
+       if (sources) msg += `\n\n${boldHtml('📚 Sources:')}\n${escHtml(sources)}`;
+
+       await sendTelegramFormatted(token, chatId, msg, forumThreadId);
+     } catch (err) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('❌ AI failed:')} ${escHtml(err.message)}`, forumThreadId);
+     }
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
 
   // ---- /db — show storage backend (all ranks) ----
   if (cmd === '/db') {
