@@ -7160,90 +7160,39 @@ ${ctx}`;
 
      try {
        let content = '';
-       let thinking = '';
 
        if (aiMode === 'anthropic') {
-         // Anthropic streaming with thinking support
-         const upstreamRes = await fetch(endpoint, {
+         const res = await fetch(endpoint, {
            method: 'POST',
            headers: { 'Content-Type': 'application/json', 'x-api-key': cfg.api_key, 'anthropic-version': '2023-06-01' },
-           body: JSON.stringify({ model, max_tokens: 3000, system: systemPrompt, messages: [{ role: 'user', content: q }], stream: true })
+           body: JSON.stringify({ model, max_tokens: 3000, system: systemPrompt, messages: [{ role: 'user', content: q }] })
          });
-         if (!upstreamRes.ok) {
-           const errText = await upstreamRes.text().catch(() => '');
-           throw new Error(`HTTP ${upstreamRes.status}: ${errText.slice(0, 200)}`);
+         if (!res.ok) {
+           const errText = await res.text().catch(() => '');
+           throw new Error(`HTTP ${res.status}: ${errText.slice(0, 200)}`);
          }
-         const reader = upstreamRes.body.getReader();
-         const decoder = new TextDecoder();
-         let buf = '';
-         while (true) {
-           const { done, value } = await reader.read();
-           if (done) break;
-           buf += decoder.decode(value, { stream: true });
-           let nl;
-           while ((nl = buf.indexOf('\n')) !== -1) {
-             const line = buf.slice(0, nl).trim();
-             buf = buf.slice(nl + 1);
-             if (!line.startsWith('data:')) continue;
-             const payload = line.slice(5).trim();
-             if (!payload || payload === '[DONE]') continue;
-             let j; try { j = JSON.parse(payload); } catch (_) { continue; }
-             if (j.type === 'content_block_delta' && j.delta) {
-               if (j.delta.type === 'thinking_delta') thinking += j.delta.thinking || '';
-               else if (j.delta.type === 'text_delta') content += j.delta.text || '';
-             }
-           }
-         }
+         const data = await res.json().catch(() => ({}));
+         content = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
        } else {
-         // OpenAI-compatible streaming with reasoning_content support
-         const upstreamRes = await fetch(endpoint, {
+         const res = await fetch(endpoint, {
            method: 'POST',
            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.api_key}` },
-           body: JSON.stringify({ model, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: q }], temperature: 0.2, max_tokens: 3000, stream: true })
+           body: JSON.stringify({ model, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: q }], temperature: 0.2, max_tokens: 3000 })
          });
-         if (!upstreamRes.ok) {
-           const errText = await upstreamRes.text().catch(() => '');
-           throw new Error(`HTTP ${upstreamRes.status}: ${errText.slice(0, 200)}`);
+         if (!res.ok) {
+           const errText = await res.text().catch(() => '');
+           throw new Error(`HTTP ${res.status}: ${errText.slice(0, 200)}`);
          }
-         const reader = upstreamRes.body.getReader();
-         const decoder = new TextDecoder();
-         let buf = '';
-         while (true) {
-           const { done, value } = await reader.read();
-           if (done) break;
-           buf += decoder.decode(value, { stream: true });
-           let nl;
-           while ((nl = buf.indexOf('\n')) !== -1) {
-             const line = buf.slice(0, nl).trim();
-             buf = buf.slice(nl + 1);
-             if (!line.startsWith('data:')) continue;
-             const payload = line.slice(5).trim();
-             if (!payload || payload === '[DONE]') continue;
-             let j; try { j = JSON.parse(payload); } catch (_) { continue; }
-             const d = j.choices?.[0]?.delta || {};
-             if (d.reasoning_content) thinking += d.reasoning_content;
-             if (d.content) content += d.content;
-             if (!d.content && !d.reasoning_content) {
-               const text = j.choices?.[0]?.text || '';
-               if (text) content += text;
-             }
-           }
-         }
-         // Fallback: if only reasoning, use it as content
-         if (!content && thinking) content = thinking;
+         const data = await res.json().catch(() => ({}));
+         content = data.choices?.[0]?.message?.content || data.choices?.[0]?.text || '';
        }
 
-       // Build response with collapsible thinking block
-       let msg = '';
-       if (thinking && thinking.trim()) {
-         msg += `<blockquote expandable>${escHtml(thinking.trim())}</blockquote>\n\n`;
-       }
        const aiHtml = escHtml(content || '(empty)')
          .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
          .replace(/`([^`]+)`/g, '<code>$1</code>')
          .replace(/\[(\d+)\]/g, '<b>[$1]</b>')
          .replace(/\[#(\d+)\]/g, '<b>[#$1]</b>');
-       msg += `${boldHtml('🧠 AI Answer')}\n\n${aiHtml}`;
+       let msg = `${boldHtml('🧠 AI Answer')}\n\n${aiHtml}`;
 
        // Find cited sources in the answer (e.g., [#1], [#2])
        const citedIndices = new Set();
