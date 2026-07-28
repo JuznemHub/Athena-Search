@@ -7138,13 +7138,50 @@ ${ctx}`;
          .replace(/\[#(\d+)\]/g, '<b>[#$1]</b>');
        msg += `${boldHtml('🧠 AI Answer')}\n\n${aiHtml}`;
 
-       // Sources
-       const sources = docs.slice(0, 5).map(d => {
+       // Find cited sources in the answer (e.g., [#1], [#2])
+       const citedIndices = new Set();
+       const citeRegex = /\[#(\d+)\]/g;
+       let citeMatch;
+       while ((citeMatch = citeRegex.exec(content || '')) !== null) {
+         citedIndices.add(parseInt(citeMatch[1], 10) - 1); // 0-based index
+       }
+       // Also check for [#n] without brackets
+       const citeRegex2 = /\[(\d+)\]/g;
+       while ((citeMatch = citeRegex2.exec(content || '')) !== null) {
+         citedIndices.add(parseInt(citeMatch[1], 10) - 1);
+       }
+
+       // Separate main cited sources from other sources
+       const mainSources = [];
+       const otherSources = [];
+       docs.slice(0, 5).forEach((d, i) => {
          const t = d.title || titleFromUrl(d.url || '');
          const isDoc = d.isDocument || d.type === 'document';
-         return isDoc ? `📄 ${t}` : (d.url ? `🔗 ${t}\n${d.url}` : null);
-       }).filter(Boolean).join('\n');
-       if (sources) msg += `\n\n${boldHtml('📚 Sources:')}\n${escHtml(sources)}`;
+         const sourceLine = isDoc ? `📄 ${t}` : (d.url ? `🔗 ${t}\n${d.url}` : null);
+         if (!sourceLine) return;
+         if (citedIndices.has(i)) {
+           mainSources.push(sourceLine);
+         } else {
+           otherSources.push(sourceLine);
+         }
+       });
+
+       // Main source (cited in answer) — shown prominently
+       if (mainSources.length) {
+         msg += `\n\n${mainSources.join('\n')}`;
+       }
+       // Other sources — shown below
+       if (otherSources.length) {
+         msg += `\n\n${boldHtml('📚 Other Sources:')}\n${otherSources.join('\n')}`;
+       } else if (!mainSources.length && docs.length) {
+         // Fallback: if no citations found, show all as Sources
+         const allSources = docs.slice(0, 5).map(d => {
+           const t = d.title || titleFromUrl(d.url || '');
+           const isDoc = d.isDocument || d.type === 'document';
+           return isDoc ? `📄 ${t}` : (d.url ? `🔗 ${t}\n${d.url}` : null);
+         }).filter(Boolean);
+         if (allSources.length) msg += `\n\n${boldHtml('📚 Sources:')}\n${allSources.join('\n')}`;
+       }
 
        await sendTelegramFormatted(token, chatId, msg, forumThreadId);
      } catch (err) {
