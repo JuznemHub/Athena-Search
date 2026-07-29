@@ -5480,7 +5480,8 @@ function helpTextForSection(section) {
       '',
       'File uploads: send .md/.txt/.json/.py etc in group → community brain',
       'GOD: /personal · /clear_personal_db · /sync · /backup · /db · website bot + AI credentials',
-      '/setlogchannel <id|off> — set log channel for login/join notifications'
+      '/setlogchannel <id|off> — set log channel for login/join notifications',
+      '/restart — restart Athena service (GOD only)'
     ].join('\n');
   }
   return [
@@ -6213,6 +6214,19 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await env.DB.prepare('UPDATE community_bots SET log_channel_id = ? WHERE id = ?').bind(channelId, personalBot.id).run();
        await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Log channel set to: ${codeHtml(channelId)}\nLogin and community join notifications will be sent there.`, forumThreadId);
      }
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /restart (GOD restarts the service) ----
+   if (cmd === '/restart') {
+     if (!isGod) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Only GOD rank can restart the service.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await sendTelegramFormatted(token, chatId, `${boldHtml('🔄')} Restarting Athena… Back in ~5 seconds.\nSend /start to check.`, forumThreadId);
+     // Fire and forget — the restart will kill this process
+     const { exec } = await import('node:child_process');
+     exec('systemctl restart athena', () => {});
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
