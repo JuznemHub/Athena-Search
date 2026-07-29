@@ -5507,6 +5507,7 @@ async function editTelegramMessage(token, chatId, messageId, text, replyMarkup, 
     message_id: messageId,
     // editMessageText is single-message only — prefer full text when short, else truncate cleanly
     text: chunkTelegramText(text, TG_MSG_MAX)[0] || String(text).slice(0, TG_MSG_MAX),
+    parse_mode: 'HTML',
     disable_web_page_preview: true
   };
   if (replyMarkup) payload.reply_markup = replyMarkup;
@@ -7166,7 +7167,8 @@ BRAIN has ${rows.length} saved item(s). Retrieved for this question:
 
 ${ctx}`;
 
-     await sendTelegramFormatted(token, chatId, `${boldHtml('🧠')} Thinking with your${scope === 'personal' ? ' personal' : ''} brain…`, forumThreadId);
+     const thinkMsg = await sendTelegramFormatted(token, chatId, `${boldHtml('🧠')} Thinking with your${scope === 'personal' ? ' personal' : ''} brain…`, forumThreadId);
+     const thinkMsgId = thinkMsg.message_id;
 
      const endpoint = resolveChatEndpoint(cfg.base_url, cfg.mode || 'openai');
      const model = normalizeModelId(cfg.model, cfg.base_url);
@@ -7201,11 +7203,13 @@ ${ctx}`;
          content = data.choices?.[0]?.message?.content || data.choices?.[0]?.text || '';
        }
 
+       // Convert markdown-style links to Telegram HTML: [text](url) → <a href="url">text</a>
        const aiHtml = escHtml(content || '(empty)')
+         .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2">$1</a>')
          .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
          .replace(/`([^`]+)`/g, '<code>$1</code>')
-         .replace(/\[(\d+)\]/g, '<b>[$1]</b>')
-         .replace(/\[#(\d+)\]/g, '<b>[#$1]</b>');
+         .replace(/\[#(\d+)\]/g, '<b>[#$1]</b>')
+         .replace(/\[(\d+)\]/g, '<b>[$1]</b>');
        let msg = `${boldHtml('🧠 AI Answer')}\n\n${aiHtml}`;
 
        // Find cited sources in the answer (e.g., [#1], [#2])
@@ -7253,10 +7257,10 @@ ${ctx}`;
          if (allSources.length) msg += `\n\n${boldHtml('📚 Sources:')}\n${allSources.join('\n')}`;
        }
 
-       await sendTelegramFormatted(token, chatId, msg, forumThreadId);
-     } catch (err) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('❌ AI failed:')} ${escHtml(err.message)}`, forumThreadId);
-     }
+        await editTelegramMessage(token, chatId, thinkMsgId, msg, null, forumThreadId);
+      } catch (err) {
+        await editTelegramMessage(token, chatId, thinkMsgId, `${boldHtml('❌ AI failed:')} ${escHtml(err.message)}`, null, forumThreadId);
+      }
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
@@ -7717,7 +7721,7 @@ async function sendTelegramMessage(token, chatId, text, threadId = null, parseMo
       }
       const data = await telegramApi(token, 'sendMessage', payload);
       if (!data.ok) return { ok: false, error: data.description || 'sendMessage failed', raw: data };
-      last = { ok: true };
+      last = { ok: true, message_id: data.result?.message_id };
     }
     return last;
   } catch (err) {
