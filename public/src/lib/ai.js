@@ -80,20 +80,6 @@ Rules:
 7. The user may ask follow-up questions. Use the conversation history to understand context. If they say "tell me more" or "which sections", refer back to the documents discussed.`;
   }
 
-  function buildUserMessage(question, docs, corpusSize) {
-    if (!docs.length) {
-      return `BRAIN CONTEXT: (truly empty — 0 saved items)\n\nUSER: ${question}`;
-    }
-    let used = 0;
-    const ctx = docs.map((d, i) => {
-      const remaining = Math.max(0, 30000 - used);
-      const formatted = formatDoc(d, i).slice(0, remaining);
-      used += formatted.length;
-      return formatted;
-    }).filter(Boolean).join('\n\n');
-    return `BRAIN has ${corpusSize} saved item(s). Retrieved for this question:\n\n${ctx}\n\n---\nUSER QUESTION: ${question}\n\nAnswer using the items above. If one is relevant (even partially), lead with its useful content or URL.`;
-  }
-
   function buildContextMessage(docs, corpusSize) {
     if (!docs.length) return 'BRAIN CONTEXT: (truly empty — 0 saved items)';
     let used = 0;

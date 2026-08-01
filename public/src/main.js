@@ -58,22 +58,13 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   function isGod() {
-    if (!state.currentUser) return false;
-    if (state.currentUser.is_god != null) return !!state.currentUser.is_god;
-    if (state.currentUser.can_bot_settings != null) return !!state.currentUser.can_bot_settings;
-    if (state.currentUser.can_personal != null) return !!state.currentUser.can_personal;
-    return !!state.currentUser.is_instance_owner;
+    return !!state.currentUser?.is_god;
   }
-  // legacy name used for personal-scope UI — GOD only now
-  function isOwner() { return isGod(); }
-  function isInstanceOwnerOnly() { return isGod(); }
   function canUseAi() {
     return !!state.currentUser; // all logged-in ranks
   }
   function canEditAiConfig() {
-    if (!state.currentUser) return false;
-    if (state.currentUser.can_ai_config != null) return !!state.currentUser.can_ai_config;
-    return isGod();
+    return !!state.currentUser?.can_ai_config;
   }
 
   const $ = (id) => document.getElementById(id);
@@ -116,8 +107,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const aiAnswerCard = $('aiAnswerCard');
   const aiAnswerText = $('aiAnswerText');
   const aiSources = $('aiSources');
-  const heroMark = $('heroMark');
-  const heroTitle = $('heroTitle');
   const storageDesc = $('storageDesc');
   const storageProvider = $('storageProvider');
   const githubFields = $('githubFields');
@@ -355,12 +344,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  function cloudRemove(key) {
-    const cs = tgCloud();
-    if (!cs) return;
-    try { cs.removeItem(key, () => {}); } catch (_) {}
-  }
-
   /** Persist the session everywhere that might survive, best-effort. */
   async function persistSession(token) {
     state.sessionToken = token;
@@ -397,8 +380,8 @@ document.addEventListener('DOMContentLoaded', () => {
       await persistSession(data.session);
       if (data.user) {
         state.currentUser = data.user;
-        state.isInstanceOwner = !!(data.user.is_god || data.user.is_instance_owner || data.user.can_bot_settings);
-        state.isElevated = !!(data.user.is_elevated || data.user.is_god || data.user.is_instance_owner);
+        state.isInstanceOwner = !!data.user.is_god;
+        state.isElevated = !!data.user.is_elevated;
       }
       return { ok: true };
     } catch (e) {
@@ -497,8 +480,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const { res, data } = await api('/api/auth/me');
         if (res.ok && data.user) {
           state.currentUser = data.user;
-          state.isInstanceOwner = !!(data.user.is_god || data.user.is_instance_owner || data.user.can_bot_settings);
-          state.isElevated = !!(data.user.is_elevated || data.user.is_god || data.user.is_instance_owner);
+          state.isInstanceOwner = !!data.user.is_god;
+          state.isElevated = !!data.user.is_elevated;
           showLoggedIn();
           updateUserUI();
           return true;
@@ -526,8 +509,8 @@ document.addEventListener('DOMContentLoaded', () => {
         return false;
       }
       state.currentUser = data.user;
-      state.isInstanceOwner = !!(data.user.is_god || data.user.is_instance_owner || data.user.can_bot_settings);
-      state.isElevated = !!(data.user.is_elevated || data.user.is_god || data.user.is_instance_owner);
+      state.isInstanceOwner = !!data.user.is_god;
+      state.isElevated = !!data.user.is_elevated;
       showLoggedIn();
       updateUserUI();
       return true;
@@ -577,8 +560,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function updateUserUI() {
     const u = state.currentUser;
     if (!u) return;
-    state.isInstanceOwner = isInstanceOwnerOnly();
-    state.isElevated = isOwner();
+    state.isInstanceOwner = isGod();
     userName.textContent = u.displayName || u.username;
     const roleTag = isGod() ? ' · GOD' : (state.isElevated ? ' · staff' : ' · member');
     userEmail.textContent = `${u.provider || 'oauth'} · @${u.username}${roleTag}`;
@@ -988,14 +970,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     botBindingsList.querySelectorAll('.bot-del-btn').forEach(btn => {
       btn.addEventListener('click', async () => {
-        await api('/api/community-bots', { method: 'DELETE', body: JSON.stringify({ id: btn.dataset.id }) });
+        await api('/api/bot-bindings', { method: 'DELETE', body: JSON.stringify({ id: btn.dataset.id }) });
         await loadCommunityBots();
       });
     });
   }
 
   async function loadPersonalLinks() {
-    if (!isOwner()) {
+    if (!isGod()) {
       state.personalLinks = [];
       return;
     }
@@ -1022,7 +1004,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function loadPersonalDocuments() {
-    if (!isOwner()) {
+    if (!isGod()) {
       state.personalDocuments = [];
       return;
     }
@@ -1072,7 +1054,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function uploadDocuments(files) {
     if (!files.length) return;
-    if (state.scope === 'personal' && !isOwner()) return showToast('Personal uploads are for owners only', true);
+    if (state.scope === 'personal' && !isGod()) return showToast('Personal uploads are GOD only', true);
     if (state.scope === 'community' && !state.activeCommunity) return showToast('Select a community first', true);
     uploadFileBtn.disabled = true;
     let uploaded = 0;
@@ -1145,8 +1127,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function saveDump(raw) {
-    if (state.scope === 'personal' && !isOwner()) {
-      showToast('Personal dump is for owners only. Join a community first.', true);
+    if (state.scope === 'personal' && !isGod()) {
+      showToast('Personal dump is GOD only. Join a community first.', true);
       return;
     }
     if (state.scope === 'community' && !state.activeCommunity) {
@@ -1789,13 +1771,13 @@ document.addEventListener('DOMContentLoaded', () => {
       const result = await window.AthenaAI.answerFromBrain(
         q, corpus(),
         // onDelta: stream the current answer live
-        (delta, full) => {
+        (_delta, full) => {
           const el = aiAnswerText.querySelector('.chat-msg:last-child .chat-answer-content');
           if (el) el.textContent = full;
         },
         state.conversationHistory,
         // onThinking: stream thinking into the collapsible block
-        (chunk, fullThinking) => {
+        (_chunk, fullThinking) => {
           const el = aiAnswerText.querySelector('.chat-msg:last-child .thinking-content');
           if (el) el.textContent = fullThinking;
         }
@@ -2264,8 +2246,8 @@ document.addEventListener('DOMContentLoaded', () => {
           showToast('Login required', true);
           return;
         }
-        if (!isOwner()) {
-          showToast('Wipe personal is for owners and admins only', true);
+        if (!isGod()) {
+          showToast('Wipe personal is GOD only', true);
           return;
         }
         if (!confirm('Wipe ALL your personal data on this instance?\n\nThis cannot be undone.')) return;
@@ -2334,8 +2316,8 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     personalScopeBtn.addEventListener('click', () => {
-        if (!isOwner()) {
-          showToast('Personal mode is for owners and admins only. Join a community via bot: /community_join <id>', true);
+        if (!isGod()) {
+          showToast('Personal mode is GOD only. Join a community via bot: /community_join <id>', true);
           return;
         }
       state.scope = 'personal';

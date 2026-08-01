@@ -3,7 +3,7 @@
 One bar: search, dump, and AI answers from your markdown brain.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-6.18-blueviolet?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-6.18.6-blueviolet?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/license_CC_BY--NC_4.0-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/telegram-bot-blue?style=flat-square&logo=telegram" alt="telegram">
   <img src="https://img.shields.io/badge/discord-bot-5865F2?style=flat-square&logo=discord" alt="discord">
@@ -11,85 +11,20 @@ One bar: search, dump, and AI answers from your markdown brain.
 
 ---
 
-## Table of contents
-
-- [Features](#features)
-- [UI themes and accent colors](#ui-themes-and-accent-colors)
-- [Ranks and access control](#ranks-and-access-control)
-- [Personal mode vs community mode](#personal-mode-vs-community-mode)
-- [Communities](#communities)
-- [Install path A — Cloudflare](#install-path-a--cloudflare)
-- [Install path B — self-hosted PostgreSQL](#install-path-b--self-hosted-postgresql)
-- [Storage backends](#storage-backends)
-- [GitHub storage setup](#github-storage-setup)
-- [Backend URL configuration](#backend-url-configuration)
-- [Document upload](#document-upload)
-- [AI configuration](#ai-configuration)
-- [Telegram bot setup](#telegram-bot-setup)
-- [Bot commands](#bot-commands)
-- [API endpoints](#api-endpoints)
-- [Architecture](#architecture)
-- [A note](#a-note)
-- [License](#license)
-
----
-
 ## Features
 
-**Links and documents**
-- Save links via the web UI, Telegram bot, or Discord bot
-- Upload text files (.md, .py, .js, .json, .yaml, .sql, .go, .rs, and 30+ more)
-- Personal mode (GOD rank only) and community mode (shared with members)
-- Upvote, downvote, and report links in community mode
-- Inline editing of titles, URLs, and descriptions
-
-**Search**
-- Fuzzy search across titles, URLs, notes, and tags
-- Documents included in search results alongside links
-- Server-side search for large brains (whole corpus, not just loaded slice)
-- Supports typos, partial matches, and synonym expansion (yt-dlp ↔ youtube-dl)
-
-**AI**
-- RAG over your saved links and uploaded documents
-- Multiple providers: OpenAI, Anthropic, Groq, OpenRouter, OpenCode Zen
-- Streaming responses with collapsible thinking blocks
-- Conversation history with follow-up questions
-- Configurable per-instance (GOD sets credentials, all ranks use them)
-
-**Telegram bot**
-- Rich HTML formatting on all outputs (bold, code, links, italic)
-- `/search`, `/ai`, `/rank`, `/db`, `/sync`, `/backup` commands
-- File uploads: send .md/.txt/.json etc → saved to active scope
-- Community verification and management
-- Inline keyboards for backup destination selection
-- Topic locking for forum groups
-
-**Storage backends**
-- Cloudflare D1 (default, zero config)
-- GitHub Markdown (your data as files in your repo)
-- PostgreSQL (self-hosted, recommended for production)
-- Sync between D1 and GitHub via `/sync` command or website
-
-**Authentication**
-- Telegram OAuth + Mini App login
-- Discord OAuth
-- Session-based auth with 30-day expiry
-- Telegram CloudStorage for Mini App session persistence
+- **Save** links from the web UI, Telegram bot, or Discord bot. Upload text files (.md, .py, .json, .sql, and 30+ more, 512 KB each).
+- **Search** with fuzzy matching across titles, URLs, notes, and tags — tolerant of typos and partial matches, with server-side search for large brains.
+- **Ask** questions with RAG over your links and documents. Supports OpenAI, Anthropic, Groq, OpenRouter, and OpenCode Zen, with streaming answers and cited sources.
+- **Share** a brain with a Telegram group in community mode, with voting, reporting, and rank-based permissions — or keep it private in personal mode.
+- **Store** your data wherever you like: Cloudflare D1, Markdown files in your own GitHub repo, or self-hosted PostgreSQL.
+- **Log in** with Telegram (OAuth or Mini App) or Discord. Sessions last 30 days.
 
 ---
 
-## UI themes and accent colors
+## Themes
 
-Athena ships with 4 distinct UI themes:
-
-| Theme | Description |
-|-------|-------------|
-| **Dark** | Rich dark background with vibrant accent glows |
-| **Light** | Clean white with subtle shadows |
-| **Material** | Material Design 3 surface tones, elevation, no blur |
-| **Glass** | iOS/macOS vibrancy with strong blur effects |
-
-**Accent color picker** — Settings → Accent Color. Pick any color — buttons, glows, backgrounds, borders, and highlights all update instantly. 12 preset swatches + free-form color input. Persists in localStorage.
+Four themes — **Dark**, **Light**, **Material** (MD3 surfaces, no blur), and **Glass** (iOS-style vibrancy) — each with a free-form accent color picker in Settings. Buttons, glows, borders, and highlights update instantly and persist locally.
 
 <p>
 <img src="screenshots/dark-purple.svg" width="24%" alt="Dark Purple">
@@ -106,117 +41,37 @@ Athena ships with 4 distinct UI themes:
 
 ---
 
-## Ranks and access control
+## Install
 
-| Rank | Who | Personal brain | AI | Bot settings | Delete links | Upload docs |
-|------|-----|---------------|-----|--------------|--------------|-------------|
-| **GOD** | Instance host (`TG_OWNER_IDS`) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Owner** | Community creator (`/community_verify`) | ❌ | ✅ | ❌ | ✅ | ✅ |
-| **Admin** | Promoted with `/admin` | ❌ | ✅ | ❌ | ✅ | ✅ |
-| **Member** | After login + join TG group + `/community_join` | ❌ | ✅ | ❌ | ❌ | ✅ |
-| **Banned** | Left/kicked from TG group | ❌ | ❌ | ❌ | ❌ | ❌ |
-
-- GOD is determined by `TG_OWNER_IDS` and `DISCORD_OWNER_IDS` environment variables
-- Empty owner lists → every logged-in user is GOD (self-host convenience)
-- Bans are per-community: banned from one community does not affect others
-- Live Telegram presence sync: leaving the group auto-bans, rejoining auto-unbans
-
----
-
-## Personal mode vs community mode
-
-**Personal mode** (GOD rank only)
-- Your private brain — only you can see, search, and ask AI about it
-- Links and documents stored under your user ID
-- Switch with `/personal` in bot or toggle on website
-
-**Community mode** (all ranks)
-- Shared brain for a Telegram group / community
-- All members can dump, search, and use AI
-- Links and documents stored under the community ID
-- Switch with `/community` in bot or toggle on website
-
-**Dual mode in DMs**: After linking a bot, `/personal` and `/community` switch where links go when you paste URLs in the bot DM. In groups, everything goes to the community brain.
-
----
-
-## Communities
-
-**Creating a community**
-1. Add your bot to a Telegram group
-2. Bot owner runs `/community_verify` in the group
-3. A community is created with the group title as its name
-4. Bot owner becomes the owner; they can promote admins with `/admin`
-
-**Joining a community**
-1. Login on the website with Telegram
-2. Join the Telegram group
-3. DM the bot: `/community_join <community_id>`
-4. Get the community ID from `/community_list` or the website
-
-**Community management**
-- `/admin` — reply to a user to promote them to admin
-- `/demote` — demote an admin back to member
-- `/clear @user` — remove a member (they can rejoin)
-- `/community_delete <id>` — wipe community + all data (owner/GOD only)
-- `/clear_db <id>` — wipe links only, keep community and members
-
----
-
-## Install path A — Cloudflare
-
-Best for: quick start, zero infrastructure, free tier.
+### A. Cloudflare — quick start, free tier, zero infrastructure
 
 ```bash
-# Clone
 git clone https://github.com/JuznemHub/Athena-Search.git
 cd Athena-Search/worker
 
-# Configure
-cp ENV.example .env
-# Edit .env with your Cloudflare account_id, Telegram/Discord secrets
-
-# Deploy
+# Edit wrangler.toml: account_id, the D1 database_id, and the [vars] values
+npx wrangler secret put TELEGRAM_CLIENT_SECRET
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+npx wrangler secret put DISCORD_CLIENT_SECRET
+npx wrangler secret put STORAGE_KEY          # only if you plan to use GitHub storage
 npx wrangler deploy
 ```
 
-**Wrangler.toml** configures:
-- D1 database binding
-- Static assets from `public/`
-- Environment variables (Telegram/Discord client IDs, owner IDs)
-- Secrets (set via `wrangler secret put`): `TELEGRAM_CLIENT_SECRET`, `TELEGRAM_BOT_TOKEN`, `DISCORD_CLIENT_SECRET`
+Non-secret values — `account_id`, the D1 `database_id`, and the client and owner IDs under `[vars]` — are edited straight into `wrangler.toml`; static assets are served from `public/` by the same config. `worker/ENV.example` is a reference for what to fill in, and a `worker/.env` copy of it only feeds local `wrangler dev`: `npx wrangler deploy` never reads it, so anything not in `wrangler.toml` or set with `wrangler secret put` will be missing in production.
 
-**Webhook setup** (for Telegram bot):
-```bash
-curl "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=https://<your-worker>.workers.dev/api/telegram-webhook&secret_token=<WEBHOOK_SECRET>"
-```
+### B. Self-hosted PostgreSQL — production, full control
 
----
-
-## Install path B — self-hosted PostgreSQL
-
-Best for: production, full control, own database.
+Requires Node.js 22+ and PostgreSQL 14+.
 
 ```bash
-# Prerequisites: Node.js 22+, PostgreSQL 14+
-
-# Clone
 git clone https://github.com/JuznemHub/Athena-Search.git
 cd Athena-Search
 
-# Install
 npm install
-
-# Configure
-cp .env.example .env
-# Edit .env: DATABASE_URL, TELEGRAM_*, TG_OWNER_IDS, etc.
-# See also: server/.env.example for the full reference with comments
-
-# Run
+cp .env.example .env     # see server/.env.example for the annotated reference
 node server/index.js
 ```
 
-**Environment variables** (`.env`):
 ```bash
 DATABASE_URL=postgresql://athena:password@localhost:5432/athena
 PORT=8787
@@ -235,22 +90,21 @@ GDRIVE_REFRESH_TOKEN=your_refresh_token
 GDRIVE_FOLDER_ID=your_drive_folder_id
 ```
 
-**Reverse proxy** (Caddy example in `server/Caddyfile.example`):
-```
-athena.yourdomain.com {
-    reverse_proxy localhost:8787
-}
-```
+Examples for Caddy (`server/Caddyfile.example`), systemd (`server/athena.service.example`), and Cloudflare Tunnel (`server/cloudflared-athena.service.example`) ship with the repo.
 
-**Nginx reverse proxy** (for Cloudflare or any provider):
+<details>
+<summary>Nginx reverse proxy</summary>
 
-If your domain is behind Cloudflare, set Cloudflare SSL/TLS to **Flexible** (origin is HTTP) and use this nginx config:
+Behind Cloudflare, set SSL/TLS to **Full (strict)** and serve the origin over HTTPS with a [Cloudflare origin certificate](https://developers.cloudflare.com/ssl/origin-configuration/origin-ca/). Keep plain-HTTP origins private behind a Cloudflare Tunnel instead of exposing them.
 
 ```nginx
 # /etc/nginx/conf.d/athena.conf
 server {
-    listen 80;
+    listen 443 ssl default_server;
     server_name athena.yourdomain.com;
+
+    ssl_certificate     /etc/ssl/cloudflare/athena.pem;
+    ssl_certificate_key /etc/ssl/cloudflare/athena.key;
 
     location / {
         proxy_pass http://127.0.0.1:8787;
@@ -266,127 +120,74 @@ server {
 }
 ```
 
-Remove or comment out the default server block in `/etc/nginx/nginx.conf` if it catches requests before your config.
+If another block catches requests first, disable the distro's default site (`/etc/nginx/sites-enabled/default` on Debian/Ubuntu, the `server` block in `/etc/nginx/nginx.conf` on RHEL) — only one block per port may be `default_server`.
+</details>
 
-**Systemd service** (example in `server/athena.service.example`)
+### Cloudflare frontend, self-hosted backend
+
+Set `ATHENA_FRONTEND_URL` on your server to wherever OAuth should send the browser after login — it has to be a URL your users can actually reach, serving this same UI. Then in Settings → Backend, enter your server URL and click "Set backend for everyone". The choice is stored per-instance, so every visitor uses the same backend.
+
+Storage backend comes from `ATHENA_RUNTIME`, not the frontend URL. A self-hosted server always uses PostgreSQL.
 
 ---
 
-## Storage backends
+## Ranks
+
+| Rank | Who | Personal brain | AI | Bot settings | Delete links | Upload docs |
+|------|-----|---------------|-----|--------------|--------------|-------------|
+| **GOD** | Instance host (`TG_OWNER_IDS`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Owner** | Community creator (`/community_verify`) | ❌ | ✅ | ❌ | ✅ | ✅ |
+| **Admin** | Promoted with `/admin` | ❌ | ✅ | ❌ | ✅ | ✅ |
+| **Member** | Login + join TG group + `/community_join` | ❌ | ✅ | ❌ | ❌ | ✅ |
+| **Banned** | Left or kicked from the TG group | ❌ | ❌ | ❌ | ❌ | ❌ |
+
+Empty owner lists mean every logged-in user is GOD — convenient for a personal self-host. Bans are per-community, and Telegram presence stays in sync: leaving the group auto-bans, rejoining auto-unbans.
+
+---
+
+## Personal and community brains
+
+**Personal** (GOD only) is private — stored under your user ID, visible only to you. **Community** is shared with a Telegram group, where every member can dump, search, and ask. Switch with `/personal` and `/community` in the bot, or the toggle on the website.
+
+In a group, everything goes to the community brain. In DMs, the mode decides where pasted links land.
+
+**Creating a community**: add your bot to a Telegram group and run `/community_verify`. The group title becomes the community name and you become its owner, free to promote admins with `/admin`.
+
+**Joining one**: log in on the website, join the Telegram group, then DM the bot `/community_join <community_id>` — the ID comes from `/community_list` or the website.
+
+---
+
+## Storage
 
 | Backend | How it works | When to use |
 |---------|-------------|-------------|
-| **Cloudflare D1** | Links stored in D1 (SQLite). Reads/writes go directly to D1. | Quick start, free, zero config |
-| **GitHub Markdown** | Links stored as .md files in your repo. D1 acts as read cache (auto-synced). | Data ownership, version history |
-| **PostgreSQL** | Links stored in your own Postgres database. | Production, self-hosted |
+| **Cloudflare D1** | Reads and writes go straight to D1 (SQLite). | Quick start, free, zero config |
+| **GitHub Markdown** | Links live as .md files in your repo; D1 is a transparent read cache. | Data ownership, version history |
+| **PostgreSQL** | Your own database. | Production, self-hosted |
 
-**GitHub storage (optional)**
+With GitHub active, it is the source of truth: reads come from GitHub (cached to D1), writes go to both. With D1 active, GitHub is untouched until you sync.
 
-When GitHub is the active provider:
-- All reads go to GitHub (synced to D1 cache for speed)
-- All writes go to GitHub AND D1 (keeps cache fresh)
-- D1 is a transparent cache — you never interact with it directly
-- GitHub is the source of truth
+**Setting up GitHub storage**: set `STORAGE_KEY` first — `npx wrangler secret put STORAGE_KEY` on Cloudflare, or the `STORAGE_KEY` line in `.env` when self-hosted. It encrypts the PAT at rest (AES-GCM, stored with an `enc:v1:` prefix under `env.STORAGE_KEY`); leave it unset and the token is written to the database in plaintext as a fallback. Rotating or losing the key makes an already-saved token unreadable, so you re-enter it.
 
-When D1 is the active provider:
-- All reads/writes go to D1
-- GitHub is not used at all
-- You can manually sync D1 → GitHub with `/sync` or website "Push to GitHub"
+Then create a repo (say `yourname/athena-brain`), generate a fine-grained PAT scoped to just that repo with **Contents: Read and write**, and go to Settings → Storage → GitHub to enter the repo, branch, and token. Save to verify the connection.
 
-**Setting up GitHub storage**:
-1. Create a GitHub repo (e.g., `yourname/athena-brain`)
-2. Generate a personal access token with `repo` scope
-3. Website → Settings → Storage → GitHub
-4. Enter repo (`owner/repo`), branch (`main`), token
-5. Click Save → verify connection
+**Syncing** merges both stores in either direction, whichever backend is active — via Settings → Storage → "Push existing links to GitHub", or `/sync` in the bot (GOD only). The merge is a union on URL hash, so nothing is dropped from either side; when the same URL exists in both, the D1 record is the one kept, and its title, notes, and tags overwrite the GitHub copy.
 
-**Sync** (D1 ↔ GitHub, bidirectional):
-- Website: Settings → Storage → "Push existing links to GitHub"
-- Bot: `/sync` (GOD only)
-- Merges both stores: links from D1 go to GitHub, links from GitHub go to D1
-- After sync, both stores are identical
-- Works regardless of which is the active provider
-
----
-
-## GitHub storage setup
-
-1. Create a GitHub repo (e.g., `yourname/athena-brain`)
-2. Generate a personal access token with `repo` scope
-3. Website → Settings → Storage → GitHub
-4. Enter repo (`owner/repo`), branch (`main`), token
-5. Click Save → verify connection
-6. Existing D1 data can be pushed with "Sync" button
-
-Data layout in GitHub:
-```
+```text
 brain/
-  personal/
-    user123/
-      link1.md
-      link2.md
-  communities/
-    c_abc123/
-      link3.md
-      link4.md
+  personal/user123/link1.md
+  communities/c_abc123/link3.md
 documents/
-  personal/
-    user123/
-      doc-id--filename.md
-  communities/
-    c_abc123/
-      doc-id--filename.md
+  personal/user123/doc-id--filename.md
+  communities/c_abc123/doc-id--filename.md
 ```
 
 ---
 
-## Backend URL configuration
+## AI
 
-For self-hosted backends with Cloudflare frontend:
+As GOD, go to Settings → AI assistant, pick a provider, and enter the base URL, model, and API key. Saving syncs the config to the server, so the website and the bot's `/ai` share one set of credentials.
 
-1. Set `ATHENA_FRONTEND_URL` on the self-hosted server (e.g., `https://athena.pages.dev`)
-2. Website → Settings → Backend → enter your self-hosted URL
-3. GOD clicks "Set backend for everyone"
-4. All browsers now use the self-hosted API
-
-The backend URL is stored per-instance (on the Cloudflare origin), so every visitor uses the same backend.
-
-**What `ATHENA_FRONTEND_URL` does**: This is where OAuth redirects send the browser after login (Telegram, Discord). It must be a URL the user can actually reach. If you set it to a Cloudflare Worker URL, the Worker must serve the same frontend — otherwise the user lands on a page that can't talk to your self-hosted API.
-
-**Using a Worker URL as frontend**: This works if:
-- The Worker serves the same Athena UI (e.g., you deployed the Worker with `wrangler deploy`)
-- The Worker can reach your self-hosted backend (or the user's browser connects directly)
-- You configure the backend URL in Settings → Backend so the UI talks to your server
-
-Storage backend options (D1, GitHub, PostgreSQL) are determined by `ATHENA_RUNTIME`, not the frontend URL. On a self-hosted server, only PostgreSQL is available regardless of what `ATHENA_FRONTEND_URL` points to.
-
----
-
-## Document upload
-
-**Supported formats**: .md, .txt, .py, .js, .ts, .jsx, .tsx, .sh, .bash, .css, .html, .json, .yaml, .yml, .toml, .xml, .csv, .sql, .go, .rs, .java, .c, .h, .cpp, .rb, .php, .swift, .kt, .lua, .r, .dart, .vue, .svelte, .ini, .cfg, .conf, .env, .log
-
-**Limits**: 512 KB per file, must be text (not binary)
-
-**Website**: Dump mode → Upload text button → select files
-
-**Bot**: Send/forward a file to the bot
-- In groups: saved to community brain
-- In DMs: saved to active scope (personal or community)
-- Also writes to GitHub if GitHub storage is configured
-
----
-
-## AI configuration
-
-**Setting up AI** (GOD rank):
-1. Website → Settings → AI assistant
-2. Select provider (OpenAI, Anthropic, Groq, OpenRouter, OpenCode Zen, or Custom)
-3. Enter API base URL, model, and API key
-4. Click Save AI config
-5. This syncs to the server so both website and bot `/ai` use the same credentials
-
-**Supported providers**:
 | Provider | Base URL | Model example |
 |----------|----------|---------------|
 | OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
@@ -396,60 +197,34 @@ Storage backend options (D1, GitHub, PostgreSQL) are determined by `ATHENA_RUNTI
 | OpenCode Zen Go | `https://opencode.ai/zen/go/v1` | `deepseek-v4-flash` |
 | OpenCode Zen | `https://opencode.ai/zen/v1` | `deepseek-v4-flash` |
 
-**How AI works**:
-1. Your question is matched against saved links and documents using fuzzy search
-2. Top matches are injected as context into the system prompt
-3. LLM generates an answer grounded in your brain data
-4. Sources are listed below the answer
+Questions are fuzzy-matched against your links and documents, the top matches are injected into the system prompt, and the answer comes back grounded in your brain with its sources listed underneath.
 
 ---
 
-## Telegram bot setup
+## Telegram bot
 
-1. Talk to [@BotFather](https://t.me/BotFather) → `/newbot` → get token
-2. Website → Settings → Bot → paste token + your DM `/id`
-3. Click "Verify & save bot"
-4. For groups: add bot to group → `/community_verify`
+1. Get a token from [@BotFather](https://t.me/BotFather) with `/newbot`
+2. DM your bot `/id` to find your user ID
+3. Website → Settings → Bot → paste the token and your ID → "Verify & save bot"
+4. For groups: add the bot, then run `/community_verify`
 
-**Getting your DM /id**: DM the bot → send `/id` → it replies with your user ID
+In forum groups, `/id` inside a topic gives you the topic ID, and `/topic <id>` locks the bot to it.
 
-**Forum topic support**: Run `/id` in a topic to get the topic ID, then `/topic <id>` to lock the bot to that topic only.
-
-**Webhook setup (self-hosted)**:
-
-The webhook endpoint is `/api/telegram-webhook` (not `/telegram/webhook`).
-
-If you set `TELEGRAM_WEBHOOK_SECRET` in your `.env`, you must pass the same value as `secret_token` when registering the webhook with Telegram:
+**Webhook (self-hosted)** — the endpoint is `/api/telegram-webhook`:
 
 ```bash
 curl "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=https://yourdomain.com/api/telegram-webhook&secret_token=<TELEGRAM_WEBHOOK_SECRET>"
 ```
 
-If `TELEGRAM_WEBHOOK_SECRET` is not set, Athena derives a secret from the bot token automatically. In that case, re-register the webhook after any bot token change.
+If you set `TELEGRAM_WEBHOOK_SECRET`, pass the same value as `secret_token`. If you don't, Athena derives one from the bot token — in which case re-register the webhook whenever the token changes. `WEBHOOK_ALLOW_UNSIGNED=1` disables the check entirely; it's insecure and only meant for migration.
 
-To allow unsigned webhooks during migration (insecure, remove after testing):
-```bash
-WEBHOOK_ALLOW_UNSIGNED=1
-```
+**Log channel** — send login and community-join notices to a channel instead of GOD's DMs. Add the bot as a channel admin, get the channel ID (forward a message to @userinfobot, then prefix it with `-100`), and DM `/setlogchannel -1001234567890`. Turn it off with `/setlogchannel off`.
 
-**Log channel (GOD only)**:
+<details>
+<summary><b>Bot commands</b></summary>
 
-Set a Telegram channel to receive login and community join notifications instead of DMs:
+**Everyone**
 
-1. Add your bot as admin to the channel
-2. Get the channel ID (forward a message from the channel to @userinfobot)
-3. **Important**: Channel IDs from @userinfobot need `-100` prefix (e.g., `1234567890` → `-1001234567890`)
-4. DM the bot: `/setlogchannel -1001234567890`
-
-To remove: `/setlogchannel off`
-
-When set, website login and community join notifications go to this channel instead of GOD DMs.
-
----
-
-## Bot commands
-
-### Global (all ranks)
 | Command | Description |
 |---------|-------------|
 | `/start` | Welcome message and status |
@@ -457,58 +232,55 @@ When set, website login and community join notifications go to this channel inst
 | `/id` | Chat ID, your user ID, topic ID |
 | `/rank` | Your ranks across all communities |
 | `/db` | Show storage backend info |
-
-### Search and AI (all ranks)
-| Command | Description |
-|---------|-------------|
 | `/search <query>` | Search active brain |
 | `/ai <question>` | AI over brain context |
-
-### Personal (GOD only)
-| Command | Description |
-|---------|-------------|
-| `/personal` | Switch dump mode to personal |
-| `/community` | Switch dump mode to community |
-| `/mode` | Show current dump mode |
-| `/clear_personal_db` | Wipe personal links |
-
-### Community (members+)
-| Command | Description |
-|---------|-------------|
 | `/community_join <id>` | Join a community |
-| `/community_list` | List your communities |
-| `/community_list <id>` | Community details |
+| `/community_list [id]` | List your communities, or one community's details |
 
-### Staff (admin/owner/GOD)
+Sending or forwarding any supported text file saves it to the active scope.
+
+**Staff** (admin, owner, GOD)
+
 | Command | Description |
 |---------|-------------|
 | `/delete <url>` | Delete a link (or reply `/delete`) |
 | `/edit <url> \| notes: ...` | Edit link description |
-| `/admin` | Reply to user → promote admin |
+| `/admin` | Reply to a user → promote to admin |
 | `/demote` | Demote admin to member |
 | `/clear @user` | Remove member (can rejoin) |
-| `/topic <id>` | Lock bot to forum topic |
-| `/topic off` | Remove topic lock |
+| `/topic <id>` / `/topic off` | Lock bot to a forum topic |
 | `/dumpall on/off` | Multi-link mode |
 
-### Owner/GOD only
+**Owner and GOD**
+
 | Command | Description |
 |---------|-------------|
 | `/community_verify` | Link group to community |
-| `/community_delete <id>` | Wipe community + data |
-| `/clear_db <id>` | Wipe links only |
+| `/community_delete <id>` | Wipe community + all data |
+| `/clear_db <id>` | Wipe links only, keep members |
 | `/sync` | Sync D1 ↔ GitHub |
 | `/backup` | Trigger backup (self-hosted) |
 | `/setlogchannel <id\|off>` | Set log channel for notifications |
 
-### File uploads
-Send or forward any supported text file → saved to active scope.
+**GOD only**
+
+| Command | Description |
+|---------|-------------|
+| `/personal` / `/community` | Switch dump mode |
+| `/mode` | Show current dump mode |
+| `/clear_personal_db` | Wipe personal links |
+
+</details>
 
 ---
 
-## API endpoints
+## API
 
-### Public (no auth)
+<details>
+<summary><b>Endpoints</b></summary>
+
+**Public**
+
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/health` | Health check, version, features |
@@ -521,90 +293,63 @@ Send or forward any supported text file → saved to active scope.
 | POST | `/api/telegram-webhook` | Telegram bot webhook |
 | GET | `/api/instance/config` | Instance default backend |
 
-### Authenticated
+**Authenticated**
+
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/auth/me` | Current user info |
 | POST | `/api/auth/logout` | Destroy session |
 | GET | `/api/communities` | List communities |
 | POST | `/api/communities/join` | Join community |
-| GET | `/api/links` | Get community links |
-| POST | `/api/links` | Create community link |
-| PATCH | `/api/links` | Edit link |
-| DELETE | `/api/links` | Delete link |
+| GET, POST, PATCH, DELETE | `/api/links` | Read, create, edit, delete links |
 | GET | `/api/links/search` | Server-side search |
 | POST | `/api/links/vote` | Vote on link |
 | POST | `/api/links/report` | Report link |
-| GET | `/api/documents` | Get documents |
-| POST | `/api/documents` | Upload document |
-| DELETE | `/api/documents` | Delete document |
-| GET | `/api/personal-links` | Get personal links (GOD) |
-| POST | `/api/personal-links` | Create personal link (GOD) |
+| GET, POST, DELETE | `/api/documents` | Read, upload, delete documents |
+| GET, POST | `/api/personal-links` | Personal links (GOD) |
 | GET | `/api/notifications` | List notifications |
 | POST | `/api/ai/chat` | AI chat proxy (streaming) |
-| GET | `/api/ai/config` | AI config status |
-| POST | `/api/ai/config` | Save AI config (GOD) |
-| GET | `/api/storage/config` | Storage backend info |
-| POST | `/api/storage/config` | Save storage config (GOD) |
+| GET, POST | `/api/ai/config` | Read config status, save config (GOD) |
+| GET, POST | `/api/storage/config` | Read backend info, save config (GOD) |
 | POST | `/api/storage/sync` | Sync D1 ↔ GitHub (GOD) |
+
+</details>
 
 ---
 
 ## Architecture
 
-```
+```text
 athena/
-├── public/                    # Frontend (static assets served by Worker/server)
-│   ├── index.html             # SPA entry point
+├── public/              # Frontend (static assets served by Worker/server)
+│   ├── index.html       # SPA entry point
 │   └── src/
-│       ├── main.js            # App logic (auth, search, AI, themes, dice)
-│       ├── style.css          # Base styles
-│       ├── themes.css         # Theme tokens (dark/light/material/glass)
-│       └── lib/
-│           ├── ai.js          # AI proxy + RAG retrieval
-│           ├── search.js      # Fuzzy search engine
-│           └── dedupe.js      # URL normalization + dedup
+│       ├── main.js      # App logic (auth, search, AI, themes)
+│       ├── style.css    # Base styles
+│       ├── themes.css   # Theme tokens (dark/light/material/glass)
+│       └── lib/         # ai.js (RAG), search.js (fuzzy), dedupe.js (URLs)
 │
-├── worker/                    # Cloudflare Worker (API + bot + static)
-│   ├── index.js               # All API routes, auth, Telegram webhook
-│   ├── storage.js             # GitHub store (read/write/list)
-│   ├── pgcompat.js            # SQLite → Postgres SQL translator
-│   ├── schema.sql             # Database schema
-│   └── wrangler.toml          # Cloudflare config
+├── worker/              # Cloudflare Worker — API + bot + static
+│   ├── index.js         # All API routes, auth, Telegram webhook
+│   ├── storage.js       # GitHub store (read/write/list)
+│   ├── pgcompat.js      # SQLite → Postgres SQL translator
+│   ├── schema.sql       # Database schema
+│   └── wrangler.toml    # Cloudflare config
 │
-├── server/                    # Self-hosted wrapper
-│   ├── index.js               # Node HTTP → Worker adapter
-│   ├── pgdb.js                # D1-compatible Postgres driver
-│   ├── assets.js              # Static file server
-│   ├── backup.js              # Telegram + Drive backup
-│   ├── restore.js             # Backup restore tool
-│   └── setup-selfhost.sh      # Setup script
-│
-├── screenshots/               # README images (SVG mockups)
-└── README.md
+└── server/              # Self-hosted wrapper
+    ├── index.js         # Node HTTP → Worker adapter
+    ├── pgdb.js          # D1-compatible Postgres driver
+    ├── assets.js        # Static file server
+    ├── backup.js        # Telegram + Drive backup
+    └── restore.js       # Backup restore tool
 ```
 
-**Data flow**:
+Requests always land on the Worker or the Node server, which reads and writes the active store and proxies AI calls out to your provider:
 
-When D1 is active (default):
-```
-Browser/Telegram → Worker/Server → D1 (source of truth)
-                         ↓
-                   AI Proxy → OpenAI/Anthropic/etc
-```
-
-When GitHub is active:
-```
-Browser/Telegram → Worker/Server → GitHub (source of truth)
-                         ↓              ↓
-                   D1 (read cache)   AI Proxy → OpenAI/Anthropic/etc
-```
-
-When self-hosted (PostgreSQL):
-```
-Browser/Telegram → Node Server → PostgreSQL (source of truth)
-                         ↓
-                   AI Proxy → OpenAI/Anthropic/etc
+```text
+Browser/Telegram → Worker or Node server → D1 | GitHub (+D1 cache) | PostgreSQL
+                              ↓
+                        AI Proxy → OpenAI/Anthropic/etc
 ```
 
 ---
@@ -625,5 +370,6 @@ Browser/Telegram → Node Server → PostgreSQL (source of truth)
 
 [CC BY-NC 4.0](LICENSE) — Attribution-NonCommercial
 
-You may use, modify, and share this code for non-commercial purposes with proper attribution.
-Commercial use requires a separate license.
+You may use, modify, and share this code for non-commercial purposes with proper attribution. Commercial use requires a separate license.
+</content>
+</invoke>
