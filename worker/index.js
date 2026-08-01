@@ -44,7 +44,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '6.18.6',
+          version: '6.18.7',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -115,7 +115,7 @@ export default {
           await destroyUserSessions(env, user.id);
           return deny(corsHeaders, BANNED_SITE_MSG, 'SITE_BANNED', 403);
         }
-        return Response.json({ success: true, user: publicUser(user, env, { owner, elevated, god: owner }) }, { headers: corsHeaders });
+        return Response.json({ success: true, user: publicUser(user, { god: owner, elevated }) }, { headers: corsHeaders });
       }
 
       if (pathname === '/api/auth/logout' && request.method === 'POST') {
@@ -1079,11 +1079,10 @@ async function resolveTgApiIdForUser(user) {
   return null;
 }
 
-function publicUser(user, env = null, flags = null) {
+function publicUser(user, flags = null) {
   if (!user) return null;
-  const owner = flags?.owner != null ? !!flags.owner : (env ? isInstanceOwnerUser(user, env) : false);
-  const elevated = flags?.elevated != null ? !!flags.elevated : owner;
-  const god = flags?.god != null ? !!flags.god : owner;
+  const god = !!flags?.god;
+  const elevated = !!flags?.elevated;
   return {
     id: user.id,
     username: user.username,
@@ -1589,7 +1588,7 @@ async function handleTelegramWebAppAuth(request, env, corsHeaders) {
     return Response.json({
       success: true,
       session: sessionToken,
-      user: publicUser(user, env, { owner, elevated, god: owner })
+      user: publicUser(user, { god: owner, elevated })
     }, { headers: { ...corsHeaders, 'Set-Cookie': `athena_session=${encodeURIComponent(sessionToken)}; Path=/; SameSite=Lax; Max-Age=${cookieMaxAge}` } });
   } catch (err) {
     console.error('webapp auth', err);
@@ -5740,7 +5739,8 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       }
     }
   }
-  if (!text && !entityUrlsEarly.length) return new Response('OK', { status: 200, headers: corsHeaders });
+  // Captionless document uploads have no text and no entity URLs — let them reach the doc handler
+  if (!text && !entityUrlsEarly.length && !msg.document?.file_id) return new Response('OK', { status: 200, headers: corsHeaders });
   // synthetic command text for media-only with links
   if (!text && entityUrlsEarly.length) text = entityUrlsEarly.join(' ');
 
@@ -5824,18 +5824,21 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   if (cmd.startsWith('http')) cmd = '';
   const rest = cmd.startsWith('/') ? text.slice(parts[0].length).trim() : text;
 
+  // Rank context for this chat. Must precede document handling, which reads isGod.
+  const communityIdForRank = binding?.community_id || null;
+  const userRankInfo = await resolveUserRank(env, athenaUser, tgUserId, communityIdForRank);
+  const userRank = userRankInfo.rank;
+  const isGod = userRank === 'god';
+  const isCommOwner = userRank === 'owner' || isGod;
+  const isCommAdmin = userRank === 'admin' || isCommOwner;
+  const isMemberPlus = rankAtLeast(userRank, 'member');
+
   // ---- Document/file handling ----
   // When a user sends a .md or supported file, save it to the active scope.
   // In groups: always community scope. In DMs: respect /personal or /community mode.
-  const DOCUMENT_EXTENSIONS = new Set([
-    'md', 'markdown', 'txt', 'py', 'js', 'ts', 'jsx', 'tsx', 'sh', 'bash', 'zsh', 'fish',
-    'css', 'html', 'htm', 'json', 'yaml', 'yml', 'toml', 'xml', 'csv', 'sql', 'go', 'rs',
-    'java', 'c', 'h', 'cpp', 'hpp', 'cs', 'rb', 'php', 'swift', 'kt', 'kts', 'lua', 'r',
-    'dart', 'vue', 'svelte', 'ini', 'cfg', 'conf', 'env', 'log'
-  ]);
   const doc = msg.document;
   if (doc && doc.file_id && athenaUser) {
-    const filename = doc.file_name || 'document.txt';
+    let filename = doc.file_name || 'document.txt';
     const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
     if (DOCUMENT_EXTENSIONS.has(ext)) {
       const isGroup = String(msg.chat?.type || '').includes('group') || chatId.startsWith('-');
@@ -5867,6 +5870,11 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No community linked. ${codeHtml('/community_verify')} in a group or ${codeHtml('/community_join <id>')}.`, forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
+      // Community uploads are member+ only — a non-member in the group must not write to its brain
+      if (docCommunityId && !isMemberPlus) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('⛔')} Members only. ${codeHtml('/community_join ' + docCommunityId)} first.`, forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
       // Download file from Telegram
       try {
         const botToken = token || env.TELEGRAM_BOT_TOKEN;
@@ -5878,16 +5886,14 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         const fileUrl = `https://api.telegram.org/file/bot${botToken}/${fileInfo.result.file_path}`;
         const fileRes = await fetch(fileUrl);
         if (!fileRes.ok) throw new Error(`Download failed: ${fileRes.status}`);
-        const content = await fileRes.text();
-        // Skip binary files
-        if (content.includes('\0')) {
-          await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} Binary file — only text/code files supported.`, forumThreadId);
+        // Same validator as the API path — byte-accurate size cap, filename and UTF-8 checks
+        const valid = validateDocumentInput({ scope: docScope, filename, content: await fileRes.text() });
+        if (valid.error) {
+          await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} ${escHtml(valid.error)}`, forumThreadId);
           return new Response('OK', { status: 200, headers: corsHeaders });
         }
-        if (content.length > 512 * 1024) {
-          await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} File too large (max 512 KB).`, forumThreadId);
-          return new Response('OK', { status: 200, headers: corsHeaders });
-        }
+        const content = valid.content;
+        filename = valid.filename;
         await ensureDocumentsTable(env);
         const id = 'doc_' + Date.now().toString(36) + '_' + randomToken().slice(0, 4);
         const now = Date.now();
@@ -5964,15 +5970,6 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
   }
-
-    // Rank context for this chat
-  const communityIdForRank = binding?.community_id || null;
-  const userRankInfo = await resolveUserRank(env, athenaUser, tgUserId, communityIdForRank);
-  const userRank = userRankInfo.rank;
-  const isGod = userRank === 'god';
-  const isCommOwner = userRank === 'owner' || isGod;
-  const isCommAdmin = userRank === 'admin' || isCommOwner;
-  const isMemberPlus = rankAtLeast(userRank, 'member');
 
   const STAFF_OR_ABOVE = new Set([
     '/delete', '/edit', '/topic', '/dumpall', '/dumpsmart', '/admin', '/demote', '/clear',
@@ -7983,6 +7980,19 @@ function parseReadmeIntro(md) {
   };
 }
 
+const SCRAPE_TIMEOUT_MS = 9000;
+
+/** fetch that aborts instead of hanging a link-enrichment request forever. */
+async function fetchWithTimeout(url, options = {}, timeoutMs = SCRAPE_TIMEOUT_MS) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Forge hosts (GitHub / Codeberg / GitLab / Gitea-style) via API + README.
  */
@@ -8002,7 +8012,7 @@ async function scrapeForgeMetadata(rawUrl) {
         Accept: 'application/vnd.github+json',
         'User-Agent': 'AthenaBot/1.3 (+link-preview)'
       };
-      const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers });
+      const repoRes = await fetchWithTimeout(`https://api.github.com/repos/${owner}/${repo}`, { headers });
       if (!repoRes.ok) return null;
       const data = await repoRes.json();
       if (!data?.name) return null;
@@ -8010,7 +8020,7 @@ async function scrapeForgeMetadata(rawUrl) {
       let description = (data.description || '').trim();
       let image = data.owner?.avatar_url || '';
       try {
-        const readmeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/readme`, {
+        const readmeRes = await fetchWithTimeout(`https://api.github.com/repos/${owner}/${repo}/readme`, {
           headers: { ...headers, Accept: 'application/vnd.github.raw' }
         });
         if (readmeRes.ok) {
@@ -8037,7 +8047,7 @@ async function scrapeForgeMetadata(rawUrl) {
     if (host === 'codeberg.org' || host === 'gitea.com' || host.endsWith('.gitea.io')) {
       const apiBase = `https://${host}/api/v1`;
       const headers = { Accept: 'application/json', 'User-Agent': 'AthenaBot/1.3 (+link-preview)' };
-      const repoRes = await fetch(`${apiBase}/repos/${owner}/${repo}`, { headers });
+      const repoRes = await fetchWithTimeout(`${apiBase}/repos/${owner}/${repo}`, { headers });
       if (!repoRes.ok) return null;
       const data = await repoRes.json();
       if (!data?.name) return null;
@@ -8047,7 +8057,7 @@ async function scrapeForgeMetadata(rawUrl) {
       try {
         // raw README candidates
         for (const name of ['README.md', 'readme.md', 'README.MD']) {
-          const rr = await fetch(`https://${host}/${owner}/${repo}/raw/branch/${data.default_branch || 'main'}/${name}`, {
+          const rr = await fetchWithTimeout(`https://${host}/${owner}/${repo}/raw/branch/${data.default_branch || 'main'}/${name}`, {
             headers: { 'User-Agent': 'AthenaBot/1.3' }
           });
           if (rr.ok) {
@@ -8074,7 +8084,7 @@ async function scrapeForgeMetadata(rawUrl) {
     if (host === 'gitlab.com') {
       const project = encodeURIComponent(`${owner}/${repo}`);
       const headers = { Accept: 'application/json', 'User-Agent': 'AthenaBot/1.3 (+link-preview)' };
-      const repoRes = await fetch(`https://gitlab.com/api/v4/projects/${project}`, { headers });
+      const repoRes = await fetchWithTimeout(`https://gitlab.com/api/v4/projects/${project}`, { headers });
       if (!repoRes.ok) return null;
       const data = await repoRes.json();
       if (!data?.name) return null;
@@ -8082,7 +8092,7 @@ async function scrapeForgeMetadata(rawUrl) {
       let description = (data.description || '').trim();
       let image = data.avatar_url || data.namespace?.avatar_url || '';
       try {
-        const rr = await fetch(
+        const rr = await fetchWithTimeout(
           `https://gitlab.com/api/v4/projects/${project}/repository/files/README.md/raw?ref=${encodeURIComponent(data.default_branch || 'main')}`,
           { headers }
         );
@@ -8144,12 +8154,9 @@ async function scrapeLinkMetadata(rawUrl) {
       };
     }
 
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 9000);
-    const res = await fetch(rawUrl, {
+    const res = await fetchWithTimeout(rawUrl, {
       method: 'GET',
       redirect: 'follow',
-      signal: ctrl.signal,
       headers: {
         'User-Agent':
           'Mozilla/5.0 (compatible; AthenaBot/1.3)',
@@ -8157,7 +8164,6 @@ async function scrapeLinkMetadata(rawUrl) {
         'Accept-Language': 'en-US,en;q=0.9'
       }
     });
-    clearTimeout(timer);
     if (!res.ok) return fallback;
 
     const ctype = (res.headers.get('content-type') || '').toLowerCase();

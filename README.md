@@ -3,17 +3,17 @@
 One bar: search, dump, and AI answers from your markdown brain.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-6.18.6-blueviolet?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-6.18.7-blueviolet?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/license_CC_BY--NC_4.0-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/telegram-bot-blue?style=flat-square&logo=telegram" alt="telegram">
-  <img src="https://img.shields.io/badge/discord-bot-5865F2?style=flat-square&logo=discord" alt="discord">
+  <img src="https://img.shields.io/badge/discord-login-5865F2?style=flat-square&logo=discord" alt="discord">
 </p>
 
 ---
 
 ## Features
 
-- **Save** links from the web UI, Telegram bot, or Discord bot. Upload text files (.md, .py, .json, .sql, and 30+ more, 512 KB each).
+- **Save** links from the web UI or the Telegram bot. Upload text files (.md, .py, .json, .sql, and 30+ more, 512 KB each).
 - **Search** with fuzzy matching across titles, URLs, notes, and tags — tolerant of typos and partial matches, with server-side search for large brains.
 - **Ask** questions with RAG over your links and documents. Supports OpenAI, Anthropic, Groq, OpenRouter, and OpenCode Zen, with streaming answers and cited sources.
 - **Share** a brain with a Telegram group in community mode, with voting, reporting, and rank-based permissions — or keep it private in personal mode.
@@ -356,13 +356,15 @@ Browser/Telegram → Worker or Node server → D1 | GitHub (+D1 cache) | Postgre
 
 ## A Note
 
-> **1.** Yes, this is a vibe-coded project — no need to remind me. I built it for personal use and open-sourced it in case it helps someone. I plan to ask friends with more experience to help improve it. If your only intention is to tell me this is "vibe-coded slop," you're welcome to not use it. But if you genuinely want to help, PRs are always welcome.
+> [!NOTE]
+> Athena started as a personal second brain — one search bar over my own notes — and grew into a proper project: a Cloudflare Worker that also runs self-hosted on Node, a Telegram bot, RAG-based AI search, and a zero-build frontend. It's linted, versioned, and checked by CI on every PR; changes go through code review before they land.
 >
-> **2.** Thanks to [OpenCode](https://opencode.ai), ChatGPT, and Claude. I'm a student on a tight budget. OpenCode's affordable subscription, ChatGPT's generous free tier, and Anthropic's support made it possible for me to build this.
+> Built with the help of [OpenCode](https://opencode.ai), ChatGPT, and Claude. I'm a student on a tight budget, and their accessible tooling made this possible.
+
+> [!NOTE]
+> If Athena saves you time, a star or a share helps others find it — and if you hit a bug or want a feature, issues and PRs are welcome.
 >
-> **3.** If you find this useful, consider giving it a star or sharing it — only if you genuinely like it.
->
-> **4.** Aaron Swartz's thoughts and ideas have deeply shaped who I am. Long live.
+> Aaron Swartz's ideas deeply shaped how I think about open information. Long live.
 
 ---
 
