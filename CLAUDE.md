@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-npm start                          # self-hosted; needs DATABASE_URL. = node server/index.js
+npm start                          # node server/index.js — self-hosted, needs DATABASE_URL
 ./start.sh                         # production: sources .env, then starts
 
 cd worker && npx wrangler deploy
@@ -75,7 +75,7 @@ Multiple bots bind per community (`community_bots`): `findTelegramBinding` resol
 
 ### Link enrichment
 
-`scrapeLinkMetadata` / `scrapeForgeMetadata` pull title, description, image by regex over fetched HTML — plain `fetch`, no headless browser, since it runs in a Worker. (`playwright` is in `package.json` but imported nowhere.) `isWeakTitle` / `isUiNoiseText` / `scoreDescriptionCandidate` / `parseReadmeIntro` reject site chrome and GitHub UI boilerplate.
+`scrapeLinkMetadata` / `scrapeForgeMetadata` pull title, description, image by regex over fetched HTML — plain `fetch`, no headless browser, since it runs in a Worker. `isWeakTitle` / `isUiNoiseText` / `scoreDescriptionCandidate` / `parseReadmeIntro` reject site chrome and GitHub UI boilerplate.
 
 One message can carry a main link plus references; `scoreUrlAsPrimary` / `selectPrimaryLinks` decide which becomes its own entry.
 
@@ -83,7 +83,7 @@ One message can carry a main link plus references; `scoreUrlAsPrimary` / `select
 
 `public/` — no bundler, no framework, no ES modules. Plain `<script>` tags sharing window globals: `window.AthenaSearch` (fuzzy search + RAG retrieval), `window.AthenaAI`, `window.Dedupe` (URL normalize + duplicate check). `main.js` is one large IIFE.
 
-Cache-busting is manual: `public/index.html` loads assets with `?v=6.18.3`. Bump on every edit to `main.js`, `style.css`, `themes.css`, `lib/*.js` — otherwise hosted users keep the old file. Version also lives in `/api/health` (worker/index.js:47) and the README badge; all three currently drift.
+Cache-busting is manual: `public/index.html` loads assets with `?v=6.18.6`. Bump on every edit to `main.js`, `style.css`, `themes.css`, `lib/*.js` — otherwise hosted users keep the old file. Version also lives in `/api/health` (worker/index.js:47) and the README badge; keep all three in step.
 
 Themes are CSS custom properties in `themes.css` (dark/light/material/glass). The accent picker converts hex → HSL at runtime (`hexToHsl` / `applyAccentColor`) and writes the derived vars — consume `--accent-*`, never hardcode a color.
 
@@ -91,7 +91,7 @@ Themes are CSS custom properties in `themes.css` (dark/light/material/glass). Th
 
 ## Conventions
 
-- ES modules, Node >= 22, no TypeScript
+- ES modules in `server/` and `worker/`, Node >= 22, no TypeScript. `public/**/*.js` stays plain scripts
 - Responses: `{ success, ... }` / `{ success: false, error, code }`; `deny()` builds the 403 shape
 - Unmatched `/api/*` returns JSON 404 — falling through to the SPA handler serves `index.html` with HTTP 200
 

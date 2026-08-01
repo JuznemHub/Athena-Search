@@ -1054,7 +1054,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function uploadDocuments(files) {
     if (!files.length) return;
-    if (state.scope === 'personal' && !isGod()) return showToast('Personal uploads are for owners only', true);
+    if (state.scope === 'personal' && !isGod()) return showToast('Personal uploads are GOD only', true);
     if (state.scope === 'community' && !state.activeCommunity) return showToast('Select a community first', true);
     uploadFileBtn.disabled = true;
     let uploaded = 0;
@@ -1128,7 +1128,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function saveDump(raw) {
     if (state.scope === 'personal' && !isGod()) {
-      showToast('Personal dump is for owners only. Join a community first.', true);
+      showToast('Personal dump is GOD only. Join a community first.', true);
       return;
     }
     if (state.scope === 'community' && !state.activeCommunity) {
@@ -2247,7 +2247,7 @@ document.addEventListener('DOMContentLoaded', () => {
           return;
         }
         if (!isGod()) {
-          showToast('Wipe personal is for owners and admins only', true);
+          showToast('Wipe personal is GOD only', true);
           return;
         }
         if (!confirm('Wipe ALL your personal data on this instance?\n\nThis cannot be undone.')) return;
@@ -2317,7 +2317,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     personalScopeBtn.addEventListener('click', () => {
         if (!isGod()) {
-          showToast('Personal mode is for owners and admins only. Join a community via bot: /community_join <id>', true);
+          showToast('Personal mode is GOD only. Join a community via bot: /community_join <id>', true);
           return;
         }
       state.scope = 'personal';

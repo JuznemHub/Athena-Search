@@ -3,7 +3,7 @@
 One bar: search, dump, and AI answers from your markdown brain.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-6.18.4-blueviolet?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-6.18.6-blueviolet?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/license_CC_BY--NC_4.0-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/telegram-bot-blue?style=flat-square&logo=telegram" alt="telegram">
   <img src="https://img.shields.io/badge/discord-bot-5865F2?style=flat-square&logo=discord" alt="discord">
@@ -91,13 +91,16 @@ Examples for Caddy (`server/Caddyfile.example`), systemd (`server/athena.service
 <details>
 <summary>Nginx reverse proxy</summary>
 
-Behind Cloudflare, set SSL/TLS to **Flexible** — the origin is HTTP.
+Behind Cloudflare, set SSL/TLS to **Full (strict)** and serve the origin over HTTPS with a [Cloudflare origin certificate](https://developers.cloudflare.com/ssl/origin-configuration/origin-ca/). Keep plain-HTTP origins private behind a Cloudflare Tunnel instead of exposing them.
 
 ```nginx
 # /etc/nginx/conf.d/athena.conf
 server {
-    listen 80;
+    listen 443 ssl default_server;
     server_name athena.yourdomain.com;
+
+    ssl_certificate     /etc/ssl/cloudflare/athena.pem;
+    ssl_certificate_key /etc/ssl/cloudflare/athena.key;
 
     location / {
         proxy_pass http://127.0.0.1:8787;
@@ -113,7 +116,7 @@ server {
 }
 ```
 
-Remove the default server block in `/etc/nginx/nginx.conf` if it catches requests first.
+If another block catches requests first, disable the distro's default site (`/etc/nginx/sites-enabled/default` on Debian/Ubuntu, the `server` block in `/etc/nginx/nginx.conf` on RHEL) — only one block per port may be `default_server`.
 </details>
 
 ### Cloudflare frontend, self-hosted backend
@@ -160,11 +163,11 @@ In a group, everything goes to the community brain. In DMs, the mode decides whe
 
 With GitHub active, it is the source of truth: reads come from GitHub (cached to D1), writes go to both. With D1 active, GitHub is untouched until you sync.
 
-**Setting up GitHub storage**: create a repo (say `yourname/athena-brain`), generate a PAT with `repo` scope, then Settings → Storage → GitHub and enter the repo, branch, and token. Save to verify the connection.
+**Setting up GitHub storage**: create a repo (say `yourname/athena-brain`), generate a fine-grained PAT scoped to just that repo with **Contents: Read and write**, then Settings → Storage → GitHub and enter the repo, branch, and token. Save to verify the connection.
 
 **Syncing** merges both stores in either direction, whichever backend is active — via Settings → Storage → "Push existing links to GitHub", or `/sync` in the bot (GOD only).
 
-```
+```text
 brain/
   personal/user123/link1.md
   communities/c_abc123/link3.md
@@ -310,7 +313,7 @@ Sending or forwarding any supported text file saves it to the active scope.
 
 ## Architecture
 
-```
+```text
 athena/
 ├── public/              # Frontend (static assets served by Worker/server)
 │   ├── index.html       # SPA entry point
@@ -337,7 +340,7 @@ athena/
 
 Requests always land on the Worker or the Node server, which reads and writes the active store and proxies AI calls out to your provider:
 
-```
+```text
 Browser/Telegram → Worker or Node server → D1 | GitHub (+D1 cache) | PostgreSQL
                               ↓
                         AI Proxy → OpenAI/Anthropic/etc
