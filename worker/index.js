@@ -44,7 +44,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '6.18.0',
+          version: '6.18.4',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -1094,9 +1094,7 @@ function publicUser(user, env = null, flags = null) {
     telegramApiId: user.telegram_api_id || null,
     is_god: god,
     is_elevated: elevated,
-    can_ai: true,
-    can_ai_config: god,
-    can_view_bot: true
+    can_ai_config: god
   };
 }
 

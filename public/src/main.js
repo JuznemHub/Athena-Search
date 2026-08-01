@@ -64,9 +64,7 @@ document.addEventListener('DOMContentLoaded', () => {
     return !!state.currentUser; // all logged-in ranks
   }
   function canEditAiConfig() {
-    if (!state.currentUser) return false;
-    if (state.currentUser.can_ai_config != null) return !!state.currentUser.can_ai_config;
-    return isGod();
+    return !!state.currentUser?.can_ai_config;
   }
 
   const $ = (id) => document.getElementById(id);
@@ -565,7 +563,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const u = state.currentUser;
     if (!u) return;
     state.isInstanceOwner = isGod();
-    state.isElevated = isGod();
     userName.textContent = u.displayName || u.username;
     const roleTag = isGod() ? ' · GOD' : (state.isElevated ? ' · staff' : ' · member');
     userEmail.textContent = `${u.provider || 'oauth'} · @${u.username}${roleTag}`;
