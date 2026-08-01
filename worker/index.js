@@ -5739,7 +5739,8 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       }
     }
   }
-  if (!text && !entityUrlsEarly.length) return new Response('OK', { status: 200, headers: corsHeaders });
+  // Captionless document uploads have no text and no entity URLs — let them reach the doc handler
+  if (!text && !entityUrlsEarly.length && !msg.document?.file_id) return new Response('OK', { status: 200, headers: corsHeaders });
   // synthetic command text for media-only with links
   if (!text && entityUrlsEarly.length) text = entityUrlsEarly.join(' ');
 
@@ -5867,6 +5868,11 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       }
       if (docScope === 'community' && !docCommunityId) {
         await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No community linked. ${codeHtml('/community_verify')} in a group or ${codeHtml('/community_join <id>')}.`, forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      // Community uploads are member+ only — a non-member in the group must not write to its brain
+      if (docCommunityId && !isMemberPlus) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('⛔')} Members only. ${codeHtml('/community_join ' + docCommunityId)} first.`, forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
       // Download file from Telegram
