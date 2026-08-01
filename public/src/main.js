@@ -209,7 +209,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!raw) return '#';
     // Browsers ignore control chars/whitespace when parsing a scheme, so
     // "java\tscript:alert(1)" is still javascript:. Strip them before testing.
-    const probe = raw.replace(/[\u0000-\u0020]/g, '').toLowerCase();
+    const probe = raw.replace(/[\x00-\x20]/g, '').toLowerCase();
     if (/^(https?|mailto|tel):/.test(probe)) return escapeHtml(raw);
     if (/^[a-z][a-z0-9+.-]*:/.test(probe)) return '#'; // any other explicit scheme
     return escapeHtml(raw); // relative/scheme-less

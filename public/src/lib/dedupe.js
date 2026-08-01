@@ -57,7 +57,7 @@ function normalizeUrl(rawUrl) {
       normalizedUrl,
       hash: Math.abs(hash).toString(36)
     };
-  } catch (err) {
+  } catch {
     return {
       canonicalUrl: cleaned,
       normalizedUrl: cleaned.toLowerCase(),
@@ -92,6 +92,7 @@ function checkDuplicateLink(candidateUrl, existingLinks = []) {
 }
 
 // Export for ES modules and global window usage
+/* global module */
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = { normalizeUrl, checkDuplicateLink };
 } else {

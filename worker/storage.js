@@ -191,7 +191,7 @@ export class GitHubStore {
         ...(init.headers || {}),
       },
     });
-    let body = null;
+    let body;
     try { body = await res.json(); } catch (_) { body = null; }
     return { ok: res.ok, status: res.status, body };
   }
