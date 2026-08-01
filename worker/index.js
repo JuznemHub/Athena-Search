@@ -22,7 +22,7 @@ const PUBLIC_API = new Set([
 ]);
 
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const url = new URL(request.url);
     const pathname = url.pathname;
 
@@ -551,7 +551,7 @@ function rankAtLeast(rank, min) {
 async function scanTgPresenceAcrossCommunities(env, tgUserId) {
   if (!tgUserId) return [];
   await ensureBotBindingColumns(env);
-  let rows = [];
+  let rows;
   try {
     const r = await env.DB.prepare(
       `SELECT c.id, c.name, b.group_id, b.bot_token
@@ -1348,7 +1348,7 @@ async function upsertOAuthUser({ provider, providerId, username, displayName, av
       `INSERT INTO users (id, username, password_hash, display_name, avatar_url, provider, provider_id, created_at)
        VALUES (?, ?, 'oauth', ?, ?, ?, ?, ?)`
     ).bind(id, safeUser, displayName || safeUser, avatarUrl || null, provider, pid, now).run();
-  } catch (err) {
+  } catch {
     // Concurrent insert or leftover id — re-fetch
     const again = await env.DB.prepare(
       'SELECT * FROM users WHERE provider = ? AND provider_id = ?'
@@ -2001,7 +2001,7 @@ async function handleListCommunities(user, env, corsHeaders) {
   if (await isInstanceOwnerUserAsync(user, env)) {
     try { await syncInstanceOwnerCommunities(user, env); } catch (_) {}
   }
-  let results = [];
+  let results;
   try {
     const r = await env.DB.prepare(
       `SELECT c.*, m.role AS member_role
@@ -2145,7 +2145,7 @@ async function handleJoinCommunity(request, user, env, corsHeaders) {
     }
   }
   await ensureCommunityMembersColumns(env);
-  let existing = null;
+  let existing;
   try {
     existing = await env.DB.prepare(
       'SELECT user_id, role FROM community_members WHERE community_id = ? AND user_id = ?'
@@ -2310,7 +2310,7 @@ async function handleListBotBindings(url, user, env, corsHeaders) {
   const scopeFilter = url.searchParams.get('scope'); // personal | community | all
   const isGod = await isGodUserAsync(user, env);
 
-  let results = [];
+  let results;
   if (communityId) {
     if (!(await ensureMember(communityId, user.id, env)) && !isGod) {
       return Response.json({ success: false, error: 'Not a member of this community' }, { status: 403, headers: corsHeaders });
@@ -2702,7 +2702,7 @@ async function handlePostCommunityLink(request, user, env, corsHeaders) {
       JSON.stringify(body.tags || []), displayName, user.id, user.provider || null, displayName,
       now, meta.image_url || null, meta.site_name || null
     ).run();
-  } catch (err) {
+  } catch {
     await env.DB.prepare(
       `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
         added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at)
@@ -2860,7 +2860,7 @@ function validateDocumentInput(body) {
   if (typeof body.content !== 'string') return { error: 'content must be UTF-8 text' };
   const content = body.content;
   const encoded = new TextEncoder().encode(content);
-  if (/\u0000/.test(content) || new TextDecoder().decode(encoded) !== content) return { error: 'content must be valid UTF-8 text' };
+  if (/\x00/.test(content) || new TextDecoder().decode(encoded) !== content) return { error: 'content must be valid UTF-8 text' };
   const bytes = encoded.length;
   if (bytes > DOCUMENT_MAX_BYTES) return { error: 'Document exceeds 512 KiB' };
   const controls = (content.match(/[\x01-\x08\x0B\x0C\x0E-\x1F\x7F]/g) || []).length;
@@ -3069,7 +3069,7 @@ async function handleListNotifications(user, env, corsHeaders) {
     }));
     const unread = list.filter(n => !n.read).length;
     return Response.json({ success: true, notifications: list, unread }, { headers: corsHeaders });
-  } catch (err) {
+  } catch {
     return Response.json({ success: true, notifications: [], unread: 0 }, { headers: corsHeaders });
   }
 }
@@ -3918,7 +3918,7 @@ async function handleSaveStorageConfig(request, env, corsHeaders) {
 async function mergeScope(env, store, scope, key) {
   const folder = folderFor(scope, key);
   const provider = (await getStorageConfig(env))?.provider || 'd1';
-  let ghLinks = [];
+  let ghLinks;
   try {
     ghLinks = (await readAll(store, folder)).links;
   } catch (err) {
@@ -4933,9 +4933,9 @@ function telegramUserNotes(msg) {
  */
 function scoreUrlAsPrimary(rawUrl, fullText = '') {
   let score = 0;
-  let host = '';
-  let path = '';
-  let segs = [];
+  let host;
+  let path;
+  let segs;
   try {
     const u = new URL(rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`);
     host = u.hostname.replace(/^www\./, '').toLowerCase();
@@ -6593,8 +6593,8 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
     }
-    let targetTg = null;
-    let targetName = null;
+    let targetTg;
+    let targetName;
     const targetMsg = msg.reply_to_message?.from;
     if (targetMsg?.id) {
       targetTg = String(targetMsg.id);
@@ -6667,9 +6667,9 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       await sendTelegramMessage(token, chatId, 'Admin/owner only.', forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    let targetTg = null;
-    let targetUser = null;
-    let targetName = null;
+    let targetTg;
+    let targetUser;
+    let targetName;
     if (msg.reply_to_message?.from?.id) {
       targetTg = String(msg.reply_to_message.from.id);
       targetName = msg.reply_to_message.from.first_name || msg.reply_to_message.from.username || targetTg;
@@ -6853,7 +6853,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     const arg = (rest.split(/\s+/)[0] || '').toLowerCase();
-    let mode = null;
+    let mode;
     if (cmd === '/dumpsmart') mode = 'smart';
     else if (['on', 'all', '1', 'true', 'yes'].includes(arg)) mode = 'all';
     else if (['off', 'smart', '0', 'false', 'no'].includes(arg)) mode = 'smart';
@@ -7463,7 +7463,7 @@ ${ctx}`;
     }
 
     const scope = binding.scope || (binding.community_id ? 'community' : 'personal');
-    let rows = [];
+    let rows;
     if (scope === 'personal') {
       if (!isGod) {
         await sendTelegramMessage(token, chatId, 'Personal /edit is GOD rank only.', forumThreadId);
@@ -7627,7 +7627,7 @@ ${ctx}`;
 
   let toSave = urls;
   let titleHint = '';
-  let notesForSave = captionNotes;
+  let notesForSave;
 
   if (urls.length > 1 && linkMode !== 'all') {
     const picked = selectPrimaryLinks(urls, fullPost);

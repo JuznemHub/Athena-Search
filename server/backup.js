@@ -13,7 +13,7 @@
  * matching the server version. It is plain SQL: restorable with psql, or with
  * server/restore.js.
  */
-import { createGzip, gunzipSync } from 'node:zlib';
+import { createGzip } from 'node:zlib';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { stat, unlink, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';

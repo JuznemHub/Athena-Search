@@ -18,7 +18,7 @@ node server/migrate-from-cloudflare.js
 node server/merge-telegram-identities.js   # merge one person's OIDC + Bot API identities
 ```
 
-No tests, no linter, no build step. Nothing to run after an edit — deploy or restart is the only verification.
+No tests. `npm run check` runs lint and the version-drift check — run before committing.
 
 ## Architecture
 
@@ -49,6 +49,7 @@ New table using `INSERT OR REPLACE` → add it to `PRIMARY_KEYS` in `worker/pgco
 D1 / GitHub Markdown / Postgres. Live `links` and `personal_links` always hold the *active* store; switching provider parks current rows into `parked_links` / `parked_personal_links` tagged by store name and restores the other set (`parkActiveStore` / `restoreStore`). Read paths stay provider-unaware.
 
 GitHub active → Markdown is source of truth, D1 is cache:
+
 - `ensureFresh(env, scope, key)` revalidates before reads — one listing, skipped inside `LISTING_TTL_MS` (15s), per-file parse cache keyed by git sha in `storage_file_cache`
 - Writes hit GitHub first, then cache
 - GitHub unreachable → serve stale cache, never wipe
@@ -83,7 +84,7 @@ One message can carry a main link plus references; `scoreUrlAsPrimary` / `select
 
 `public/` — no bundler, no framework, no ES modules. Plain `<script>` tags sharing window globals: `window.AthenaSearch` (fuzzy search + RAG retrieval), `window.AthenaAI`, `window.Dedupe` (URL normalize + duplicate check). `main.js` is one large IIFE.
 
-Cache-busting is manual: `public/index.html` loads assets with `?v=6.18.6`. Bump on every edit to `main.js`, `style.css`, `themes.css`, `lib/*.js` — otherwise hosted users keep the old file. Version also lives in `/api/health` (worker/index.js:47) and the README badge; keep all three in step.
+Cache-busting is stamped: `npm run build` rewrites `?v=` in `public/index.html` (every asset), `version:` in `worker/index.js:47`, and the README badge from the single source of truth — `version` in root `package.json`. `npm run check:version` (part of `npm run check`) fails CI on drift. Bump via `npm version patch` then `npm run build`.
 
 Themes are CSS custom properties in `themes.css` (dark/light/material/glass). The accent picker converts hex → HSL at runtime (`hexToHsl` / `applyAccentColor`) and writes the derived vars — consume `--accent-*`, never hardcode a color.
 

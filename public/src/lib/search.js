@@ -145,7 +145,6 @@
     const qSoft = soft(q);
     const qAlnum = alnum(q);
     const { tokens: qTokens, expanded } = expandQueryTerms(q);
-    const segs = sd.segs;
     const segsAlnum = sd.segsAlnum;
 
     let score = 0;
