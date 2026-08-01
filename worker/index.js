@@ -75,7 +75,7 @@ export default {
         return handleDiscordStart(url, env, corsHeaders);
       }
       if (pathname === '/api/auth/discord/callback' && request.method === 'GET') {
-        return await handleDiscordCallback(url, env, corsHeaders);
+        return await handleDiscordCallback(url, env);
       }
 
       if (pathname === '/api/telegram-webhook' && request.method === 'POST') {
@@ -249,20 +249,20 @@ export default {
       // Storage backend — readable by all ranks, writable by GOD only
       if (pathname === '/api/storage/config') {
         if (request.method === 'GET') {
-          return await handleGetStorageConfig(user, env, corsHeaders);
+          return await handleGetStorageConfig(env, corsHeaders);
         }
         if (!(await isInstanceOwnerUserAsync(user, env))) {
           return deny(corsHeaders, 'Storage backend is set by GOD rank only', 'GOD_ONLY');
         }
         if (request.method === 'POST') {
-          return await handleSaveStorageConfig(request, user, env, corsHeaders);
+          return await handleSaveStorageConfig(request, env, corsHeaders);
         }
       }
       if (pathname === '/api/storage/sync' && request.method === 'POST') {
         if (!(await isInstanceOwnerUserAsync(user, env))) {
           return deny(corsHeaders, 'Storage sync is GOD rank only', 'GOD_ONLY');
         }
-        return await handleStorageSync(request, user, env, corsHeaders);
+        return await handleStorageSync(user, env, corsHeaders);
       }
 
       // Community admins (platform IDs)
@@ -1886,7 +1886,7 @@ function handleDiscordStart(url, env, corsHeaders) {
   return Response.redirect(authUrl.toString(), 302);
 }
 
-async function handleDiscordCallback(url, env, corsHeaders) {
+async function handleDiscordCallback(url, env) {
   const code = url.searchParams.get('code');
   if (!code || !env.DISCORD_CLIENT_ID || !env.DISCORD_CLIENT_SECRET) {
     return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=discord`, 302);
@@ -3787,7 +3787,7 @@ async function handleSetInstanceConfig(request, env, corsHeaders, siteOrigin) {
   return Response.json({ success: true, default_backend: backend }, { headers: corsHeaders });
 }
 
-async function handleGetStorageConfig(user, env, corsHeaders) {
+async function handleGetStorageConfig(env, corsHeaders) {
   const cfg = await getStorageConfig(env);
   const provider = cfg?.provider || 'd1';
   const selfHosted = isSelfHosted(env);
@@ -3817,7 +3817,7 @@ async function handleGetStorageConfig(user, env, corsHeaders) {
   return Response.json(out, { headers: corsHeaders });
 }
 
-async function handleSaveStorageConfig(request, user, env, corsHeaders) {
+async function handleSaveStorageConfig(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
   const provider = String(body.provider || 'd1').toLowerCase();
   const selfHosted = isSelfHosted(env);
@@ -3918,8 +3918,6 @@ async function handleSaveStorageConfig(request, user, env, corsHeaders) {
 async function mergeScope(env, store, scope, key) {
   const folder = folderFor(scope, key);
   const provider = (await getStorageConfig(env))?.provider || 'd1';
-  const inactive = provider === 'github' ? 'd1' : 'github';
-
   let ghLinks = [];
   try {
     ghLinks = (await readAll(store, folder)).links;
@@ -4031,7 +4029,7 @@ async function mergeAllScopes(env, store, godUserId) {
 }
 
 /** Reconcile D1 and GitHub in both directions. */
-async function handleStorageSync(request, user, env, corsHeaders) {
+async function handleStorageSync(user, env, corsHeaders) {
   if (isSelfHosted(env)) {
     return Response.json({
       success: false,
@@ -4832,7 +4830,7 @@ function tokenForBinding(binding, env) {
   return (binding && binding.bot_token) || env.TELEGRAM_BOT_TOKEN || null;
 }
 
-async function resolveAthenaUserFromTg(env, tgUserId, binding) {
+async function resolveAthenaUserFromTg(env, tgUserId) {
   await ensureCommunityMembersColumns(env);
   const tid = tgUserId ? String(tgUserId) : null;
   if (!tid) return null;
@@ -5070,7 +5068,7 @@ function selectPrimaryLinks(urls, fullText = '') {
  * Keep: title + description (+ optional special thanks).
  * Drop: Links block, support/donate fluff, hashtags.
  */
-function buildMultiLinkNotes(fullText, primaryUrl, relatedUrls) {
+function buildMultiLinkNotes(fullText) {
   let body = String(fullText || '').trim();
 
   // Hard-stop before thanks / support / social fluff (keep only title + description)
@@ -5508,7 +5506,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
   const binding = chatId ? await findTelegramBinding(env, chatId, tgUserId) : null;
   let token = tokenForBinding(binding, env) || env.TELEGRAM_BOT_TOKEN;
   if (!token && tgUserId) {
-    const u = await resolveAthenaUserFromTg(env, tgUserId, binding);
+    const u = await resolveAthenaUserFromTg(env, tgUserId);
     const personal = u ? await findPersonalBotForOwner(env, u.id) : null;
     if (personal?.bot_token) token = personal.bot_token;
   }
@@ -5599,7 +5597,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
-  const athenaUser = await resolveAthenaUserFromTg(env, tgUserId, binding);
+  const athenaUser = await resolveAthenaUserFromTg(env, tgUserId);
   const staff = await isTgUserCommunityStaff(env, pend.community_id, tgUserId, athenaUser);
   if (!staff) {
     await telegramApi(token, 'answerCallbackQuery', {
@@ -5756,7 +5754,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
 
   let binding = await findTelegramBinding(env, chatId, tgUserId);
   let token = tokenForBinding(binding, env) || env.TELEGRAM_BOT_TOKEN;
-  let athenaUser = await resolveAthenaUserFromTg(env, tgUserId, binding);
+  let athenaUser = await resolveAthenaUserFromTg(env, tgUserId);
   // Persist Bot API id whenever we see a logged-in Telegram user (needed for join + owner match)
   if (athenaUser?.id && tgUserId && isLikelyTelegramBotApiId(tgUserId)) {
     try {
@@ -5818,8 +5816,6 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     const pb = await findPersonalBotForOwner(env, athenaUser.id);
     if (pb?.bot_token) token = pb.bot_token;
   }
-  const tgReply = (text, tok) => sendTelegramMessage(tok || token, chatId, text, forumThreadId);
-
   const parts = text.split(/\s+/);
   let cmd = (parts[0] || '').toLowerCase().replace(/@\w+$/, '');
   // typos
@@ -5895,7 +5891,6 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         await ensureDocumentsTable(env);
         const id = 'doc_' + Date.now().toString(36) + '_' + randomToken().slice(0, 4);
         const now = Date.now();
-        const caption = (msg.caption || '').trim();
         if (docScope === 'personal') {
           await env.DB.prepare(
             `INSERT INTO uploaded_documents (id, scope, user_id, filename, content, uploaded_by, created_at)
@@ -6238,7 +6233,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       // Resolve owner: OIDC user, personal-bot DM match, or any bot they own
       let owner = athenaUser;
       if (!owner && tgUserId) {
-        owner = await resolveAthenaUserFromTg(env, tgUserId, binding);
+        owner = await resolveAthenaUserFromTg(env, tgUserId);
       }
       // Prefer personal bot whose group_id is this user's Bot API id
       let personal = owner ? await findPersonalBotForOwner(env, owner.id) : null;
@@ -6663,7 +6658,6 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
 
   // ---- /clear <@user|id> — remove from community (admin+; admin cannot clear owner/god/admin) ----
   if (cmd === '/clear') {
-    const isGroup = String(msg.chat?.type || '').includes('group') || chatId.startsWith('-');
     const cid = binding?.community_id;
     if (!cid) {
       await sendTelegramMessage(token, chatId, 'Use /clear in a verified community group (or with community linked).', forumThreadId);
@@ -6991,7 +6985,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         await sendTelegramFormatted(token, chatId, q ? `No personal results for: ${boldHtml(q)}` : 'No personal links yet.', forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
-      const lines = hits.map((h, i) => {
+      const lines = hits.map((h) => {
         const t = (h.title && !/^link from telegram/i.test(h.title)) ? h.title : titleFromUrl(h.url || '');
         const d = (h.notes || '').trim();
         const isDoc = h.isDocument || h.type === 'document';
@@ -7033,7 +7027,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       await sendTelegramFormatted(token, chatId, q ? `No results for: ${boldHtml(q)}` : 'No links in this community brain yet.', forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    const lines = hits.map((h, i) => {
+    const lines = hits.map((h) => {
       const t = (h.title && !/^link from telegram/i.test(h.title)) ? h.title : titleFromUrl(h.url || '');
       const d = (h.notes || '').trim();
       const isDoc = h.isDocument || h.type === 'document';
@@ -7632,22 +7626,20 @@ ${ctx}`;
   const linkMode = (binding.dump_link_mode || dumpLinkMode || 'smart').toLowerCase();
 
   let toSave = urls;
-  let related = [];
   let titleHint = '';
   let notesForSave = captionNotes;
 
   if (urls.length > 1 && linkMode !== 'all') {
     const picked = selectPrimaryLinks(urls, fullPost);
     toSave = picked.primary;
-    related = picked.related || [];
-    const built = buildMultiLinkNotes(fullPost, toSave[0], related);
+    const built = buildMultiLinkNotes(fullPost);
     notesForSave = built.notes;
     titleHint = built.titleHint;
   } else if (urls.length > 1 && linkMode === 'all') {
     notesForSave = captionNotes || fullPost;
   } else {
     notesForSave = isDetailedNotes(fullPost) ? fullPost : captionNotes;
-    const built = buildMultiLinkNotes(fullPost, urls[0], []);
+    const built = buildMultiLinkNotes(fullPost);
     if (built.titleHint) titleHint = built.titleHint;
     if (isDetailedNotes(fullPost)) notesForSave = fullPost;
   }

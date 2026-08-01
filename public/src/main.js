@@ -107,8 +107,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const aiAnswerCard = $('aiAnswerCard');
   const aiAnswerText = $('aiAnswerText');
   const aiSources = $('aiSources');
-  const heroMark = $('heroMark');
-  const heroTitle = $('heroTitle');
   const storageDesc = $('storageDesc');
   const storageProvider = $('storageProvider');
   const githubFields = $('githubFields');
@@ -1773,13 +1771,13 @@ document.addEventListener('DOMContentLoaded', () => {
       const result = await window.AthenaAI.answerFromBrain(
         q, corpus(),
         // onDelta: stream the current answer live
-        (delta, full) => {
+        (_delta, full) => {
           const el = aiAnswerText.querySelector('.chat-msg:last-child .chat-answer-content');
           if (el) el.textContent = full;
         },
         state.conversationHistory,
         // onThinking: stream thinking into the collapsible block
-        (chunk, fullThinking) => {
+        (_chunk, fullThinking) => {
           const el = aiAnswerText.querySelector('.chat-msg:last-child .thinking-content');
           if (el) el.textContent = fullThinking;
         }
