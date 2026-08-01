@@ -69,7 +69,7 @@ Bans are per-community, driven by live Telegram presence: `syncLivePresenceForUs
 
 `handleTelegramWebhook` (worker/index.js:5690), a single ~2000-line dispatcher. Every delivery is secret-verified (`webhookSecret`: `TELEGRAM_WEBHOOK_SECRET`, else derived from the bot token) — unverified, the endpoint is unauthenticated RPC where `from.id` can be forged to act as GOD. `WEBHOOK_ALLOW_UNSIGNED=1` disables it; migration only.
 
-Output is Telegram HTML via `escHtml` / `boldHtml` / `codeHtml` / `linkHtml` / `preHtml` — escape every interpolated value or a `<` in a title breaks the message. `chunkTelegramText` splits at the 4096-char cap.
+Output is Telegram HTML via `escHtml` / `boldHtml` / `codeHtml` / `linkHtml` — escape every interpolated value or a `<` in a title breaks the message. `chunkTelegramText` splits at the 4096-char cap.
 
 Multiple bots bind per community (`community_bots`): `findTelegramBinding` resolves chat → bot → community, `tokenForBinding` picks the token.
 
