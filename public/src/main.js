@@ -355,12 +355,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  function cloudRemove(key) {
-    const cs = tgCloud();
-    if (!cs) return;
-    try { cs.removeItem(key, () => {}); } catch (_) {}
-  }
-
   /** Persist the session everywhere that might survive, best-effort. */
   async function persistSession(token) {
     state.sessionToken = token;

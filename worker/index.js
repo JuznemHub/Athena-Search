@@ -3678,19 +3678,6 @@ async function storeMutateLink(env, scope, key, linkId, replacement) {
   return { handled: true, ok: true };
 }
 
-/** Full-folder rewrite. Only for reconciliation — prefer storeMutateLink. */
-async function storeRewrite(env, scope, key, links, message) {
-  const store = await githubStoreFor(env);
-  if (!store) return { handled: false };
-  const res = await rewriteAll(store, folderFor(scope, key), links, {
-    heading: storageHeadingFor(scope, key),
-    message,
-  });
-  if (!res.ok) return { handled: true, ok: false, error: res.error };
-  await markCacheTrusted(env, scope, key);
-  return { handled: true, ok: true };
-}
-
 /**
  * Called right after we commit to GitHub ourselves.
  *
@@ -7769,8 +7756,6 @@ function boldHtml(str) { return `<b>${escHtml(str)}</b>`; }
 function codeHtml(str) { return `<code>${escHtml(str)}</code>`; }
 function linkHtml(url, text) { return `<a href="${escHtml(url)}">${escHtml(text || url)}</a>`; }
 function italicHtml(str) { return `<i>${escHtml(str)}</i>`; }
-function preHtml(str, lang) { return lang ? `<pre><code class="language-${escHtml(lang)}">${escHtml(str)}</code></pre>` : `<pre>${escHtml(str)}</pre>`; }
-
 function generateUrlHash(rawUrl) {
   try {
     const parsed = new URL(rawUrl);
