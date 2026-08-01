@@ -49,11 +49,15 @@ Four themes — **Dark**, **Light**, **Material** (MD3 surfaces, no blur), and *
 git clone https://github.com/JuznemHub/Athena-Search.git
 cd Athena-Search/worker
 
-cp ENV.example .env      # Cloudflare account_id, Telegram/Discord secrets
+# Edit wrangler.toml: account_id, the D1 database_id, and the [vars] values
+npx wrangler secret put TELEGRAM_CLIENT_SECRET
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+npx wrangler secret put DISCORD_CLIENT_SECRET
+npx wrangler secret put STORAGE_KEY          # only if you plan to use GitHub storage
 npx wrangler deploy
 ```
 
-Secrets go in with `wrangler secret put`: `TELEGRAM_CLIENT_SECRET`, `TELEGRAM_BOT_TOKEN`, `DISCORD_CLIENT_SECRET`. Everything else — the D1 binding, static assets from `public/`, client and owner IDs — lives in `wrangler.toml`.
+Non-secret values — `account_id`, the D1 `database_id`, and the client and owner IDs under `[vars]` — are edited straight into `wrangler.toml`; static assets are served from `public/` by the same config. `worker/ENV.example` is a reference for what to fill in, and a `worker/.env` copy of it only feeds local `wrangler dev`: `npx wrangler deploy` never reads it, so anything not in `wrangler.toml` or set with `wrangler secret put` will be missing in production.
 
 ### B. Self-hosted PostgreSQL — production, full control
 
@@ -163,9 +167,11 @@ In a group, everything goes to the community brain. In DMs, the mode decides whe
 
 With GitHub active, it is the source of truth: reads come from GitHub (cached to D1), writes go to both. With D1 active, GitHub is untouched until you sync.
 
-**Setting up GitHub storage**: create a repo (say `yourname/athena-brain`), generate a fine-grained PAT scoped to just that repo with **Contents: Read and write**, then Settings → Storage → GitHub and enter the repo, branch, and token. Save to verify the connection.
+**Setting up GitHub storage**: set `STORAGE_KEY` first — `npx wrangler secret put STORAGE_KEY` on Cloudflare, or the `STORAGE_KEY` line in `.env` when self-hosted. It encrypts the PAT at rest (AES-GCM, stored with an `enc:v1:` prefix under `env.STORAGE_KEY`); leave it unset and the token is written to the database in plaintext as a fallback. Rotating or losing the key makes an already-saved token unreadable, so you re-enter it.
 
-**Syncing** merges both stores in either direction, whichever backend is active — via Settings → Storage → "Push existing links to GitHub", or `/sync` in the bot (GOD only).
+Then create a repo (say `yourname/athena-brain`), generate a fine-grained PAT scoped to just that repo with **Contents: Read and write**, and go to Settings → Storage → GitHub to enter the repo, branch, and token. Save to verify the connection.
+
+**Syncing** merges both stores in either direction, whichever backend is active — via Settings → Storage → "Push existing links to GitHub", or `/sync` in the bot (GOD only). The merge is a union on URL hash, so nothing is dropped from either side; when the same URL exists in both, the D1 record is the one kept, and its title, notes, and tags overwrite the GitHub copy.
 
 ```text
 brain/

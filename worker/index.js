@@ -3912,8 +3912,8 @@ async function handleSaveStorageConfig(request, env, corsHeaders) {
  *  - overwriting GitHub with D1 destroys links added or hand-written on GitHub;
  *  - letting a GitHub read replace D1 destroys links captured while the
  *    instance was running on the D1 provider.
- * Merging on url hash keeps everything. GitHub wins on a genuine collision
- * because it is the declared source of truth.
+ * Merging on url hash keeps everything. D1 wins on a genuine collision — the
+ * URL is identical either way, so only the metadata differs.
  */
 async function mergeScope(env, store, scope, key) {
   const folder = folderFor(scope, key);
@@ -3932,7 +3932,7 @@ async function mergeScope(env, store, scope, key) {
 
   const keyOf = l => (l.url_hash || generateUrlHash(l.url || '') || l.url || '').toString();
 
-  // Union both stores, de-duplicated on url hash. GitHub wins a true collision
+  // Union both stores, de-duplicated on url hash. D1 wins a true collision
   // only because one side has to; the URL is identical either way.
   const union = new Map();
   for (const l of cloudflareLinks) union.set(keyOf(l), l);
