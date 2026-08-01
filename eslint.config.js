@@ -3,14 +3,11 @@ import globals from 'globals';
 import { defineConfig } from 'eslint/config';
 
 export default defineConfig([
-  { ignores: ['node_modules/', 'screenshots/', 'package-lock.json'] },
-
   // Node: ES modules, full Node globals
   {
     files: ['server/**/*.js', 'scripts/**/*.js'],
     extends: [js.configs.recommended],
     languageOptions: {
-      ecmaVersion: 2023,
       sourceType: 'module',
       globals: globals.node,
     },
@@ -22,7 +19,6 @@ export default defineConfig([
     files: ['worker/**/*.js'],
     extends: [js.configs.recommended],
     languageOptions: {
-      ecmaVersion: 2023,
       sourceType: 'module',
       globals: { ...globals.worker, ...globals.node },
     },
@@ -33,7 +29,6 @@ export default defineConfig([
     files: ['public/**/*.js'],
     extends: [js.configs.recommended],
     languageOptions: {
-      ecmaVersion: 2023,
       sourceType: 'script',
       globals: globals.browser,
     },
@@ -43,7 +38,6 @@ export default defineConfig([
     rules: {
       'no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' }],
       'no-control-regex': 'off', // sanitizers deliberately match control chars (filenames, content)
-      'no-console': 'off',
       'no-empty': ['error', { allowEmptyCatch: true }],
     },
   },

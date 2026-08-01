@@ -18,7 +18,7 @@ node server/migrate-from-cloudflare.js
 node server/merge-telegram-identities.js   # merge one person's OIDC + Bot API identities
 ```
 
-No tests. `npm run check` runs lint, version-drift check, and `node --check` — run before committing.
+No tests. `npm run check` runs lint and the version-drift check — run before committing.
 
 ## Architecture
 

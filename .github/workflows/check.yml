@@ -5,11 +5,16 @@ on:
   push:
     branches: [master]
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -17,14 +22,17 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run check:version
-      - run: node --check worker/index.js && node --check public/src/main.js
 
   secrets:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write    # gitleaks comments findings on the PR
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0        # gitleaks scans history, not just the tip
-      - uses: gitleaks/gitleaks-action@v2
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

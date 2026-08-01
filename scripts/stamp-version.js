@@ -19,17 +19,17 @@ const targets = [
   {
     file: resolve(root, 'public/index.html'),
     pattern: /\?v=[0-9]+\.[0-9]+\.[0-9]+/g,
-    render: () => `?v=${version}`,
+    stamp: `?v=${version}`,
   },
   {
     file: resolve(root, 'worker/index.js'),
     pattern: /version: '[0-9]+\.[0-9]+\.[0-9]+'/,
-    render: () => `version: '${version}'`,
+    stamp: `version: '${version}'`,
   },
   {
     file: resolve(root, 'README.md'),
     pattern: /badge\/version-[0-9]+\.[0-9]+\.[0-9]+-blueviolet/,
-    render: () => `badge/version-${version}-blueviolet`,
+    stamp: `badge/version-${version}-blueviolet`,
   },
 ];
 
@@ -38,13 +38,12 @@ let missing = false;
 for (const t of targets) {
   const content = readFileSync(t.file, 'utf8');
   // No match means the stamp site moved or was deleted — never a silent pass.
-  if (!t.pattern.test(content)) {
+  if (!content.match(t.pattern)) {
     console.error(`No version pattern in ${t.file} — stamp target moved or removed.`);
     missing = true;
     continue;
   }
-  t.pattern.lastIndex = 0;
-  const next = content.replace(t.pattern, t.render());
+  const next = content.replace(t.pattern, t.stamp);
   if (next === content) continue;
   dirty = true;
   if (check) {
