@@ -2074,16 +2074,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     root.style.setProperty('--accent', hex);
     root.style.setProperty('--accent-soft', `hsla(${h}, ${s}%, ${l}%, 0.22)`);
-    root.style.setProperty('--accent-glow', `hsla(${h}, ${s}%, ${l}%, 0.45)`);
     root.style.setProperty('--accent-gradient', `linear-gradient(135deg, hsl(${h}, ${s}%, ${Math.min(l + 15, 80)}%), hsl(${h}, ${s}%, ${Math.max(l - 15, 15)}%))`);
     root.style.setProperty('--accent-hover', `hsl(${h}, ${Math.min(s + 5, 100)}%, ${Math.min(l + 8, 85)}%)`);
     root.style.setProperty('--accent-surface', `hsla(${h}, ${s}%, ${l}%, 0.08)`);
     root.style.setProperty('--accent-border', `hsla(${h}, ${s}%, ${l}%, 0.35)`);
     root.style.setProperty('--primary-purple', hex);
-    root.style.setProperty('--glow-purple', `hsla(${h}, ${s}%, ${l}%, 0.45)`);
     root.style.setProperty('--border-highlight', `hsla(${h}, ${s}%, ${l}%, 0.35)`);
-    root.style.setProperty('--body-glow-1', `hsla(${h}, ${s}%, ${l}%, 0.45)`);
-    root.style.setProperty('--body-glow-2', `hsla(${h}, ${s}%, ${Math.max(l - 10, 20)}%, 0.25)`);
 
     try { localStorage.setItem(ACCENT_LS_KEY, hex); } catch (_) {}
 
