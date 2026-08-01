@@ -58,15 +58,8 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   function isGod() {
-    if (!state.currentUser) return false;
-    if (state.currentUser.is_god != null) return !!state.currentUser.is_god;
-    if (state.currentUser.can_bot_settings != null) return !!state.currentUser.can_bot_settings;
-    if (state.currentUser.can_personal != null) return !!state.currentUser.can_personal;
-    return !!state.currentUser.is_instance_owner;
+    return !!state.currentUser?.is_god;
   }
-  // legacy name used for personal-scope UI — GOD only now
-  function isOwner() { return isGod(); }
-  function isInstanceOwnerOnly() { return isGod(); }
   function canUseAi() {
     return !!state.currentUser; // all logged-in ranks
   }
@@ -391,8 +384,8 @@ document.addEventListener('DOMContentLoaded', () => {
       await persistSession(data.session);
       if (data.user) {
         state.currentUser = data.user;
-        state.isInstanceOwner = !!(data.user.is_god || data.user.is_instance_owner || data.user.can_bot_settings);
-        state.isElevated = !!(data.user.is_elevated || data.user.is_god || data.user.is_instance_owner);
+        state.isInstanceOwner = !!data.user.is_god;
+        state.isElevated = !!data.user.is_elevated;
       }
       return { ok: true };
     } catch (e) {
@@ -491,8 +484,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const { res, data } = await api('/api/auth/me');
         if (res.ok && data.user) {
           state.currentUser = data.user;
-          state.isInstanceOwner = !!(data.user.is_god || data.user.is_instance_owner || data.user.can_bot_settings);
-          state.isElevated = !!(data.user.is_elevated || data.user.is_god || data.user.is_instance_owner);
+          state.isInstanceOwner = !!data.user.is_god;
+          state.isElevated = !!data.user.is_elevated;
           showLoggedIn();
           updateUserUI();
           return true;
@@ -520,8 +513,8 @@ document.addEventListener('DOMContentLoaded', () => {
         return false;
       }
       state.currentUser = data.user;
-      state.isInstanceOwner = !!(data.user.is_god || data.user.is_instance_owner || data.user.can_bot_settings);
-      state.isElevated = !!(data.user.is_elevated || data.user.is_god || data.user.is_instance_owner);
+      state.isInstanceOwner = !!data.user.is_god;
+      state.isElevated = !!data.user.is_elevated;
       showLoggedIn();
       updateUserUI();
       return true;
@@ -571,8 +564,8 @@ document.addEventListener('DOMContentLoaded', () => {
   function updateUserUI() {
     const u = state.currentUser;
     if (!u) return;
-    state.isInstanceOwner = isInstanceOwnerOnly();
-    state.isElevated = isOwner();
+    state.isInstanceOwner = isGod();
+    state.isElevated = isGod();
     userName.textContent = u.displayName || u.username;
     const roleTag = isGod() ? ' · GOD' : (state.isElevated ? ' · staff' : ' · member');
     userEmail.textContent = `${u.provider || 'oauth'} · @${u.username}${roleTag}`;
@@ -982,14 +975,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     botBindingsList.querySelectorAll('.bot-del-btn').forEach(btn => {
       btn.addEventListener('click', async () => {
-        await api('/api/community-bots', { method: 'DELETE', body: JSON.stringify({ id: btn.dataset.id }) });
+        await api('/api/bot-bindings', { method: 'DELETE', body: JSON.stringify({ id: btn.dataset.id }) });
         await loadCommunityBots();
       });
     });
   }
 
   async function loadPersonalLinks() {
-    if (!isOwner()) {
+    if (!isGod()) {
       state.personalLinks = [];
       return;
     }
@@ -1016,7 +1009,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function loadPersonalDocuments() {
-    if (!isOwner()) {
+    if (!isGod()) {
       state.personalDocuments = [];
       return;
     }
@@ -1066,7 +1059,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function uploadDocuments(files) {
     if (!files.length) return;
-    if (state.scope === 'personal' && !isOwner()) return showToast('Personal uploads are for owners only', true);
+    if (state.scope === 'personal' && !isGod()) return showToast('Personal uploads are for owners only', true);
     if (state.scope === 'community' && !state.activeCommunity) return showToast('Select a community first', true);
     uploadFileBtn.disabled = true;
     let uploaded = 0;
@@ -1139,7 +1132,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function saveDump(raw) {
-    if (state.scope === 'personal' && !isOwner()) {
+    if (state.scope === 'personal' && !isGod()) {
       showToast('Personal dump is for owners only. Join a community first.', true);
       return;
     }
@@ -2258,7 +2251,7 @@ document.addEventListener('DOMContentLoaded', () => {
           showToast('Login required', true);
           return;
         }
-        if (!isOwner()) {
+        if (!isGod()) {
           showToast('Wipe personal is for owners and admins only', true);
           return;
         }
@@ -2328,7 +2321,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     personalScopeBtn.addEventListener('click', () => {
-        if (!isOwner()) {
+        if (!isGod()) {
           showToast('Personal mode is for owners and admins only. Join a community via bot: /community_join <id>', true);
           return;
         }

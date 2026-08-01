@@ -147,7 +147,7 @@ export default {
       }
 
       // Bot bindings — visible to all ranks; mutate GOD only
-      if (pathname === '/api/community-bots' || pathname === '/api/bot-bindings') {
+      if (pathname === '/api/bot-bindings') {
         if (request.method === 'GET') {
           return await handleListBotBindings(url, user, env, corsHeaders);
         }
@@ -1092,13 +1092,10 @@ function publicUser(user, env = null, flags = null) {
     provider: user.provider,
     providerId: user.provider_id || null,
     telegramApiId: user.telegram_api_id || null,
-    is_instance_owner: owner,
     is_god: god,
     is_elevated: elevated,
-    can_personal: god,
     can_ai: true,
     can_ai_config: god,
-    can_bot_settings: god,
     can_view_bot: true
   };
 }
