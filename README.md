@@ -3,17 +3,17 @@
 One bar: search, dump, and AI answers from your markdown brain.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-6.18.6-blueviolet?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-6.18.7-blueviolet?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/license_CC_BY--NC_4.0-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/telegram-bot-blue?style=flat-square&logo=telegram" alt="telegram">
-  <img src="https://img.shields.io/badge/discord-bot-5865F2?style=flat-square&logo=discord" alt="discord">
+  <img src="https://img.shields.io/badge/discord-login-5865F2?style=flat-square&logo=discord" alt="discord">
 </p>
 
 ---
 
 ## Features
 
-- **Save** links from the web UI, Telegram bot, or Discord bot. Upload text files (.md, .py, .json, .sql, and 30+ more, 512 KB each).
+- **Save** links from the web UI or the Telegram bot. Upload text files (.md, .py, .json, .sql, and 30+ more, 512 KB each).
 - **Search** with fuzzy matching across titles, URLs, notes, and tags — tolerant of typos and partial matches, with server-side search for large brains.
 - **Ask** questions with RAG over your links and documents. Supports OpenAI, Anthropic, Groq, OpenRouter, and OpenCode Zen, with streaming answers and cited sources.
 - **Share** a brain with a Telegram group in community mode, with voting, reporting, and rank-based permissions — or keep it private in personal mode.
