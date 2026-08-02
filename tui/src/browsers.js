@@ -50,33 +50,68 @@ async function readFirefox(profileDir) {
   } finally { conn.close(); }
 }
 
-function browserCandidates() {
-  const home = os.homedir();
+// Chromium-family profile roots (native + sandboxed). The actual profile
+// directory can be "Default", "Profile 1", a custom name, etc.
+const CHROME_ROOTS = [
+  ['Chrome', ['.config', 'google-chrome']],
+  ['Chrome (Flatpak)', ['.var', 'app', 'com.google.Chrome', 'config', 'google-chrome']],
+  ['Chromium', ['.config', 'chromium']],
+  ['Chromium (Flatpak)', ['.var', 'app', 'org.chromium.Chromium', 'config', 'chromium']],
+  ['Edge', ['.config', 'microsoft-edge']],
+  ['Edge (Flatpak)', ['.var', 'app', 'com.microsoft.Edge', 'config', 'microsoft-edge']],
+  ['Brave', ['.config', 'BraveSoftware', 'Brave-Browser']],
+  ['Brave (Flatpak)', ['.var', 'app', 'com.brave.Browser', 'config', 'BraveSoftware', 'Brave-Browser']],
+  ['Opera', ['.config', 'opera']],
+  ['Opera (Flatpak)', ['.var', 'app', 'com.opera.Opera', 'config', 'opera']],
+  ['Vivaldi', ['.config', 'vivaldi']],
+  ['Arc', ['Library', 'Application Support', 'Arc', 'User Data']],
+];
+
+const FIREFOX_ROOTS = [
+  ['.mozilla', 'firefox'],
+  ['.var', 'app', 'org.mozilla.firefox', '.mozilla', 'firefox'],
+  ['snap', 'firefox', 'common', '.mozilla', 'firefox'],
+];
+
+function chromeCandidateFiles(home) {
   const out = [];
-  const chromeProfiles = [
-    ['Chrome', path.join(home, '.config', 'google-chrome', 'Default', 'Bookmarks')],
-    ['Chrome (Windows)', path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'User Data', 'Default', 'Bookmarks')],
-    ['Chromium', path.join(home, '.config', 'chromium', 'Default', 'Bookmarks')],
-    ['Edge', path.join(home, '.config', 'microsoft-edge', 'Default', 'Bookmarks')],
-    ['Brave', path.join(home, '.config', 'BraveSoftware', 'Brave-Browser', 'Default', 'Bookmarks')],
-    ['Opera', path.join(home, '.config', 'opera', 'Bookmarks')],
-    ['Vivaldi', path.join(home, '.config', 'vivaldi', 'Default', 'Bookmarks')],
-    ['Arc', path.join(home, 'Library', 'Application Support', 'Arc', 'User Data', 'Default', 'Bookmarks')],
-    ['Safari (via export)', ''],
-  ];
-  const firefoxProfiles = path.join(home, '.mozilla', 'firefox');
-  if (fs.existsSync(firefoxProfiles)) {
+  for (const [name, dirs] of CHROME_ROOTS) {
+    const base = path.join(home, ...dirs);
+    if (!fs.existsSync(base)) continue;
     try {
-      for (const dir of fs.readdirSync(firefoxProfiles)) {
+      for (const dir of fs.readdirSync(base)) {
+        const file = path.join(base, dir, 'Bookmarks');
+        // Opera keeps Bookmarks at the profile root (no profile subdir).
+        if (fs.existsSync(file) || fs.existsSync(path.join(base, 'Bookmarks'))) {
+          out.push([dir === 'Bookmarks' ? name : `${name} · ${dir}`, file]);
+        }
+      }
+    } catch { /* unreadable root */ }
+  }
+  return out;
+}
+
+function firefoxProfileDirs(home) {
+  const out = [];
+  for (const dirs of FIREFOX_ROOTS) {
+    const root = path.join(home, ...dirs);
+    if (!fs.existsSync(root)) continue;
+    try {
+      for (const dir of fs.readdirSync(root)) {
         // Any profile dir that actually contains places.sqlite: .default,
         // -release, -esr, -dev-edition, or a custom name.
-        if (fs.existsSync(path.join(firefoxProfiles, dir, 'places.sqlite'))) {
-          out.push([`Firefox · ${dir}`, path.join(firefoxProfiles, dir)]);
+        if (fs.existsSync(path.join(root, dir, 'places.sqlite'))) {
+          out.push([`Firefox · ${dir}`, path.join(root, dir)]);
         }
       }
     } catch { /* unreadable profiles dir */ }
   }
-  return [...chromeProfiles.map(([name, file]) => [name, file]), ...out];
+  return out;
+}
+
+function browserCandidates() {
+  const home = os.homedir();
+  return [...chromeCandidateFiles(home), ...firefoxProfileDirs(home)];
 }
 
 /** Detect what bookmarks exist locally; returns [{name, file, kind}]. */
@@ -92,6 +127,32 @@ export function detectBookmarks() {
     }
   }
   return found;
+}
+
+/** Human-readable scan report for `athena-tui --diagnose`. */
+export function scanDiagnose() {
+  const home = os.homedir();
+  const out = [
+    `os.homedir() = ${home}`,
+    `HOME env     = ${process.env.HOME || '(unset)'}`,
+    `uid          = ${process.getuid?.() ?? 'n/a'}`,
+    '',
+  ];
+  for (const [name, dirs] of [...CHROME_ROOTS, ...FIREFOX_ROOTS.map((d) => ['Firefox', d])]) {
+    const base = path.join(home, ...dirs);
+    out.push(`${fs.existsSync(base) ? 'YES' : 'NO '} ${name} root: ${base}`);
+    if (!fs.existsSync(base)) continue;
+    try {
+      for (const dir of fs.readdirSync(base)) {
+        const p = path.join(base, dir);
+        const has = fs.existsSync(path.join(p, 'places.sqlite')) ? 'PLACES' : fs.existsSync(path.join(p, 'Bookmarks')) ? 'bookmarks' : '';
+        out.push(`   ${has.padEnd(9)} ${dir}`);
+      }
+    } catch (e) { out.push(`   (unreadable: ${e.message})`); }
+  }
+  const found = detectBookmarks();
+  out.push('', `detected: ${found.length ? found.map((f) => f.name).join(', ') : 'NOTHING'}`);
+  return out;
 }
 
 /** Load bookmarks from a detected source or a user-supplied path. */
