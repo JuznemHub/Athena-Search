@@ -1,0 +1,13 @@
+{
+  "name": "athena-tui",
+  "version": "1.0.0",
+  "description": "Terminal UI for Athena Search — dump your browser bookmarks into your Athena brain.",
+  "type": "module",
+  "private": true,
+  "engines": { "node": ">=22" },
+  "bin": { "athena-tui": "src/index.js" },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node smoke.mjs && node e2e.mjs"
+  }
+}

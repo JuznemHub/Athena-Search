@@ -34,6 +34,16 @@ export default defineConfig([
     },
   },
 
+  // TUI: zero-dependency Node ESM CLI
+  {
+    files: ['tui/**/*.js'],
+    extends: [js.configs.recommended],
+    languageOptions: {
+      sourceType: 'module',
+      globals: globals.node,
+    },
+  },
+
   {
     rules: {
       'no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' }],
