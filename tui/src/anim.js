@@ -1,6 +1,6 @@
 // Animation: intro materialization, braille spinner, cursor-safe.
 
-import { CLEAR, HIDE_CURSOR, SHOW_CURSOR, ERASE_LINE, titleBlock } from './screen.js';
+import { CLEAR, HIDE_CURSOR, SHOW_CURSOR, ERASE_LINE, titleBlock, LOGO_WIDTH } from './screen.js';
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 export const reducedMotion = () => process.env.ATHENA_TUI_NO_ANIMATION === '1';
@@ -14,7 +14,7 @@ export async function playIntro(io, theme, width) {
   let sweep = -1;
   const timer = setInterval(() => {
     glow += 1;
-    sweep = Math.min(44, sweep + 3);
+    sweep = Math.min(LOGO_WIDTH, sweep + 3);
     const block = titleBlock(theme, width, glow >= glowOn);
     const frame = block.map((l, i) => {
       if (i < 1 || i > 3) return l;

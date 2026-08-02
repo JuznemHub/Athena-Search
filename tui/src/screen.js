@@ -22,18 +22,21 @@ export function center(line, width) {
   return ' '.repeat(pad) + line;
 }
 
-// Three-row half-block wordmark: A T H E N A · S E A R C H
+// Three-row half-block wordmark: A T H E N A · S E A R C H (49 wide) —
+// the same big-block letter style as the binthere CLI wordmark.
 export const LOGO = [
   '█▀█ ▀█▀ █ █ █▀▀ █▄ █ █▀█  ▄▀▀ █▀▀ █▀█ █▀▄ ▄▀▀ █ █',
   '█▄█  █  █▀█ █▀  █ ▀█ █▄█  █▄▄ █▀  █▄█ █▀▄ █   █▀█',
   '▀ ▀  ▀  ▀ ▀ ▀▀▀ ▀  ▀ ▀ ▀  ▀▀▀ ▀▀▀ ▀ ▀ ▀▀  ▀▀▀ ▀ ▀',
 ];
+export const LOGO_WIDTH = LOGO[0].length;
 
 /** The spark above the wordmark, padded to the logo width. */
 export function logoSpark(theme, glow = true) {
+  if (theme.level === 0) return center(`${glow ? '✦' : '·'}${' '.repeat(26)}`, LOGO_WIDTH);
   const star = theme.rgb(255, 240, 190)('✦');
   const off = theme.dim('·');
-  return center(`${glow ? star : off}${' '.repeat(26)}`, 44);
+  return center(`${glow ? star : off}${' '.repeat(26)}`, LOGO_WIDTH);
 }
 
 /** Violet gradient wash across the logo, light crown → deep base. */
@@ -83,11 +86,17 @@ export function box(lines, theme, { label = '' } = {}) {
 
 /** Render the whole title block centered for a given width. */
 export function titleBlock(theme, width, glow = true) {
-  const pad = Math.floor(Math.max(0, width - 44) / 2);
+  const pad = Math.floor(Math.max(0, width - LOGO_WIDTH) / 2);
   const padLine = (l) => ' '.repeat(pad) + l;
   return [
     padLine(logoSpark(theme, glow)),
     ...paintLogo(theme).map(padLine),
     '',
   ];
+}
+
+/** The big-block wordmark with its spark above — centered — for menu headers. */
+export function logoBlock(theme, width) {
+  const pad = Math.floor(Math.max(0, width - LOGO_WIDTH) / 2);
+  return [center(logoSpark(theme), width), ...paintLogo(theme).map((l) => ' '.repeat(pad) + l)];
 }

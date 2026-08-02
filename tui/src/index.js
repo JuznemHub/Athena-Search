@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 
 import { makeTheme } from './theme.js';
-import { CLEAR, HIDE_CURSOR, SHOW_CURSOR, ERASE_EOL, box, center, titleBlock } from './screen.js';
+import { CLEAR, HIDE_CURSOR, SHOW_CURSOR, ERASE_EOL, box, center, titleBlock, logoBlock } from './screen.js';
 import { menu, confirm } from './menu.js';
 import { playIntro, withSpinner } from './anim.js';
 import { keyStream } from './keys.js';
@@ -331,7 +331,14 @@ async function mainMenu() {
     ...(state.token ? [{ label: 'Logout', hint: '' }] : []),
     { label: 'Quit', hint: '' },
   ];
-  const pick = await menu(io, theme, { title: 'ATHENA SEARCH', items, width: columns() });
+  // binthere mirror: big-block wordmark + spark → tagline → server line → actions box.
+  const head = [
+    ...logoBlock(theme, columns()),
+    center(theme.dim('search your second brain · dump your bookmarks · ai answers'), columns()),
+    center(theme.dim(`server  ${state.instance || 'not connected'}`), columns()),
+    '',
+  ];
+  const pick = await menu(io, theme, { title: 'ATHENA SEARCH', items, width: columns(), header: head, label: 'actions' });
   if (pick === null) return false;
   const fns = [stepLogin, stepConnectInstance, stepJoinCommunity, stepScan, stepDump, stepStatus, ...(state.token ? [stepLogout] : []), () => false];
   return fns[pick]();

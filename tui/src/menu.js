@@ -5,15 +5,18 @@ import { HOME, ERASE_EOL, ERASE_DOWN, box, center } from './screen.js';
 /**
  * Show a vertical menu. `items` = [{ label, hint?, disabled? }].
  * Returns the chosen index, or null when aborted (escape/ctrl-c/q).
+ * `header` (pre-centered lines) replaces the plain title; `label` sits on
+ * the box's top edge (binthere uses 'actions').
  */
-export async function menu(io, theme, { title = '', items, width }) {
+export async function menu(io, theme, { title = '', items, width, header = null, label = '' }) {
   const stream = await io.keys();
   let cursor = 0;
   let done = false;
 
   const draw = (msg = '') => {
     io.stderr(HOME + ERASE_EOL + ERASE_DOWN);
-    if (title) io.stderr(center(theme.bold(title), width) + '\n');
+    const head = header ?? [center(theme.bold(title), width)];
+    for (const l of head) io.stderr(l + '\n');
     const lines = items.map((it, i) => {
       if (it.disabled) return theme.dim(`${' '.repeat(2)}${it.label}`);
       const mark = i === cursor ? theme.accent('❯') : ' ';
@@ -23,8 +26,9 @@ export async function menu(io, theme, { title = '', items, width }) {
     });
     const maxH = Math.max(1, Math.min(io.rows ? io.rows() - 6 : 24, lines.length));
     const first = Math.max(0, Math.min(cursor - maxH + 1, items.length - maxH));
-    for (const l of lines.slice(first, first + maxH)) io.stderr(l + '\n');
-    io.stderr(box([msg === '' ? '↑↓ move · ↵ select · 1-9 jump · q quit' : msg], theme).join('\n') + '\n');
+    const frame = lines.slice(first, first + maxH);
+    for (const l of box(frame, theme, { label }).map((l) => center(l, width))) io.stderr(l + '\n');
+    for (const l of box([msg === '' ? '↑↓ move · ↵ select · 1-9 jump · q quit' : msg], theme).map((l) => center(l, width))) io.stderr(l + '\n');
   };
 
   draw();
