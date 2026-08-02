@@ -10,7 +10,7 @@ import { menu, confirm } from './menu.js';
 import { playIntro, withSpinner } from './anim.js';
 import { keyStream } from './keys.js';
 import { makeClient, ApiError, STORAGE_LABELS, rankOf } from './api.js';
-import { detectBookmarks, loadBookmarks, dedupe, scanDiagnose, filterSynthetic, isSyntheticLink } from './browsers.js';
+import { detectBookmarks, loadBookmarks, dedupe, scanDiagnose, filterSynthetic } from './browsers.js';
 import { loadConfig, saveConfig } from './config.js';
 
 const theme = makeTheme();
