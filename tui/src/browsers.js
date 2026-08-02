@@ -8,6 +8,24 @@ import { ApiError } from './api.js';
 
 const isHttp = (url) => /^https?:\/\//i.test(url || '');
 
+// Reserved test/demo domains (RFC 2606) and loopback hosts: fixtures from
+// browser/e2e test suites that must never pollute a brain AI search can read.
+const SYNTHETIC_RE = [
+  /^https?:\/\/(?:[a-z0-9-]+\.)*example\.(?:com|org|net|edu|gov|mil)(?::\d+)?(?:\/|$)/i,
+  /^https?:\/\/(?:[a-z0-9-]+\.)*(?:test|invalid|localhost)(?::\d+)?(?:\/|$)/i,
+  /^https?:\/\/(?:\[::1\]|0\.0\.0\.0|127\.\d{1,3}\.\d{1,3}\.\d{1,3})(?::\d+)?(?:\/|$)/,
+];
+
+/** True when a link is an obvious test/demo fixture, not a real bookmark. */
+export function isSyntheticLink(link) {
+  return SYNTHETIC_RE.some((re) => re.test(link?.url || ''));
+}
+
+/** Drop test/demo fixtures; returns the clean list. */
+export function filterSynthetic(links) {
+  return links.filter((l) => !isSyntheticLink(l));
+}
+
 function walkChromium(node, out = []) {
   if (!node) return out;
   if (node.type === 'url' && isHttp(node.url)) {

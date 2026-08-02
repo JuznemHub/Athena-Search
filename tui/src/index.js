@@ -10,7 +10,7 @@ import { menu, confirm } from './menu.js';
 import { playIntro, withSpinner } from './anim.js';
 import { keyStream } from './keys.js';
 import { makeClient, ApiError, STORAGE_LABELS, rankOf } from './api.js';
-import { detectBookmarks, loadBookmarks, dedupe, scanDiagnose } from './browsers.js';
+import { detectBookmarks, loadBookmarks, dedupe, scanDiagnose, filterSynthetic, isSyntheticLink } from './browsers.js';
 import { loadConfig, saveConfig } from './config.js';
 
 const theme = makeTheme();
@@ -165,7 +165,9 @@ async function stepScan() {
     const links = await withSpinner(io, theme, `Reading ${src.name}…`, () => loadBookmarks(src));
     all.push(...links);
   }
-  const unique = dedupe(all);
+  const raw = dedupe(all);
+  const unique = filterSynthetic(raw);
+  const excluded = raw.length - unique.length;
   state.scanned = { count: unique.length, folders: [...new Set(unique.flatMap((l) => l.tags || []))].slice(0, 6), time: Date.now(), sources };
   saveConfig(state);
   await renderHeader(false);
@@ -173,6 +175,7 @@ async function stepScan() {
   const lines = [
     `${theme.accent(String(unique.length))} unique bookmarks`,
     ...sources.map((s) => theme.dim('◦ ' + s.name)),
+    ...(excluded ? [theme.dim(`${excluded} test/synthetic bookmarks excluded (example.*, *.test, localhost)`)] : []),
     ...(state.scanned.folders.length ? ['', ...state.scanned.folders.map((f) => theme.dim('📁 ' + f))] : []),
   ];
   stderr(box(lines, theme).join('\n') + '\n');
@@ -224,21 +227,24 @@ async function stepDump() {
     all.push(...links);
   }
   const unique = dedupe(all);
-  if (!unique.length) { stderr(theme.danger('No bookmarks found locally.\n')); return false; }
-  state.scanned = { ...state.scanned, count: unique.length, time: Date.now() };
+  const clean = filterSynthetic(unique);
+  const excluded = unique.length - clean.length;
+  if (!clean.length) { stderr(theme.danger('No bookmarks found locally.\n')); return false; }
+  state.scanned = { ...state.scanned, count: clean.length, time: Date.now() };
   saveConfig(state);
 
   await renderHeader(false);
   const where = target === 'personal' ? 'personal brain' : `community "${state.community_name || state.community_id}"`;
-  stderr(center(theme.bold(`Dump ${unique.length} bookmarks → ${where}`), columns()) + '\n\n');
+  stderr(center(theme.bold(`Dump ${clean.length} bookmarks → ${where}`), columns()) + '\n\n');
+  if (excluded) stderr(theme.dim(`${excluded} test/synthetic bookmarks excluded (example.*, *.test, localhost)\n`));
   const ok = await confirm(io, theme, 'Send them now? (y/n)', columns());
   if (!ok) { stderr(theme.dim('Cancelled.\n')); return false; }
 
   stderr(HIDE_CURSOR);
   let added = 0, dupes = 0, failed = 0, sent = 0;
-  const total = unique.length;
+  const total = clean.length;
   const errors = [];
-  for (const link of unique) {
+  for (const link of clean) {
     const payload = { url: link.url, ...(link.title ? { title: link.title.slice(0, 200) } : {}), ...(link.tags?.length ? { tags: link.tags.slice(0, 10) } : {}) };
     try {
       if (target === 'personal') await client.postPersonalLink(payload);
