@@ -69,16 +69,37 @@ async function readFirefox(profileDir) {
     const rows = conn.prepare(`
       SELECT p.url AS url,
              COALESCE(NULLIF(b.title, ''), p.title) AS title,
-             GROUP_CONCAT(f.title, ' / ') AS folder
+             b.parent AS parent
       FROM moz_bookmarks b
       JOIN moz_places p ON p.id = b.fk
-      LEFT JOIN moz_bookmarks f ON f.id = b.parent
       WHERE b.type = 1 AND p.url IS NOT NULL
       GROUP BY p.url
     `).all();
+    // Build full folder paths ("Other Bookmarks/Misc/pmwiki", not just the
+    // immediate parent) by walking the parent chain; root ids get their
+    // user-facing names and id 1 (PlacesRoot) ends the walk.
+    const folders = conn.prepare('SELECT id, parent, title FROM moz_bookmarks WHERE type = 2').all();
+    const folderMap = new Map(folders.map((f) => [f.id, f]));
+    const pathFor = (parentId) => {
+      const parts = [];
+      let id = parentId;
+      for (let i = 0; i < 6 && id != null; i++) {
+        const rootName = FIREFOX_ROOT_NAMES[id];
+        if (rootName === null || rootName === undefined) {
+          const f = folderMap.get(id);
+          if (!f) break;
+          parts.unshift(f.title || '');
+          id = f.parent;
+        } else {
+          if (rootName) parts.unshift(rootName);
+          break;
+        }
+      }
+      return parts;
+    };
     return rows
       .filter((r) => isHttp(r.url))
-      .map((r) => ({ url: r.url, title: r.title || '', tags: r.folder ? [r.folder] : [] }));
+      .map((r) => ({ url: r.url, title: r.title || '', tags: pathFor(r.parent) }));
   } finally {
     conn.close();
     fs.rmSync(tmp, { force: true });
@@ -111,6 +132,9 @@ const FIREFOX_ROOTS = [
   ['.var', 'app', 'org.mozilla.firefox', '.mozilla', 'firefox'],
   ['snap', 'firefox', 'common', '.mozilla', 'firefox'],
 ];
+
+// moz_bookmarks special roots (internal titles) → user-facing names.
+const FIREFOX_ROOT_NAMES = { 1: null, 2: 'Bookmarks Menu', 3: 'Bookmarks Toolbar', 4: 'Tags', 5: 'Other Bookmarks', 6: 'Mobile Bookmarks' };
 
 function chromeCandidateFiles(home) {
   const out = [];

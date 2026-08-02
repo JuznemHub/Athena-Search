@@ -175,7 +175,8 @@ async function stepScan() {
   const raw = dedupe(all);
   const unique = filterSynthetic(raw);
   const excluded = raw.length - unique.length;
-  state.scanned = { count: unique.length, folders: [...new Set(unique.flatMap((l) => l.tags || []))].slice(0, 6), time: Date.now(), sources };
+  const allTags = [...new Set(unique.flatMap((l) => l.tags || []))].sort();
+  state.scanned = { count: unique.length, folders: allTags, time: Date.now(), sources };
   saveConfig(state);
   await renderHeader(false);
   stderr(center(theme.bold('Bookmarks found'), columns()) + '\n\n');
@@ -184,7 +185,10 @@ async function stepScan() {
     ...sources.map((s) => theme.dim('◦ ' + s.name)),
     ...(excluded ? [theme.dim(`${excluded} test/synthetic bookmarks excluded (example.*, *.test, localhost)`)] : []),
     ...(failed.length ? [theme.danger(`${failed.length} source(s) unreadable:`), ...failed.map((f) => theme.dim('  ' + f))] : []),
-    ...(state.scanned.folders.length ? ['', ...state.scanned.folders.map((f) => theme.dim('📁 ' + f))] : []),
+    ...(state.scanned.folders.length
+      ? ['', ...state.scanned.folders.slice(0, 15).map((f) => theme.dim('📁 ' + f)),
+         ...(state.scanned.folders.length > 15 ? [theme.dim(`…and ${state.scanned.folders.length - 15} more folders`)] : [])]
+      : []),
   ];
   stderr(box(lines, theme).join('\n') + '\n');
   stderr(center(theme.dim('Press ↵ to continue'), columns()) + '\n');
