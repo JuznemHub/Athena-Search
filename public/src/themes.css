@@ -536,7 +536,8 @@ body::before {
 .form-group textarea,
 .form-group select,
 .edit-panel input,
-.edit-panel textarea {
+.edit-panel textarea,
+.input {
   background: var(--input-bg) !important;
   color: var(--text-main) !important;
   border-color: var(--hairline) !important;
@@ -617,22 +618,28 @@ body::before {
 }
 
 /* ========== Responsive ========== */
+/* A long unbroken URL in a title or note must wrap, not get clipped by
+   body{overflow-x:hidden}. */
+.g-title, .g-snippet, .g-author { overflow-wrap: anywhere; }
+
 @media (max-width: 720px) {
-  .theme-bar .theme-chip { padding: 6px 8px; font-size: 0.65rem; }
+  /* Four 44px chips can't share a 360px bar with the brand and two icon
+     buttons. The drawer's Appearance switcher is the same .theme-chip set. */
+  .theme-bar { display: none !important; }
   .mode-badge { display: none !important; }
   .brand-logo .logo-text { font-size: 0.95rem !important; }
   .scope-switch-container { left: 50% !important; right: auto !important; transform: translateX(-50%); }
   .scope-switch { width: min(300px, calc(100vw - 28px)); }
   .scope-btn { flex: 1; justify-content: center; }
   .side-drawer { width: 100% !important; }
-  .search-bar-box input, .search-bar-box #searchInput { font-size: 16px !important; }
+  /* Under 16px, iOS Safari zooms the page on focus and never zooms back. */
+  .search-bar-box input, .search-bar-box #searchInput,
+  .form-group input, .form-group textarea, .form-group select,
+  .edit-panel input, .edit-panel textarea,
+  .input, .chat-followup-input { font-size: 16px !important; }
   .mode-pills { width: 100%; }
   .mode-pill { flex: 1; text-align: center; font-size: 0.8rem; }
-}
-
-@media (max-width: 420px) {
-  .theme-bar .theme-chip span { display: none; }
-  .theme-bar .theme-chip { padding: 7px 9px; min-width: 32px; }
+  .notif-panel { right: max(12px, env(safe-area-inset-right)) !important; left: max(12px, env(safe-area-inset-left)); width: auto !important; }
 }
 
 @media (min-width: 1025px) {

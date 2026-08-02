@@ -354,11 +354,13 @@ body {
 
 .form-group { margin-bottom: 14px; }
 .form-group label { display: block; font-size: 0.85rem; color: var(--text-muted, #8e95b0); margin-bottom: 6px; }
-.form-group input, .form-group textarea, .form-group select {
+.form-group input, .form-group textarea, .form-group select, .input {
   width: 100%; background: rgba(6,7,10,0.6); border: 1px solid var(--border-color, rgba(255,255,255,0.1));
   border-radius: var(--radius-md, 12px); padding: 10px 14px; color: var(--text-main, #eef0f6); font-size: 0.95rem; outline: none; transition: border 0.2s;
 }
-.form-group input:focus, .form-group textarea:focus, .form-group select:focus { border-color: var(--accent); }
+.form-group input:focus, .form-group textarea:focus, .form-group select:focus, .input:focus { border-color: var(--accent); }
+
+.field-label { display: block; font-size: 0.85rem; color: var(--text-muted, #8e95b0); margin: 10px 0 6px; }
 
 .status-msg { font-size: 0.75rem; color: var(--text-muted, #8e95b0); }
 
