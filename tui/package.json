@@ -1,6 +1,6 @@
 {
   "name": "athena-tui",
-  "version": "1.0.6",
+  "version": "1.0.15",
   "description": "Terminal UI for Athena Search — dump your browser bookmarks into your Athena brain from the command line.",
   "type": "module",
   "main": "src/index.js",
@@ -16,6 +16,6 @@
   "homepage": "https://github.com/JuznemHub/Athena-Search/tree/master/tui",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node smoke.mjs && node e2e.mjs"
+    "test": "node smoke.mjs && node --test test-firefox.mjs && node e2e.mjs"
   }
 }

@@ -455,7 +455,16 @@ document.addEventListener('DOMContentLoaded', () => {
     if (fromOAuth) {
       state.sessionToken = fromOAuth;
       localStorage.setItem('athena_session', fromOAuth);
-      history.replaceState({}, '', window.location.pathname);
+      // Keep ?session= in the address bar on purpose: terminal clients
+      // (athena-tui) log in via this URL and must be able to copy the token.
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(fromOAuth).then(
+          () => showToast('Session ready — token copied. Paste it into athena-tui.'),
+          () => showToast('Session ready — copy the session= token from the address bar.')
+        );
+      } else {
+        showToast('Session ready — copy the session= token from the address bar.');
+      }
     }
     // Cookie fallback. Only useful same-origin: a SameSite=Lax cookie is not
     // sent on cross-site requests, so this does nothing once a self-hosted
@@ -2222,6 +2231,28 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (closeDrawerBtn) closeDrawerBtn.addEventListener('click', closeDrawer);
     if (drawerOverlay) drawerOverlay.addEventListener('click', closeDrawer);
+
+    const sessionTokenBtn = $('sessionTokenBtn');
+    if (sessionTokenBtn) {
+      sessionTokenBtn.addEventListener('click', async () => {
+        try {
+          const res = await fetch('/api/auth/session-token', { method: 'GET' });
+          const data = await res.json();
+          if (!res.ok || !data?.token) {
+            showToast('Login required to copy a session token', true);
+            return;
+          }
+          if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(data.token);
+          } else {
+            prompt('Session token (for athena-tui):', data.token);
+          }
+          showToast('Session token copied — paste it into athena-tui');
+        } catch {
+          showToast('Could not reach the server', true);
+        }
+      });
+    }
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') closeDrawer();
     });

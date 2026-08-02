@@ -52,6 +52,12 @@ export function makeClient(instanceUrl, token) {
     }),
     postLink: (payload) => request(base, '/api/links', { method: 'POST', body: payload, token }),
     postPersonalLink: (payload) => request(base, '/api/personal-links', { method: 'POST', body: payload, token }),
+    postLinksBatch: (links, communityId) => request(base, '/api/links/batch', {
+      method: 'POST', body: { community_id: communityId, links }, token,
+    }),
+    postPersonalLinksBatch: (links) => request(base, '/api/personal-links/batch', {
+      method: 'POST', body: { links }, token,
+    }),
   };
 }
 

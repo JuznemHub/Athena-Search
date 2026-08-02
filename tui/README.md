@@ -72,8 +72,9 @@ npm install -g athenasearch-tui
    into the terminal.
 3. **3 Join community** — paste the community id from your GOD (skip this if
    you only use your personal brain as GOD).
-4. **4 Scan bookmarks** — pick all detected browsers, one browser, or an
-   export file.
+4. **4 Scan bookmarks** — scans every browser profile found locally at once
+   (Chrome/Chromium/Edge/Brave/Opera/Vivaldi/Arc/Firefox); if none are found it
+   asks for an HTML/JSON export file.
 5. **5 Dump bookmarks** — GODs pick *personal* or *community* brain; others
    dump to their community. Server-side dedupe is handled (skips reported),
    folder paths become tags.
@@ -96,7 +97,11 @@ Or run it directly: `node tui/src/index.js`
   (disable with `ATHENA_TUI_NO_ANIMATION=1`)
 - Session + instance persisted at `~/.config/athena-tui/config.json`
 - Bookmarks detected from Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Arc,
-  and Firefox (`places.sqlite` via `node:sqlite`)
+  and Firefox (`places.sqlite` via `node:sqlite`), including Flatpak/Snap
+  sandboxes and the XDG profile dir (`~/.config/mozilla/firefox`)
+- Portable/custom browser data dirs: `ATHENA_BOOKMARK_ROOTS=/path/to/User\ Data`
+  (colon-separated) — scanned one level deep for `Bookmarks`/`places.sqlite`;
+  `athena-tui --diagnose` shows every root it checks
 - Non-HTTP(S) bookmarks are skipped; local duplicates collapse before upload
 
 ## Env

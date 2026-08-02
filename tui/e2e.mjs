@@ -19,6 +19,14 @@ const server = http.createServer((req, res) => {
       return send(200, { community: { id: JSON.parse(raw).community_id, name: 'Neo Circle', role: 'owner' } });
     }
     if (req.url === '/api/personal-links' && req.method === 'POST') return send(200, { link: { id: 1 } });
+    if (req.url === '/api/personal-links/batch' && req.method === 'POST') {
+      const links = JSON.parse(raw).links || [];
+      return send(200, { total: links.length, added: links.length, dupes: 0, failed: [] });
+    }
+    if (req.url === '/api/links/batch' && req.method === 'POST') {
+      const links = JSON.parse(raw).links || [];
+      return send(200, { total: links.length, added: links.length, dupes: 0, failed: [] });
+    }
     send(404, { error: { type: 'NOT_FOUND' } });
   });
 });
@@ -59,11 +67,8 @@ await sleep(600);
 keys('7\n');                   // community id 7
 console.log('> id');
 await sleep(800);
-keys('4');                     // Scan bookmarks
+keys('4');                     // Scan bookmarks (auto-detects all browsers)
 console.log('> scan');
-await sleep(600);
-keys('\n');                    // All detected browsers
-console.log('> source');
 await sleep(1500);
 keys('\n');                    // continue
 console.log('> continue');

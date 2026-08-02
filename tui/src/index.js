@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // Athena Search TUI — dump your browser bookmarks into your Athena brain.
 
-import path from 'node:path';
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 
@@ -11,7 +10,7 @@ import { menu, confirm } from './menu.js';
 import { playIntro, withSpinner } from './anim.js';
 import { keyStream } from './keys.js';
 import { makeClient, ApiError, STORAGE_LABELS, rankOf } from './api.js';
-import { detectBookmarks, loadBookmarks, dedupe } from './browsers.js';
+import { detectBookmarks, loadBookmarks, dedupe, scanDiagnose, filterSynthetic } from './browsers.js';
 import { loadConfig, saveConfig } from './config.js';
 
 const theme = makeTheme();
@@ -118,9 +117,16 @@ async function stepLogin() {
   state.token = token;
   const client = makeClient(state.instance, state.token);
   try {
-    const me = (await withSpinner(io, theme, 'Checking session…', () => client.me())).user;
-    state.name = me?.username || me?.first_name || 'user';
-    state.rank = rankOf(me);
+    const [me, cfg] = await Promise.all([
+      withSpinner(io, theme, 'Checking session…', () => client.me()),
+      client.storageConfig().catch(() => null),
+    ]);
+    const account = me.user;
+    state.name = account?.username || account?.first_name || 'user';
+    state.rank = rankOf(account);
+    // Backend is chosen on the website (PostgreSQL / GitHub / D1) — mirror it
+    // here so the TUI always reports where a dump will actually land.
+    if (cfg?.provider) state.provider = STORAGE_LABELS[cfg.provider] || cfg.provider;
     saveConfig(state);
     return true;
   } catch (e) {
@@ -150,44 +156,46 @@ async function stepJoinCommunity() {
   }
 }
 
-async function pickBookmarkSource() {
-  const found = detectBookmarks();
-  const items = [
-    { label: 'All detected browsers', hint: found.length ? `${found.length} found` : 'none yet' },
-    ...found.map((f) => ({ label: f.name, hint: path.basename(f.file) })),
-    { label: 'Bookmarks export file', hint: 'HTML or JSON' },
-  ];
-  const pick = await menu(io, theme, { title: 'Scan bookmarks — where from?', items, width: columns() });
-  if (pick === null) return null;
-  if (pick === 0) return found;
-  if (pick === items.length - 1) {
-    await renderHeader(false);
-    const file = await prompt('Path to export file', { hint: '/path/to/bookmarks.html' });
-    return [{ name: 'Export file', file, kind: 'export' }];
-  }
-  return [found[pick - 1]];
-}
-
 async function stepScan() {
   if (!state.token) { stderr(theme.danger('Login first.\n')); return false; }
-  const sources = await pickBookmarkSource();
-  if (sources === null || sources.length === 0) {
-    stderr(theme.danger('No bookmark sources selected.\n'));
-    return false;
+  // gosuki-style: scan every browser profile found locally, no picking.
+  let sources = detectBookmarks();
+  if (sources.length === 0) {
+    stderr(theme.danger('No browsers detected — give a bookmarks export file (HTML or JSON) instead.\n'));
+    await renderHeader(false);
+    const file = await prompt('Path to export file', { hint: '/path/to/bookmarks.html' });
+    if (!file) { stderr(theme.dim('Cancelled.\n')); return false; }
+    sources = [{ name: 'Export file', file, kind: 'export' }];
   }
   const all = [];
+  const failed = [];
   for (const src of sources) {
-    const links = await withSpinner(io, theme, `Reading ${src.name}…`, () => loadBookmarks(src));
-    all.push(...links);
+    try {
+      const links = await withSpinner(io, theme, `Reading ${src.name}…`, () => loadBookmarks(src));
+      all.push(...links);
+    } catch (e) {
+      // One unreadable source (e.g. locked places.sqlite) must not abort the
+      // scan of the others.
+      failed.push(`${src.name}: ${e.message}`);
+    }
   }
-  const unique = dedupe(all);
-  state.scanned = { count: unique.length, folders: [...new Set(unique.flatMap((l) => l.tags || []))].slice(0, 6), time: Date.now(), sources };
+  const raw = dedupe(all);
+  const unique = filterSynthetic(raw);
+  const excluded = raw.length - unique.length;
+  const allTags = [...new Set(unique.flatMap((l) => l.tags || []))].sort();
+  state.scanned = { count: unique.length, folders: allTags, time: Date.now(), sources };
   saveConfig(state);
   await renderHeader(false);
   stderr(center(theme.bold('Bookmarks found'), columns()) + '\n\n');
   const lines = [
     `${theme.accent(String(unique.length))} unique bookmarks`,
-    ...(state.scanned.folders.length ? ['', ...state.scanned.folders.map((f) => theme.dim('📁 ' + f))] : []),
+    ...sources.map((s) => theme.dim('◦ ' + s.name)),
+    ...(excluded ? [theme.dim(`${excluded} test/synthetic bookmarks excluded (example.*, *.test, localhost)`)] : []),
+    ...(failed.length ? [theme.danger(`${failed.length} source(s) unreadable:`), ...failed.map((f) => theme.dim('  ' + f))] : []),
+    ...(state.scanned.folders.length
+      ? ['', ...state.scanned.folders.slice(0, 15).map((f) => theme.dim('📁 ' + f)),
+         ...(state.scanned.folders.length > 15 ? [theme.dim(`…and ${state.scanned.folders.length - 15} more folders`)] : [])]
+      : []),
   ];
   stderr(box(lines, theme).join('\n') + '\n');
   stderr(center(theme.dim('Press ↵ to continue'), columns()) + '\n');
@@ -233,42 +241,83 @@ async function stepDump() {
   // only when the scan state was lost (e.g. old config file).
   const sources = state.scanned?.sources?.length ? state.scanned.sources : detectBookmarks();
   const all = [];
+  const unreadable = [];
   for (const src of sources) {
-    const links = await withSpinner(io, theme, `Reading ${src.name}…`, () => loadBookmarks(src));
-    all.push(...links);
+    try {
+      const links = await withSpinner(io, theme, `Reading ${src.name}…`, () => loadBookmarks(src));
+      all.push(...links);
+    } catch (e) {
+      unreadable.push(`${src.name}: ${e.message}`);
+    }
   }
   const unique = dedupe(all);
-  if (!unique.length) { stderr(theme.danger('No bookmarks found locally.\n')); return false; }
-  state.scanned = { ...state.scanned, count: unique.length, time: Date.now() };
+  const clean = filterSynthetic(unique);
+  const excluded = unique.length - clean.length;
+  if (!clean.length) { stderr(theme.danger('No bookmarks found locally.\n')); return false; }
+  state.scanned = { ...state.scanned, count: clean.length, time: Date.now() };
   saveConfig(state);
 
   await renderHeader(false);
+  const providerTxt = state.provider ? theme.dim(` · ${state.provider}`) : '';
   const where = target === 'personal' ? 'personal brain' : `community "${state.community_name || state.community_id}"`;
-  stderr(center(theme.bold(`Dump ${unique.length} bookmarks → ${where}`), columns()) + '\n\n');
+  stderr(center(theme.bold(`Dump ${clean.length} bookmarks → ${where}`) + providerTxt, columns()) + '\n\n');
+  if (excluded) stderr(theme.dim(`${excluded} test/synthetic bookmarks excluded (example.*, *.test, localhost)\n`));
+  if (unreadable.length) stderr(theme.danger(`${unreadable.length} source(s) unreadable:\n`) + unreadable.map((f) => theme.dim('  ' + f + '\n')).join(''));
   const ok = await confirm(io, theme, 'Send them now? (y/n)', columns());
   if (!ok) { stderr(theme.dim('Cancelled.\n')); return false; }
 
   stderr(HIDE_CURSOR);
-  let added = 0, dupes = 0, failed = 0, sent = 0;
-  const total = unique.length;
+  const total = clean.length;
+  let added = 0, dupes = 0, failed = 0;
   const errors = [];
-  for (const link of unique) {
-    const payload = { url: link.url, ...(link.title ? { title: link.title.slice(0, 200) } : {}), ...(link.tags?.length ? { tags: link.tags.slice(0, 10) } : {}) };
-    try {
-      if (target === 'personal') await client.postPersonalLink(payload);
-      else await client.postLink({ ...payload, community_id: state.community_id });
-      added += 1;
-    } catch (e) {
-      if (e instanceof ApiError && /EXISTS|DUPLICATE/i.test(e.type)) dupes += 1;
-      else {
-        failed += 1;
-        if (errors.length < 5) errors.push(`${e.type || e.message}: ${link.url}`);
-        if (/NON_MEMBER|LOCKED|UNAUTHORIZED/i.test(e.type)) { break; }
-      }
+  const payloads = clean.map((link) => ({
+    url: link.url,
+    ...(link.title ? { title: link.title.slice(0, 200) } : {}),
+    ...(link.tags?.length ? { tags: link.tags.slice(0, 10) } : {}),
+  }));
+
+  // Preferred path: one request for the whole batch (worker writes D1 and the
+  // GitHub folder in a single commit). Older instances without the batch
+  // endpoint fall back to per-link POSTs.
+  let batchSkipped = false;
+  try {
+    const res = target === 'personal'
+      ? await client.postPersonalLinksBatch(payloads)
+      : await client.postLinksBatch(payloads, state.community_id);
+    if (!res || typeof res.total !== 'number') throw new ApiError('batch unsupported', 'HTTP_404', 404);
+    added = res.added || 0;
+    dupes = res.dupes || 0;
+    failed = res.failed?.length || 0;
+    stderr(ERASE_EOL + `\r${theme.accent(added)} added · ${theme.dim(dupes)} dupes · ${theme.danger(failed)} failed — ${total}/${total}`);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) {
+      batchSkipped = true; // instance predates the batch endpoint
+    } else {
+      errors.push(e.message);
+      failed = total;
     }
-    sent += 1;
-    if (sent % 5 === 0 || sent === total) {
-      stderr(ERASE_EOL + `\r${theme.accent(added)} added · ${theme.dim(dupes)} dupes · ${theme.danger(failed)} failed — ${sent}/${total}`);
+  }
+
+  if (batchSkipped) {
+    // Fall back to the old per-link loop — still works everywhere.
+    let sent = 0;
+    for (const payload of payloads) {
+      try {
+        if (target === 'personal') await client.postPersonalLink(payload);
+        else await client.postLink({ ...payload, community_id: state.community_id });
+        added += 1;
+      } catch (e) {
+        if (e instanceof ApiError && /EXISTS|DUPLICATE/i.test(e.type)) dupes += 1;
+        else {
+          failed += 1;
+          if (errors.length < 5) errors.push(`${e.type || e.message}: ${payload.url}`);
+          if (/NON_MEMBER|LOCKED|UNAUTHORIZED/i.test(e.type)) { break; }
+        }
+      }
+      sent += 1;
+      if (sent % 5 === 0 || sent === total) {
+        stderr(ERASE_EOL + `\r${theme.accent(added)} added · ${theme.dim(dupes)} dupes · ${theme.danger(failed)} failed — ${sent}/${total}`);
+      }
     }
   }
   stderr('\n\n');
@@ -337,7 +386,7 @@ async function mainMenu() {
   const head = [
     ...logoBlock(theme, columns()),
     center(theme.dim('search your second brain · dump your bookmarks · ai answers'), columns()),
-    center(theme.dim(`server  ${state.instance || 'not connected'}`), columns()),
+    center(theme.dim(`server  ${state.instance || 'not connected'}${state.provider ? ` · ${state.provider}` : ''}`), columns()),
     '',
   ];
   const pick = await menu(io, theme, { title: 'ATHENA SEARCH', items, width: columns(), header: head, label: 'actions' });
@@ -347,6 +396,10 @@ async function mainMenu() {
 }
 
 async function main() {
+  if (process.argv.includes('--diagnose')) {
+    console.log(scanDiagnose().join('\n'));
+    process.exit(0);
+  }
   if (!io.stderrIsTTY || !process.stdin.isTTY) {
     stderr('athena-tui needs an interactive terminal.\n');
     process.exit(1);

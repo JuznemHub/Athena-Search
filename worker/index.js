@@ -4,7 +4,7 @@
  */
 
 import {
-  GitHubStore, readAll, appendLink, rewriteAll, rewriteFileContaining, folderFor, LISTING_TTL_MS,
+  GitHubStore, readAll, appendLink, appendLinks, rewriteAll, rewriteFileContaining, folderFor, LISTING_TTL_MS,
 } from './storage.js';
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -92,7 +92,11 @@ function corsAllowedOrigin(env, request) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
+    // Background work (batch enrichment, …): Cloudflare keeps the promise alive
+    // via waitUntil; the self-host shim runs it with a no-op waitUntil, which
+    // still executes it asynchronously after the response.
+    env.__ctx = ctx || { waitUntil(p) { Promise.resolve(p).catch(() => {}); } };
     const url = new URL(request.url);
     // Tolerate // and /// in paths (e.g. instance URLs saved with a trailing
     // slash joined to '/api/...') — route matching is exact below.
@@ -203,6 +207,13 @@ export default {
           return deny(corsHeaders, BANNED_SITE_MSG, 'SITE_BANNED', 403);
         }
         return Response.json({ success: true, user: publicUser(user, { god: owner, elevated }) }, { headers: corsHeaders });
+      }
+
+      if (pathname === '/api/auth/session-token' && request.method === 'GET') {
+        // For the CLI: an already-logged-in browser never re-runs the OAuth
+        // redirect, so there is no fresh ?session= URL to copy. Hand back the
+        // current session token instead — same one the HttpOnly cookie holds.
+        return Response.json({ success: true, token: getBearerToken(request) }, { headers: corsHeaders });
       }
 
       if (pathname === '/api/auth/logout' && request.method === 'POST') {
@@ -375,6 +386,23 @@ export default {
         }
       }
 
+      // Bulk bookmark dumps from the CLI — ONE request for the whole batch.
+      if (pathname === '/api/personal-links/batch' && request.method === 'POST') {
+        if (!(await isInstanceOwnerUserAsync(user, env))) {
+          return deny(corsHeaders, 'Personal mode is for GOD rank (instance host) only. Join a community with /community_join <id>', 'PERSONAL_LOCKED');
+        }
+        if (rateLimit(`batch:${user?.id || clientIp(request)}`, 200, 60_000)) {
+          return Response.json({ success: false, error: 'Too many saves — slow down', code: 'RATE_LIMITED' }, { status: 429, headers: corsHeaders });
+        }
+        return await handlePostPersonalLinksBatch(request, user.id, env, corsHeaders);
+      }
+      if (pathname === '/api/links/batch' && request.method === 'POST') {
+        if (rateLimit(`batch:${user?.id || clientIp(request)}`, 200, 60_000)) {
+          return Response.json({ success: false, error: 'Too many saves — slow down', code: 'RATE_LIMITED' }, { status: 429, headers: corsHeaders });
+        }
+        return await handlePostCommunityLinksBatch(request, user, env, corsHeaders);
+      }
+
       // Personal links — GOD rank only
       if (pathname === '/api/personal-links') {
         if (!(await isInstanceOwnerUserAsync(user, env))) {
@@ -419,7 +447,17 @@ export default {
       }
 
       if (env.ASSETS) {
-        return env.ASSETS.fetch(request);
+        const res = await env.ASSETS.fetch(request);
+        // Never cache HTML: index.html is the entry point whose ?v= stamps
+        // decide which JS/CSS the browser loads. A stale index.html means a
+        // stale frontend no matter how often we bump the assets.
+        if (res.ok && (pathname === '/' || /\.html?$/.test(pathname))) {
+          return new Response(res.body, {
+            status: res.status,
+            headers: { ...Object.fromEntries(res.headers), 'Cache-Control': 'no-cache' },
+          });
+        }
+        return res;
       }
 
       return new Response('Athena API', { status: 200, headers: corsHeaders });
@@ -3849,6 +3887,18 @@ async function storeAddLink(env, scope, key, link) {
   return { handled: true, ok: true };
 }
 
+/** Batch variant: all links land in ONE commit per folder. */
+async function storeAddLinks(env, scope, key, links) {
+  const store = await githubStoreFor(env);
+  if (!store) return { handled: false };
+  const res = await appendLinks(store, folderFor(scope, key), links, {
+    heading: storageHeadingFor(scope, key),
+  });
+  if (!res.ok) return { handled: true, ok: false, error: res.error };
+  await markCacheTrusted(env, scope, key);
+  return { handled: true, ok: true };
+}
+
 /**
  * Delete or edit one link, touching only the file that holds it.
  * `replacement` null removes the entry; an object swaps it in place.
@@ -4671,6 +4721,140 @@ async function handleGetPersonalLinks(userId, env, corsHeaders) {
     'SELECT * FROM personal_links WHERE user_id = ? ORDER BY created_at DESC LIMIT 1000'
   ).bind(userId).all();
   return Response.json({ success: true, links: results }, { headers: corsHeaders });
+}
+
+async function handlePostPersonalLinksBatch(request, userId, env, corsHeaders) {
+  const body = await request.json();
+  const items = Array.isArray(body.links) ? body.links.slice(0, 500) : [];
+  if (!items.length) {
+    return Response.json({ success: false, error: 'links[] required' }, { status: 400, headers: corsHeaders });
+  }
+  await ensureLinkMetaColumns(env);
+
+  const now = Date.now();
+  const displayName = 'athena-tui';
+  const inserted = [];
+  const dupes = [];
+  const failed = [];
+  for (const raw of items) {
+    const rawUrl = typeof raw?.url === 'string' ? raw.url.trim() : '';
+    if (!/^https?:\/\//i.test(rawUrl)) { failed.push({ url: rawUrl || '(empty)', error: 'BAD_URL' }); continue; }
+    const urlHash = generateUrlHash(rawUrl);
+    const existing = await env.DB.prepare(
+      'SELECT 1 FROM personal_links WHERE user_id = ? AND url_hash = ?'
+    ).bind(userId, urlHash).first();
+    if (existing) { dupes.push(rawUrl); continue; }
+    // Dump payloads already carry real titles — title-only fast path, no scrape.
+    const title = String(raw.title || '').trim().slice(0, 300);
+    inserted.push({
+      id: 'pl_' + Date.now().toString(36) + '_' + inserted.length,
+      url: rawUrl, url_hash: urlHash, title,
+      notes: '', tags: Array.isArray(raw.tags) ? raw.tags.slice(0, 10) : [],
+      created_at: now, added_by_user_id: userId, added_by_name: displayName,
+    });
+  }
+
+  if (inserted.length) {
+    const gh = await storeAddLinks(env, 'personal', userId, inserted);
+    if (gh.handled && !gh.ok) {
+      return Response.json({ success: false, error: `GitHub write failed: ${gh.error}` }, { status: 502, headers: corsHeaders });
+    }
+    for (const l of inserted) {
+      try {
+        await env.DB.prepare(
+          `INSERT INTO personal_links (id, user_id, url, url_hash, title, notes, tags, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(l.id, userId, l.url, l.url_hash, l.title, l.notes, JSON.stringify(l.tags), l.created_at).run();
+      } catch (_) { /* id collision from a concurrent batch — row already there */ }
+    }
+    // Dump was fast by design; enrich the fresh links in the background so they
+    // carry descriptions/site names/images like Telegram saves do.
+    runInBackground(env, enrichLinksInBackground(env, 'personal', userId, inserted));
+  }
+
+  return Response.json({
+    success: true,
+    total: items.length,
+    added: inserted.length,
+    dupes: dupes.length,
+    failed: failed.map((f) => f.url),
+  }, { headers: corsHeaders });
+}
+
+async function handlePostCommunityLinksBatch(request, user, env, corsHeaders) {
+  const body = await request.json();
+  const communityId = body.community_id;
+  const items = Array.isArray(body.links) ? body.links.slice(0, 500) : [];
+  if (!communityId || !items.length) {
+    return Response.json({ success: false, error: 'community_id and links[] required' }, { status: 400, headers: corsHeaders });
+  }
+  if (!(await isInstanceOwnerUserAsync(user, env))) {
+    const presence = await syncCommunityGroupPresence(env, communityId, user);
+    if (!presence.inGroup) {
+      return deny(corsHeaders, 'You left or were removed from the Telegram group — rejoin to dump links', 'NOT_IN_GROUP');
+    }
+  }
+  if (await isBannedFromCommunity(env, communityId, user)) {
+    return deny(corsHeaders, 'You are banned from this community', 'BANNED');
+  }
+  if (!(await ensureMember(communityId, user.id, env))) {
+    return Response.json({
+      success: false,
+      error: 'Join this community first: login on the website, then /community_join ' + communityId,
+      code: 'NOT_MEMBER'
+    }, { status: 403, headers: corsHeaders });
+  }
+
+  await ensureLinkMetaColumns(env);
+  const now = Date.now();
+  const displayName = user.display_name || user.username || user.id;
+  const inserted = [];
+  const dupes = [];
+  const failed = [];
+  for (const raw of items) {
+    const rawUrl = typeof raw?.url === 'string' ? raw.url.trim() : '';
+    if (!/^https?:\/\//i.test(rawUrl)) { failed.push({ url: rawUrl || '(empty)', error: 'BAD_URL' }); continue; }
+    const urlHash = generateUrlHash(rawUrl);
+    const existing = await env.DB.prepare(
+      'SELECT id, title FROM links WHERE community_id = ? AND url_hash = ?'
+    ).bind(communityId, urlHash).first();
+    if (existing) { dupes.push(rawUrl); continue; }
+    const title = String(raw.title || '').trim().slice(0, 300);
+    inserted.push({
+      id: 'link_' + Date.now().toString(36) + '_' + inserted.length,
+      community_id: communityId, url: rawUrl, url_hash: urlHash, title,
+      notes: '', tags: Array.isArray(raw.tags) ? raw.tags.slice(0, 10) : [],
+      created_at: now, added_by_name: displayName, added_by_user_id: user.id,
+    });
+  }
+
+  if (inserted.length) {
+    const gh = await storeAddLinks(env, 'community', communityId, inserted);
+    if (gh.handled && !gh.ok) {
+      return Response.json({ success: false, error: `GitHub write failed: ${gh.error}` }, { status: 502, headers: corsHeaders });
+    }
+    for (const l of inserted) {
+      try {
+        await env.DB.prepare(
+          `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
+             added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)`
+        ).bind(
+          l.id, communityId, l.url, l.url_hash, l.title, l.notes, JSON.stringify(l.tags),
+          displayName, user.id, user.provider || null, displayName, l.created_at
+        ).run();
+      } catch (_) { /* id collision from a concurrent batch — row already there */ }
+    }
+    runInBackground(env, enrichLinksInBackground(env, 'community', communityId, inserted));
+  }
+
+  return Response.json({
+    success: true,
+    total: items.length,
+    added: inserted.length,
+    dupes: dupes.length,
+    failed: failed.map((f) => f.url),
+  }, { headers: corsHeaders });
 }
 
 async function handlePostPersonalLink(request, userId, env, corsHeaders) {
@@ -8687,4 +8871,50 @@ async function enrichLinkFields(env, rawUrl, { title, notes } = {}) {
     site_name: meta.siteName || '',
     scraped: true
   };
+}
+
+/**
+ * Bulk dumps must not block on a server-side fetch per URL, but they should
+ * still END UP enriched like Telegram saves do. The batch handlers insert the
+ * dump immediately (title as given), then this pass runs in the background:
+ * scrape → UPDATE the row → and for GitHub-backed instances rewrite the
+ * Markdown entry too. Bounded concurrency; one bad site only costs its own
+ * 9s timeout.
+ */
+async function enrichLinksInBackground(env, scope, key, links) {
+  const CONCURRENCY = 4;
+  let next = 0;
+  const run = async () => {
+    while (next < links.length) {
+      const link = links[next++];
+      try {
+        const meta = await scrapeLinkMetadata(link.url, env);
+        const title = (isWeakTitle(link.title, link.url) && meta.title) ? meta.title : link.title;
+        const update = {
+          title,
+          notes: meta.description || '',
+          image_url: meta.image || '',
+          site_name: meta.siteName || '',
+        };
+        if (!update.notes && !update.image_url && !update.site_name) continue;
+        if (scope === 'personal') {
+          await env.DB.prepare(
+            'UPDATE personal_links SET title = ?, notes = ?, image_url = ?, site_name = ? WHERE id = ?'
+          ).bind(update.title, update.notes, update.image_url, update.site_name, link.id).run();
+        } else {
+          await env.DB.prepare(
+            'UPDATE links SET title = ?, notes = ?, image_url = ?, site_name = ? WHERE id = ?'
+          ).bind(update.title, update.notes, update.image_url, update.site_name, link.id).run();
+        }
+        // Best effort on GitHub storage: the .md entry catches up with the row.
+        await storeMutateLink(env, scope, key, link.id, update);
+      } catch (_) { /* one bad link must not stall the rest */ }
+    }
+  };
+  await Promise.all(Array.from({ length: CONCURRENCY }, run));
+}
+
+function runInBackground(env, promise) {
+  if (env.__ctx?.waitUntil) env.__ctx.waitUntil(promise);
+  else Promise.resolve(promise).catch(() => {});
 }
