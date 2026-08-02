@@ -354,6 +354,83 @@ export async function readAll(store, folder, cache = null) {
 }
 
 /**
+ * Append a batch of links with ONE write per file (a bulk dump used to mean
+ * one GitHub commit per link — hundreds of commits and minutes of wall time).
+ * Entries are chunked at MAX_FILE_BYTES; conflicts re-read and retry like
+ * appendLink so concurrent Telegram dumps stay safe.
+ */
+export async function appendLinks(store, folder, links, { heading, maxRetries = 5 } = {}) {
+  const entries = links.map(renderLinkEntry);
+  const totalBytes = entries.reduce((n, e) => n + e.length + 2, 0);
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const files = await store.listFolder(folder);
+    const last = files.length ? files[files.length - 1] : null;
+    const lastIndex = last ? indexOfFile(last.name) : 0;
+
+    if (last && (last.size || 0) + totalBytes <= MAX_FILE_BYTES) {
+      const current = await store.readFile(last.path);
+      if (!current) continue;
+      const body = `${current.content.replace(/\s*$/, '')}\n\n${entries.join('\n\n')}\n`;
+      const res = await store.writeFile(last.path, body, {
+        sha: current.sha,
+        message: `athena: add ${links.length} links`,
+      });
+      if (res.ok) return { ok: true, path: last.path, created: false, count: links.length };
+      if (res.status === 409 || res.status === 422) {
+        await sleep(150 * (attempt + 1));
+        continue;
+      }
+      return { ok: false, error: res.body?.message || `HTTP ${res.status}` };
+    }
+
+    // Batch does not fit the current file: chunk it across fresh files. Probe
+    // each target path first — GitHub's directory listing lags commits, so the
+    // "next" file may already exist from a concurrent writer. Each chunk
+    // retries on its OWN path (merge-append), so a conflict never duplicates.
+    const chunks = [];
+    let chunk = [];
+    let chunkSize = 0;
+    for (let i = 0; i < links.length; i++) {
+      const entrySize = entries[i].length + 2;
+      if (chunk.length && chunkSize + entrySize > MAX_FILE_BYTES) { chunks.push(chunk); chunk = []; chunkSize = 0; }
+      chunk.push(i);
+      chunkSize += entrySize;
+    }
+    if (chunk.length) chunks.push(chunk);
+
+    let idx = lastIndex + 1;
+    for (const part of chunks) {
+      const path = `${folder}/${fileName(idx)}`;
+      const partLinks = part.map((i) => links[i]);
+      const partEntries = part.map((i) => entries[i]);
+      let done = false;
+      for (let retry = 0; retry < maxRetries; retry++) {
+        const preexisting = await store.readFile(path);
+        const res = preexisting
+          ? await store.writeFile(path, `${preexisting.content.replace(/\s*$/, '')}\n\n${partEntries.join('\n\n')}\n`, {
+              sha: preexisting.sha,
+              message: `athena: add ${part.length} links`,
+            })
+          : await store.writeFile(path, renderLinksMarkdown(partLinks, { heading, fileIndex: idx }), {
+              message: `athena: add ${part.length} links`,
+            });
+        if (res.ok) { done = true; break; }
+        if (res.status === 409 || res.status === 422) {
+          await sleep(150 * (retry + 1));
+          continue;
+        }
+        return { ok: false, error: res.body?.message || `HTTP ${res.status}` };
+      }
+      if (!done) return { ok: false, error: 'Could not commit after repeated conflicts — try again' };
+      idx += 1;
+    }
+    return { ok: true, count: links.length };
+  }
+  return { ok: false, error: 'Could not commit after repeated conflicts — try again' };
+}
+
+/**
  * Append a link, rolling to a new file when the current one is full.
  *
  * GitHub's Contents API is read-modify-write against a file sha, so two

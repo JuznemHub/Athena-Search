@@ -2231,6 +2231,28 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (closeDrawerBtn) closeDrawerBtn.addEventListener('click', closeDrawer);
     if (drawerOverlay) drawerOverlay.addEventListener('click', closeDrawer);
+
+    const sessionTokenBtn = $('sessionTokenBtn');
+    if (sessionTokenBtn) {
+      sessionTokenBtn.addEventListener('click', async () => {
+        try {
+          const res = await fetch('/api/auth/session-token', { method: 'GET' });
+          const data = await res.json();
+          if (!res.ok || !data?.token) {
+            showToast('Login required to copy a session token', true);
+            return;
+          }
+          if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(data.token);
+          } else {
+            prompt('Session token (for athena-tui):', data.token);
+          }
+          showToast('Session token copied — paste it into athena-tui');
+        } catch {
+          showToast('Could not reach the server', true);
+        }
+      });
+    }
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') closeDrawer();
     });

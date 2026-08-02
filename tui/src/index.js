@@ -259,26 +259,57 @@ async function stepDump() {
   if (!ok) { stderr(theme.dim('Cancelled.\n')); return false; }
 
   stderr(HIDE_CURSOR);
-  let added = 0, dupes = 0, failed = 0, sent = 0;
   const total = clean.length;
+  let added = 0, dupes = 0, failed = 0;
   const errors = [];
-  for (const link of clean) {
-    const payload = { url: link.url, ...(link.title ? { title: link.title.slice(0, 200) } : {}), ...(link.tags?.length ? { tags: link.tags.slice(0, 10) } : {}) };
-    try {
-      if (target === 'personal') await client.postPersonalLink(payload);
-      else await client.postLink({ ...payload, community_id: state.community_id });
-      added += 1;
-    } catch (e) {
-      if (e instanceof ApiError && /EXISTS|DUPLICATE/i.test(e.type)) dupes += 1;
-      else {
-        failed += 1;
-        if (errors.length < 5) errors.push(`${e.type || e.message}: ${link.url}`);
-        if (/NON_MEMBER|LOCKED|UNAUTHORIZED/i.test(e.type)) { break; }
-      }
+  const payloads = clean.map((link) => ({
+    url: link.url,
+    ...(link.title ? { title: link.title.slice(0, 200) } : {}),
+    ...(link.tags?.length ? { tags: link.tags.slice(0, 10) } : {}),
+  }));
+
+  // Preferred path: one request for the whole batch (worker writes D1 and the
+  // GitHub folder in a single commit). Older instances without the batch
+  // endpoint fall back to per-link POSTs.
+  let batchSkipped = false;
+  try {
+    const res = target === 'personal'
+      ? await client.postPersonalLinksBatch(payloads)
+      : await client.postLinksBatch(payloads, state.community_id);
+    if (!res || typeof res.total !== 'number') throw new ApiError('batch unsupported', 'HTTP_404', 404);
+    added = res.added || 0;
+    dupes = res.dupes || 0;
+    failed = res.failed?.length || 0;
+    stderr(ERASE_EOL + `\r${theme.accent(added)} added · ${theme.dim(dupes)} dupes · ${theme.danger(failed)} failed — ${total}/${total}`);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) {
+      batchSkipped = true; // instance predates the batch endpoint
+    } else {
+      errors.push(e.message);
+      failed = total;
     }
-    sent += 1;
-    if (sent % 5 === 0 || sent === total) {
-      stderr(ERASE_EOL + `\r${theme.accent(added)} added · ${theme.dim(dupes)} dupes · ${theme.danger(failed)} failed — ${sent}/${total}`);
+  }
+
+  if (batchSkipped) {
+    // Fall back to the old per-link loop — still works everywhere.
+    let sent = 0;
+    for (const payload of payloads) {
+      try {
+        if (target === 'personal') await client.postPersonalLink(payload);
+        else await client.postLink({ ...payload, community_id: state.community_id });
+        added += 1;
+      } catch (e) {
+        if (e instanceof ApiError && /EXISTS|DUPLICATE/i.test(e.type)) dupes += 1;
+        else {
+          failed += 1;
+          if (errors.length < 5) errors.push(`${e.type || e.message}: ${payload.url}`);
+          if (/NON_MEMBER|LOCKED|UNAUTHORIZED/i.test(e.type)) { break; }
+        }
+      }
+      sent += 1;
+      if (sent % 5 === 0 || sent === total) {
+        stderr(ERASE_EOL + `\r${theme.accent(added)} added · ${theme.dim(dupes)} dupes · ${theme.danger(failed)} failed — ${sent}/${total}`);
+      }
     }
   }
   stderr('\n\n');
