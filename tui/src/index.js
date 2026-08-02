@@ -181,7 +181,7 @@ async function stepScan() {
     all.push(...links);
   }
   const unique = dedupe(all);
-  state.scanned = { count: unique.length, folders: [...new Set(unique.flatMap((l) => l.tags || []))].slice(0, 6), time: Date.now() };
+  state.scanned = { count: unique.length, folders: [...new Set(unique.flatMap((l) => l.tags || []))].slice(0, 6), time: Date.now(), sources };
   saveConfig(state);
   await renderHeader(false);
   stderr(center(theme.bold('Bookmarks found'), columns()) + '\n\n');
@@ -229,7 +229,9 @@ async function stepDump() {
     return false;
   }
 
-  const sources = detectBookmarks();
+  // Dump the same sources that were scanned; fall back to a fresh detection
+  // only when the scan state was lost (e.g. old config file).
+  const sources = state.scanned?.sources?.length ? state.scanned.sources : detectBookmarks();
   const all = [];
   for (const src of sources) {
     const links = await withSpinner(io, theme, `Reading ${src.name}…`, () => loadBookmarks(src));
@@ -237,7 +239,7 @@ async function stepDump() {
   }
   const unique = dedupe(all);
   if (!unique.length) { stderr(theme.danger('No bookmarks found locally.\n')); return false; }
-  state.scanned = { count: unique.length, time: Date.now() };
+  state.scanned = { ...state.scanned, count: unique.length, time: Date.now() };
   saveConfig(state);
 
   await renderHeader(false);

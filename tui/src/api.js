@@ -12,15 +12,24 @@ function normalize(url) {
   return url.replace(/\/+$/, '');
 }
 
-async function request(base, path, { method = 'GET', body, token } = {}) {
-  const res = await fetch(`${normalize(base)}${path}`, {
-    method,
-    headers: {
-      'content-type': 'application/json',
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+async function request(base, path, { method = 'GET', body, token, timeout = 15_000 } = {}) {
+  let res;
+  try {
+    res = await fetch(`${normalize(base)}${path}`, {
+      method,
+      headers: {
+        'content-type': 'application/json',
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(timeout),
+    });
+  } catch (e) {
+    if (e?.name === 'TimeoutError' || e?.name === 'AbortError') {
+      throw new ApiError('The server did not respond (request timed out).', 'TIMEOUT', 0);
+    }
+    throw e;
+  }
   let data = null;
   try { data = await res.json(); } catch { /* non-JSON body */ }
   if (!res.ok) {

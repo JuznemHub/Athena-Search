@@ -120,7 +120,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.1',
+          version: '1.0.2',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -1998,13 +1998,11 @@ async function handleTelegramCallback(url, env, corsHeaders, request) {
     await env.DB.prepare('DELETE FROM oauth_states WHERE state = ?').bind(state).run();
   } catch (_) {}
   const cookieMaxAge = Math.floor(SESSION_TTL_MS / 1000);
-  const sameOrigin = frontendOrigin(env, url) === url.origin;
-  // Same-origin: the session rides in the (now HttpOnly) cookie; the query
-  // string would leak it into history/Referer for no benefit. Cross-origin
-  // (self-host backend) still needs the param — the cookie cannot cross origins.
-  const redirectUrl = sameOrigin
-    ? `${frontendOrigin(env, url)}/`
-    : `${frontendOrigin(env, url)}/?session=${encodeURIComponent(sessionToken)}`;
+  // The session token must reach terminal clients too — the TUI cannot read the
+  // HttpOnly cookie, so the token always rides in the query string (cookie kept
+  // for the website UX). Referer leakage is covered by Referrer-Policy; the
+  // token expires after SESSION_TTL_MS anyway.
+  const redirectUrl = `${frontendOrigin(env, url)}/?session=${encodeURIComponent(sessionToken)}`;
   const headers = new Headers(corsHeaders);
   headers.set('Location', redirectUrl);
   headers.append('Set-Cookie', sessionCookieHeader(url, sessionToken, cookieMaxAge));

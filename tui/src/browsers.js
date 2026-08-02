@@ -68,7 +68,9 @@ function browserCandidates() {
   if (fs.existsSync(firefoxProfiles)) {
     try {
       for (const dir of fs.readdirSync(firefoxProfiles)) {
-        if (dir.endsWith('.default') || dir.endsWith('-release')) {
+        // Any profile dir that actually contains places.sqlite: .default,
+        // -release, -esr, -dev-edition, or a custom name.
+        if (fs.existsSync(path.join(firefoxProfiles, dir, 'places.sqlite'))) {
           out.push([`Firefox · ${dir}`, path.join(firefoxProfiles, dir)]);
         }
       }
@@ -81,8 +83,12 @@ function browserCandidates() {
 export function detectBookmarks() {
   const found = [];
   for (const [name, file] of browserCandidates()) {
-    if (file && (fs.existsSync(file) || file.endsWith('places.sqlite'))) {
-      found.push({ name, file, kind: /places\.sqlite$/.test(file) ? 'firefox' : 'chromium' });
+    if (!file) continue;
+    // Firefox candidates are profile directories containing places.sqlite;
+    // Chromium candidates are the Bookmarks JSON files themselves.
+    const isFirefox = file.endsWith('places.sqlite') || fs.existsSync(path.join(file, 'places.sqlite'));
+    if (isFirefox || fs.existsSync(file)) {
+      found.push({ name, file, kind: isFirefox ? 'firefox' : 'chromium' });
     }
   }
   return found;
