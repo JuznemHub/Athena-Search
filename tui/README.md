@@ -25,7 +25,31 @@ npm install -g athena-tui
 athena-tui
 ```
 
-From the repo checkout:
+Prefer a longer name? `athenasearch-tui` is an alias package that installs
+the same CLI (`athenasearch-tui` and `athena-tui` commands both work):
+
+```sh
+npm install -g athenasearch-tui
+```
+
+### Setup
+
+> First-time? Just press **1–5** in order — the menu is the whole app.
+> Every step can be re-run anytime; `q` quits.
+
+1. **1 Connect instance** — paste your instance URL (`https://athena.example.org`) — or skip the prompt with `ATHENA_INSTANCE` env.
+2. **2 Login with Telegram** — your browser opens the site's login page;
+   log in, then paste the address-bar URL (or the `session=` token) back
+   into the terminal.
+3. **3 Join community** — paste the community id from your GOD (skip this if
+   you only use your personal brain as GOD).
+4. **4 Scan bookmarks** — pick all detected browsers, one browser, or an
+   export file.
+5. **5 Dump bookmarks** — GODs pick *personal* or *community* brain; others
+   dump to their community. Server-side dedupe is handled (skips reported),
+   folder paths become tags.
+
+From the repo checkout (instead of npm):
 
 ```sh
 cd tui
@@ -33,27 +57,7 @@ npm install       # no-op — zero deps, just links the `athena-tui` bin
 npm start
 ```
 
-Or run it without installing, straight from the checkout:
-
-```sh
-node tui/src/index.js
-```
-
-## Flow (step by step)
-
-1. **Connect instance** — paste your GOD's instance URL (or set `ATHENA_INSTANCE`).
-2. **Login with Telegram** — the TUI opens the site's login page in your
-   browser; log in there, then paste the address-bar URL (or the `session=`
-   token) back into the terminal.
-3. **Join community** — paste the community id from your GOD.
-4. **Scan bookmarks** — pick a source: all detected browsers, one browser,
-   or a `bookmarks.html`/JSON export file.
-5. **Dump bookmarks** — GODs choose the *personal brain* or the *community
-   brain*; everyone else dumps to their community. Server-side dedupe is
-   handled (skips are reported), folder paths become tags.
-
-> First-time? Just press **1–5** in order — the menu is the whole app.
-> Every step can be re-run anytime; `q` quits.
+Or run it directly: `node tui/src/index.js`
 
 ## Features
 

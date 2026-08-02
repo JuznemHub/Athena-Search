@@ -142,7 +142,17 @@ npm install -g athena-tui
 athena-tui
 ```
 
-Flow: **1** connect instance → **2** login with Telegram → **3** join community → **4** scan bookmarks → **5** dump (GODs pick personal or community brain). Detects Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Arc, and Firefox bookmarks automatically.
+Prefer a longer name? `athenasearch-tui` is an alias package for the same CLI.
+
+**Setup** — the menu is the whole app, just press in order:
+
+1. **1** Connect instance — paste your instance URL
+2. **2** Login with Telegram — browser opens the site login; paste the address-bar URL (or `session=` token) back
+3. **3** Join community — paste the community id from your GOD (skip if personal-brain only)
+4. **4** Scan bookmarks — all detected browsers, one browser, or an export file
+5. **5** Dump bookmarks — GODs pick *personal* or *community* brain; others dump to their community
+
+Detects Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Arc, and Firefox bookmarks automatically.
 
 Full docs in [`tui/README.md`](tui/README.md).
 

@@ -1,12 +1,11 @@
 {
-  "name": "athena-tui",
+  "name": "athenasearch-tui",
   "version": "1.0.0",
-  "description": "Terminal UI for Athena Search — dump your browser bookmarks into your Athena brain from the command line.",
+  "description": "Alias for athena-tui — Terminal UI for Athena Search (dump browser bookmarks into your Athena brain).",
   "type": "module",
-  "main": "src/index.js",
   "engines": { "node": ">=22" },
-  "bin": { "athena-tui": "src/index.js" },
-  "files": ["src", "README.md"],
+  "bin": { "athenasearch-tui": "cli.js", "athena-tui": "cli.js" },
+  "files": ["cli.js"],
   "keywords": ["athena", "athena-search", "bookmarks", "telegram", "cli", "tui", "second-brain"],
   "license": "CC-BY-NC-4.0",
   "repository": {
@@ -14,8 +13,5 @@
     "url": "https://github.com/JuznemHub/Athena-Search.git"
   },
   "homepage": "https://github.com/JuznemHub/Athena-Search/tree/master/tui",
-  "scripts": {
-    "start": "node src/index.js",
-    "test": "node smoke.mjs && node e2e.mjs"
-  }
+  "dependencies": { "athena-tui": "^1.0.0" }
 }
