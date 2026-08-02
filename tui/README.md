@@ -72,8 +72,9 @@ npm install -g athenasearch-tui
    into the terminal.
 3. **3 Join community** — paste the community id from your GOD (skip this if
    you only use your personal brain as GOD).
-4. **4 Scan bookmarks** — pick all detected browsers, one browser, or an
-   export file.
+4. **4 Scan bookmarks** — scans every browser profile found locally at once
+   (Chrome/Chromium/Edge/Brave/Opera/Vivaldi/Arc/Firefox); if none are found it
+   asks for an HTML/JSON export file.
 5. **5 Dump bookmarks** — GODs pick *personal* or *community* brain; others
    dump to their community. Server-side dedupe is handled (skips reported),
    folder paths become tags.

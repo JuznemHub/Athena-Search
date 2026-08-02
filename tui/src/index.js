@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // Athena Search TUI — dump your browser bookmarks into your Athena brain.
 
-import path from 'node:path';
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 
@@ -150,30 +149,16 @@ async function stepJoinCommunity() {
   }
 }
 
-async function pickBookmarkSource() {
-  const found = detectBookmarks();
-  const items = [
-    { label: 'All detected browsers', hint: found.length ? `${found.length} found` : 'none yet' },
-    ...found.map((f) => ({ label: f.name, hint: path.basename(f.file) })),
-    { label: 'Bookmarks export file', hint: 'HTML or JSON' },
-  ];
-  const pick = await menu(io, theme, { title: 'Scan bookmarks — where from?', items, width: columns() });
-  if (pick === null) return null;
-  if (pick === 0) return found;
-  if (pick === items.length - 1) {
-    await renderHeader(false);
-    const file = await prompt('Path to export file', { hint: '/path/to/bookmarks.html' });
-    return [{ name: 'Export file', file, kind: 'export' }];
-  }
-  return [found[pick - 1]];
-}
-
 async function stepScan() {
   if (!state.token) { stderr(theme.danger('Login first.\n')); return false; }
-  const sources = await pickBookmarkSource();
-  if (sources === null || sources.length === 0) {
-    stderr(theme.danger('No bookmark sources selected.\n'));
-    return false;
+  // gosuki-style: scan every browser profile found locally, no picking.
+  let sources = detectBookmarks();
+  if (sources.length === 0) {
+    stderr(theme.danger('No browsers detected — give a bookmarks export file (HTML or JSON) instead.\n'));
+    await renderHeader(false);
+    const file = await prompt('Path to export file', { hint: '/path/to/bookmarks.html' });
+    if (!file) { stderr(theme.dim('Cancelled.\n')); return false; }
+    sources = [{ name: 'Export file', file, kind: 'export' }];
   }
   const all = [];
   for (const src of sources) {
@@ -187,6 +172,7 @@ async function stepScan() {
   stderr(center(theme.bold('Bookmarks found'), columns()) + '\n\n');
   const lines = [
     `${theme.accent(String(unique.length))} unique bookmarks`,
+    ...sources.map((s) => theme.dim('◦ ' + s.name)),
     ...(state.scanned.folders.length ? ['', ...state.scanned.folders.map((f) => theme.dim('📁 ' + f))] : []),
   ];
   stderr(box(lines, theme).join('\n') + '\n');

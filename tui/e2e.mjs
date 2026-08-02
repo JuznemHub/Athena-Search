@@ -59,11 +59,8 @@ await sleep(600);
 keys('7\n');                   // community id 7
 console.log('> id');
 await sleep(800);
-keys('4');                     // Scan bookmarks
+keys('4');                     // Scan bookmarks (auto-detects all browsers)
 console.log('> scan');
-await sleep(600);
-keys('\n');                    // All detected browsers
-console.log('> source');
 await sleep(1500);
 keys('\n');                    // continue
 console.log('> continue');
