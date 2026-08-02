@@ -10,7 +10,7 @@
   "license": "CC-BY-NC-4.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/JuznemHub/Athena-Search.git"
+    "url": "git+https://github.com/JuznemHub/Athena-Search.git"
   },
   "homepage": "https://github.com/JuznemHub/Athena-Search/tree/master/tui",
   "dependencies": { "athena-tui": "^1.0.0" }
