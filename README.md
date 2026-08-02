@@ -378,12 +378,12 @@ Browser/Telegram → Worker or Node server → D1 | GitHub (+D1 cache) | Postgre
 ## A Note
 
 > [!NOTE]
-> Athena started as a personal second brain — one search bar over my own notes — and grew into a proper project: a Cloudflare Worker that also runs self-hosted on Node, a Telegram bot, RAG-based AI search, and a zero-build frontend. It's linted, versioned, and checked by CI on every PR; changes go through code review before they land.
+> Athena started as a personal second brain, one search bar over my own notes and grew into a proper project: a Cloudflare Worker that also runs self-hosted on Node, a Telegram bot, RAG-based AI search, and a zero-build frontend. It's linted, versioned, and checked by CI on every PR; changes go through code review before they land. By its nature its vibe coded but I try to take help of my friends who are good at coding and trying to make this better. 
 >
-> Built with the help of [OpenCode](https://opencode.ai), ChatGPT, and Claude. I'm a student on a tight budget, and their accessible tooling made this possible.
+> Built with the help of [OpenCode](https://opencode.ai), [ChatGPT](https://chatgpt.com/), and [Claude](https://claude.ai/). I'm a student on a tight budget, and their accessible tooling made this possible.
 
 > [!NOTE]
-> If you find this useful, consider giving it a star or sharing it — and if you hit a bug or want a feature, issues and PRs are welcome.
+> If you find this useful, consider giving it a star or sharing it. And if you hit a bug or want a feature, issues and PRs are welcome.
 >
 > Aaron Swartz's thoughts and ideas have deeply shaped who I am. Long live.
 
