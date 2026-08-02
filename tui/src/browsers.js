@@ -107,7 +107,7 @@ export async function loadBookmarks(source) {
 /** Strip markup from bookmark titles/folder names (incl. unterminated tags). */
 function sanitizeText(s) {
   const out = String(s || '') // codeql[js/incomplete-multi-character-sanitization] — every '<', '>' and entity form is dropped below
-    .replace(/&(lt|gt|quot|amp|#0*39|#x0*3[cC]);/gi, '')
+    .replace(/&(lt|gt|quot|amp|#\d+|#x[0-9a-f]+);/gi, '')
     .replace(/<[^>]*>?/g, '')
     .replace(/</g, '');
   return out.trim();
