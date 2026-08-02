@@ -74,6 +74,17 @@ const env = {
 
 const ctx = { waitUntil(p) { Promise.resolve(p).catch(() => {}); }, passThroughOnException() {} };
 
+// Forwarded client-IP headers are only trustworthy coming from our own reverse
+// proxy; a direct caller could otherwise spoof one per request and get a fresh
+// rate-limit bucket. Defaults to loopback (nginx/caddy on this box).
+const TRUSTED_PROXIES = new Set(
+  (process.env.TRUSTED_PROXY_IPS || '127.0.0.1,::1')
+    .split(',').map(s => s.trim()).filter(Boolean).map(normalizeIp)
+);
+function normalizeIp(ip) {
+  return String(ip || '').replace(/^::ffff:/, '');
+}
+
 // --- node http -> web Request -> Worker -> node response ------------------
 function nodeToRequest(req) {
   const proto = req.headers['x-forwarded-proto'] || 'http';
@@ -84,10 +95,14 @@ function nodeToRequest(req) {
     if (Array.isArray(v)) v.forEach(x => headers.append(k, x));
     else if (v != null) headers.set(k, String(v));
   }
-  // Without a reverse proxy nothing carries the client IP, so clientIp() in the
-  // Worker returns '' and every caller shares one rate-limit bucket.
-  if (!headers.has('x-forwarded-for') && req.socket?.remoteAddress) {
-    headers.set('x-forwarded-for', req.socket.remoteAddress);
+  // Behind a trusted proxy the forwarded headers are authoritative. From anyone
+  // else they are attacker input: replace them with the real peer address so
+  // clientIp() in the Worker cannot be steered.
+  const peer = normalizeIp(req.socket?.remoteAddress);
+  if (!TRUSTED_PROXIES.has(peer)) {
+    headers.delete('cf-connecting-ip');
+    if (peer) headers.set('x-forwarded-for', peer);
+    else headers.delete('x-forwarded-for');
   }
   return { url, headers };
 }
@@ -127,7 +142,12 @@ const server = http.createServer(async (req, res) => {
         res.end();
         return;
       } catch (e) {
-        console.error('[athena] stream relay failed, falling back to buffer:', e.message);
+        // No buffered retry: bytes are already on the wire, and the body is
+        // consumed. Kill the connection so the client sees a truncated stream
+        // instead of JSON appended to half an SSE response.
+        console.error('[athena] stream relay failed:', e.message);
+        res.destroy();
+        return;
       }
     }
     const buf = Buffer.from(await response.arrayBuffer());

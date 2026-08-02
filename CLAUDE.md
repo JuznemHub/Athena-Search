@@ -121,6 +121,8 @@ Each one below is a bug that shipped or nearly shipped. Full history: `docs/secu
 
 - **Per-request credential overrides are a paired, rank-gated set.** Never let a request supply `baseUrl` and inherit the stored `apiKey` — that delivers the instance key to an attacker's host. `handleAiChatProxy` 403s a partial or non-GOD override; `public/src/lib/ai.js` must stay aligned (`window.athenaIsGod`) or non-GOD users hit that 403.
 
+- **`clientIp()` is only as trustworthy as the hop that set it.** `nodeToRequest` (`server/index.js`) keeps `X-Forwarded-For` / `CF-Connecting-IP` only when the socket peer is in `TRUSTED_PROXY_IPS` (default loopback); a direct caller gets its socket address forced in, else it rotates the header to mint a fresh rate-limit bucket per request.
+
 - **Self-host `env` is an allowlist.** Reading a new `env.FOO` in `worker/index.js` requires adding `FOO` to `ALLOWED_ENV` in `server/index.js`. Miss it and the var is silently `undefined` under Node while working fine on Workers.
 
 - **Nothing goes on `window` beyond what a library needs.** `public/` shares globals by design, so an added export widens XSS reach — a handle on `state` exposes `sessionToken`.
