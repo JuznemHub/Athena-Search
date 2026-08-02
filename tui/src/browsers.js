@@ -104,6 +104,14 @@ export async function loadBookmarks(source) {
   throw new ApiError('Unrecognized bookmark file (expected .json, .html, or places.sqlite).', 'BAD_FILE');
 }
 
+/** Strip markup from bookmark titles/folder names (incl. unterminated tags). */
+function sanitizeText(s) {
+  return String(s || '')
+    .replace(/<\/?[^>]*>/g, '')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&quot;/g, '"')
+    .trim();
+}
+
 /** Minimal Netscape bookmarks.html parser (export fallback). Folders via <DL>. */
 export function parseHtmlExport(html) {
   const out = [];
@@ -115,14 +123,14 @@ export function parseHtmlExport(html) {
     if (/^<A\b/i.test(full)) {
       const attrs = m[2];
       const href = /HREF="([^"]*)"/i.exec(attrs)?.[1] || /HREF='([^']*)'/i.exec(attrs)?.[1];
-      const text = m[3].replace(/<[^>]+>/g, '').trim();
+      const text = sanitizeText(m[3]);
       if (href && isHttp(href)) out.push({ url: href, title: text, tags: stack.slice() });
     } else if (/^<\/DL/i.test(full)) {
       stack.pop();
     } else if (full.toLowerCase().startsWith('<h3')) {
       const rest = html.slice(re.lastIndex);
       const end = rest.search(/<\/H3>/i);
-      const name = (end === -1 ? rest : rest.slice(0, end)).replace(/<[^>]+>/g, '').trim();
+      const name = sanitizeText(end === -1 ? rest : rest.slice(0, end));
       stack.push(name);
     }
   }

@@ -29,7 +29,7 @@ const server = http.createServer((req, res) => {
     }
     if (req.url === '/api/links' && req.method === 'POST') {
       const p = JSON.parse(raw);
-      if (p.url.includes('dupe.com')) return send(409, { error: { type: 'ALREADY_EXISTS', message: 'already known' } });
+      if (new URL(p.url).hostname === 'dupe.example') return send(409, { error: { type: 'ALREADY_EXISTS', message: 'already known' } });
       return send(200, { link: { id: 1 } });
     }
     if (req.url === '/api/personal-links' && req.method === 'POST') {
@@ -55,7 +55,7 @@ try { await client.joinCommunity('999'); } catch (e) { caught = e; }
 ok('join 404 error', caught?.type === 'NOT_FOUND' && caught?.status === 404);
 ok('post link', (await client.postLink({ community_id: 7, url: 'https://a.com' })).link.id === 1);
 caught = null;
-try { await client.postLink({ community_id: 7, url: 'https://dupe.com' }); } catch (e) { caught = e; }
+try { await client.postLink({ community_id: 7, url: 'https://dupe.example/' }); } catch (e) { caught = e; }
 ok('dupe 409', caught?.type === 'ALREADY_EXISTS' && caught?.status === 409);
 ok('personal link', (await client.postPersonalLink({ url: 'https://p.com' })).link.id === 2);
 caught = null;
@@ -85,9 +85,11 @@ try {
   ok('dedupe', dedupe(links).length === 2 && dedupe(links.concat(links)).length === 2);
 
   const html = path.join(dir, 'export.html');
-  writeFileSync(html, `<DL><p><DT><H3>Dev</H3><DL><p><DT><A HREF="https://ex.org">Ex</A></DL><p><DT><A HREF="https://plain.org">Plain</A></DL>`);
+  writeFileSync(html, `<DL><p><DT><H3>Dev</H3><DL><p><DT><A HREF="https://ex.org">Ex</A></DL><p><DT><A HREF="https://plain.org">Plain</A></DL><p><DT><A HREF="https://xss.org"><script>alert(1)</script>Evil<img src=x></A>`);
   const htmlLinks = await loadBookmarks({ kind: 'export', file: html });
-  ok('html export', htmlLinks.length === 2 && htmlLinks.find((l) => l.url === 'https://ex.org')?.tags?.[0] === 'Dev');
+  ok('html export', htmlLinks.length === 3 && htmlLinks.find((l) => l.url === 'https://ex.org')?.tags?.[0] === 'Dev');
+  const xss = htmlLinks.find((l) => l.url === 'https://xss.org');
+  ok('html title sanitized', xss?.title === 'alert(1)Evil' && !xss.title.includes('<'));
 
   const detected = detectBookmarks();
   console.log(`INFO detected: ${detected.length}`);
