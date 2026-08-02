@@ -48,20 +48,37 @@ try {
 }
 
 // --- env handed to the Worker --------------------------------------------
+// Explicit allowlist — passing process.env wholesale means any future
+// debug/introspection endpoint would leak every variable (secrets included).
+// Exactly the vars worker/index.js reads: anything only this file or backup.js
+// needs (GDRIVE_*, CF_*, PORT, …) stays in process.env and never crosses over.
+const ALLOWED_ENV = [
+  'DATABASE_URL', 'ATHENA_RUNTIME', 'ATHENA_FRONTEND_URL',
+  'TG_OWNER_IDS', 'DISCORD_OWNER_IDS',
+  'TELEGRAM_CLIENT_ID', 'TELEGRAM_CLIENT_SECRET', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_WEBHOOK_SECRET',
+  'TELEGRAM_OAUTH_REDIRECT_BASE', 'STORAGE_KEY',
+  'DISCORD_CLIENT_ID', 'DISCORD_CLIENT_SECRET',
+  'BACKUP_TELEGRAM_TOKEN', 'BACKUP_TELEGRAM_CHAT_ID', 'GDRIVE_CLIENT_ID',
+  'OAUTH_RELAY_BACKEND',
+];
+const allowedEnv = {};
+for (const k of ALLOWED_ENV) {
+  if (process.env[k] !== undefined) allowedEnv[k] = process.env[k];
+}
 const env = {
-  ...process.env,
+  // Self-host default matches the Worker's: empty owner lists mean the first
+  // logged-in user is GOD. Set TG_OWNER_IDS to lock that down.
+  TG_OWNER_IDS: '',
+  DISCORD_OWNER_IDS: '',
+  // This box is a BACKEND. The user is looking at the Cloudflare-hosted site, so
+  // OAuth must hand the browser back there rather than to this origin. It still
+  // serves the UI as a fallback for running fully standalone.
+  ATHENA_FRONTEND_URL: '',
+  ...allowedEnv,
   DB,
   ASSETS: createAssets(ASSETS_DIR),
   // Tells the Worker it is not on Cloudflare: local SQLite only, no GitHub store.
   ATHENA_RUNTIME: 'selfhost',
-  // This box is a BACKEND. The user is looking at the Cloudflare-hosted site, so
-  // OAuth must hand the browser back there rather than to this origin. It still
-  // serves the UI as a fallback for running fully standalone.
-  ATHENA_FRONTEND_URL: process.env.ATHENA_FRONTEND_URL || '',
-  // Self-host default matches the Worker's: empty owner lists mean the first
-  // logged-in user is GOD. Set TG_OWNER_IDS to lock that down.
-  TG_OWNER_IDS: process.env.TG_OWNER_IDS || '',
-  DISCORD_OWNER_IDS: process.env.DISCORD_OWNER_IDS || '',
   // Expose backup function for the Worker's /backup command
   runBackup: () => runBackupOnce({ connectionString: DATABASE_URL, env: process.env, db: DB }),
 };

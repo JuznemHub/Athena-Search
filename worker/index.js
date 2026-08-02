@@ -21,15 +21,89 @@ const PUBLIC_API = new Set([
   '/api/instance/config',
 ]);
 
+/**
+ * Security headers added to every response (API + static).
+ * No X-Frame-Options: it cannot express an allowlist, and Telegram Web runs the
+ * Mini App inside an iframe — frame-ancestors covers framing for every browser
+ * that matters and keeps that login path working.
+ */
+function securityHeaders() {
+  return {
+    'Referrer-Policy': 'no-referrer',
+    'X-Content-Type-Options': 'nosniff',
+    'Content-Security-Policy': "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' https://telegram.org 'unsafe-inline'; connect-src 'self' https:; frame-ancestors https://web.telegram.org https://telegram.org",
+  };
+}
+
+/**
+ * In-memory sliding-window rate limiter (per worker instance; resets on
+ * redeploy). `limit` events per `windowMs` per key. Callers pass an explicit
+ * key (IP + user id where available). Not a substitute for an edge rate limit,
+ * but closes the obvious abuse paths: paid upstream calls (/api/ai/chat),
+ * outbound fetch amplification (link scraper), and OAuth state churn.
+ */
+const RATE_WINDOWS = new Map();
+const RATE_MAX_KEYS = 10_000;
+const RATE_SWEEP_MS = 60_000;
+let rateSweptAt = 0;
+function rateLimit(key, limit, windowMs) {
+  if (!key) return false;
+  const now = Date.now();
+  // Keys are per-IP, so an unbounded map is a slow leak on a long-lived
+  // self-host process. Sweep expired windows once the map gets large, at most
+  // once a minute so a flood of live keys cannot make every call a full scan.
+  if (RATE_WINDOWS.size > RATE_MAX_KEYS && now - rateSweptAt > RATE_SWEEP_MS) {
+    rateSweptAt = now;
+    for (const [k, v] of RATE_WINDOWS) {
+      if (v.windowEnd < now) RATE_WINDOWS.delete(k);
+    }
+  }
+  let w = RATE_WINDOWS.get(key);
+  if (!w || w.windowEnd < now) {
+    w = { windowEnd: now + windowMs, count: 0 };
+    RATE_WINDOWS.set(key, w);
+  }
+  w.count += 1;
+  return w.count > limit;
+}
+function clientIp(request) {
+  const cf = request?.headers?.get('CF-Connecting-IP');
+  if (cf) return cf;
+  const fwd = request?.headers?.get('X-Forwarded-For') || '';
+  if (fwd) return fwd.split(',')[0].trim();
+  return '';
+}
+
+/**
+ * Allowed cross-origin callers for API responses. Wildcard is not usable with
+ * credentialed requests and lets any origin read public endpoints. Restrict to
+ * the configured frontend + the request's own origin; the self-hosted backend
+ * is reached cross-origin, so its configured frontend must stay allowed.
+ */
+function corsAllowedOrigin(env, request) {
+  const own = request?.url ? new URL(request.url).origin : '';
+  const configured = String(env.ATHENA_FRONTEND_URL || '').trim().replace(/\/+$/, '');
+  const allowed = new Set();
+  if (own) allowed.add(own);
+  if (configured) allowed.add(configured);
+  const origin = (request?.headers?.get('Origin') || '').trim();
+  if (origin && allowed.has(origin)) return origin;
+  return allowed.size ? [...allowed][0] : own;
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const pathname = url.pathname;
 
     const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Origin': corsAllowedOrigin(env, request),
+      // The allowed origin now varies per request; without this a cache can hand
+      // one origin's response (and its ACAO) to another.
+      'Vary': 'Origin',
       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-User-Id',
+      ...securityHeaders(),
     };
 
     if (request.method === 'OPTIONS') {
@@ -50,7 +124,6 @@ export default {
           // true once a webhook secret is resolvable; false means the bot endpoint
           // is still accepting unsigned (forgeable) updates.
           webhook_auth: !!(await webhookSecret(env)),
-          webhook_allow_unsigned: String(env.WEBHOOK_ALLOW_UNSIGNED || '') === '1',
           features: ['oidc-telegram', 'oauth-discord', 'session-auth', 'instance-owners', 'elevated-admins', 'member-community-join', 'join-requires-tg-group', 'group-presence-ban', 'personal-wipe', 'community-delete-confirm', 'tg-ban-sync', 'ai-all-ranks', 'god-ai-config', 'rank-acl', 'clear-demote', 'bot-ban-gate', 'multi-community-ban', 'live-group-scan', 'miniapp-login', 'session-cookie', 'dm-ai-search', 'live-sync', 'topic-lock-all-cmds', 'link-scrape-universal', 'bot-smart-multi-link', 'bot-topic', 'bot-edit', 'bot-token-verify', 'bot-ai', 'bot-search-delete', 'bot-personal-community-switch', 'community-verify', 'community-list', 'community-delete', 'bot-admin', 'forum-thread-replies', 'help-menu', 'tg-split-messages', 'votes-reports', 'notifications', 'd1-sync', 'telegram-bot', 'instance-default-backend', 'scoped-backups', 'rich-formatting', 'file-upload', 'accent-colors']
         }, { headers: corsHeaders });
       }
@@ -61,21 +134,30 @@ export default {
 
       // Telegram OAuth (redirect to oauth.telegram.org → callback)
       if (pathname === '/api/auth/telegram' && request.method === 'GET') {
+        if (rateLimit(`oauth:${clientIp(request)}`, 10, 60_000)) {
+          return Response.json({ success: false, error: 'Too many login attempts', code: 'RATE_LIMITED' }, { status: 429, headers: corsHeaders });
+        }
         return handleTelegramStart(url, env, corsHeaders);
       }
       if (pathname === '/api/auth/telegram/callback' && request.method === 'GET') {
-        return await handleTelegramCallback(url, env, corsHeaders);
+        return await handleTelegramCallback(url, env, corsHeaders, request);
       }
       if (pathname === '/api/auth/telegram/webapp' && request.method === 'POST') {
-        return await handleTelegramWebAppAuth(request, env, corsHeaders);
+        if (rateLimit(`webapp:${clientIp(request)}`, 10, 60_000)) {
+          return Response.json({ success: false, error: 'Too many login attempts', code: 'RATE_LIMITED' }, { status: 429, headers: corsHeaders });
+        }
+        return await handleTelegramWebAppAuth(request, env, corsHeaders, url);
       }
 
       // Discord OAuth (redirect → callback)
       if (pathname === '/api/auth/discord' && request.method === 'GET') {
-        return handleDiscordStart(url, env, corsHeaders);
+        if (rateLimit(`oauth:${clientIp(request)}`, 10, 60_000)) {
+          return Response.json({ success: false, error: 'Too many login attempts', code: 'RATE_LIMITED' }, { status: 429, headers: corsHeaders });
+        }
+        return await handleDiscordStart(url, env, corsHeaders);
       }
       if (pathname === '/api/auth/discord/callback' && request.method === 'GET') {
-        return await handleDiscordCallback(url, env);
+        return await handleDiscordCallback(url, env, request);
       }
 
       if (pathname === '/api/telegram-webhook' && request.method === 'POST') {
@@ -84,6 +166,9 @@ export default {
         // command — anyone could forge `from.id` and act as GOD.
         if (!(await webhookRequestIsAuthentic(request, env))) {
           return new Response('Forbidden', { status: 403, headers: corsHeaders });
+        }
+        if (rateLimit(`webhook:${clientIp(request)}`, 600, 60_000)) {
+          return new Response('Too Many Requests', { status: 429, headers: corsHeaders });
         }
         const update = await request.json().catch(() => null);
         if (!update) {
@@ -120,7 +205,11 @@ export default {
 
       if (pathname === '/api/auth/logout' && request.method === 'POST') {
         await destroySession(request, env);
-        return Response.json({ success: true }, { headers: corsHeaders });
+        // The session row is gone either way, but JS cannot clear an HttpOnly
+        // cookie — expire it here so the browser stops sending a dead token.
+        return Response.json({ success: true }, {
+          headers: { ...corsHeaders, 'Set-Cookie': sessionCookieHeader(url, '', 0) }
+        });
       }
 
       if (pathname === '/api/account/wipe' && request.method === 'POST') {
@@ -171,6 +260,9 @@ export default {
           return await handleGetCommunityLinks(url, user, env, corsHeaders);
         }
         if (request.method === 'POST') {
+          if (rateLimit(`scrape:${user?.id || clientIp(request)}`, 60, 60_000)) {
+            return Response.json({ success: false, error: 'Too many saves — slow down', code: 'RATE_LIMITED' }, { status: 429, headers: corsHeaders });
+          }
           return await handlePostCommunityLink(request, user, env, corsHeaders);
         }
         if (request.method === 'PATCH') {
@@ -213,6 +305,9 @@ export default {
 
       // AI chat — all ranks; credentials (config) GOD only
       if (pathname === '/api/ai/chat' && request.method === 'POST') {
+        if (rateLimit(`ai:${user?.id || clientIp(request)}`, 30, 60_000)) {
+          return Response.json({ success: false, error: 'Too many AI requests — slow down', code: 'RATE_LIMITED' }, { status: 429, headers: corsHeaders });
+        }
         return await handleAiChatProxy(request, user, env, corsHeaders);
       }
       if (pathname === '/api/ai/config') {
@@ -287,6 +382,9 @@ export default {
           return await handleGetPersonalLinks(user.id, env, corsHeaders);
         }
         if (request.method === 'POST') {
+          if (rateLimit(`scrape:${user?.id || clientIp(request)}`, 60, 60_000)) {
+            return Response.json({ success: false, error: 'Too many saves — slow down', code: 'RATE_LIMITED' }, { status: 429, headers: corsHeaders });
+          }
           return await handlePostPersonalLink(request, user.id, env, corsHeaders);
         }
         if (request.method === 'PATCH') {
@@ -329,6 +427,7 @@ export default {
   }
 };
 
+
 // ============================================================
 // Auth helpers
 // ============================================================
@@ -337,8 +436,6 @@ export default {
  * Shared secret registered with setWebhook and echoed back by Telegram in
  * X-Telegram-Bot-Api-Secret-Token. Explicit env var wins; otherwise it is derived
  * deterministically from the bot token so existing installs need no new config.
- * Set WEBHOOK_ALLOW_UNSIGNED=1 for a migration window if the webhook has not been
- * re-registered yet (insecure — remove once /api/health reports webhook_auth: true).
  */
 async function webhookSecret(env) {
   const explicit = String(env.TELEGRAM_WEBHOOK_SECRET || '').trim();
@@ -361,10 +458,9 @@ function safeEqual(a, b) {
 
 async function webhookRequestIsAuthentic(request, env) {
   const expected = await webhookSecret(env);
-  if (!expected) return String(env.WEBHOOK_ALLOW_UNSIGNED || '') === '1';
+  if (!expected) return false;
   const got = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
-  if (safeEqual(got, expected)) return true;
-  return String(env.WEBHOOK_ALLOW_UNSIGNED || '') === '1';
+  return safeEqual(got, expected);
 }
 
 function parseIdList(raw) {
@@ -1038,7 +1134,7 @@ async function isTelegramUserInCommunityGroup(env, communityId, tgUserId) {
   if (!String(bot.group_id).startsWith('-')) {
     return false;
   }
-  const token = bot.bot_token || env.TELEGRAM_BOT_TOKEN;
+  const token = (await decryptBotToken(env, bot.bot_token)) || env.TELEGRAM_BOT_TOKEN;
   if (!token) return PRESENCE_UNKNOWN;
   let data;
   try {
@@ -1278,6 +1374,41 @@ async function createSession(userId, env) {
   return token;
 }
 
+/** HttpOnly+Secure session cookie. Secure is skipped on plain-http origins so
+ *  local dev / self-host behind a proxy still works; SameSite=Lax everywhere. */
+function sessionCookieHeader(url, token, cookieMaxAge) {
+  const proto = String(url?.protocol || 'https:').toLowerCase();
+  const secure = proto === 'https:' ? '; Secure' : '';
+  return `athena_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${cookieMaxAge}${secure}`;
+}
+
+/**
+ * One-time cookie that binds an OAuth flow to the browser that started it.
+ * A stored `oauth_states` row alone proves only that *some* browser started a
+ * login here — an attacker can mint one, complete the provider step with their
+ * own account and force the resulting code+state onto a victim (login CSRF).
+ * The callback additionally requires this cookie to match.
+ */
+const OAUTH_STATE_COOKIE = 'athena_oauth_state';
+
+function oauthStateCookie(url, state, maxAgeSec = 1800) {
+  const secure = String(url?.protocol || 'https:').toLowerCase() === 'https:' ? '; Secure' : '';
+  return `${OAUTH_STATE_COOKIE}=${state ? encodeURIComponent(state) : ''}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${state ? maxAgeSec : 0}${secure}`;
+}
+
+function readOauthStateCookie(request) {
+  const cookie = request?.headers?.get('Cookie') || '';
+  const m = cookie.match(/(?:^|;\s*)athena_oauth_state=([^;]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+/** Response.redirect() cannot carry Set-Cookie, so build the 302 by hand. */
+function redirectWithCookie(location, cookie) {
+  const headers = { Location: location };
+  if (cookie) headers['Set-Cookie'] = cookie;
+  return new Response(null, { status: 302, headers });
+}
+
 async function allocateUniqueUsername(env, preferred, providerId) {
   const base = String(preferred || 'user')
     .replace(/[^a-zA-Z0-9_]/g, '_')
@@ -1475,7 +1606,7 @@ async function verifyTelegramInitData(initData, botToken) {
   return null;
 }
 
-async function handleTelegramWebAppAuth(request, env, corsHeaders) {
+async function handleTelegramWebAppAuth(request, env, corsHeaders, url) {
   try {
     const body = await request.json().catch(() => ({}));
     const initData = body.initData || body.init_data || '';
@@ -1492,7 +1623,7 @@ async function handleTelegramWebAppAuth(request, env, corsHeaders) {
           `SELECT bot_token FROM community_bots WHERE platform = 'telegram' AND bot_token IS NOT NULL AND bot_token != ''
            ORDER BY created_at DESC LIMIT 1`
         ).first();
-        botToken = row?.bot_token || null;
+        botToken = row?.bot_token ? await decryptBotToken(env, row.bot_token) : null;
       } catch (_) {}
     }
     if (!botToken) {
@@ -1589,7 +1720,7 @@ async function handleTelegramWebAppAuth(request, env, corsHeaders) {
       success: true,
       session: sessionToken,
       user: publicUser(user, { god: owner, elevated })
-    }, { headers: { ...corsHeaders, 'Set-Cookie': `athena_session=${encodeURIComponent(sessionToken)}; Path=/; SameSite=Lax; Max-Age=${cookieMaxAge}` } });
+    }, { headers: { ...corsHeaders, 'Set-Cookie': sessionCookieHeader(url, sessionToken, cookieMaxAge) } });
   } catch (err) {
     console.error('webapp auth', err);
     return Response.json({ success: false, error: err.message || 'WebApp login failed' }, { status: 500, headers: corsHeaders });
@@ -1648,7 +1779,7 @@ async function handleTelegramStart(url, env, corsHeaders) {
   authUrl.searchParams.set('state', state);
   authUrl.searchParams.set('code_challenge', codeChallenge);
   authUrl.searchParams.set('code_challenge_method', 'S256');
-  return Response.redirect(authUrl.toString(), 302);
+  return redirectWithCookie(authUrl.toString(), oauthStateCookie(url, state));
 }
 
 function decodeJwtPayload(jwt) {
@@ -1702,7 +1833,7 @@ async function verifyTelegramIdToken(idToken, clientId) {
 }
 
 /** Telegram OIDC callback: code → tokens → session. */
-async function handleTelegramCallback(url, env, corsHeaders) {
+async function handleTelegramCallback(url, env, corsHeaders, request) {
   const code = url.searchParams.get('code');
   // Telegram may return state with extra encoding; normalize
   let state = url.searchParams.get('state');
@@ -1752,6 +1883,13 @@ async function handleTelegramCallback(url, env, corsHeaders) {
       await env.DB.prepare('DELETE FROM oauth_states WHERE state = ?').bind(state).run();
     } catch (_) {}
     return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=telegram_state_expired`, 302);
+  }
+  // Bind the flow to the browser that started it. Skipped only when the
+  // registered redirect_uri lives on another origin — there the start cookie was
+  // set elsewhere and cannot be presented here; that topology relays above.
+  const ownRedirect = telegramRedirectUri(env, url).startsWith(`${url.origin}/`);
+  if (ownRedirect && readOauthStateCookie(request) !== state) {
+    return redirectWithCookie(`${frontendOrigin(env, url)}/?auth_error=telegram_state`, oauthStateCookie(url, ''));
   }
 
   const redirectUri = telegramRedirectUri(env, url);
@@ -1858,23 +1996,40 @@ async function handleTelegramCallback(url, env, corsHeaders) {
     await env.DB.prepare('DELETE FROM oauth_states WHERE state = ?').bind(state).run();
   } catch (_) {}
   const cookieMaxAge = Math.floor(SESSION_TTL_MS / 1000);
-  const redirectUrl = `${frontendOrigin(env, url)}/?session=${encodeURIComponent(sessionToken)}`;
-  return new Response(null, {
-    status: 302,
-    headers: {
-      Location: redirectUrl,
-      'Set-Cookie': `athena_session=${encodeURIComponent(sessionToken)}; Path=/; SameSite=Lax; Max-Age=${cookieMaxAge}`,
-      ...corsHeaders
-    }
-  });
+  const sameOrigin = frontendOrigin(env, url) === url.origin;
+  // Same-origin: the session rides in the (now HttpOnly) cookie; the query
+  // string would leak it into history/Referer for no benefit. Cross-origin
+  // (self-host backend) still needs the param — the cookie cannot cross origins.
+  const redirectUrl = sameOrigin
+    ? `${frontendOrigin(env, url)}/`
+    : `${frontendOrigin(env, url)}/?session=${encodeURIComponent(sessionToken)}`;
+  const headers = new Headers(corsHeaders);
+  headers.set('Location', redirectUrl);
+  headers.append('Set-Cookie', sessionCookieHeader(url, sessionToken, cookieMaxAge));
+  headers.append('Set-Cookie', oauthStateCookie(url, ''));
+  return new Response(null, { status: 302, headers });
 }
 
-function handleDiscordStart(url, env, corsHeaders) {
+async function handleDiscordStart(url, env, corsHeaders) {
   if (!env.DISCORD_CLIENT_ID) {
     return Response.json({ success: false, error: 'Discord OAuth not configured' }, { status: 503, headers: corsHeaders });
   }
   const redirectUri = `${url.origin}/api/auth/discord/callback`;
   const state = randomToken().slice(0, 16);
+  // Persist the state so the callback can reject logins that never started here
+  // (login CSRF: an attacker's own ?code= forced onto a victim's browser would
+  // otherwise mint a session for the attacker's account). Mirror the Telegram
+  // flow: store + verify + consume.
+  await ensureOAuthStatesTable(env);
+  const expires = Date.now() + 30 * 60 * 1000;
+  try {
+    await env.DB.prepare(
+      'INSERT OR REPLACE INTO oauth_states (state, code_verifier, expires_at) VALUES (?, ?, ?)'
+    ).bind(state, '', expires).run();
+  } catch (e) {
+    console.error('oauth_states insert failed (discord)', e);
+    return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=discord_state_store`, 302);
+  }
   const authUrl = new URL('https://discord.com/api/oauth2/authorize');
   authUrl.searchParams.set('client_id', env.DISCORD_CLIENT_ID);
   authUrl.searchParams.set('redirect_uri', redirectUri);
@@ -1882,13 +2037,34 @@ function handleDiscordStart(url, env, corsHeaders) {
   authUrl.searchParams.set('scope', 'identify');
   authUrl.searchParams.set('state', state);
 
-  return Response.redirect(authUrl.toString(), 302);
+  return redirectWithCookie(authUrl.toString(), oauthStateCookie(url, state));
 }
 
-async function handleDiscordCallback(url, env) {
+async function handleDiscordCallback(url, env, request) {
   const code = url.searchParams.get('code');
+  const state = (url.searchParams.get('state') || '').trim();
+  const clearState = oauthStateCookie(url, '');
   if (!code || !env.DISCORD_CLIENT_ID || !env.DISCORD_CLIENT_SECRET) {
     return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=discord`, 302);
+  }
+  if (!state) {
+    return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=discord_state`, 302);
+  }
+  // redirect_uri is always this origin, so the start cookie is always presented.
+  if (readOauthStateCookie(request) !== state) {
+    return redirectWithCookie(`${frontendOrigin(env, url)}/?auth_error=discord_state`, clearState);
+  }
+
+  await ensureOAuthStatesTable(env);
+  const row = await env.DB.prepare(
+    'SELECT expires_at FROM oauth_states WHERE state = ?'
+  ).bind(state).first();
+  if (!row || !Number(row.expires_at) || Number(row.expires_at) < Date.now()) {
+    // Consume unknown/expired states so a replayed ?code= cannot be retried.
+    if (row) {
+      try { await env.DB.prepare('DELETE FROM oauth_states WHERE state = ?').bind(state).run(); } catch (_) {}
+    }
+    return redirectWithCookie(`${frontendOrigin(env, url)}/?auth_error=discord_state`, clearState);
   }
 
   const redirectUri = `${url.origin}/api/auth/discord/callback`;
@@ -1961,7 +2137,20 @@ async function handleDiscordCallback(url, env) {
        }
      }
    } catch (_) {}
-   return Response.redirect(`${frontendOrigin(env, url)}/?session=${encodeURIComponent(sessionToken)}`, 302);
+   // Consume the state on success (single-use).
+   try { await env.DB.prepare('DELETE FROM oauth_states WHERE state = ?').bind(state).run(); } catch (_) {}
+   const sameOrigin = frontendOrigin(env, url) === url.origin;
+   const redirectUrl = sameOrigin
+     ? `${frontendOrigin(env, url)}/`
+     : `${frontendOrigin(env, url)}/?session=${encodeURIComponent(sessionToken)}`;
+   return new Response(null, {
+     status: 302,
+     headers: [
+       ['Location', redirectUrl],
+       ['Set-Cookie', sessionCookieHeader(url, sessionToken, Math.floor(SESSION_TTL_MS / 1000))],
+       ['Set-Cookie', clearState]
+     ]
+   });
 }
 
 // ============================================================
@@ -2432,7 +2621,7 @@ async function handleUpsertBotBinding(request, user, env, corsHeaders) {
       user.id,
       scope,
       user.id,
-      storeToken,
+      storeToken ? await encryptSecret(env, storeToken) : null,
       existing.id
     ).run();
     return Response.json({
@@ -2461,7 +2650,7 @@ async function handleUpsertBotBinding(request, user, env, corsHeaders) {
     Date.now(),
     scope,
     user.id,
-    storeToken
+    storeToken ? await encryptSecret(env, storeToken) : null
   ).run();
 
   return Response.json({
@@ -2674,7 +2863,7 @@ async function handlePostCommunityLink(request, user, env, corsHeaders) {
   }
 
   await ensureLinkMetaColumns(env);
-  const meta = await enrichLinkFields(rawUrl, { title: body.title, notes: body.notes });
+  const meta = await enrichLinkFields(env, rawUrl, { title: body.title, notes: body.notes });
   const id = 'link_' + Date.now().toString(36);
   const displayName = user.display_name || user.username || user.id;
   const now = Date.now();
@@ -3190,23 +3379,29 @@ async function getInstanceAiConfig(env) {
   let row = await env.DB.prepare(
     "SELECT base_url, model, mode, updated_at, api_key FROM user_ai_config WHERE user_id = '__instance__'"
   ).first();
-  if (row) return row;
-  const owners = parseIdList(env.TG_OWNER_IDS);
-  for (const oid of owners) {
-    const u = await env.DB.prepare(
-      `SELECT id FROM users WHERE provider = 'telegram' AND (provider_id = ? OR telegram_api_id = ?)`
-    ).bind(String(oid), String(oid)).first();
-    if (u) {
-      row = await env.DB.prepare(
-        'SELECT base_url, model, mode, updated_at, api_key FROM user_ai_config WHERE user_id = ?'
-      ).bind(u.id).first();
-      if (row) return row;
+  if (!row) {
+    const owners = parseIdList(env.TG_OWNER_IDS);
+    for (const oid of owners) {
+      const u = await env.DB.prepare(
+        `SELECT id FROM users WHERE provider = 'telegram' AND (provider_id = ? OR telegram_api_id = ?)`
+      ).bind(String(oid), String(oid)).first();
+      if (u) {
+        row = await env.DB.prepare(
+          'SELECT base_url, model, mode, updated_at, api_key FROM user_ai_config WHERE user_id = ?'
+        ).bind(u.id).first();
+        if (row) break;
+      }
     }
   }
-  // self-host / no owners: most recently updated config
-  row = await env.DB.prepare(
-    'SELECT base_url, model, mode, updated_at, api_key FROM user_ai_config ORDER BY updated_at DESC LIMIT 1'
-  ).first();
+  if (!row) {
+    // self-host / no owners: most recently updated config
+    row = await env.DB.prepare(
+      'SELECT base_url, model, mode, updated_at, api_key FROM user_ai_config ORDER BY updated_at DESC LIMIT 1'
+    ).first();
+  }
+  if (row && row.api_key) {
+    try { row.api_key = await decryptSecret(env, row.api_key); } catch (_) {}
+  }
   return row || null;
 }
 
@@ -3240,6 +3435,7 @@ async function handleSaveAiConfig(request, user, env, corsHeaders) {
     return Response.json({ success: false, error: 'baseUrl, apiKey, model required' }, { status: 400, headers: corsHeaders });
   }
   // Instance-wide config under __instance__ + mirror on GOD user for legacy bot /ai
+  const encKey = await encryptSecret(env, apiKey);
   for (const uid of ['__instance__', user.id]) {
     await env.DB.prepare(
       `INSERT INTO user_ai_config (user_id, base_url, api_key, model, mode, updated_at)
@@ -3250,7 +3446,7 @@ async function handleSaveAiConfig(request, user, env, corsHeaders) {
          model = excluded.model,
          mode = excluded.mode,
          updated_at = excluded.updated_at`
-    ).bind(uid, baseUrl, apiKey, model, mode, Date.now()).run();
+    ).bind(uid, baseUrl, encKey, model, mode, Date.now()).run();
   }
   return Response.json({ success: true }, { headers: corsHeaders });
 }
@@ -4071,6 +4267,108 @@ function cleanApiBase(baseUrl) {
   return root;
 }
 
+const PRIVATE_HOST_RE =
+  /(^|\.)(local|localhost|localdomain|internal|test|example|invalid|onion)$/i;
+
+// A scrape resolves the same handful of hosts repeatedly (api.github.com is hit
+// 2-4 times per repo), and every miss is two DoH round trips. Short TTL so a
+// legitimately changed record is picked up quickly.
+const DNS_VERDICTS = new Map();
+const DNS_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * DNS-rebinding-safe SSRF guard. True only for hosts that resolve to public,
+ * non-loopback, non-private addresses. On Cloudflare there is no internal
+ * network to protect, so this only restricts when self-hosted — the one place
+ * 127.0.0.1 / RFC1918 / link-local / cloud metadata are reachable.
+ *
+ * Resolves all A/AAAA; on mixed public/private results we err closed. Fails
+ * closed if DoH itself is unreachable, so a box that cannot reach dns.google
+ * scrapes nothing — see docs/self-hosting notes.
+ */
+async function isSafeExternalUrl(u, env) {
+  try {
+    if (!u) return false;
+    if (!isSelfHosted(env)) return true; // Workers: no internal network
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return false;
+    const host = (u.hostname || '').trim().toLowerCase();
+    if (!host) return false;
+    if (PRIVATE_HOST_RE.test(host)) return false;
+    let ip = host;
+    const isIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':');
+    if (!isIp) {
+      const cached = DNS_VERDICTS.get(host);
+      if (cached && cached.until > Date.now()) return cached.safe;
+      let safe;
+      try {
+        const [j, j6] = await Promise.all(
+          ['A', 'AAAA'].map(t =>
+            fetch(`https://dns.google/resolve?name=${encodeURIComponent(host)}&type=${t}`)
+              .then(r => r.json())
+              .catch(() => ({}))
+          )
+        );
+        const addrs = (j.Answer || []).filter(a => a.type === 1).map(a => String(a.data));
+        addrs.push(...(j6.Answer || []).filter(a => a.type === 28).map(a => String(a.data)));
+        // No records is NXDOMAIN or a DoH failure — either way, err closed and
+        // do not cache, so a transient outage does not blackhole the host.
+        if (!addrs.length) return false;
+        safe = addrs.every(isPublicIp);
+      } catch (_) {
+        return false;
+      }
+      if (DNS_VERDICTS.size > 1000) DNS_VERDICTS.clear();
+      DNS_VERDICTS.set(host, { safe, until: Date.now() + DNS_TTL_MS });
+      return safe;
+    }
+    return isPublicIp(ip);
+  } catch (_) {
+    return false;
+  }
+}
+
+function isPublicIp(ip) {
+  const v4 = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const o = v4.slice(1).map(Number);
+    if (o.some(x => x > 255)) return false;
+    if (o[0] === 0 || o[0] === 10) return false;
+    if (o[0] === 127) return false;
+    if (o[0] === 169 && o[1] === 254) return false;
+    if (o[0] === 172 && o[1] >= 16 && o[1] <= 31) return false;
+    if (o[0] === 192 && o[1] === 168) return false;
+    if (o[0] === 100 && o[1] >= 64 && o[1] <= 127) return false; // 100.64/10 CGNAT
+    if (o[0] === 198 && (o[1] === 18 || o[1] === 19)) return false; // 198.18/15 benchmark
+    if (o[0] >= 224) return false; // multicast + reserved
+    return true;
+  }
+  // IPv6: expand, then flag loopback (::1), link-local (fe8/fe9/fea/feb),
+  // ULA (fc/fd), and the IPv4-mapped v4-in-v6 forms handled via v4 rules.
+  let norm = ip.toLowerCase();
+  // IPv4-mapped (::ffff:a.b.c.d) — classify the embedded IPv4.
+  if (norm.includes('.')) {
+    const m = norm.match(/(\d{1,3}(\.\d{1,3}){3})$/);
+    if (m) return isPublicIp(m[1]);
+    return false;
+  }
+  const v6 = norm.match(/^[0-9a-f:]+$/);
+  if (!v6) return false;
+  if (!norm.includes('::')) {
+    const need = 8 - norm.split(':').length;
+    if (need > 0) norm += ':'.repeat(need + 1);
+  }
+  const first = norm.split(':')[0];
+  if (first === '' || first === '0') return false; // ::/128, ::1, compat
+  const hext = norm.split(':').map(h => h || '0');
+  const head = (hext[0] || '').padStart(4, '0');
+  if (head.startsWith('fe')) {
+    const nib = head[2];
+    if (['8', '9', 'a', 'b'].includes(nib)) return false; // fe80::/10
+  }
+  if (/^f[cd]/.test(head)) return false; // fc00::/7 ULA
+  return true;
+}
+
 function resolveChatEndpoint(baseUrl, mode) {
   let root = cleanApiBase(baseUrl);
   if (!root) return null;
@@ -4105,10 +4403,25 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
   // Prefer instance (GOD) credentials; client may still send overrides for GOD testing
   const inst = await getInstanceAiConfig(env);
-  const baseUrl = cleanApiBase(body.baseUrl || body.base_url || inst?.base_url || '');
-  const apiKey = (body.apiKey || body.api_key || inst?.api_key || '').trim();
-  const mode = (body.mode || inst?.mode || 'openai').toLowerCase();
-  let model = normalizeModelId(body.model || inst?.model, baseUrl);
+  const bodyBase = cleanApiBase(body.baseUrl || body.base_url || '');
+  const bodyKey = (body.apiKey || body.api_key || '').trim();
+  const bodyMode = (body.mode || '').toLowerCase();
+  const bodyModel = (body.model || '').trim();
+  const hasOverride = !!(bodyBase || bodyKey || bodyMode || bodyModel);
+  // Per-request overrides are a paired set, allowed only for GOD. Mixing a
+  // request's baseUrl with the instance's key would hand the stored secret to
+  // an arbitrary host (exfiltration). Non-GOD users always use the instance
+  // config for both URL and key.
+  if (hasOverride && !(await isInstanceOwnerUserAsync(user, env))) {
+    return Response.json(
+      { success: false, error: 'Per-request AI overrides are GOD rank only' },
+      { status: 403, headers: corsHeaders }
+    );
+  }
+  const baseUrl = cleanApiBase(bodyBase || inst?.base_url || '');
+  const apiKey = (bodyKey || inst?.api_key || '').trim();
+  const mode = (bodyMode || inst?.mode || 'openai').toLowerCase();
+  let model = normalizeModelId(bodyModel || inst?.model, baseUrl);
     const system = body.system || '';
     const userMsg = body.user || body.prompt || '';
     const messages = Array.isArray(body.messages) ? body.messages : null;
@@ -4125,11 +4438,14 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
     );
   }
 
-  // Only allow https endpoints
+  // Only allow https endpoints; reject private hosts on self-host (SSRF)
   try {
     const u = new URL(baseUrl.startsWith('http') ? baseUrl : `https://${baseUrl}`);
     if (u.protocol !== 'https:') {
       return Response.json({ success: false, error: 'Only HTTPS API bases allowed' }, { status: 400, headers: corsHeaders });
+    }
+    if (!(await isSafeExternalUrl(u, env))) {
+      return Response.json({ success: false, error: 'API base must be a public HTTPS host' }, { status: 400, headers: corsHeaders });
     }
   } catch (_) {
     return Response.json({ success: false, error: 'Invalid baseUrl' }, { status: 400, headers: corsHeaders });
@@ -4138,6 +4454,10 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
   const endpoint = resolveChatEndpoint(baseUrl, mode);
   if (!endpoint) {
     return Response.json({ success: false, error: 'Could not resolve chat endpoint' }, { status: 400, headers: corsHeaders });
+  }
+  const ep = new URL(endpoint);
+  if (ep.protocol !== 'https:' || !(await isSafeExternalUrl(ep, env))) {
+    return Response.json({ success: false, error: 'API base must be a public HTTPS host' }, { status: 400, headers: corsHeaders });
   }
 
   try {
@@ -4178,6 +4498,14 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
             stream: true
           })
         });
+      }
+      // Re-check after a redirect: the key must never be delivered anywhere
+      // but the validated public host (DNS-rebinding / open-redirect to a
+      // private host would otherwise exfiltrate it on self-host).
+      if (upstreamRes.url && upstreamRes.url !== endpoint) {
+        if (!(await isSafeExternalUrl(new URL(upstreamRes.url), env))) {
+          return Response.json({ success: false, error: 'Provider redirected to a non-public host' }, { status: 502, headers: corsHeaders });
+        }
       }
 
       if (!upstreamRes.ok) {
@@ -4359,7 +4687,7 @@ async function handlePostPersonalLink(request, userId, env, corsHeaders) {
   await ensureLinkMetaColumns(env);
   const meta = isNote
     ? { title: body.title || 'Note', notes: body.notes || '', image_url: '', site_name: '' }
-    : await enrichLinkFields(rawUrl, { title: body.title, notes: body.notes });
+    : await enrichLinkFields(env, rawUrl, { title: body.title, notes: body.notes });
 
   const id = 'pl_' + Date.now().toString(36);
   const now = Date.now();
@@ -4787,7 +5115,7 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
     await sendTelegramMessage(token, chatId, `Already in community: ${rawUrl}`, threadId);
     return;
   }
-  const meta = await enrichLinkFields(rawUrl, { title: titleHint || '', notes: userNotes || '' });
+  const meta = await enrichLinkFields(env, rawUrl, { title: titleHint || '', notes: userNotes || '' });
   if (titleHint && isWeakTitle(meta.title, rawUrl)) meta.title = titleHint;
   const id = 'tg_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   await ensureLinkMetaColumns(env);
@@ -4825,8 +5153,19 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
   await sendTelegramMessage(token, chatId, `Saved to community:\n${meta.title || rawUrl}\n${rawUrl}${preview}`, threadId);
 }
 
-function tokenForBinding(binding, env) {
-  return (binding && binding.bot_token) || env.TELEGRAM_BOT_TOKEN || null;
+/** Decrypt a stored bot_token (enc:v1:...) for use; plaintext rows pass through.
+ *  Null on a wrong/missing STORAGE_KEY — callers fall back to env.TELEGRAM_BOT_TOKEN. */
+async function decryptBotToken(env, stored) {
+  if (!stored) return stored;
+  return await decryptSecret(env, stored);
+}
+
+/** tokenForBinding variant that decrypts the stored token before returning. */
+async function tokenForBindingAsync(binding, env) {
+  const raw = (binding && binding.bot_token) || env.TELEGRAM_BOT_TOKEN || null;
+  if (!raw) return null;
+  if (binding?.bot_token) return await decryptBotToken(env, raw);
+  return raw;
 }
 
 async function resolveAthenaUserFromTg(env, tgUserId) {
@@ -5272,7 +5611,7 @@ async function savePersonalUrl(env, userId, rawUrl, senderName, userNotes = '', 
   if (existing) return { duplicate: true, existing };
   await ensureLinkMetaColumns(env);
   // Detailed caption/post text → keep as notes, skip scrape overwrite
-  const meta = await enrichLinkFields(rawUrl, {
+  const meta = await enrichLinkFields(env, rawUrl, {
     title: titleHint || '',
     notes: userNotes || ''
   });
@@ -5503,11 +5842,11 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
   const msgId = cq.message?.message_id;
   const threadId = cq.message?.message_thread_id != null ? Number(cq.message.message_thread_id) : null;
   const binding = chatId ? await findTelegramBinding(env, chatId, tgUserId) : null;
-  let token = tokenForBinding(binding, env) || env.TELEGRAM_BOT_TOKEN;
+  let token = (await tokenForBindingAsync(binding, env)) || env.TELEGRAM_BOT_TOKEN;
   if (!token && tgUserId) {
     const u = await resolveAthenaUserFromTg(env, tgUserId);
     const personal = u ? await findPersonalBotForOwner(env, u.id) : null;
-    if (personal?.bot_token) token = personal.bot_token;
+    if (personal?.bot_token) token = await decryptBotToken(env, personal.bot_token);
   }
 
   // ---- Help menu buttons ----
@@ -5614,7 +5953,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
     if (!again) {
       const id = 'tg_' + Date.now().toString(36);
       try {
-        const meta = await enrichLinkFields(pend.url, { title: pend.title, notes: pend.notes });
+        const meta = await enrichLinkFields(env, pend.url, { title: pend.title, notes: pend.notes });
         await ensureLinkMetaColumns(env);
         try {
           await env.DB.prepare(
@@ -5753,7 +6092,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   const forumThreadId = msg.message_thread_id != null ? Number(msg.message_thread_id) : null;
 
   let binding = await findTelegramBinding(env, chatId, tgUserId);
-  let token = tokenForBinding(binding, env) || env.TELEGRAM_BOT_TOKEN;
+  let token = (await tokenForBindingAsync(binding, env)) || env.TELEGRAM_BOT_TOKEN;
   let athenaUser = await resolveAthenaUserFromTg(env, tgUserId);
   // Persist Bot API id whenever we see a logged-in Telegram user (needed for join + owner match)
   if (athenaUser?.id && tgUserId && isLikelyTelegramBotApiId(tgUserId)) {
@@ -5809,12 +6148,12 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   // Unverified group: use owner's personal bot token so replies work
   if (!binding && athenaUser && (String(msg.chat?.type || '').includes('group') || chatId.startsWith('-'))) {
     const personalBot = await findPersonalBotForOwner(env, athenaUser.id);
-    if (personalBot?.bot_token) token = personalBot.bot_token;
+    if (personalBot?.bot_token) token = await decryptBotToken(env, personalBot.bot_token);
   }
   // Prefer binding token, else any personal bot of this user, else env
   if (!token && athenaUser) {
     const pb = await findPersonalBotForOwner(env, athenaUser.id);
-    if (pb?.bot_token) token = pb.bot_token;
+    if (pb?.bot_token) token = await decryptBotToken(env, pb.bot_token);
   }
   const parts = text.split(/\s+/);
   let cmd = (parts[0] || '').toLowerCase().replace(/@\w+$/, '');
@@ -6266,7 +6605,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         } catch (_) {}
       }
 
-      const replyToken = personal.bot_token || token || env.TELEGRAM_BOT_TOKEN;
+      const replyToken = (await decryptBotToken(env, personal.bot_token)) || token || env.TELEGRAM_BOT_TOKEN;
       if (!replyToken) {
         await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, 'Bot token missing. Re-save bot on website with full token.', forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
@@ -6291,19 +6630,20 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       ).bind(id, chatTitle, owner.id, now).run();
       await upsertCommunityMember(env, id, owner.id, 'owner');
 
-      const storeToken = personal.bot_token || replyToken || null;
+      const storeToken = (await decryptBotToken(env, personal.bot_token)) || replyToken || null;
       const botUname = personal.bot_username || 'bot';
+      const encStore = storeToken ? await encryptSecret(env, storeToken) : null;
       if (existingGroup) {
         await env.DB.prepare(
           `UPDATE community_bots SET community_id = ?, scope = 'community', group_name = ?, created_by = ?, user_id = ?, bot_token = COALESCE(?, bot_token), bot_username = COALESCE(?, bot_username) WHERE id = ?`
-        ).bind(id, chatTitle, owner.id, owner.id, storeToken, botUname, existingGroup.id).run();
+        ).bind(id, chatTitle, owner.id, owner.id, encStore, botUname, existingGroup.id).run();
         binding = await env.DB.prepare('SELECT * FROM community_bots WHERE id = ?').bind(existingGroup.id).first();
       } else {
         const botId = 'bot_' + Date.now().toString(36);
         await env.DB.prepare(
           `INSERT INTO community_bots (id, community_id, platform, bot_username, group_id, group_name, created_by, created_at, scope, user_id, bot_token)
            VALUES (?, ?, 'telegram', ?, ?, ?, ?, ?, 'community', ?, ?)`
-        ).bind(botId, id, botUname, chatId, chatTitle, owner.id, now, owner.id, storeToken).run();
+        ).bind(botId, id, botUname, chatId, chatTitle, owner.id, now, owner.id, encStore).run();
         binding = await env.DB.prepare('SELECT * FROM community_bots WHERE id = ?').bind(botId).first();
       }
 
@@ -7569,7 +7909,7 @@ ${ctx}`;
           // User said same as website: if not present add it. Staff can add directly.
           const urlHash = generateUrlHash(rawUrl);
           const id = 'tg_' + Date.now().toString(36);
-          const meta = await enrichLinkFields(rawUrl, {});
+          const meta = await enrichLinkFields(env, rawUrl, {});
           await ensureLinkMetaColumns(env);
           try {
             await env.DB.prepare(
@@ -7982,12 +8322,40 @@ function parseReadmeIntro(md) {
 
 const SCRAPE_TIMEOUT_MS = 9000;
 
-/** fetch that aborts instead of hanging a link-enrichment request forever. */
+/**
+ * fetch that aborts instead of hanging a link-enrichment request forever.
+ * When self-hosted, every destination (including each redirect hop) must be a
+ * public host, so the scraper cannot be turned into an SSRF oracle against
+ * localhost / RFC1918 / metadata endpoints.
+ */
 async function fetchWithTimeout(url, options = {}, timeoutMs = SCRAPE_TIMEOUT_MS) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...options, signal: ctrl.signal });
+    let u = url;
+    let hops = 0;
+    const redirect = (options.redirect === undefined) ? 'follow' : options.redirect;
+    while (true) {
+      const target = new URL(u);
+      if (!(await isSafeExternalUrl(target, options.env))) {
+        const err = new Error(`blocked: ${target.hostname} is not a public host`);
+        err.code = 'SSRF_BLOCKED';
+        throw err;
+      }
+      const res = await fetch(u, { ...options, env: undefined, redirect: 'manual', signal: ctrl.signal });
+      if ([301, 302, 303, 307, 308].includes(res.status) && redirect === 'follow') {
+        const loc = res.headers.get('location');
+        if (!loc) return res;
+        u = new URL(loc, u).toString();
+        if (++hops > 5) {
+          const err = new Error('too many redirects');
+          err.code = 'SSRF_BLOCKED';
+          throw err;
+        }
+        continue;
+      }
+      return res;
+    }
   } finally {
     clearTimeout(timer);
   }
@@ -7996,10 +8364,11 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = SCRAPE_TIMEOUT_MS
 /**
  * Forge hosts (GitHub / Codeberg / GitLab / Gitea-style) via API + README.
  */
-async function scrapeForgeMetadata(rawUrl) {
+async function scrapeForgeMetadata(rawUrl, env) {
   try {
     const u = new URL(rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`);
     const host = u.hostname.replace(/^www\./, '').toLowerCase();
+    if (!(await isSafeExternalUrl(u, env))) return null;
     const segs = u.pathname.split('/').filter(Boolean);
     if (segs.length < 2) return null;
     const owner = segs[0];
@@ -8012,7 +8381,7 @@ async function scrapeForgeMetadata(rawUrl) {
         Accept: 'application/vnd.github+json',
         'User-Agent': 'AthenaBot/1.3 (+link-preview)'
       };
-      const repoRes = await fetchWithTimeout(`https://api.github.com/repos/${owner}/${repo}`, { headers });
+      const repoRes = await fetchWithTimeout(`https://api.github.com/repos/${owner}/${repo}`, { headers, env });
       if (!repoRes.ok) return null;
       const data = await repoRes.json();
       if (!data?.name) return null;
@@ -8021,7 +8390,7 @@ async function scrapeForgeMetadata(rawUrl) {
       let image = data.owner?.avatar_url || '';
       try {
         const readmeRes = await fetchWithTimeout(`https://api.github.com/repos/${owner}/${repo}/readme`, {
-          headers: { ...headers, Accept: 'application/vnd.github.raw' }
+          headers: { ...headers, Accept: 'application/vnd.github.raw' }, env
         });
         if (readmeRes.ok) {
           const intro = parseReadmeIntro((await readmeRes.text()).slice(0, 8000));
@@ -8047,7 +8416,7 @@ async function scrapeForgeMetadata(rawUrl) {
     if (host === 'codeberg.org' || host === 'gitea.com' || host.endsWith('.gitea.io')) {
       const apiBase = `https://${host}/api/v1`;
       const headers = { Accept: 'application/json', 'User-Agent': 'AthenaBot/1.3 (+link-preview)' };
-      const repoRes = await fetchWithTimeout(`${apiBase}/repos/${owner}/${repo}`, { headers });
+      const repoRes = await fetchWithTimeout(`${apiBase}/repos/${owner}/${repo}`, { headers, env });
       if (!repoRes.ok) return null;
       const data = await repoRes.json();
       if (!data?.name) return null;
@@ -8058,7 +8427,7 @@ async function scrapeForgeMetadata(rawUrl) {
         // raw README candidates
         for (const name of ['README.md', 'readme.md', 'README.MD']) {
           const rr = await fetchWithTimeout(`https://${host}/${owner}/${repo}/raw/branch/${data.default_branch || 'main'}/${name}`, {
-            headers: { 'User-Agent': 'AthenaBot/1.3' }
+            headers: { 'User-Agent': 'AthenaBot/1.3' }, env
           });
           if (rr.ok) {
             const intro = parseReadmeIntro((await rr.text()).slice(0, 8000));
@@ -8084,7 +8453,7 @@ async function scrapeForgeMetadata(rawUrl) {
     if (host === 'gitlab.com') {
       const project = encodeURIComponent(`${owner}/${repo}`);
       const headers = { Accept: 'application/json', 'User-Agent': 'AthenaBot/1.3 (+link-preview)' };
-      const repoRes = await fetchWithTimeout(`https://gitlab.com/api/v4/projects/${project}`, { headers });
+      const repoRes = await fetchWithTimeout(`https://gitlab.com/api/v4/projects/${project}`, { headers, env });
       if (!repoRes.ok) return null;
       const data = await repoRes.json();
       if (!data?.name) return null;
@@ -8094,7 +8463,7 @@ async function scrapeForgeMetadata(rawUrl) {
       try {
         const rr = await fetchWithTimeout(
           `https://gitlab.com/api/v4/projects/${project}/repository/files/README.md/raw?ref=${encodeURIComponent(data.default_branch || 'main')}`,
-          { headers }
+          { headers, env }
         );
         if (rr.ok) {
           const intro = parseReadmeIntro((await rr.text()).slice(0, 8000));
@@ -8133,7 +8502,7 @@ function cleanGenericSummary(text) {
 /**
  * Scrape: forge APIs first; else prefer clean meta description over noisy body.
  */
-async function scrapeLinkMetadata(rawUrl) {
+async function scrapeLinkMetadata(rawUrl, env) {
   const fallback = {
     title: titleFromUrl(rawUrl),
     description: '',
@@ -8144,7 +8513,7 @@ async function scrapeLinkMetadata(rawUrl) {
     if (!/^https?:\/\//i.test(rawUrl) || rawUrl.startsWith('note://')) return fallback;
 
     // Fast path: GitHub / Codeberg / GitLab
-    const forge = await scrapeForgeMetadata(rawUrl);
+    const forge = await scrapeForgeMetadata(rawUrl, env);
     if (forge && (forge.description || forge.title)) {
       return {
         title: forge.title || fallback.title,
@@ -8157,6 +8526,7 @@ async function scrapeLinkMetadata(rawUrl) {
     const res = await fetchWithTimeout(rawUrl, {
       method: 'GET',
       redirect: 'follow',
+      env,
       headers: {
         'User-Agent':
           'Mozilla/5.0 (compatible; AthenaBot/1.3)',
@@ -8254,7 +8624,7 @@ async function ensureLinkMetaColumns(env) {
 }
 
 /** Merge user-provided fields with scraped page meta. Skip scrape if notes already detailed. */
-async function enrichLinkFields(rawUrl, { title, notes } = {}) {
+async function enrichLinkFields(env, rawUrl, { title, notes } = {}) {
   const userTitle = String(title || '').trim();
   const userNotes = String(notes || '').trim();
   const detailed = isDetailedNotes(userNotes);
@@ -8274,7 +8644,7 @@ async function enrichLinkFields(rawUrl, { title, notes } = {}) {
   }
   if (detailed && !strongTitle) {
     // keep notes, only fill title/image lightly
-    const meta = await scrapeLinkMetadata(rawUrl);
+    const meta = await scrapeLinkMetadata(rawUrl, env);
     return {
       title: (isWeakTitle(userTitle, rawUrl) ? meta.title : userTitle).slice(0, 300),
       notes: userNotes.slice(0, NOTES_MAX),
@@ -8284,7 +8654,7 @@ async function enrichLinkFields(rawUrl, { title, notes } = {}) {
     };
   }
 
-  const meta = await scrapeLinkMetadata(rawUrl);
+  const meta = await scrapeLinkMetadata(rawUrl, env);
   const useScrapedTitle = isWeakTitle(userTitle, rawUrl);
   // Keep short user caption as prefix when present
   let finalNotes = meta.description || '';

@@ -114,15 +114,16 @@ Rules:
   }
 
   async function callViaProxy({ baseUrl, apiKey, model, mode, system, user, messages, onDelta, onThinking }) {
+    // A same-origin login has no bearer token — the HttpOnly session cookie is
+    // sent by the browser instead. Only a cross-origin backend needs the header.
     const token = localStorage.getItem('athena_session');
-    if (!token) throw new Error('Login required for AI');
 
     const apiBase = window.getAthenaApiBase?.() || window.location.origin;
     const res = await fetch(`${apiBase}/api/ai/chat`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`
+        ...(token ? { Authorization: `Bearer ${token}` } : {})
       },
       body: JSON.stringify({
         baseUrl: cleanBaseUrl(baseUrl),
@@ -197,6 +198,17 @@ Rules:
       return { ...local, mode: 'local', thinking: '' };
     }
 
+    // Server accepts per-request credentials only for GOD rank (audit HIGH-1);
+    // everyone else uses the instance config. Don't send a local key that would
+    // be rejected — fall back to instance, or to local search when the instance
+    // has no key configured.
+    const isGod = window.athenaIsGod?.() ?? true;
+    const sendOwn = isGod && hasLocalKey;
+    if (!isGod && !serverConfigured) {
+      const local = answerLocal(q, list);
+      return { ...local, mode: 'local', thinking: '' };
+    }
+
     // Build messages: system prompt with brain context, then conversation history.
     const system = buildSystemPrompt() + '\n\n' + buildContextMessage(docs, list.length);
     const history = conversationHistory && conversationHistory.length
@@ -206,10 +218,10 @@ Rules:
 
     try {
       const result = await callViaProxy({
-        baseUrl: hasLocalKey ? cfg.baseUrl : '',
-        apiKey: hasLocalKey ? cfg.apiKey : '',
-        model: hasLocalKey ? normalizeModelId(cfg.model, cfg.baseUrl) : '',
-        mode: hasLocalKey ? (cfg.mode || 'openai') : '',
+        baseUrl: sendOwn ? cfg.baseUrl : '',
+        apiKey: sendOwn ? cfg.apiKey : '',
+        model: sendOwn ? normalizeModelId(cfg.model, cfg.baseUrl) : '',
+        mode: sendOwn ? (cfg.mode || 'openai') : '',
         messages,
         onDelta,
         onThinking
@@ -246,10 +258,9 @@ Rules:
     if (_serverCfg !== null) return _serverCfg;
     try {
       const token = localStorage.getItem('athena_session');
-      if (!token) { _serverCfg = false; return false; }
       const apiBase = window.getAthenaApiBase?.() || window.location.origin;
       const res = await fetch(`${apiBase}/api/ai/config`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: token ? { Authorization: `Bearer ${token}` } : {}
       });
       const data = await res.json().catch(() => ({}));
       // hasKey (not just `configured`) — a row with no API key cannot answer.

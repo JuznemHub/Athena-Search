@@ -20,6 +20,13 @@ node server/merge-telegram-identities.js   # merge one person's OIDC + Bot API i
 
 No tests. `npm run check` runs lint and the version-drift check — run before committing.
 
+`eslint .` walks `worker/.wrangler/tmp` (generated dev bundles, 4 pre-existing errors), so `npm run check` exits 1 and never reaches the version check. Lint real source and check the stamp separately:
+
+```bash
+npx eslint worker/ server/ public/ scripts/
+npm run check:version
+```
+
 ## Architecture
 
 ### One codebase, two runtimes
@@ -95,6 +102,28 @@ Themes are CSS custom properties in `themes.css` (dark/light/material/glass). Th
 - ES modules in `server/` and `worker/`, Node >= 22, no TypeScript. `public/**/*.js` stays plain scripts
 - Responses: `{ success, ... }` / `{ success: false, error, code }`; `deny()` builds the 403 shape
 - Unmatched `/api/*` returns JSON 404 — falling through to the SPA handler serves `index.html` with HTTP 200
+
+## Security invariants
+
+Each one below is a bug that shipped or nearly shipped. Full history: `docs/security-audit.md`.
+
+- **Security headers live in three places.** `run_worker_first = ["/api/*"]` means static assets never touch the Worker, so `securityHeaders()` only covers `/api/*`. Change a header → change all three: `securityHeaders()` (`worker/index.js`), `public/_headers` (Cloudflare static), `SECURITY` (`server/assets.js`, self-host static). CSP `frame-ancestors` must keep `https://web.telegram.org` — Telegram Web runs the Mini App in an iframe, and `X-Frame-Options` cannot express that, so it is deliberately absent. Per-origin `Access-Control-Allow-Origin` requires `Vary: Origin`.
+
+- **`Response.redirect()` cannot carry `Set-Cookie`.** An auth callback that mints a session must build `new Response(null, { status: 302, headers })`. Using the helper drops the cookie silently — login fails with no error anywhere.
+
+- **Session is cookie OR bearer; never assume bearer.** The cookie is `HttpOnly`, so a same-origin login leaves `state.sessionToken` null in the browser and `document.cookie` cannot see it. Gate frontend logic on `state.currentUser`, never on `state.sessionToken`; send `Authorization` only when a token happens to exist. Only the cross-origin case (Cloudflare frontend → self-hosted backend) gets a token, via `?session=`.
+
+- **OAuth `state` must be bound to the browser.** A row in `oauth_states` proves only that *some* browser started a login, and the start endpoints are public — an attacker mints their own state, completes the provider step with their account, and forces the result onto a victim (login CSRF). Callbacks require the `athena_oauth_state` cookie to match the returned `state`.
+
+- **New column holding a token or key → `encryptSecret` / `decryptSecret`** (`enc:v1:` AES-GCM under `STORAGE_KEY`). Every read path decrypts. `decryptSecret` returns `null` on a wrong/missing key instead of throwing, so callers must handle null rather than `try/catch`. Never return the raw value from an API — mask to `has_token` / `has_key`.
+
+- **Outbound fetch to a user-supplied URL → `isSafeExternalUrl(u, env)` first**, re-checked after every redirect hop. `fetchWithTimeout` reads `env` from its options object; omit it and the call fails closed. A new scrape/enrich helper must thread `env` through every call site.
+
+- **Per-request credential overrides are a paired, rank-gated set.** Never let a request supply `baseUrl` and inherit the stored `apiKey` — that delivers the instance key to an attacker's host. `handleAiChatProxy` 403s a partial or non-GOD override; `public/src/lib/ai.js` must stay aligned (`window.athenaIsGod`) or non-GOD users hit that 403.
+
+- **Self-host `env` is an allowlist.** Reading a new `env.FOO` in `worker/index.js` requires adding `FOO` to `ALLOWED_ENV` in `server/index.js`. Miss it and the var is silently `undefined` under Node while working fine on Workers.
+
+- **Nothing goes on `window` beyond what a library needs.** `public/` shares globals by design, so an added export widens XSS reach — a handle on `state` exposes `sessionToken`.
 
 ## Git
 

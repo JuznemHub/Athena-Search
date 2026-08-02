@@ -7,6 +7,14 @@ import { join, normalize, extname } from 'node:path';
 
 const NO_CACHE = new Set(['.html', '.js', '.css']);
 
+// No X-Frame-Options — it cannot express an allowlist, and Telegram Web loads
+// the Mini App in an iframe. frame-ancestors covers framing instead.
+const SECURITY = {
+  'Referrer-Policy': 'no-referrer',
+  'X-Content-Type-Options': 'nosniff',
+  'Content-Security-Policy': "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' https://telegram.org 'unsafe-inline'; connect-src 'self' https:; frame-ancestors https://web.telegram.org https://telegram.org; base-uri 'self'",
+};
+
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -41,6 +49,7 @@ export function createAssets(root) {
             headers: {
               'Content-Type': TYPES[extname(full).toLowerCase()] || 'application/octet-stream',
               'Cache-Control': NO_CACHE.has(extname(full).toLowerCase()) ? 'no-cache' : 'public, max-age=3600',
+              ...SECURITY,
             },
           });
         }
@@ -50,7 +59,7 @@ export function createAssets(root) {
         const html = await readFile(join(root, 'index.html'));
         return new Response(html, {
           status: 200,
-          headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' },
+          headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', ...SECURITY },
         });
       } catch (_) {
         return new Response('Not found', { status: 404 });
