@@ -26,6 +26,27 @@ const PUBLIC_API = 'https://api.telegram.org';
 const CLOUD_MAX_BYTES = 49 * 1024 * 1024;
 const LOCAL_MAX_BYTES = 1900 * 1024 * 1024;
 
+/**
+ * Decrypt an `enc:v1:` token stored by the Worker (AES-GCM under STORAGE_KEY).
+ * Plaintext rows (pre-encryption) pass through unchanged. Used only to obtain
+ * the bot token that uploads the dump — the dump itself ships ciphertext.
+ */
+async function decryptStoredToken(stored, storageKey) {
+  const s = String(stored || '');
+  if (!s.startsWith('enc:v1:')) return stored;
+  const key = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(storageKey || '')));
+  const k = await crypto.subtle.importKey('raw', key, { name: 'AES-GCM' }, false, ['decrypt']);
+  try {
+    const [, , ivB64, ctB64] = s.split(':');
+    const iv = Uint8Array.from(atob(ivB64), c => c.charCodeAt(0));
+    const ct = Uint8Array.from(atob(ctB64), c => c.charCodeAt(0));
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, k, ct);
+    return new TextDecoder().decode(plain);
+  } catch (_) {
+    return stored; // wrong/rotated key → keep raw (send will fail, logged)
+  }
+}
+
 export function apiBase(env) {
   return String(env.TELEGRAM_API_BASE || PUBLIC_API).replace(/\/+$/, '');
 }
@@ -55,7 +76,7 @@ async function resolveBotAndChat(db, env) {
            WHERE platform = 'telegram' AND bot_token IS NOT NULL AND bot_token != ''
            ORDER BY created_at DESC LIMIT 1`
         ).first();
-        if (row?.bot_token) token = row.bot_token;
+        if (row?.bot_token) token = await decryptStoredToken(row.bot_token, env.STORAGE_KEY);
       }
       if (!chatId) {
         // A personal-scope binding's group_id IS the owner's Telegram user id.

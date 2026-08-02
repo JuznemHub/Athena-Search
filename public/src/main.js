@@ -56,10 +56,12 @@ document.addEventListener('DOMContentLoaded', () => {
     hasSearched: false,
     isInstanceOwner: true // until /auth/me says otherwise; empty owner lists = all owners
   };
-
   function isGod() {
     return !!state.currentUser?.is_god;
   }
+  // ai.js only sends per-request AI credentials for GOD — the server rejects
+  // them for anyone else.
+  window.athenaIsGod = isGod;
   function canUseAi() {
     return !!state.currentUser; // all logged-in ranks
   }
@@ -140,12 +142,11 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function api(path, options = {}) {
-    // Deliberately NOT credentials:'include'. The backend answers with
-    // Access-Control-Allow-Origin: *, and the CORS spec forbids that pairing —
-    // the browser blocks the response outright, so every call fails once the
-    // backend is on a different origin. Auth travels in the Authorization
-    // header, not a cookie, so nothing is lost. The default ('same-origin')
-    // still sends the cookie when the backend IS this origin.
+    // Deliberately NOT credentials:'include'. The backend does not send
+    // Access-Control-Allow-Credentials, so the browser would block the response
+    // outright once the backend is on a different origin. Cross-origin auth
+    // travels in the Authorization header; the default ('same-origin') still
+    // sends the HttpOnly session cookie when the backend IS this origin.
     const res = await fetch(`${API_BASE}${path}`, {
       ...options,
       headers: {
@@ -363,8 +364,8 @@ document.addEventListener('DOMContentLoaded', () => {
       // data that was never sent.
       const initData = tg.initData || '';
       if (!initData) return { ok: false, reason: 'no_init_data' };
-      // No credentials:'include' — see api(); it is incompatible with the
-      // wildcard CORS origin and would make this call fail cross-origin.
+      // No credentials:'include' — see api(); the backend sends no
+      // Allow-Credentials, so it would make this call fail cross-origin.
       const res = await fetch(`${API_BASE}/api/auth/telegram/webapp`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -444,6 +445,8 @@ document.addEventListener('DOMContentLoaded', () => {
         telegram_jwt: 'Telegram ID token invalid. Check bot OIDC domain settings.',
         telegram_config: 'Telegram login is not configured on the server.',
         telegram_missing: 'Telegram did not return a full login response. Try again.',
+        discord_state: 'Login session expired or was started in another browser. Click Continue with Discord once, in this tab.',
+        discord_state_store: 'Could not start login (server). Try again in a moment.',
         banned: 'You are banned from all communities (no remaining memberships). If you still belong to another community, contact support — otherwise rejoin a group then /community_join <id>.'
       };
       showAuthError(hints[authErr] || `Login failed (${authErr})`);
@@ -695,7 +698,9 @@ document.addEventListener('DOMContentLoaded', () => {
     return `${p.length}:${newest(p)}:${pd.length}:${newest(pd)}|${c.length}:${newest(c)}:${cd.length}:${newest(cd)}|${state.activeCommunity || ''}`;
   }
   async function refreshLiveData(opts = {}) {
-    if (!state.currentUser || !state.sessionToken) return;
+    // No sessionToken check: a same-origin login authenticates with the HttpOnly
+    // cookie alone, so currentUser is the only reliable signal.
+    if (!state.currentUser) return;
     if (liveSyncBusy) return;
     liveSyncBusy = true;
     try {
