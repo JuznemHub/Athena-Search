@@ -44,7 +44,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '6.18.7',
+          version: '6.18.8',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
