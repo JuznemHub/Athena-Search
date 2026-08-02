@@ -4424,10 +4424,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
   // A partial override is the same exfiltration: baseUrl alone would inherit
   // inst.api_key and ship it to the caller's host.
   if (hasOverride && !(bodyBase && bodyKey)) {
-    return Response.json(
-      { success: false, error: 'Per-request AI overrides must supply both baseUrl and apiKey' },
-      { status: 403, headers: corsHeaders }
-    );
+    return deny(corsHeaders, 'Per-request AI overrides must supply both baseUrl and apiKey', 'AI_OVERRIDE_INCOMPLETE');
   }
   const baseUrl = cleanApiBase(bodyBase || inst?.base_url || '');
   const apiKey = (bodyKey || inst?.api_key || '').trim();
