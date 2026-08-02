@@ -455,7 +455,16 @@ document.addEventListener('DOMContentLoaded', () => {
     if (fromOAuth) {
       state.sessionToken = fromOAuth;
       localStorage.setItem('athena_session', fromOAuth);
-      history.replaceState({}, '', window.location.pathname);
+      // Keep ?session= in the address bar on purpose: terminal clients
+      // (athena-tui) log in via this URL and must be able to copy the token.
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(fromOAuth).then(
+          () => showToast('Session ready — token copied. Paste it into athena-tui.'),
+          () => showToast('Session ready — copy the session= token from the address bar.')
+        );
+      } else {
+        showToast('Session ready — copy the session= token from the address bar.');
+      }
     }
     // Cookie fallback. Only useful same-origin: a SameSite=Lax cookie is not
     // sent on cross-site requests, so this does nothing once a self-hosted
