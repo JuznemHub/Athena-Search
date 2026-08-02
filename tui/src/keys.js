@@ -69,7 +69,7 @@ export function keyStream(stdin = process.stdin) {
         pending = pending.slice(1);
         finish({ name: 'other', value: c });
       }
-    });
+    };
     const onError = () => finish({ name: 'error' });
     stdin.on('data', onData);
     stdin.on('error', onError);
