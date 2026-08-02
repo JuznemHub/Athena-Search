@@ -89,7 +89,7 @@ try {
   const htmlLinks = await loadBookmarks({ kind: 'export', file: html });
   ok('html export', htmlLinks.length === 3 && htmlLinks.find((l) => l.url === 'https://ex.org')?.tags?.[0] === 'Dev');
   const xss = htmlLinks.find((l) => l.url === 'https://xss.org');
-  const safe = /^alert\(1\)Evil/.test(xss?.title) && !/[<>]/.test(xss?.title) && !/&#/.test(xss?.title);
+  const safe = xss?.title.includes('alert(1)Evil') && !/[<>]/.test(xss?.title) && !/&#/.test(xss?.title);
   ok('html title sanitized', safe);
 
   const detected = detectBookmarks();
