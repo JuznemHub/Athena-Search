@@ -43,7 +43,7 @@ async function decryptStoredToken(stored, storageKey) {
     const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, k, ct);
     return new TextDecoder().decode(plain);
   } catch (_) {
-    return stored; // wrong/rotated key → keep raw (send will fail, logged)
+    return null; // wrong/rotated key → let the caller fall back to TELEGRAM_BOT_TOKEN
   }
 }
 

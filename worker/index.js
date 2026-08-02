@@ -31,7 +31,7 @@ function securityHeaders() {
   return {
     'Referrer-Policy': 'no-referrer',
     'X-Content-Type-Options': 'nosniff',
-    'Content-Security-Policy': "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' https://telegram.org 'unsafe-inline'; connect-src 'self' https:; frame-ancestors https://web.telegram.org https://telegram.org",
+    'Content-Security-Policy': "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' https://telegram.org 'unsafe-inline'; connect-src 'self' https:; frame-ancestors https://web.telegram.org https://telegram.org; base-uri 'self'",
   };
 }
 
@@ -4447,6 +4447,9 @@ function normalizeModelId(model, baseUrl) {
   return m;
 }
 
+/** Time-to-first-byte budget for the upstream model call; a cold model is slow. */
+const AI_PROXY_TIMEOUT_MS = 30_000;
+
 async function handleAiChatProxy(request, user, env, corsHeaders) {
   if (!user) {
     return Response.json({ success: false, error: 'Login required', code: 'AUTH_REQUIRED' }, { status: 401, headers: corsHeaders });
@@ -4468,6 +4471,11 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
       { success: false, error: 'Per-request AI overrides are GOD rank only' },
       { status: 403, headers: corsHeaders }
     );
+  }
+  // A partial override is the same exfiltration: baseUrl alone would inherit
+  // inst.api_key and ship it to the caller's host.
+  if (hasOverride && !(bodyBase && bodyKey)) {
+    return deny(corsHeaders, 'Per-request AI overrides must supply both baseUrl and apiKey', 'AI_OVERRIDE_INCOMPLETE');
   }
   const baseUrl = cleanApiBase(bodyBase || inst?.base_url || '');
   const apiKey = (bodyKey || inst?.api_key || '').trim();
@@ -4514,9 +4522,16 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
   try {
       const maxTok = Math.min(parseInt(body.max_tokens, 10) || 500, 8192);
       let upstreamRes;
+      // fetchWithTimeout, not fetch: it never follows a redirect blindly. Here
+      // redirect:'error' refuses them outright — the request carries the API key
+      // and the prompt, and a public-but-hostile hop passes isSafeExternalUrl.
+      // Checking upstreamRes.url afterwards would be too late. Time-to-headers
+      // only; the timer is cleared before the SSE body streams.
       if (mode === 'anthropic') {
-        upstreamRes = await fetch(endpoint, {
+        upstreamRes = await fetchWithTimeout(endpoint, {
           method: 'POST',
+          env,
+          redirect: 'error',
           headers: {
             'Content-Type': 'application/json',
             'x-api-key': apiKey,
@@ -4529,14 +4544,16 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
             messages: messages || [{ role: 'user', content: userMsg }],
             stream: true
           })
-        });
+        }, AI_PROXY_TIMEOUT_MS);
       } else {
         const msgs = messages || [
           ...(system ? [{ role: 'system', content: system }] : []),
           { role: 'user', content: userMsg }
         ];
-        upstreamRes = await fetch(endpoint, {
+        upstreamRes = await fetchWithTimeout(endpoint, {
           method: 'POST',
+          env,
+          redirect: 'error',
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${apiKey}`
@@ -4548,15 +4565,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
             max_tokens: maxTok,
             stream: true
           })
-        });
-      }
-      // Re-check after a redirect: the key must never be delivered anywhere
-      // but the validated public host (DNS-rebinding / open-redirect to a
-      // private host would otherwise exfiltrate it on self-host).
-      if (upstreamRes.url && upstreamRes.url !== endpoint) {
-        if (!(await isSafeExternalUrl(new URL(upstreamRes.url), env))) {
-          return Response.json({ success: false, error: 'Provider redirected to a non-public host' }, { status: 502, headers: corsHeaders });
-        }
+        }, AI_PROXY_TIMEOUT_MS);
       }
 
       if (!upstreamRes.ok) {
@@ -8588,6 +8597,11 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = SCRAPE_TIMEOUT_MS
         throw err;
       }
       const res = await fetch(u, { ...options, env: undefined, redirect: 'manual', signal: ctrl.signal });
+      if ([301, 302, 303, 307, 308].includes(res.status) && redirect === 'error') {
+        const err = new Error(`redirect refused: ${target.hostname} -> ${res.headers.get('location') || 'unknown'}`);
+        err.code = 'REDIRECT_REFUSED';
+        throw err;
+      }
       if ([301, 302, 303, 307, 308].includes(res.status) && redirect === 'follow') {
         const loc = res.headers.get('location');
         if (!loc) return res;

@@ -540,7 +540,8 @@ body::before {
 .input {
   background: var(--input-bg) !important;
   color: var(--text-main) !important;
-  border-color: var(--hairline) !important;
+  /* No !important: the :focus rules in style.css must be able to override it. */
+  border-color: var(--hairline);
   font-family: var(--font-sans) !important;
 }
 .search-bar-box input,
