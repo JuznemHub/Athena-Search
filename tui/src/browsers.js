@@ -110,6 +110,7 @@ function sanitizeText(s) {
     .replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#0*39;/gi, "'")
     .replace(/&amp;/gi, '&')
     .replace(/<[^>]*>?/g, '')
+    .replace(/</g, '')
     .trim();
 }
 
