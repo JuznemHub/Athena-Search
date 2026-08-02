@@ -91,7 +91,7 @@ async function stepConnectInstance() {
   const client = makeClient(url);
   try {
     await withSpinner(io, theme, 'Pinging instance…', () => client.health());
-    state.instance = url;
+    state.instance = url.replace(/\/+$/, '');
     saveConfig(state);
     stderr(theme.ok('Connected.\n'));
     return true;
@@ -349,7 +349,8 @@ async function main() {
     stderr('athena-tui needs an interactive terminal.\n');
     process.exit(1);
   }
-  state.instance = state.instance || process.env.ATHENA_INSTANCE;
+  const inst = state.instance || process.env.ATHENA_INSTANCE;
+  state.instance = inst ? String(inst).replace(/\/+$/, '') : undefined;
   if (process.env.ATHENA_TOKEN) state.token = process.env.ATHENA_TOKEN;
 
   await playIntro(io, theme, columns());

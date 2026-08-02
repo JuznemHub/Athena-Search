@@ -94,7 +94,9 @@ function corsAllowedOrigin(env, request) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const pathname = url.pathname;
+    // Tolerate // and /// in paths (e.g. instance URLs saved with a trailing
+    // slash joined to '/api/...') — route matching is exact below.
+    const pathname = url.pathname.replace(/\/{2,}/g, '/');
 
     const corsHeaders = {
       'Access-Control-Allow-Origin': corsAllowedOrigin(env, request),
