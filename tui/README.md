@@ -1,5 +1,12 @@
 # athena-tui
 
+<p>
+  <a href="https://www.npmjs.com/package/athena-tui"><img src="https://img.shields.io/npm/v/athena-tui?style=flat-square&label=npm" alt="npm"></a>
+  <img src="https://img.shields.io/badge/license_CC_BY--NC_4.0-blue?style=flat-square" alt="license">
+  <img src="https://img.shields.io/badge/dependencies-0-brightgreen?style=flat-square" alt="zero dependencies">
+  <img src="https://img.shields.io/badge/node-%3E%3D22.5-339933?style=flat-square&logo=node.js" alt="node >= 22.5">
+</p>
+
 Terminal UI for [Athena Search](https://github.com/JuznemHub/Athena-Search) —
 dump your browser bookmarks into your Athena brain from the command line.
 
@@ -16,9 +23,9 @@ bookmark extraction covers Chromium-family browsers and Firefox.
 
 ## Install
 
-The package is on npm, so you can grab it on any machine without cloning the
-repo — handy when the website and database live on a VPS but you run the TUI
-locally to collect your bookmarks:
+The package is on [npm](https://www.npmjs.com/package/athena-tui), so you can
+grab it on any machine without cloning the repo — handy when the website and
+database live on a VPS but you run the TUI locally to collect your bookmarks:
 
 ```sh
 npm install -g athena-tui

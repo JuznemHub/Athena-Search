@@ -142,7 +142,7 @@ npm install -g athena-tui
 athena-tui
 ```
 
-Prefer a longer name? `athenasearch-tui` is an alias package for the same CLI.
+Prefer a longer name? [`athenasearch-tui`](https://www.npmjs.com/package/athenasearch-tui) is an alias package for the same CLI.
 
 **Setup** — the menu is the whole app, just press in order:
 
