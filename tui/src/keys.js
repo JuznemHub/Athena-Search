@@ -22,7 +22,7 @@ export function keyStream(stdin = process.stdin) {
     stdin.setRawMode(true);
     stdin.resume();
     stdin.setEncoding('utf8');
-    stdin.on('data', (chunk) => {
+    const onData = (chunk) => {
       // Terminals may split escape sequences across chunks (\x1b then [A), so
       // buffer until a sequence resolves instead of treating every \x1b as ESC.
       pending += chunk;
@@ -70,7 +70,9 @@ export function keyStream(stdin = process.stdin) {
         finish({ name: 'other', value: c });
       }
     });
-    stdin.on('error', () => finish({ name: 'error' }));
+    const onError = () => finish({ name: 'error' });
+    stdin.on('data', onData);
+    stdin.on('error', onError);
     resolve({
       next() {
         if (queue.length) return Promise.resolve(queue.shift());
@@ -78,6 +80,8 @@ export function keyStream(stdin = process.stdin) {
       },
       close() {
         if (escTimer) clearTimeout(escTimer);
+        stdin.removeListener('data', onData);
+        stdin.removeListener('error', onError);
         try { stdin.setRawMode(false); } catch { /* already closed */ }
         stdin.pause();
       },
