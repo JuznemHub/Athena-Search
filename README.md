@@ -131,6 +131,24 @@ Storage backend comes from `ATHENA_RUNTIME`, not the frontend URL. A self-hosted
 
 ---
 
+## Terminal UI (athena-tui)
+
+Dump your browser bookmarks into your Athena brain straight from the terminal — no browser needed. Zero dependencies, Node >= 22.
+
+```bash
+cd tui
+npm install   # no-op, just links the `athena-tui` bin
+npm start
+```
+
+Or install it globally: `cd tui && npm install -g .` → `athena-tui`
+
+Flow: **1** connect instance → **2** login with Telegram → **3** join community → **4** scan bookmarks → **5** dump (GODs pick personal or community brain). Detects Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Arc, and Firefox bookmarks automatically.
+
+Full docs in [`tui/README.md`](tui/README.md).
+
+---
+
 ## Ranks
 
 | Rank | Who | Personal brain | AI | Bot settings | Delete links | Upload docs |
