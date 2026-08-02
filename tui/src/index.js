@@ -103,8 +103,8 @@ async function stepConnectInstance() {
 
 async function stepLogin() {
   if (!state.instance) {
-    stderr(theme.danger('Connect an instance first.\n'));
-    return false;
+    stderr(theme.dim('No instance connected — connecting first.\n\n'));
+    if (!(await stepConnectInstance())) return false;
   }
   await renderHeader(false);
   stderr(center(theme.bold('Login with Telegram'), columns()) + '\n\n');
