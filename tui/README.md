@@ -16,7 +16,16 @@ bookmark extraction covers Chromium-family browsers and Firefox.
 
 ## Install
 
-From the repo root:
+The package is on npm, so you can grab it on any machine without cloning the
+repo — handy when the website and database live on a VPS but you run the TUI
+locally to collect your bookmarks:
+
+```sh
+npm install -g athena-tui
+athena-tui
+```
+
+From the repo checkout:
 
 ```sh
 cd tui
@@ -28,14 +37,6 @@ Or run it without installing, straight from the checkout:
 
 ```sh
 node tui/src/index.js
-```
-
-Or install it as a global command (available anywhere as `athena-tui`):
-
-```sh
-cd tui
-npm install -g .
-athena-tui
 ```
 
 ## Flow (step by step)
