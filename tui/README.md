@@ -14,6 +14,28 @@ Zero dependencies (Node >= 22 built-ins only). The wordmark, box menus, `❯`
 cursor, and spinner take after [nxfu/binthere](https://github.com/nxfu/binthere);
 bookmark extraction covers Chromium-family browsers and Firefox.
 
+```text
+                                    ✦
+                   █▀█ ▀█▀ █ █ █▀▀ █▄ █ █▀█  ▄▀▀ █▀▀ █▀█ █▀▄ ▄▀▀ █ █
+                   █▄█  █  █▀█ █▀  █ ▀█ █▄█  █▄▄ █▀  █▄█ █▀▄ █   █▀█
+                   ▀ ▀  ▀  ▀ ▀ ▀▀▀ ▀  ▀ ▀ ▀  ▀▀▀ ▀▀▀ ▀ ▀ ▀▀  ▀▀▀ ▀ ▀
+              search your second brain · dump your bookmarks · ai answers
+                                 server  not connected
+
+                   ╭─ actions ─────────────────────────────────────╮
+                   │ ❯ 1 Login with Telegram         not logged in │
+                   │   2 Connect instance            not connected │
+                   │   3 Join community              not joined    │
+                   │   4 Scan bookmarks              not scanned   │
+                   │   5 Dump bookmarks                            │
+                   │   6 Status                                    │
+                   │   7 Quit                                      │
+                   ╰───────────────────────────────────────────────╯
+                       ╭────────────────────────────────────────╮
+                       │ ↑↓ move · ↵ select · 1-9 jump · q quit │
+                       ╰────────────────────────────────────────╯
+```
+
 ## Requirements
 
 - **Node.js >= 22.5** (uses `node:sqlite` for Firefox bookmarks; anything

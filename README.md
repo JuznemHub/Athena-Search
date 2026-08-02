@@ -129,6 +129,28 @@ Storage backend comes from `ATHENA_RUNTIME`, not the frontend URL. A self-hosted
 
 Dump your browser bookmarks into your Athena brain straight from the terminal — no browser needed. Zero dependencies, Node >= 22.
 
+```text
+                                    ✦
+                   █▀█ ▀█▀ █ █ █▀▀ █▄ █ █▀█  ▄▀▀ █▀▀ █▀█ █▀▄ ▄▀▀ █ █
+                   █▄█  █  █▀█ █▀  █ ▀█ █▄█  █▄▄ █▀  █▄█ █▀▄ █   █▀█
+                   ▀ ▀  ▀  ▀ ▀ ▀▀▀ ▀  ▀ ▀ ▀  ▀▀▀ ▀▀▀ ▀ ▀ ▀▀  ▀▀▀ ▀ ▀
+              search your second brain · dump your bookmarks · ai answers
+                                 server  not connected
+
+                   ╭─ actions ─────────────────────────────────────╮
+                   │ ❯ 1 Login with Telegram         not logged in │
+                   │   2 Connect instance            not connected │
+                   │   3 Join community              not joined    │
+                   │   4 Scan bookmarks              not scanned   │
+                   │   5 Dump bookmarks                            │
+                   │   6 Status                                    │
+                   │   7 Quit                                      │
+                   ╰───────────────────────────────────────────────╯
+                       ╭────────────────────────────────────────╮
+                       │ ↑↓ move · ↵ select · 1-9 jump · q quit │
+                       ╰────────────────────────────────────────╯
+```
+
 Installed from npm, so it works on any machine without cloning the repo — the website and database can live on your VPS while you run the TUI locally to collect bookmarks:
 
 ```bash
