@@ -28,15 +28,9 @@ Four themes — **Dark**, **Light**, **Material** (MD3 surfaces, no blur), and *
 
 <p>
 <img src="screenshots/dark-purple.svg" width="24%" alt="Dark Purple">
-<img src="screenshots/dark-blue.svg" width="24%" alt="Dark Blue">
-<img src="screenshots/dark-green.svg" width="24%" alt="Dark Green">
-<img src="screenshots/dark-pink.svg" width="24%" alt="Dark Pink">
-</p>
-<p>
 <img src="screenshots/glass-purple.svg" width="24%" alt="Glass Purple">
 <img src="screenshots/material-blue.svg" width="24%" alt="Material Blue">
 <img src="screenshots/light-green.svg" width="24%" alt="Light Green">
-<img src="screenshots/material-pink.svg" width="24%" alt="Material Pink">
 </p>
 
 ---
