@@ -3,7 +3,7 @@
 One bar: search, dump, and AI answers from your markdown brain.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-6.18.7-blueviolet?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-6.18.8-blueviolet?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/license_CC_BY--NC_4.0-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/telegram-bot-blue?style=flat-square&logo=telegram" alt="telegram">
   <img src="https://img.shields.io/badge/discord-login-5865F2?style=flat-square&logo=discord" alt="discord">
@@ -362,9 +362,9 @@ Browser/Telegram → Worker or Node server → D1 | GitHub (+D1 cache) | Postgre
 > Built with the help of [OpenCode](https://opencode.ai), ChatGPT, and Claude. I'm a student on a tight budget, and their accessible tooling made this possible.
 
 > [!NOTE]
-> If Athena saves you time, a star or a share helps others find it — and if you hit a bug or want a feature, issues and PRs are welcome.
+> If you find this useful, consider giving it a star or sharing it — and if you hit a bug or want a feature, issues and PRs are welcome.
 >
-> Aaron Swartz's ideas deeply shaped how I think about open information. Long live.
+> Aaron Swartz's thoughts and ideas have deeply shaped who I am. Long live.
 
 ---
 
