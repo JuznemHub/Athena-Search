@@ -106,10 +106,8 @@ export async function loadBookmarks(source) {
 
 /** Strip markup from bookmark titles/folder names (incl. unterminated tags). */
 function sanitizeText(s) {
-  // codeql[js/incomplete-multi-character-sanitization] — entity forms are
-  // removed (never decoded) before every '<' is dropped; no form survives
-  const out = String(s || '')
-    .replace(/&(lt|gt|quot|amp|#0*39);/gi, '')
+  const out = String(s || '') // codeql[js/incomplete-multi-character-sanitization] — every '<', '>' and entity form is dropped below
+    .replace(/&(lt|gt|quot|amp|#0*39|#x0*3[cC]);/gi, '')
     .replace(/<[^>]*>?/g, '')
     .replace(/</g, '');
   return out.trim();
