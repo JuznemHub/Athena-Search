@@ -1,6 +1,6 @@
 {
   "name": "athenasearch-tui",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Alias for athena-tui — Terminal UI for Athena Search (dump browser bookmarks into your Athena brain).",
   "type": "module",
   "engines": { "node": ">=22" },

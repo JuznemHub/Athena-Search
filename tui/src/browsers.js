@@ -53,7 +53,16 @@ async function readFirefox(profileDir) {
   if (!fs.existsSync(db)) return [];
   let DatabaseSync;
   try { ({ DatabaseSync } = await import('node:sqlite')); } catch { return null; }
-  const conn = new DatabaseSync(db, { readOnly: true });
+  // A running Firefox holds an exclusive lock on places.sqlite (SQLITE_BUSY).
+  // Copy it (+ WAL/SHM) to a temp file and read the copy — the same trick
+  // gosuki uses for its VFS-locked DBs.
+  const tmp = path.join(os.tmpdir(), `athena-places-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.sqlite`);
+  fs.copyFileSync(db, tmp);
+  for (const ext of ['-wal', '-shm']) {
+    const f = db + ext;
+    try { if (fs.existsSync(f)) fs.copyFileSync(f, tmp + ext); } catch { /* optional */ }
+  }
+  const conn = new DatabaseSync(tmp, { readOnly: true });
   try {
     const rows = conn.prepare(`
       SELECT b.url, b.title, GROUP_CONCAT(p.title, ' / ') AS folder
@@ -65,7 +74,12 @@ async function readFirefox(profileDir) {
     return rows
       .filter((r) => isHttp(r.url))
       .map((r) => ({ url: r.url, title: r.title || '', tags: r.folder ? [r.folder] : [] }));
-  } finally { conn.close(); }
+  } finally {
+    conn.close();
+    fs.rmSync(tmp, { force: true });
+    fs.rmSync(tmp + '-wal', { force: true });
+    fs.rmSync(tmp + '-shm', { force: true });
+  }
 }
 
 // Chromium-family profile roots (native + sandboxed). The actual profile

@@ -161,9 +161,16 @@ async function stepScan() {
     sources = [{ name: 'Export file', file, kind: 'export' }];
   }
   const all = [];
+  const failed = [];
   for (const src of sources) {
-    const links = await withSpinner(io, theme, `Reading ${src.name}…`, () => loadBookmarks(src));
-    all.push(...links);
+    try {
+      const links = await withSpinner(io, theme, `Reading ${src.name}…`, () => loadBookmarks(src));
+      all.push(...links);
+    } catch (e) {
+      // One unreadable source (e.g. locked places.sqlite) must not abort the
+      // scan of the others.
+      failed.push(`${src.name}: ${e.message}`);
+    }
   }
   const raw = dedupe(all);
   const unique = filterSynthetic(raw);
@@ -176,6 +183,7 @@ async function stepScan() {
     `${theme.accent(String(unique.length))} unique bookmarks`,
     ...sources.map((s) => theme.dim('◦ ' + s.name)),
     ...(excluded ? [theme.dim(`${excluded} test/synthetic bookmarks excluded (example.*, *.test, localhost)`)] : []),
+    ...(failed.length ? [theme.danger(`${failed.length} source(s) unreadable:`), ...failed.map((f) => theme.dim('  ' + f))] : []),
     ...(state.scanned.folders.length ? ['', ...state.scanned.folders.map((f) => theme.dim('📁 ' + f))] : []),
   ];
   stderr(box(lines, theme).join('\n') + '\n');
@@ -222,9 +230,14 @@ async function stepDump() {
   // only when the scan state was lost (e.g. old config file).
   const sources = state.scanned?.sources?.length ? state.scanned.sources : detectBookmarks();
   const all = [];
+  const unreadable = [];
   for (const src of sources) {
-    const links = await withSpinner(io, theme, `Reading ${src.name}…`, () => loadBookmarks(src));
-    all.push(...links);
+    try {
+      const links = await withSpinner(io, theme, `Reading ${src.name}…`, () => loadBookmarks(src));
+      all.push(...links);
+    } catch (e) {
+      unreadable.push(`${src.name}: ${e.message}`);
+    }
   }
   const unique = dedupe(all);
   const clean = filterSynthetic(unique);
@@ -237,6 +250,7 @@ async function stepDump() {
   const where = target === 'personal' ? 'personal brain' : `community "${state.community_name || state.community_id}"`;
   stderr(center(theme.bold(`Dump ${clean.length} bookmarks → ${where}`), columns()) + '\n\n');
   if (excluded) stderr(theme.dim(`${excluded} test/synthetic bookmarks excluded (example.*, *.test, localhost)\n`));
+  if (unreadable.length) stderr(theme.danger(`${unreadable.length} source(s) unreadable:\n`) + unreadable.map((f) => theme.dim('  ' + f + '\n')).join(''));
   const ok = await confirm(io, theme, 'Send them now? (y/n)', columns());
   if (!ok) { stderr(theme.dim('Cancelled.\n')); return false; }
 
