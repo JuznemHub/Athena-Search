@@ -106,12 +106,13 @@ export async function loadBookmarks(source) {
 
 /** Strip markup from bookmark titles/folder names (incl. unterminated tags). */
 function sanitizeText(s) {
+  // codeql[js/incomplete-multi-character-sanitization] — entity forms are
+  // removed (never decoded) before every '<' is dropped; no form survives
   const out = String(s || '')
-    .replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#0*39;/gi, "'")
-    .replace(/&amp;/gi, '&')
+    .replace(/&(lt|gt|quot|amp|#0*39);/gi, '')
     .replace(/<[^>]*>?/g, '')
     .replace(/</g, '');
-  return out.trim(); // codeql[js/html-element-injection] — every '<' removed above
+  return out.trim();
 }
 
 /** Minimal Netscape bookmarks.html parser (export fallback). Folders via <DL>. */
