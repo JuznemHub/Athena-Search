@@ -92,7 +92,11 @@ function corsAllowedOrigin(env, request) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
+    // Background work (batch enrichment, …): Cloudflare keeps the promise alive
+    // via waitUntil; the self-host shim runs it with a no-op waitUntil, which
+    // still executes it asynchronously after the response.
+    env.__ctx = ctx || { waitUntil(p) { Promise.resolve(p).catch(() => {}); } };
     const url = new URL(request.url);
     // Tolerate // and /// in paths (e.g. instance URLs saved with a trailing
     // slash joined to '/api/...') — route matching is exact below.
@@ -4754,6 +4758,9 @@ async function handlePostPersonalLinksBatch(request, userId, env, corsHeaders) {
         ).bind(l.id, userId, l.url, l.url_hash, l.title, l.notes, JSON.stringify(l.tags), l.created_at).run();
       } catch (_) { /* id collision from a concurrent batch — row already there */ }
     }
+    // Dump was fast by design; enrich the fresh links in the background so they
+    // carry descriptions/site names/images like Telegram saves do.
+    runInBackground(env, enrichLinksInBackground(env, 'personal', userId, inserted));
   }
 
   return Response.json({
@@ -4829,6 +4836,7 @@ async function handlePostCommunityLinksBatch(request, user, env, corsHeaders) {
         ).run();
       } catch (_) { /* id collision from a concurrent batch — row already there */ }
     }
+    runInBackground(env, enrichLinksInBackground(env, 'community', communityId, inserted));
   }
 
   return Response.json({
@@ -8818,18 +8826,6 @@ async function enrichLinkFields(env, rawUrl, { title, notes } = {}) {
       scraped: false
     };
   }
-  // Title-only upload (e.g. bookmark dumps from athena-tui): the caller already
-  // knows the title — never block a bulk dump on a server-side fetch of every
-  // URL. Weak titles are bookmarked-page URLs, which also skip the scrape.
-  if (strongTitle && !userNotes) {
-    return {
-      title: userTitle.slice(0, 300),
-      notes: '',
-      image_url: '',
-      site_name: '',
-      scraped: false
-    };
-  }
   if (detailed && !strongTitle) {
     // keep notes, only fill title/image lightly
     const meta = await scrapeLinkMetadata(rawUrl, env);
@@ -8861,4 +8857,50 @@ async function enrichLinkFields(env, rawUrl, { title, notes } = {}) {
     site_name: meta.siteName || '',
     scraped: true
   };
+}
+
+/**
+ * Bulk dumps must not block on a server-side fetch per URL, but they should
+ * still END UP enriched like Telegram saves do. The batch handlers insert the
+ * dump immediately (title as given), then this pass runs in the background:
+ * scrape → UPDATE the row → and for GitHub-backed instances rewrite the
+ * Markdown entry too. Bounded concurrency; one bad site only costs its own
+ * 9s timeout.
+ */
+async function enrichLinksInBackground(env, scope, key, links) {
+  const CONCURRENCY = 4;
+  let next = 0;
+  const run = async () => {
+    while (next < links.length) {
+      const link = links[next++];
+      try {
+        const meta = await scrapeLinkMetadata(link.url, env);
+        const title = (isWeakTitle(link.title, link.url) && meta.title) ? meta.title : link.title;
+        const update = {
+          title,
+          notes: meta.description || '',
+          image_url: meta.image || '',
+          site_name: meta.siteName || '',
+        };
+        if (!update.notes && !update.image_url && !update.site_name) continue;
+        if (scope === 'personal') {
+          await env.DB.prepare(
+            'UPDATE personal_links SET title = ?, notes = ?, image_url = ?, site_name = ? WHERE id = ?'
+          ).bind(update.title, update.notes, update.image_url, update.site_name, link.id).run();
+        } else {
+          await env.DB.prepare(
+            'UPDATE links SET title = ?, notes = ?, image_url = ?, site_name = ? WHERE id = ?'
+          ).bind(update.title, update.notes, update.image_url, update.site_name, link.id).run();
+        }
+        // Best effort on GitHub storage: the .md entry catches up with the row.
+        await storeMutateLink(env, scope, key, link.id, update);
+      } catch (_) { /* one bad link must not stall the rest */ }
+    }
+  };
+  await Promise.all(Array.from({ length: CONCURRENCY }, run));
+}
+
+function runInBackground(env, promise) {
+  if (env.__ctx?.waitUntil) env.__ctx.waitUntil(promise);
+  else Promise.resolve(promise).catch(() => {});
 }
