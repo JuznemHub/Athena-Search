@@ -97,7 +97,11 @@ Or run it directly: `node tui/src/index.js`
   (disable with `ATHENA_TUI_NO_ANIMATION=1`)
 - Session + instance persisted at `~/.config/athena-tui/config.json`
 - Bookmarks detected from Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Arc,
-  and Firefox (`places.sqlite` via `node:sqlite`)
+  and Firefox (`places.sqlite` via `node:sqlite`), including Flatpak/Snap
+  sandboxes and the XDG profile dir (`~/.config/mozilla/firefox`)
+- Portable/custom browser data dirs: `ATHENA_BOOKMARK_ROOTS=/path/to/User\ Data`
+  (colon-separated) — scanned one level deep for `Bookmarks`/`places.sqlite`;
+  `athena-tui --diagnose` shows every root it checks
 - Non-HTTP(S) bookmarks are skipped; local duplicates collapse before upload
 
 ## Env

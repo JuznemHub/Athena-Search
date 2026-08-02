@@ -87,6 +87,8 @@ const CHROME_ROOTS = [
 
 const FIREFOX_ROOTS = [
   ['.mozilla', 'firefox'],
+  // XDG config home — where Arch/Fedora place Firefox profiles now
+  ['.config', 'mozilla', 'firefox'],
   ['.var', 'app', 'org.mozilla.firefox', '.mozilla', 'firefox'],
   ['snap', 'firefox', 'common', '.mozilla', 'firefox'],
 ];
@@ -127,9 +129,38 @@ function firefoxProfileDirs(home) {
   return out;
 }
 
+// Portable/custom browser data dirs (e.g. Comet in Documents): colon-separated
+// in ATHENA_BOOKMARK_ROOTS, each scanned one level deep for <dir>/Bookmarks
+// (chromium-style) or <dir>/places.sqlite (firefox-style).
+function extraCandidateFiles(home) {
+  const roots = String(process.env.ATHENA_BOOKMARK_ROOTS || '')
+    .split(':').map((s) => s.trim()).filter(Boolean);
+  const out = [];
+  for (const root of roots) {
+    const base = path.resolve(root.startsWith('~/') ? path.join(home, root.slice(2)) : root);
+    if (!fs.existsSync(base)) continue;
+    const label = path.basename(base);
+    if (fs.existsSync(path.join(base, 'places.sqlite'))) {
+      out.push([`Custom · ${label}`, base]);
+      continue;
+    }
+    try {
+      for (const dir of fs.readdirSync(base)) {
+        const p = path.join(base, dir);
+        if (fs.existsSync(path.join(p, 'Bookmarks'))) {
+          out.push([`Custom · ${label}/${dir}`, path.join(p, 'Bookmarks')]);
+        } else if (fs.existsSync(path.join(p, 'places.sqlite'))) {
+          out.push([`Custom · ${label}/${dir}`, p]);
+        }
+      }
+    } catch { /* unreadable root */ }
+  }
+  return out;
+}
+
 function browserCandidates() {
   const home = os.homedir();
-  return [...chromeCandidateFiles(home), ...firefoxProfileDirs(home)];
+  return [...chromeCandidateFiles(home), ...firefoxProfileDirs(home), ...extraCandidateFiles(home)];
 }
 
 /** Detect what bookmarks exist locally; returns [{name, file, kind}]. */
@@ -154,6 +185,7 @@ export function scanDiagnose() {
     `os.homedir() = ${home}`,
     `HOME env     = ${process.env.HOME || '(unset)'}`,
     `uid          = ${process.getuid?.() ?? 'n/a'}`,
+    `ATHENA_BOOKMARK_ROOTS = ${process.env.ATHENA_BOOKMARK_ROOTS || '(unset)'}`,
     '',
   ];
   for (const [name, dirs] of [...CHROME_ROOTS, ...FIREFOX_ROOTS.map((d) => ['Firefox', d])]) {
@@ -167,6 +199,11 @@ export function scanDiagnose() {
         out.push(`   ${has.padEnd(9)} ${dir}`);
       }
     } catch (e) { out.push(`   (unreadable: ${e.message})`); }
+  }
+  const extra = String(process.env.ATHENA_BOOKMARK_ROOTS || '').split(':').filter(Boolean);
+  for (const root of extra) {
+    const base = path.resolve(root.startsWith('~/') ? path.join(home, root.slice(2)) : root);
+    out.push(`${fs.existsSync(base) ? 'YES' : 'NO '} custom root: ${base}`);
   }
   const found = detectBookmarks();
   out.push('', `detected: ${found.length ? found.map((f) => f.name).join(', ') : 'NOTHING'}`);
