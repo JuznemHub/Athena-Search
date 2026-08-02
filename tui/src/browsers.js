@@ -107,8 +107,9 @@ export async function loadBookmarks(source) {
 /** Strip markup from bookmark titles/folder names (incl. unterminated tags). */
 function sanitizeText(s) {
   return String(s || '')
-    .replace(/<\/?[^>]*>/g, '')
-    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&quot;/g, '"')
+    .replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#0*39;/gi, "'")
+    .replace(/&amp;/gi, '&')
+    .replace(/<[^>]*>?/g, '')
     .trim();
 }
 

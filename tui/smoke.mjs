@@ -85,11 +85,11 @@ try {
   ok('dedupe', dedupe(links).length === 2 && dedupe(links.concat(links)).length === 2);
 
   const html = path.join(dir, 'export.html');
-  writeFileSync(html, `<DL><p><DT><H3>Dev</H3><DL><p><DT><A HREF="https://ex.org">Ex</A></DL><p><DT><A HREF="https://plain.org">Plain</A></DL><p><DT><A HREF="https://xss.org"><script>alert(1)</script>Evil<img src=x></A>`);
+  writeFileSync(html, `<DL><p><DT><H3>Dev</H3><DL><p><DT><A HREF="https://ex.org">Ex</A></DL><p><DT><A HREF="https://plain.org">Plain</A></DL><p><DT><A HREF="https://xss.org"><script>alert(1)</script>Evil<img src=x>&amp;lt;script&amp;gt;</A>`);
   const htmlLinks = await loadBookmarks({ kind: 'export', file: html });
   ok('html export', htmlLinks.length === 3 && htmlLinks.find((l) => l.url === 'https://ex.org')?.tags?.[0] === 'Dev');
   const xss = htmlLinks.find((l) => l.url === 'https://xss.org');
-  ok('html title sanitized', xss?.title === 'alert(1)Evil' && !xss.title.includes('<'));
+  ok('html title sanitized', xss?.title === 'alert(1)Evil&lt;script&gt;' && !xss.title.includes('<'));
 
   const detected = detectBookmarks();
   console.log(`INFO detected: ${detected.length}`);
