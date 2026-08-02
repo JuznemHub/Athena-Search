@@ -124,7 +124,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.4',
+          version: '1.0.5',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -2841,10 +2841,11 @@ async function handleGetCommunityLinks(url, user, env, corsHeaders) {
   const { results } = await env.DB.prepare(
     'SELECT * FROM links WHERE community_id = ? ORDER BY created_at DESC LIMIT 500'
   ).bind(communityId).all();
+  const seen = dedupeLinkRows(results || []);
 
   // attach my vote
   const links = [];
-  for (const row of results || []) {
+  for (const row of seen) {
     const my = await env.DB.prepare(
       'SELECT vote FROM link_votes WHERE link_id = ? AND user_id = ?'
     ).bind(row.id, user.id).first();
@@ -3007,7 +3008,7 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
     await ensureFresh(env, 'personal', user.id);
     const rows = await candidateLinks(env, 'personal', user.id, q);
     return Response.json(
-      { success: true, query: q, scope, links: rankLinks(rows, q) },
+      { success: true, query: q, scope, links: rankLinks(dedupeLinkRows(rows), q) },
       { headers: corsHeaders }
     );
   }
@@ -3021,7 +3022,7 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
   await ensureFresh(env, 'community', communityId);
   const rows = await candidateLinks(env, 'community', communityId, q);
   return Response.json(
-    { success: true, query: q, scope, links: rankLinks(rows, q) },
+    { success: true, query: q, scope, links: rankLinks(dedupeLinkRows(rows), q) },
     { headers: corsHeaders }
   );
 }
@@ -4711,7 +4712,7 @@ async function handleGetPersonalLinks(userId, env, corsHeaders) {
   const { results } = await env.DB.prepare(
     'SELECT * FROM personal_links WHERE user_id = ? ORDER BY created_at DESC LIMIT 1000'
   ).bind(userId).all();
-  return Response.json({ success: true, links: results }, { headers: corsHeaders });
+  return Response.json({ success: true, links: dedupeLinkRows(results || []) }, { headers: corsHeaders });
 }
 
 async function handlePostPersonalLinksBatch(request, userId, env, corsHeaders) {
@@ -5333,8 +5334,27 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
       'INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
     ).bind(id, communityId, rawUrl, urlHash, meta.title, meta.notes || '', JSON.stringify(['telegram']), senderName, Date.now()).run();
   }
-  const preview = meta.notes ? `\n${String(meta.notes)}` : '';
-  await sendTelegramMessage(token, chatId, `Saved to community:\n${meta.title || rawUrl}\n${rawUrl}${preview}`, threadId);
+  let reply;
+  try {
+    const vocab = await recentTagsForScope(env, 'community', communityId);
+    const ai = await aiDescribeAndTag(env, rawUrl, meta, vocab);
+    if (ai) {
+      const merged = ai.tags?.length
+        ? [...new Set([...['telegram', 'community'], ...ai.tags])].slice(0, 8)
+        : ['telegram', 'community'];
+      try {
+        await env.DB.prepare('UPDATE links SET tags = ?, notes = ? WHERE id = ?')
+          .bind(JSON.stringify(merged), ai.description || meta.notes || '', id).run();
+        await storeMutateLink(env, 'community', communityId, id, { notes: ai.description || '', tags: merged });
+      } catch (_) {}
+      reply = formatSavedLinkReply('community', meta.title, rawUrl, ai);
+    } else {
+      reply = formatSavedLinkReply('community', meta.title, rawUrl, null, meta.notes);
+    }
+  } catch (_) {
+    reply = formatSavedLinkReply('community', meta.title, rawUrl, null, meta.notes);
+  }
+  await sendTelegramMessage(token, chatId, reply, threadId);
 }
 
 /** Decrypt a stored bot_token (enc:v1:...) for use; plaintext rows pass through.
@@ -6275,6 +6295,14 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   // Keep bot replies in the same forum topic as the user message (not General/#)
   const forumThreadId = msg.message_thread_id != null ? Number(msg.message_thread_id) : null;
 
+  const parts = text.split(/\s+/);
+  let cmd = (parts[0] || '').toLowerCase().replace(/@\w+$/, '');
+  // typos
+  if (cmd === '/perosnal') cmd = '/personal';
+  // if first token is a URL, not a command
+  if (cmd.startsWith('http')) cmd = '';
+  const rest = cmd.startsWith('/') ? text.slice(parts[0].length).trim() : text;
+
   let binding = await findTelegramBinding(env, chatId, tgUserId);
   let token = (await tokenForBindingAsync(binding, env)) || env.TELEGRAM_BOT_TOKEN;
   let athenaUser = await resolveAthenaUserFromTg(env, tgUserId);
@@ -6287,8 +6315,28 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     } catch (_) {}
   }
 
+  // Topic lock: whole bot in this group (commands + dumps + ban checks). Only
+  // /topic can run outside the locked topic. This gate MUST run before the
+  // presence/ban block — otherwise a message in the wrong topic still gets a
+  // "you are banned" reply, which looks like the bot is broken.
+  // In forum General, message_thread_id is often missing — treat as "not locked topic".
+  const isGroupChatEarly = String(msg.chat?.type || '').includes('group') || chatId.startsWith('-');
+  if (isGroupChatEarly && binding?.topic_id) {
+    const locked = String(binding.topic_id);
+    const here = forumThreadId != null ? String(forumThreadId) : null;
+    const isTopicCmd = cmd === '/topic';
+    if (here !== locked && !isTopicCmd) {
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+  }
+
+  // Telegram's "Anonymous Admin" (id 1087968824, @GroupAnonymousBot) posts as a
+  // special account that can break getChatMember presence lookups. It is an
+  // administrator by definition — never ban-reply its messages.
+  const IS_ANON_ADMIN = tgUserId === '1087968824';
+
   // Live presence + ban: THIS community only (multi-community: ban on X does not lock Y)
-  if (binding?.community_id && tgUserId && !isGodTgId(tgUserId, env)) {
+  if (binding?.community_id && tgUserId && !isGodTgId(tgUserId, env) && !IS_ANON_ADMIN) {
     try {
       const pres = await enforceGroupPresenceOrBan(env, binding.community_id, tgUserId, athenaUser);
       const bannedHere = pres.banned
@@ -6339,13 +6387,6 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     const pb = await findPersonalBotForOwner(env, athenaUser.id);
     if (pb?.bot_token) token = await decryptBotToken(env, pb.bot_token);
   }
-  const parts = text.split(/\s+/);
-  let cmd = (parts[0] || '').toLowerCase().replace(/@\w+$/, '');
-  // typos
-  if (cmd === '/perosnal') cmd = '/personal';
-  // if first token is a URL, not a command
-  if (cmd.startsWith('http')) cmd = '';
-  const rest = cmd.startsWith('/') ? text.slice(parts[0].length).trim() : text;
 
   // Rank context for this chat. Must precede document handling, which reads isGod.
   const communityIdForRank = binding?.community_id || null;
@@ -6481,18 +6522,6 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     }
   }
   const dumpLinkMode = (binding?.dump_link_mode || 'smart').toLowerCase();
-
-  // Topic lock: whole bot in this group (commands + dumps). Only /topic can run outside locked topic.
-  // In forum General, message_thread_id is often missing — treat as "not locked topic".
-  const isGroupChatEarly = String(msg.chat?.type || '').includes('group') || chatId.startsWith('-');
-  if (isGroupChatEarly && binding?.topic_id) {
-    const locked = String(binding.topic_id);
-    const here = forumThreadId != null ? String(forumThreadId) : null;
-    const isTopicCmd = cmd === '/topic';
-    if (here !== locked && !isTopicCmd) {
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-  }
 
   const STAFF_OR_ABOVE = new Set([
     '/delete', '/edit', '/topic', '/dumpall', '/dumpsmart', '/admin', '/demote', '/clear',
@@ -8182,9 +8211,25 @@ ${ctx}`;
       if (r.duplicate) {
         await sendTelegramMessage(token, chatId, `Website is already added: ${rawUrl}`, forumThreadId);
       } else {
-        const preview = r.notes ? `\n${String(r.notes)}` : '';
-        await sendTelegramMessage(token, chatId,
-          `Saved to personal:\n${r.title || rawUrl}\n${rawUrl}${preview}`, forumThreadId);
+        let reply;
+        try {
+          const vocab = await recentTagsForScope(env, 'personal', athenaUser.id);
+          const ai = await aiDescribeAndTag(env, rawUrl, { title: r.title, notes: r.notes }, vocab);
+          if (ai && r.id) {
+            const merged = ai.tags?.length
+              ? [...new Set([...['telegram', 'personal'], ...ai.tags])].slice(0, 8)
+              : ['telegram', 'personal'];
+            try {
+              await env.DB.prepare('UPDATE personal_links SET tags = ?, notes = ? WHERE id = ?')
+                .bind(JSON.stringify(merged), ai.description || r.notes || '', r.id).run();
+              await storeMutateLink(env, 'personal', athenaUser.id, r.id, { notes: ai.description || '', tags: merged });
+            } catch (_) {}
+          }
+          reply = formatSavedLinkReply('personal', r.title, rawUrl, ai, r.notes);
+        } catch (_) {
+          reply = formatSavedLinkReply('personal', r.title, rawUrl, null, r.notes);
+        }
+        await sendTelegramMessage(token, chatId, reply, forumThreadId);
       }
     }
   }
@@ -8277,6 +8322,22 @@ function generateUrlHash(rawUrl) {
   } catch (_) {
     return 'raw_' + String(rawUrl).length;
   }
+}
+
+/**
+ * Defensive de-dupe of read results. Inserts check url_hash first, but a bot
+ * share and a TUI dump can still race past the EXISTS check — or an older
+ * sync can leave two rows for one URL. The list API must never show the same
+ * page twice, so keep the newest row per url_hash on every read path.
+ */
+function dedupeLinkRows(rows) {
+  const seen = new Map();
+  for (const r of rows || []) {
+    const key = String(r.url_hash || generateUrlHash(r.url || '') || r.url || '').toLowerCase();
+    const cur = seen.get(key);
+    if (!cur || Number(r.created_at || 0) >= Number(cur.created_at || 0)) seen.set(key, r);
+  }
+  return [...seen.values()];
 }
 
 function decodeHtmlEntities(s) {
@@ -8869,6 +8930,7 @@ async function enrichLinkFields(env, rawUrl, { title, notes } = {}) {
  */
 async function enrichLinksInBackground(env, scope, key, links) {
   const CONCURRENCY = 4;
+  const vocab = await recentTagsForScope(env, scope, key);
   let next = 0;
   const run = async () => {
     while (next < links.length) {
@@ -8882,15 +8944,22 @@ async function enrichLinksInBackground(env, scope, key, links) {
           image_url: meta.image || '',
           site_name: meta.siteName || '',
         };
-        if (!update.notes && !update.image_url && !update.site_name) continue;
+        // AI describe + tag (karakeep-style); stable tags because the prompt
+        // is seeded with the vocabulary already in use for this scope.
+        const ai = await aiDescribeAndTag(env, link.url, { title, notes: meta.description }, vocab);
+        if (ai) {
+          if (ai.description) update.notes = ai.description;
+          if (ai.tags?.length) update.tags = [...new Set([...['telegram', 'dump'], ...ai.tags])].slice(0, 8);
+        }
+        if (!update.notes && !update.image_url && !update.site_name && !update.tags) continue;
         if (scope === 'personal') {
           await env.DB.prepare(
-            'UPDATE personal_links SET title = ?, notes = ?, image_url = ?, site_name = ? WHERE id = ?'
-          ).bind(update.title, update.notes, update.image_url, update.site_name, link.id).run();
+            'UPDATE personal_links SET title = ?, notes = ?, image_url = ?, site_name = ?' + (update.tags ? ', tags = ?' : '') + ' WHERE id = ?'
+          ).bind(update.title, update.notes, update.image_url, update.site_name, ...(update.tags ? [JSON.stringify(update.tags)] : []), link.id).run();
         } else {
           await env.DB.prepare(
-            'UPDATE links SET title = ?, notes = ?, image_url = ?, site_name = ? WHERE id = ?'
-          ).bind(update.title, update.notes, update.image_url, update.site_name, link.id).run();
+            'UPDATE links SET title = ?, notes = ?, image_url = ?, site_name = ?' + (update.tags ? ', tags = ?' : '') + ' WHERE id = ?'
+          ).bind(update.title, update.notes, update.image_url, update.site_name, ...(update.tags ? [JSON.stringify(update.tags)] : []), link.id).run();
         }
         // Best effort on GitHub storage: the .md entry catches up with the row.
         await storeMutateLink(env, scope, key, link.id, update);
@@ -8903,4 +8972,125 @@ async function enrichLinksInBackground(env, scope, key, links) {
 function runInBackground(env, promise) {
   if (env.__ctx?.waitUntil) env.__ctx.waitUntil(promise);
   else Promise.resolve(promise).catch(() => {});
+}
+
+/** Collect the tag vocabulary a community/user already uses, newest rows first. */
+async function recentTagsForScope(env, scope, key, limit = 30) {
+  const out = [];
+  try {
+    const q = scope === 'personal'
+      ? 'SELECT tags FROM personal_links WHERE user_id = ? ORDER BY created_at DESC LIMIT 60'
+      : 'SELECT tags FROM links WHERE community_id = ? ORDER BY created_at DESC LIMIT 60';
+    const { results } = await env.DB.prepare(q).bind(key).all();
+    for (const r of results || []) {
+      let arr = [];
+      try { arr = JSON.parse(r.tags || '[]'); } catch (_) {}
+      for (const t of Array.isArray(arr) ? arr : []) {
+        const s = String(t).replace(/^#/, '').trim().toLowerCase();
+        if (s && !out.includes(s)) out.push(s);
+      }
+      if (out.length >= limit) break;
+    }
+  } catch (_) {}
+  return out;
+}
+
+/**
+ * AI describe + tag (karakeep-style) for a saved link. Uses the instance AI
+ * config; identical link types get identical tags because the prompt is
+ * seeded with the community's existing tag vocabulary. Never throws — null
+ * means "AI unavailable" and callers fall back to the plain reply.
+ * Returns { description, tags } or null.
+ */
+async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = []) {
+  let cfg;
+  try { cfg = await getInstanceAiConfig(env); } catch (_) { return null; }
+  if (!cfg || !cfg.api_key) return null;
+  const baseUrl = cleanApiBase(cfg.base_url);
+  const model = normalizeModelId(cfg.model, baseUrl);
+  if (!baseUrl || !model) return null;
+  let endpoint;
+  try {
+    const ep = resolveChatEndpoint(baseUrl, cfg.mode || 'openai');
+    if (!(await isSafeExternalUrl(new URL(ep), env))) return null;
+    endpoint = ep;
+  } catch (_) { return null; }
+
+  const title = String(meta?.title || '').trim().slice(0, 200);
+  const snippet = String(meta?.notes || '').replace(/\s+/g, ' ').slice(0, 700);
+  const vocab = (existingTags.length ? existingTags.slice(0, 30) : []);
+  const mode = (cfg.mode || 'openai').toLowerCase();
+
+  const system = [
+    'You are a bookmarking assistant for a link archive.',
+    'Write what the link is, factually, in 1-2 short sentences — no marketing, no "click here", no emojis.',
+    'Choose 3-5 short lowercase tags (no #, no spaces) that describe the page.',
+    'If an existing tag fits, reuse it exactly — do not invent a synonym for a tag that already covers it.',
+    'Reply with ONLY one JSON object: {"description": "...", "tags": ["a", "b", "c"]}'
+  ].join(' ');
+
+  const user = [
+    `Title: ${title || '(unknown)'}`,
+    `URL: ${rawUrl}`,
+    snippet ? `Page text: ${snippet}` : '',
+    vocab.length ? `Existing tags: ${vocab.join(', ')}` : '',
+    '',
+    'JSON:'
+  ].filter(Boolean).join('\n');
+
+  const maxTok = 300;
+  let payload, headers;
+  if (mode === 'anthropic') {
+    headers = { 'Content-Type': 'application/json', 'x-api-key': cfg.api_key, 'anthropic-version': '2023-06-01' };
+    payload = { model, max_tokens: maxTok, system, messages: [{ role: 'user', content: user }] };
+  } else {
+    headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cfg.api_key}` };
+    payload = { model, max_tokens: maxTok, messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: user }
+    ] };
+  }
+
+  let text;
+  try {
+    const res = await fetchWithTimeout(endpoint, { method: 'POST', headers, body: JSON.stringify(payload) }, 12000);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (mode === 'anthropic') text = String(data?.content?.[0]?.text || '');
+    else text = String(data?.choices?.[0]?.message?.content || '');
+  } catch (_) { return null; }
+  if (!text.trim()) return null;
+  let parsed = null;
+  try {
+    parsed = JSON.parse(text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim());
+  } catch (_) {
+    const m = text.match(/\{[\s\S]*\}/);
+    if (m) { try { parsed = JSON.parse(m[0]); } catch (_) {} }
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+
+  const description = String(parsed.description || '').replace(/\s+/g, ' ').trim().slice(0, 400);
+  const rawTags = Array.isArray(parsed.tags) ? parsed.tags : [];
+  const tags = [];
+  for (const t of rawTags) {
+    const s = String(t).replace(/^#/, '').trim().toLowerCase().replace(/\s+/g, '-').slice(0, 24);
+    if (s && !tags.includes(s)) tags.push(s);
+    if (tags.length >= 5) break;
+  }
+  if (!description && !tags.length) return null;
+  return { description, tags };
+}
+
+/** Format the saved-link reply karakeep-style: what it is → link → #tags. */
+function formatSavedLinkReply(kindLabel, title, rawUrl, ai, fallbackNotes = '') {
+  const head = `Saved to ${kindLabel}:\n${title || rawUrl}`;
+  if (!ai) {
+    const preview = fallbackNotes ? `\n${String(fallbackNotes)}` : '';
+    return `${head}\n${rawUrl}${preview}`;
+  }
+  const lines = [head];
+  if (ai.description) lines.push('', ai.description);
+  lines.push('', rawUrl);
+  if (ai.tags?.length) lines.push('', ai.tags.map(t => `#${t}`).join(' '));
+  return lines.join('\n');
 }
