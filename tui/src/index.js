@@ -117,9 +117,16 @@ async function stepLogin() {
   state.token = token;
   const client = makeClient(state.instance, state.token);
   try {
-    const me = (await withSpinner(io, theme, 'Checking session…', () => client.me())).user;
-    state.name = me?.username || me?.first_name || 'user';
-    state.rank = rankOf(me);
+    const [me, cfg] = await Promise.all([
+      withSpinner(io, theme, 'Checking session…', () => client.me()),
+      client.storageConfig().catch(() => null),
+    ]);
+    const account = me.user;
+    state.name = account?.username || account?.first_name || 'user';
+    state.rank = rankOf(account);
+    // Backend is chosen on the website (PostgreSQL / GitHub / D1) — mirror it
+    // here so the TUI always reports where a dump will actually land.
+    if (cfg?.provider) state.provider = STORAGE_LABELS[cfg.provider] || cfg.provider;
     saveConfig(state);
     return true;
   } catch (e) {
@@ -251,8 +258,9 @@ async function stepDump() {
   saveConfig(state);
 
   await renderHeader(false);
+  const providerTxt = state.provider ? theme.dim(` · ${state.provider}`) : '';
   const where = target === 'personal' ? 'personal brain' : `community "${state.community_name || state.community_id}"`;
-  stderr(center(theme.bold(`Dump ${clean.length} bookmarks → ${where}`), columns()) + '\n\n');
+  stderr(center(theme.bold(`Dump ${clean.length} bookmarks → ${where}`) + providerTxt, columns()) + '\n\n');
   if (excluded) stderr(theme.dim(`${excluded} test/synthetic bookmarks excluded (example.*, *.test, localhost)\n`));
   if (unreadable.length) stderr(theme.danger(`${unreadable.length} source(s) unreadable:\n`) + unreadable.map((f) => theme.dim('  ' + f + '\n')).join(''));
   const ok = await confirm(io, theme, 'Send them now? (y/n)', columns());
@@ -378,7 +386,7 @@ async function mainMenu() {
   const head = [
     ...logoBlock(theme, columns()),
     center(theme.dim('search your second brain · dump your bookmarks · ai answers'), columns()),
-    center(theme.dim(`server  ${state.instance || 'not connected'}`), columns()),
+    center(theme.dim(`server  ${state.instance || 'not connected'}${state.provider ? ` · ${state.provider}` : ''}`), columns()),
     '',
   ];
   const pick = await menu(io, theme, { title: 'ATHENA SEARCH', items, width: columns(), header: head, label: 'actions' });
