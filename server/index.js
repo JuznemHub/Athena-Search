@@ -1,16 +1,10 @@
 #!/usr/bin/env node
 /**
- * Athena self-hosted mode — no Cloudflare.
+ * Athena self-hosted mode — runs worker/index.js under Node.
  *
- * Runs the exact same worker/index.js under Node by supplying the two things
- * the Workers runtime provided: a D1-compatible database (SQLite on local disk)
- * and an ASSETS binding (public/ from disk). Everything else the Worker uses —
- * fetch, Request/Response, crypto.subtle, TextEncoder, btoa — is standard in
- * Node 18+.
- *
- *   node server/index.js
- *
- * Config comes from the environment; see server/.env.example.
+ * Supplies the two bindings the Workers runtime provided: env.DB (D1-shaped
+ * Postgres) and env.ASSETS (public/ from disk). Config comes from the
+ * environment; see server/.env.example.
  */
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -30,7 +24,6 @@ const HOST = process.env.HOST || '0.0.0.0';
 const ASSETS_DIR = resolve(ROOT, process.env.ATHENA_ASSETS || 'public');
 
 // --- database -------------------------------------------------------------
-// Postgres only. SQLite was removed once Postgres was verified end to end.
 const DATABASE_URL = process.env.DATABASE_URL || '';
 if (!DATABASE_URL) {
   console.error('[athena] DATABASE_URL is required, e.g. postgresql://athena:pass@localhost:5432/athena');
@@ -48,10 +41,9 @@ try {
 }
 
 // --- env handed to the Worker --------------------------------------------
-// Explicit allowlist — passing process.env wholesale means any future
-// debug/introspection endpoint would leak every variable (secrets included).
-// Exactly the vars worker/index.js reads: anything only this file or backup.js
-// needs (GDRIVE_*, CF_*, PORT, …) stays in process.env and never crosses over.
+// Allowlist, not process.env wholesale: an introspection endpoint would
+// otherwise leak every secret. A new env.FOO read in worker/index.js is
+// undefined here until FOO is added.
 const ALLOWED_ENV = [
   'DATABASE_URL', 'ATHENA_RUNTIME', 'ATHENA_FRONTEND_URL',
   'TG_OWNER_IDS', 'DISCORD_OWNER_IDS',
@@ -66,20 +58,17 @@ for (const k of ALLOWED_ENV) {
   if (process.env[k] !== undefined) allowedEnv[k] = process.env[k];
 }
 const env = {
-  // Self-host default matches the Worker's: empty owner lists mean the first
-  // logged-in user is GOD. Set TG_OWNER_IDS to lock that down.
+  // Empty owner lists mean every logged-in user is GOD.
   TG_OWNER_IDS: '',
   DISCORD_OWNER_IDS: '',
-  // This box is a BACKEND. The user is looking at the Cloudflare-hosted site, so
-  // OAuth must hand the browser back there rather than to this origin. It still
-  // serves the UI as a fallback for running fully standalone.
+  // Set when this box is a backend for a Cloudflare-hosted frontend: OAuth
+  // hands the browser back there instead of to this origin.
   ATHENA_FRONTEND_URL: '',
   ...allowedEnv,
   DB,
   ASSETS: createAssets(ASSETS_DIR),
-  // Tells the Worker it is not on Cloudflare: local SQLite only, no GitHub store.
+  // Gates the Cloudflare-only paths in worker/index.js.
   ATHENA_RUNTIME: 'selfhost',
-  // Expose backup function for the Worker's /backup command
   runBackup: () => runBackupOnce({ connectionString: DATABASE_URL, env: process.env, db: DB }),
 };
 
@@ -94,6 +83,11 @@ function nodeToRequest(req) {
   for (const [k, v] of Object.entries(req.headers)) {
     if (Array.isArray(v)) v.forEach(x => headers.append(k, x));
     else if (v != null) headers.set(k, String(v));
+  }
+  // Without a reverse proxy nothing carries the client IP, so clientIp() in the
+  // Worker returns '' and every caller shares one rate-limit bucket.
+  if (!headers.has('x-forwarded-for') && req.socket?.remoteAddress) {
+    headers.set('x-forwarded-for', req.socket.remoteAddress);
   }
   return { url, headers };
 }
@@ -120,8 +114,7 @@ const server = http.createServer(async (req, res) => {
       else res.setHeader(k, v);
     });
 
-    // Stream the worker's body through (required for live AI token streaming /
-    // SSE). Buffering the whole body first would defeat token-by-token output.
+    // Streamed, not buffered: AI token streaming / SSE depends on it.
     if (response.body && typeof response.body.getReader === 'function') {
       try {
         const reader = response.body.getReader();
@@ -135,7 +128,6 @@ const server = http.createServer(async (req, res) => {
         return;
       } catch (e) {
         console.error('[athena] stream relay failed, falling back to buffer:', e.message);
-        // fall through to buffered path below
       }
     }
     const buf = Buffer.from(await response.arrayBuffer());
@@ -159,7 +151,6 @@ server.listen(PORT, HOST, () => {
   }
   startBackups({ connectionString: DATABASE_URL, env: process.env, db: DB });
 
-  // Auto-purge Cloudflare cache on startup
   if (process.env.CF_PURGE_CACHE === '1' && process.env.CF_ZONE_ID && process.env.CF_API_EMAIL && process.env.CF_API_KEY) {
     fetch(`https://api.cloudflare.com/client/v4/zones/${process.env.CF_ZONE_ID}/purge_cache`, {
       method: 'POST',

@@ -31,7 +31,7 @@ function securityHeaders() {
   return {
     'Referrer-Policy': 'no-referrer',
     'X-Content-Type-Options': 'nosniff',
-    'Content-Security-Policy': "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' https://telegram.org 'unsafe-inline'; connect-src 'self' https:; frame-ancestors https://web.telegram.org https://telegram.org",
+    'Content-Security-Policy': "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' https://telegram.org 'unsafe-inline'; connect-src 'self' https:; frame-ancestors https://web.telegram.org https://telegram.org; base-uri 'self'",
   };
 }
 
@@ -4396,6 +4396,9 @@ function normalizeModelId(model, baseUrl) {
   return m;
 }
 
+/** Time-to-first-byte budget for the upstream model call; a cold model is slow. */
+const AI_PROXY_TIMEOUT_MS = 30_000;
+
 async function handleAiChatProxy(request, user, env, corsHeaders) {
   if (!user) {
     return Response.json({ success: false, error: 'Login required', code: 'AUTH_REQUIRED' }, { status: 401, headers: corsHeaders });
@@ -4463,9 +4466,16 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
   try {
       const maxTok = Math.min(parseInt(body.max_tokens, 10) || 500, 8192);
       let upstreamRes;
+      // fetchWithTimeout, not fetch: it follows redirects manually and validates
+      // every hop before replaying the request, so the key is never delivered to
+      // an unvalidated host (open redirect / DNS rebinding to a private host).
+      // Checking upstreamRes.url afterwards would be too late — the credential
+      // has already left. Time-to-headers only; the timer is cleared before the
+      // SSE body streams.
       if (mode === 'anthropic') {
-        upstreamRes = await fetch(endpoint, {
+        upstreamRes = await fetchWithTimeout(endpoint, {
           method: 'POST',
+          env,
           headers: {
             'Content-Type': 'application/json',
             'x-api-key': apiKey,
@@ -4478,14 +4488,15 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
             messages: messages || [{ role: 'user', content: userMsg }],
             stream: true
           })
-        });
+        }, AI_PROXY_TIMEOUT_MS);
       } else {
         const msgs = messages || [
           ...(system ? [{ role: 'system', content: system }] : []),
           { role: 'user', content: userMsg }
         ];
-        upstreamRes = await fetch(endpoint, {
+        upstreamRes = await fetchWithTimeout(endpoint, {
           method: 'POST',
+          env,
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${apiKey}`
@@ -4497,15 +4508,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
             max_tokens: maxTok,
             stream: true
           })
-        });
-      }
-      // Re-check after a redirect: the key must never be delivered anywhere
-      // but the validated public host (DNS-rebinding / open-redirect to a
-      // private host would otherwise exfiltrate it on self-host).
-      if (upstreamRes.url && upstreamRes.url !== endpoint) {
-        if (!(await isSafeExternalUrl(new URL(upstreamRes.url), env))) {
-          return Response.json({ success: false, error: 'Provider redirected to a non-public host' }, { status: 502, headers: corsHeaders });
-        }
+        }, AI_PROXY_TIMEOUT_MS);
       }
 
       if (!upstreamRes.ok) {

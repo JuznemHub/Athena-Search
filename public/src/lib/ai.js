@@ -202,7 +202,7 @@ Rules:
     // everyone else uses the instance config. Don't send a local key that would
     // be rejected — fall back to instance, or to local search when the instance
     // has no key configured.
-    const isGod = window.athenaIsGod?.() ?? true;
+    const isGod = window.athenaIsGod?.() ?? false;
     const sendOwn = isGod && hasLocalKey;
     if (!isGod && !serverConfigured) {
       const local = answerLocal(q, list);
