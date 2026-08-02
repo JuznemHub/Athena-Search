@@ -7,27 +7,52 @@ Zero dependencies (Node >= 22 built-ins only). The wordmark, box menus, `❯`
 cursor, and spinner take after [nxfu/binthere](https://github.com/nxfu/binthere);
 bookmark extraction covers Chromium-family browsers and Firefox.
 
+## Requirements
+
+- **Node.js >= 22.5** (uses `node:sqlite` for Firefox bookmarks; anything
+  >= 22 works otherwise)
+- An Athena Search instance URL (ask your GOD)
+- A Telegram account linked to the instance
+
 ## Install
+
+From the repo root:
 
 ```sh
 cd tui
-npm install   # no-op, zero deps — just for the bin link
+npm install       # no-op — zero deps, just links the `athena-tui` bin
 npm start
 ```
 
-Or run directly: `node tui/src/index.js`
+Or run it without installing, straight from the checkout:
 
-## Flow
+```sh
+node tui/src/index.js
+```
+
+Or install it as a global command (available anywhere as `athena-tui`):
+
+```sh
+cd tui
+npm install -g .
+athena-tui
+```
+
+## Flow (step by step)
 
 1. **Connect instance** — paste your GOD's instance URL (or set `ATHENA_INSTANCE`).
-2. **Login with Telegram** — the TUI opens the site's login page; paste the
-   address-bar URL (or the `session=` token) back into the terminal.
+2. **Login with Telegram** — the TUI opens the site's login page in your
+   browser; log in there, then paste the address-bar URL (or the `session=`
+   token) back into the terminal.
 3. **Join community** — paste the community id from your GOD.
 4. **Scan bookmarks** — pick a source: all detected browsers, one browser,
    or a `bookmarks.html`/JSON export file.
 5. **Dump bookmarks** — GODs choose the *personal brain* or the *community
    brain*; everyone else dumps to their community. Server-side dedupe is
    handled (skips are reported), folder paths become tags.
+
+> First-time? Just press **1–5** in order — the menu is the whole app.
+> Every step can be re-run anytime; `q` quits.
 
 ## Features
 
