@@ -64,12 +64,17 @@ async function readFirefox(profileDir) {
   }
   const conn = new DatabaseSync(tmp, { readOnly: true });
   try {
+    // Modern Firefox: moz_bookmarks has no url column — type=1 rows point at
+    // moz_places via fk. The URL and canonical title live there.
     const rows = conn.prepare(`
-      SELECT b.url, b.title, GROUP_CONCAT(p.title, ' / ') AS folder
+      SELECT p.url AS url,
+             COALESCE(NULLIF(b.title, ''), p.title) AS title,
+             GROUP_CONCAT(f.title, ' / ') AS folder
       FROM moz_bookmarks b
-      LEFT JOIN moz_bookmarks p ON p.id = b.parent
-      WHERE b.type = 1 AND b.url IS NOT NULL
-      GROUP BY b.url
+      JOIN moz_places p ON p.id = b.fk
+      LEFT JOIN moz_bookmarks f ON f.id = b.parent
+      WHERE b.type = 1 AND p.url IS NOT NULL
+      GROUP BY p.url
     `).all();
     return rows
       .filter((r) => isHttp(r.url))
