@@ -474,5 +474,5 @@ body.results-active .search-wrapper { align-items: stretch; }
   .upload-actions { padding: 0 4px; flex-wrap: wrap; }
   .upload-file-btn { min-height: 44px; }
   .upload-status { flex-basis: 100%; }
-  .accent-swatches { grid-template-columns: repeat(4, 1fr); }
+  .accent-swatches { grid-template-columns: repeat(6, 1fr); gap: 6px; }
 }
