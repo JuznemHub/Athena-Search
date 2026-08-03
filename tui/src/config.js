@@ -17,8 +17,9 @@ export function loadConfig() {
 
 export function saveConfig(patch) {
   const cfg = { ...loadConfig(), ...patch };
-  fs.mkdirSync(dir(), { recursive: true });
-  fs.writeFileSync(file(), JSON.stringify(cfg, null, 2));
+  fs.mkdirSync(dir(), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file(), JSON.stringify(cfg, null, 2), { mode: 0o600 });
+  try { fs.chmodSync(file(), 0o600); } catch (_) {}
   return cfg;
 }
 

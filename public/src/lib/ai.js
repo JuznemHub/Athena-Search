@@ -9,6 +9,7 @@
     openrouter: { label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', mode: 'openai', model: 'openai/gpt-4o-mini' },
     anthropic: { label: 'Anthropic', baseUrl: 'https://api.anthropic.com', mode: 'anthropic', model: 'claude-sonnet-4-20250514' },
     groq: { label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', mode: 'openai', model: 'llama-3.3-70b-versatile' },
+    deepseek: { label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', mode: 'openai', model: 'deepseek-v4-flash' },
     opencode_go: {
       label: 'OpenCode Zen Go',
       baseUrl: 'https://opencode.ai/zen/go/v1',
@@ -173,7 +174,8 @@ Rules:
 
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.success) {
-      const bits = [data.error || `AI proxy failed (${res.status})`];
+      const providerError = typeof data.error === 'string' ? data.error : data.error?.message;
+      const bits = [providerError || `AI proxy failed (${res.status})`];
       if (data.endpoint) bits.push(`endpoint: ${data.endpoint}`);
       if (data.model) bits.push(`model: ${data.model}`);
       throw new Error(bits.join(' · '));

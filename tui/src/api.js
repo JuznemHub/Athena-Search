@@ -1,15 +1,36 @@
 // Athena Search REST client — everything the TUI needs, zero deps.
 
 export class ApiError extends Error {
-  constructor(message, type, status) {
+  constructor(message, type, status, { code = type, retryAfterMs = null } = {}) {
     super(message);
     this.type = type;
     this.status = status;
+    this.code = code;
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
 function normalize(url) {
   return url.replace(/\/+$/, '');
+}
+
+function retryAfterMs(headers) {
+  const raw = headers.get('retry-after');
+  if (!raw) return null;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds)) return Math.max(0, Math.round(seconds * 1000));
+  const at = Date.parse(raw);
+  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : null;
+}
+
+function errorCode(data, status) {
+  const nested = data?.error && typeof data.error === 'object' ? data.error : null;
+  return data?.code || nested?.code || nested?.type || data?.type || `HTTP_${status}`;
+}
+
+function errorMessage(data, statusText) {
+  if (typeof data?.error === 'string') return data.error;
+  return data?.error?.message || data?.message || statusText || 'Request failed';
 }
 
 async function request(base, path, { method = 'GET', body, token, timeout = 15_000 } = {}) {
@@ -28,17 +49,22 @@ async function request(base, path, { method = 'GET', body, token, timeout = 15_0
     if (e?.name === 'TimeoutError' || e?.name === 'AbortError') {
       throw new ApiError('The server did not respond (request timed out).', 'TIMEOUT', 0);
     }
-    throw e;
+    throw new ApiError(e?.message || 'Could not reach the Athena instance.', 'NETWORK', 0);
   }
   let data = null;
   try { data = await res.json(); } catch { /* non-JSON body */ }
   if (!res.ok) {
-    const type = data?.error?.type || data?.type || `HTTP_${res.status}`;
-    const message = data?.error?.message || data?.message || res.statusText;
-    throw new ApiError(message, type, res.status);
+    const type = errorCode(data, res.status);
+    const message = errorMessage(data, res.statusText);
+    throw new ApiError(message, type, res.status, {
+      code: data?.code || type,
+      retryAfterMs: retryAfterMs(res.headers),
+    });
   }
   return data;
 }
+
+const BATCH_TIMEOUT_MS = 60_000;
 
 export function makeClient(instanceUrl, token) {
   const base = normalize(instanceUrl);
@@ -52,19 +78,23 @@ export function makeClient(instanceUrl, token) {
     }),
     postLink: (payload) => request(base, '/api/links', { method: 'POST', body: payload, token }),
     postPersonalLink: (payload) => request(base, '/api/personal-links', { method: 'POST', body: payload, token }),
-    postLinksBatch: (links, communityId) => request(base, '/api/links/batch', {
+    postLinksBatch: (links, communityId, options = {}) => request(base, '/api/links/batch', {
       method: 'POST', body: { community_id: communityId, links }, token,
+      timeout: options.timeout || BATCH_TIMEOUT_MS,
     }),
-    postPersonalLinksBatch: (links) => request(base, '/api/personal-links/batch', {
+    postPersonalLinksBatch: (links, options = {}) => request(base, '/api/personal-links/batch', {
       method: 'POST', body: { links }, token,
+      timeout: options.timeout || BATCH_TIMEOUT_MS,
     }),
   };
 }
 
 export const STORAGE_LABELS = {
   d1: 'Cloudflare D1',
+  github: 'GitHub Storage',
   'github-storage': 'GitHub Storage',
   postgres: 'PostgreSQL',
+  local: 'PostgreSQL',
 };
 
 export function rankOf(me) {
