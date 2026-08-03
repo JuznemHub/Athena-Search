@@ -6920,10 +6920,15 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      await sendTelegramFormatted(token, chatId, `${boldHtml('🔄')} Restarting Athena… Back in ~5 seconds.\nSend /start to check.`, forumThreadId);
-     // Fire and forget — the restart will kill this process
-     const { exec } = await import('node:child_process');
-     exec('systemctl restart athena', () => {});
-     return new Response('OK', { status: 200, headers: corsHeaders });
+      // Restart is a self-host-only capability. Cloudflare Workers cannot
+      // access the host process, so expose it through the Node adapter instead
+      // of bundling node:child_process into the Worker.
+      if (env.ATHENA_RUNTIME !== 'selfhost' || typeof env.restartService !== 'function') {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Restart is only available on the self-hosted backend.`, forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      env.restartService();
+      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
    if (cmd === '/help') {
