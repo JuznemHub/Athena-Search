@@ -26,3 +26,5 @@ TELEGRAM_CLIENT_ID = "YOUR_TELEGRAM_CLIENT_ID"
 # Telegram Bot API user IDs (and optional OIDC subs), comma-separated
 TG_OWNER_IDS = "YOUR_TELEGRAM_USER_ID"
 DISCORD_OWNER_IDS = ""
+# Additional browser origins allowed to call a self-hosted backend.
+ATHENA_ALLOWED_ORIGINS = ""
