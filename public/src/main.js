@@ -453,7 +453,10 @@ document.addEventListener('DOMContentLoaded', () => {
       history.replaceState({}, '', window.location.pathname);
     }
     if (fromOAuth) {
-      await persistSession(fromOAuth);
+      // Keep the OAuth token in memory and in the address bar for the TUI.
+      // The backend also set an HttpOnly cookie for the website session; do not
+      // copy this bearer credential into browser storage.
+      state.sessionToken = fromOAuth;
       // Keep ?session= in the address bar on purpose: terminal clients
       // (athena-tui) log in via this URL and must be able to copy the token.
       if (navigator.clipboard?.writeText) {
