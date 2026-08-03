@@ -1,6 +1,6 @@
 {
   "name": "athenasearch-tui",
-  "version": "1.0.16",
+  "version": "1.0.17",
   "description": "Alias for athena-tui — Terminal UI for Athena Search (dump browser bookmarks into your Athena brain).",
   "type": "module",
   "engines": { "node": ">=22.5" },
@@ -13,5 +13,5 @@
     "url": "git+https://github.com/JuznemHub/Athena-Search.git"
   },
   "homepage": "https://github.com/JuznemHub/Athena-Search/tree/master/tui",
-  "dependencies": { "athena-tui": "1.0.16" }
+  "dependencies": { "athena-tui": "1.0.17" }
 }

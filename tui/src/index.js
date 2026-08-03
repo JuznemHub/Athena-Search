@@ -2,7 +2,7 @@
 // Athena Search TUI — dump your browser bookmarks into your Athena brain.
 
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import readline from 'node:readline';
 
 import { makeTheme } from './theme.js';
@@ -69,6 +69,32 @@ function retryableBatchError(error) {
 function retryDelay(error, attempt) {
   if (Number.isFinite(error?.retryAfterMs)) return Math.min(Math.max(error.retryAfterMs, 500), 60_000);
   return Math.min(1_000 * (2 ** attempt), 8_000);
+}
+
+function bookmarkKey(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    const host = u.hostname.replace(/^www\./, '').toLowerCase();
+    const port = u.port ? `:${u.port}` : '';
+    const path = u.pathname.replace(/\/+$/, '') || '/';
+    return `${u.protocol}//${host}${port}${path}${u.search}`;
+  } catch (_) {
+    return String(rawUrl || '').trim().toLowerCase();
+  }
+}
+
+function bookmarkFingerprint(rawUrl) {
+  return createHash('sha256').update(bookmarkKey(rawUrl)).digest('hex').slice(0, 20);
+}
+
+function titleSimilarity(left, right) {
+  const words = (value) => new Set(String(value || '').toLowerCase().match(/[a-z0-9]{3,}/g) || []);
+  const a = words(left);
+  const b = words(right);
+  if (a.size < 2 || b.size < 2) return 0;
+  let common = 0;
+  for (const word of a) if (b.has(word)) common++;
+  return common / new Set([...a, ...b]).size;
 }
 
 async function statusBox() {
@@ -210,12 +236,21 @@ async function stepScan() {
   const unique = filterSynthetic(raw);
   const excluded = raw.length - unique.length;
   const allTags = [...new Set(unique.flatMap((l) => l.tags || []))].sort();
-  state.scanned = { count: unique.length, folders: allTags, time: Date.now(), sources };
+  const previous = Array.isArray(state.scanned?.fingerprints) ? new Set(state.scanned.fingerprints) : null;
+  const fingerprints = unique.map((link) => bookmarkFingerprint(link.url));
+  const fingerprintSet = new Set(fingerprints);
+  const newCount = previous
+    ? fingerprints.filter((fingerprint) => !previous.has(fingerprint)).length
+    : null;
+  const removedCount = previous
+    ? [...previous].filter((fingerprint) => !fingerprintSet.has(fingerprint)).length
+    : null;
+  state.scanned = { count: unique.length, folders: allTags, fingerprints, time: Date.now(), sources };
   saveConfig(state);
   await renderHeader(false);
   stderr(center(theme.bold('Bookmarks found'), columns()) + '\n\n');
   const lines = [
-    `${theme.accent(String(unique.length))} unique bookmarks`,
+    `${theme.accent(String(unique.length))} unique bookmarks${newCount == null ? '' : ` · ${newCount} new · ${removedCount} removed`}`,
     ...sources.map((s) => theme.dim('◦ ' + s.name)),
     ...(excluded ? [theme.dim(`${excluded} test/synthetic bookmarks excluded (example.*, *.test, localhost)`)] : []),
     ...(failed.length ? [theme.danger(`${failed.length} source(s) unreadable:`), ...failed.map((f) => theme.dim('  ' + f))] : []),
@@ -303,6 +338,45 @@ async function stepDump() {
     ...(link.title ? { title: link.title.slice(0, 200) } : {}),
     ...(link.tags?.length ? { tags: link.tags.slice(0, 10) } : {}),
   }));
+  let uploadPayloads = payloads;
+  let preflightDupes = 0;
+  let similarCount = 0;
+  let preflightWarning = '';
+
+  // Check the current brain first. Exact URL matches are safe to skip locally;
+  // fuzzy title matches are only reported because similar titles may still be
+  // different resources and must not be silently discarded.
+  try {
+    const remote = target === 'personal'
+      ? await client.personalLinks()
+      : await client.links(state.community_id);
+    const remoteLinks = Array.isArray(remote?.links) ? remote.links : [];
+    const remoteKeys = new Set(remoteLinks.map((link) => bookmarkKey(link.url)));
+    const exact = payloads.filter((payload) => remoteKeys.has(bookmarkKey(payload.url)));
+    preflightDupes = exact.length;
+    dupes = preflightDupes;
+    uploadPayloads = payloads.filter((payload) => !remoteKeys.has(bookmarkKey(payload.url)));
+    similarCount = uploadPayloads.filter((payload) => remoteLinks.some((link) => (
+      bookmarkKey(link.url) !== bookmarkKey(payload.url) && titleSimilarity(payload.title, link.title) >= 0.75
+    ))).length;
+    stderr(ERASE_EOL + `\r${theme.dim(`Current brain: ${dupes} exact matches · ${uploadPayloads.length} new candidates`)}`);
+  } catch (e) {
+    preflightWarning = `Current-brain duplicate check unavailable: ${e.code || e.type || e.message}`;
+  }
+
+  if (!uploadPayloads.length) {
+    stderr('\n\n' + SHOW_CURSOR);
+    state.last_dump = { added: 0, dupes, failed: 0, unconfirmed: 0, where, time: Date.now() };
+    saveConfig(state);
+    stderr(box([
+      theme.ok('✓ No new bookmarks to upload'),
+      theme.dim(`${dupes} exact matches already exist`),
+      ...(preflightWarning ? [theme.danger(preflightWarning)] : []),
+    ], theme).join('\n') + '\n');
+    return true;
+  }
+  if (preflightWarning) stderr(`\n${theme.danger(preflightWarning)}\n`);
+  if (similarCount) stderr(theme.dim(`${similarCount} new candidate(s) have similar existing titles; they will still be uploaded.\n`));
 
   // Preferred path: one request for the whole batch (worker writes D1 and the
   // GitHub folder in a single commit). Older instances without the batch
@@ -315,8 +389,8 @@ async function stepDump() {
     for (let attempt = 0; ; attempt++) {
       try {
         res = target === 'personal'
-          ? await client.postPersonalLinksBatch(payloads, { idempotencyKey: batchKey })
-          : await client.postLinksBatch(payloads, state.community_id, { idempotencyKey: batchKey });
+          ? await client.postPersonalLinksBatch(uploadPayloads, { idempotencyKey: batchKey })
+          : await client.postLinksBatch(uploadPayloads, state.community_id, { idempotencyKey: batchKey });
         break;
       } catch (e) {
         if (e instanceof ApiError && e.status === 404) throw e;
@@ -328,7 +402,7 @@ async function stepDump() {
     }
     if (!res || typeof res.total !== 'number') throw new ApiError('batch unsupported', 'HTTP_404', 404);
     added = res.added || 0;
-    dupes = res.dupes || 0;
+    dupes = preflightDupes + (res.dupes || 0);
     const rejected = Array.isArray(res.failed) ? res.failed : [];
     failed = rejected.length;
     if (failed) errors.push(...rejected.slice(0, 5).map((url) => `REJECTED: ${url}`));
@@ -346,7 +420,7 @@ async function stepDump() {
   if (batchSkipped) {
     // Fall back to the old per-link loop — still works everywhere.
     let sent = 0;
-    for (const payload of payloads) {
+    for (const payload of uploadPayloads) {
       try {
         if (target === 'personal') await client.postPersonalLink(payload);
         else await client.postLink({ ...payload, community_id: state.community_id });
@@ -361,7 +435,7 @@ async function stepDump() {
       }
       sent += 1;
       if (sent % 5 === 0 || sent === total) {
-        stderr(ERASE_EOL + `\r${theme.accent(added)} added · ${theme.dim(dupes)} dupes · ${theme.danger(failed)} failed — ${sent}/${total}`);
+        stderr(ERASE_EOL + `\r${theme.accent(added)} added · ${theme.dim(dupes)} dupes · ${theme.danger(failed)} failed — ${preflightDupes + sent}/${total}`);
       }
     }
   }

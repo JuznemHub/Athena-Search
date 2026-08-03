@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.6',
+          version: '1.0.7',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -2845,6 +2845,7 @@ async function handleGetCommunityLinks(url, user, env, corsHeaders) {
     'SELECT * FROM links WHERE community_id = ? ORDER BY created_at DESC LIMIT 500'
   ).bind(communityId).all();
   const seen = dedupeLinkRows(results || []);
+  const enrichmentPending = queueMissingLinkEnrichment(env, 'community', communityId, seen);
 
   // attach my vote
   const links = [];
@@ -2859,7 +2860,7 @@ async function handleGetCommunityLinks(url, user, env, corsHeaders) {
       downvotes: row.downvotes || 0
     });
   }
-  return Response.json({ success: true, links }, { headers: corsHeaders });
+  return Response.json({ success: true, links, enrichment_pending: enrichmentPending }, { headers: corsHeaders });
 }
 
 async function handlePostCommunityLink(request, user, env, corsHeaders) {
@@ -3015,8 +3016,10 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
     }
     await ensureFresh(env, 'personal', user.id);
     const rows = await candidateLinks(env, 'personal', user.id, q);
+    const links = rankLinks(dedupeLinkRows(rows), q);
+    const enrichmentPending = queueMissingLinkEnrichment(env, 'personal', user.id, links);
     return Response.json(
-      { success: true, query: q, scope, links: rankLinks(dedupeLinkRows(rows), q) },
+      { success: true, query: q, scope, links, enrichment_pending: enrichmentPending },
       { headers: corsHeaders }
     );
   }
@@ -3029,8 +3032,10 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
   if (gate) return gate;
   await ensureFresh(env, 'community', communityId);
   const rows = await candidateLinks(env, 'community', communityId, q);
+  const links = rankLinks(dedupeLinkRows(rows), q);
+  const enrichmentPending = queueMissingLinkEnrichment(env, 'community', communityId, links);
   return Response.json(
-    { success: true, query: q, scope, links: rankLinks(dedupeLinkRows(rows), q) },
+    { success: true, query: q, scope, links, enrichment_pending: enrichmentPending },
     { headers: corsHeaders }
   );
 }
@@ -4734,7 +4739,9 @@ async function handleGetPersonalLinks(userId, env, corsHeaders) {
   const { results } = await env.DB.prepare(
     'SELECT * FROM personal_links WHERE user_id = ? ORDER BY created_at DESC LIMIT 1000'
   ).bind(userId).all();
-  return Response.json({ success: true, links: dedupeLinkRows(results || []) }, { headers: corsHeaders });
+  const links = dedupeLinkRows(results || []);
+  const enrichmentPending = queueMissingLinkEnrichment(env, 'personal', userId, links);
+  return Response.json({ success: true, links, enrichment_pending: enrichmentPending }, { headers: corsHeaders });
 }
 
 function isUniqueConstraintError(error) {
@@ -8863,12 +8870,14 @@ async function scrapeForgeMetadata(rawUrl, env) {
       let title = data.name || repo;
       let description = (data.description || '').trim();
       let image = data.owner?.avatar_url || '';
+      let content = '';
       try {
         const readmeRes = await fetchWithTimeout(`https://api.github.com/repos/${owner}/${repo}/readme`, {
           headers: { ...headers, Accept: 'application/vnd.github.raw' }, env
         });
         if (readmeRes.ok) {
-          const intro = parseReadmeIntro((await readmeRes.text()).slice(0, 8000));
+          content = (await readmeRes.text()).slice(0, 12000);
+          const intro = parseReadmeIntro(content.slice(0, 8000));
           if (intro.title) title = intro.title;
           if (intro.description && intro.description.length >= 20) description = intro.description;
           else if (description && intro.description) {
@@ -8882,6 +8891,7 @@ async function scrapeForgeMetadata(rawUrl, env) {
       return {
         title: String(title).slice(0, 120),
         description: description.slice(0, 900),
+        content,
         image: String(image).slice(0, 500),
         siteName: 'GitHub'
       };
@@ -8898,6 +8908,7 @@ async function scrapeForgeMetadata(rawUrl, env) {
       let title = data.name || repo;
       let description = (data.description || '').trim();
       let image = data.owner?.avatar_url || data.avatar_url || '';
+      let content = '';
       try {
         // raw README candidates
         for (const name of ['README.md', 'readme.md', 'README.MD']) {
@@ -8905,7 +8916,8 @@ async function scrapeForgeMetadata(rawUrl, env) {
             headers: { 'User-Agent': 'AthenaBot/1.3' }, env
           });
           if (rr.ok) {
-            const intro = parseReadmeIntro((await rr.text()).slice(0, 8000));
+            content = (await rr.text()).slice(0, 12000);
+            const intro = parseReadmeIntro(content.slice(0, 8000));
             if (intro.title) title = intro.title;
             if (intro.description && intro.description.length >= 20) {
               description = intro.description;
@@ -8919,6 +8931,7 @@ async function scrapeForgeMetadata(rawUrl, env) {
       return {
         title: String(title).slice(0, 120),
         description: description.slice(0, 900),
+        content,
         image: String(image).slice(0, 500),
         siteName: host === 'codeberg.org' ? 'Codeberg' : host
       };
@@ -8935,13 +8948,15 @@ async function scrapeForgeMetadata(rawUrl, env) {
       let title = data.name || repo;
       let description = (data.description || '').trim();
       let image = data.avatar_url || data.namespace?.avatar_url || '';
+      let content = '';
       try {
         const rr = await fetchWithTimeout(
           `https://gitlab.com/api/v4/projects/${project}/repository/files/README.md/raw?ref=${encodeURIComponent(data.default_branch || 'main')}`,
           { headers, env }
         );
         if (rr.ok) {
-          const intro = parseReadmeIntro((await rr.text()).slice(0, 8000));
+          content = (await rr.text()).slice(0, 12000);
+          const intro = parseReadmeIntro(content.slice(0, 8000));
           if (intro.title) title = intro.title;
           if (intro.description && intro.description.length >= 20) description = intro.description;
         }
@@ -8951,6 +8966,7 @@ async function scrapeForgeMetadata(rawUrl, env) {
       return {
         title: String(title).slice(0, 120),
         description: description.slice(0, 900),
+        content,
         image: String(image || '').slice(0, 500),
         siteName: 'GitLab'
       };
@@ -8974,6 +8990,107 @@ function cleanGenericSummary(text) {
     .trim();
 }
 
+function extractReadableContent(html) {
+  const source = firstMatch(html, /<(?:article|main)[^>]*>([\s\S]{100,20000}?)<\/(?:article|main)>/i) || html;
+  const chunks = [];
+  const re = /<(?:h1|h2|h3|p|li|pre|blockquote)[^>]*>([\s\S]*?)<\/(?:h1|h2|h3|p|li|pre|blockquote)>/gi;
+  let match;
+  while ((match = re.exec(source)) && chunks.length < 80) {
+    const text = stripTags(match[1]);
+    if (text.length >= 30 && !isUiNoiseText(text)) chunks.push(text.slice(0, 1200));
+  }
+  return [...new Set(chunks)].join('\n\n').slice(0, 12000);
+}
+
+async function scrapeRedditMetadata(rawUrl, env) {
+  try {
+    const page = new URL(rawUrl);
+    const host = page.hostname.replace(/^www\./, '').toLowerCase();
+    if (host !== 'reddit.com' && !host.endsWith('.reddit.com')) return null;
+    if (!/^\/r\/[^/]+\/comments\//i.test(page.pathname)) return null;
+    const endpoint = `https://www.reddit.com${page.pathname.replace(/\/+$/, '')}.json?raw_json=1`;
+    const response = await fetchWithTimeout(endpoint, {
+      env,
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'AthenaBot/1.3 (bookmark metadata)'
+      }
+    });
+    if (!response.ok) {
+      const embed = await fetchWithTimeout(
+        `https://www.reddit.com/oembed?url=${encodeURIComponent(rawUrl)}`,
+        { env, headers: { Accept: 'application/json', 'User-Agent': 'AthenaBot/1.3 (bookmark metadata)' } }
+      );
+      if (!embed.ok) return null;
+      const data = await embed.json();
+      if (!data?.title) return null;
+      return {
+        title: String(data.title).slice(0, 160),
+        description: `Reddit discussion by ${data.author_name || 'the community'}.`,
+        content: `Reddit title: ${data.title}\nAuthor: ${data.author_name || 'unknown'}`,
+        image: '',
+        siteName: 'Reddit'
+      };
+    }
+    const data = await response.json();
+    const post = data?.[0]?.data?.children?.find(child => child?.data)?.data;
+    if (!post?.title) return null;
+    const comments = (data?.[1]?.data?.children || [])
+      .map(child => child?.data)
+      .filter(comment => comment?.body)
+      .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))
+      .slice(0, 5)
+      .map(comment => `Comment (${comment.score || 0} points): ${comment.body}`);
+    const content = [
+      `Subreddit: r/${post.subreddit || 'unknown'}`,
+      `Title: ${post.title}`,
+      post.selftext ? `Post: ${post.selftext}` : '',
+      comments.length ? `Top comments:\n${comments.join('\n\n')}` : ''
+    ].filter(Boolean).join('\n\n').slice(0, 12000);
+    const image = post.preview?.images?.[0]?.source?.url
+      ? decodeHtmlEntities(post.preview.images[0].source.url)
+      : '';
+    return {
+      title: String(post.title).slice(0, 160),
+      description: cleanGenericSummary(post.selftext || `Reddit discussion in r/${post.subreddit || 'unknown'}.`),
+      content,
+      image: image.slice(0, 500),
+      siteName: 'Reddit'
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+async function scrapeGistMetadata(rawUrl, env) {
+  try {
+    const page = new URL(rawUrl);
+    const host = page.hostname.replace(/^www\./, '').toLowerCase();
+    if (host !== 'gist.github.com') return null;
+    const parts = page.pathname.split('/').filter(Boolean);
+    const gistId = parts.at(-1);
+    if (!gistId || !/^[a-f0-9]+$/i.test(gistId)) return null;
+    const response = await fetchWithTimeout(`https://api.github.com/gists/${gistId}`, {
+      env,
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'AthenaBot/1.3 (+gist)' }
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    const files = Object.values(data.files || {});
+    const fileText = files.map(file => `File: ${file.filename}\n${file.content || ''}`).join('\n\n').slice(0, 12000);
+    const description = String(data.description || '').trim() || fileText.split('\n').find(Boolean) || 'GitHub Gist';
+    return {
+      title: description.slice(0, 160),
+      description: description.slice(0, 900),
+      content: [description, fileText].filter(Boolean).join('\n\n').slice(0, 12000),
+      image: data.owner?.avatar_url || '',
+      siteName: 'GitHub Gist'
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
 /**
  * Scrape: forge APIs first; else prefer clean meta description over noisy body.
  */
@@ -8981,18 +9098,25 @@ async function scrapeLinkMetadata(rawUrl, env) {
   const fallback = {
     title: titleFromUrl(rawUrl),
     description: '',
+    content: '',
     image: '',
     siteName: ''
   };
   try {
     if (!/^https?:\/\//i.test(rawUrl) || rawUrl.startsWith('note://')) return fallback;
 
+    const reddit = await scrapeRedditMetadata(rawUrl, env);
+    if (reddit) return reddit;
+    const gist = await scrapeGistMetadata(rawUrl, env);
+    if (gist) return gist;
+
     // Fast path: GitHub / Codeberg / GitLab
     const forge = await scrapeForgeMetadata(rawUrl, env);
     if (forge && (forge.description || forge.title)) {
       return {
-        title: forge.title || fallback.title,
-        description: forge.description || '',
+          title: forge.title || fallback.title,
+          description: forge.description || '',
+          content: forge.content || '',
         image: forge.image || '',
         siteName: forge.siteName || ''
       };
@@ -9038,6 +9162,7 @@ async function scrapeLinkMetadata(rawUrl, env) {
     );
     const ogDesc = cleanGenericSummary(metaContent(html, ['og:description', 'twitter:description']) || '');
     const blurb = cleanGenericSummary(extractReadableBlurb(html));
+    const content = extractReadableContent(html);
 
     // Rank: prefer short clean meta over long body mashups
     let description = pickBestDescription([
@@ -9045,7 +9170,8 @@ async function scrapeLinkMetadata(rawUrl, env) {
       ogDesc,
       // only use first sentence-ish of blurb
       blurb ? blurb.split(/(?<=[.!?])\s+/)[0] : '',
-      blurb
+      blurb,
+      content.slice(0, 1200)
     ]);
 
     // If meta is good and short, prefer it alone (mcp.so / fmhy case)
@@ -9079,6 +9205,7 @@ async function scrapeLinkMetadata(rawUrl, env) {
     return {
       title: String(title || fallback.title).slice(0, 160),
       description,
+      content,
       image: image.slice(0, 500),
       siteName: (siteName || host || '').slice(0, 120)
     };
@@ -9112,6 +9239,7 @@ async function enrichLinkFields(env, rawUrl, { title, notes } = {}) {
     return {
       title: userTitle.slice(0, 300),
       notes: userNotes.slice(0, NOTES_MAX),
+      content: userNotes.slice(0, 12000),
       image_url: '',
       site_name: '',
       scraped: false
@@ -9123,6 +9251,7 @@ async function enrichLinkFields(env, rawUrl, { title, notes } = {}) {
     return {
       title: (isWeakTitle(userTitle, rawUrl) ? meta.title : userTitle).slice(0, 300),
       notes: userNotes.slice(0, NOTES_MAX),
+      content: meta.content || userNotes.slice(0, 12000),
       image_url: meta.image || '',
       site_name: meta.siteName || '',
       scraped: true
@@ -9144,6 +9273,7 @@ async function enrichLinkFields(env, rawUrl, { title, notes } = {}) {
   return {
     title: (useScrapedTitle ? meta.title : userTitle).slice(0, 300),
     notes: finalNotes.slice(0, NOTES_MAX),
+    content: meta.content || finalNotes.slice(0, 12000),
     image_url: meta.image || '',
     site_name: meta.siteName || '',
     scraped: true
@@ -9178,10 +9308,18 @@ async function enrichLinksInBackground(env, scope, key, links) {
         };
         // AI describe + tag (karakeep-style); stable tags because the prompt
         // is seeded with the vocabulary already in use for this scope.
-        const ai = await aiDescribeAndTag(env, link.url, { title, notes: meta.description }, vocab, aiConfig);
+        const ai = await aiDescribeAndTag(env, link.url, {
+          title,
+          notes: meta.description,
+          content: meta.content
+        }, vocab, aiConfig);
         if (ai) {
           if (ai.description) update.notes = ai.description;
-          if (ai.tags?.length) update.tags = [...new Set([...['telegram', 'dump'], ...ai.tags])].slice(0, 8);
+          if (ai.tags?.length) {
+            let existingTags = [];
+            try { existingTags = Array.isArray(link.tags) ? link.tags : JSON.parse(link.tags || '[]'); } catch (_) {}
+            update.tags = [...new Set([...existingTags, ...ai.tags])].slice(0, 8);
+          }
         }
         if (!update.notes && !update.image_url && !update.site_name && !update.tags) continue;
         if (scope === 'personal') {
@@ -9199,6 +9337,21 @@ async function enrichLinksInBackground(env, scope, key, links) {
     }
   };
   await Promise.all(Array.from({ length: CONCURRENCY }, run));
+}
+
+function queueMissingLinkEnrichment(env, scope, key, rows) {
+  const missing = (rows || [])
+    .filter(row => row?.url && (!String(row.notes || '').trim() || (!row.site_name && !row.image_url)))
+    .slice(0, 10)
+    .map(row => ({
+      id: row.id,
+      url: row.url,
+      title: row.title || '',
+      notes: row.notes || '',
+      tags: row.tags || []
+    }));
+  if (missing.length) runInBackground(env, enrichLinksInBackground(env, scope, key, missing));
+  return missing.length;
 }
 
 function runInBackground(env, promise) {
@@ -9219,7 +9372,7 @@ async function recentTagsForScope(env, scope, key, limit = 30) {
       try { arr = JSON.parse(r.tags || '[]'); } catch (_) {}
       for (const t of Array.isArray(arr) ? arr : []) {
         const s = String(t).replace(/^#/, '').trim().toLowerCase();
-        if (s && !out.includes(s)) out.push(s);
+        if (s && !['telegram', 'community', 'personal', 'dump'].includes(s) && !out.includes(s)) out.push(s);
       }
       if (out.length >= limit) break;
     }
@@ -9253,22 +9406,31 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
   } catch (_) { return null; }
 
   const title = String(meta?.title || '').trim().slice(0, 200);
-  const snippet = String(meta?.notes || '').replace(/\s+/g, ' ').slice(0, 700);
-  const vocab = (existingTags.length ? existingTags.slice(0, 30) : []);
+  const snippet = String(meta?.content || meta?.notes || '').replace(/\s+/g, ' ').slice(0, 5000);
+  const vocab = (existingTags || [])
+    .map(tag => String(tag).replace(/^#/, '').trim().toLowerCase())
+    .filter(tag => tag && !['telegram', 'community', 'personal', 'dump'].includes(tag))
+    .slice(0, 30);
   const mode = (cfg.mode || 'openai').toLowerCase();
+  const controlledTags = [
+    'ai', 'ocr', 'local-llm', 'machine-learning', 'computer-vision', 'open-source',
+    'github', 'programming', 'research', 'tutorial', 'tools', 'reddit', 'web',
+    'security', 'productivity', 'data', 'documentation', 'news', 'video', 'design'
+  ];
 
   const system = [
     'You are a bookmarking assistant for a link archive.',
-    'Write what the link is, factually, in 1-2 short sentences — no marketing, no "click here", no emojis.',
-    'Choose 3-5 short lowercase tags (no #, no spaces) that describe the page.',
-    'If an existing tag fits, reuse it exactly — do not invent a synonym for a tag that already covers it.',
+    'Write a useful context summary in 1-2 factual sentences: preserve the question, problem, subject, or decision the page is about, not just the site name.',
+    'Choose 3-5 short lowercase tags (no #, no spaces) that describe the content.',
+    'Reuse an existing tag exactly whenever it fits; do not invent a synonym for an existing tag.',
+    `Prefer these controlled tags when applicable: ${controlledTags.join(', ')}.`,
     'Reply with ONLY one JSON object: {"description": "...", "tags": ["a", "b", "c"]}'
   ].join(' ');
 
   const user = [
     `Title: ${title || '(unknown)'}`,
     `URL: ${rawUrl}`,
-    snippet ? `Page text: ${snippet}` : '',
+    snippet ? `Page content: ${snippet}` : '',
     vocab.length ? `Existing tags: ${vocab.join(', ')}` : '',
     '',
     'JSON:'
@@ -9309,7 +9471,9 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
   const rawTags = Array.isArray(parsed.tags) ? parsed.tags : [];
   const tags = [];
   for (const t of rawTags) {
-    const s = String(t).replace(/^#/, '').trim().toLowerCase().replace(/\s+/g, '-').slice(0, 24);
+    let s = String(t).replace(/^#/, '').trim().toLowerCase().replace(/\s+/g, '-').slice(0, 24);
+    if (s === 'localllm' || s === 'local-llms') s = 'local-llm';
+    if (s === 'artificial-intelligence' || s === 'machine-intelligence') s = 'ai';
     if (s && !tags.includes(s)) tags.push(s);
     if (tags.length >= 5) break;
   }
