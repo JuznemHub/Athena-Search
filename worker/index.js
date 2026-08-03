@@ -4804,8 +4804,17 @@ async function beginBatchUpload(env, userId, scope, scopeKey, requestKey) {
 
 async function finishBatchUpload(env, id, result) {
   if (!id) return;
+  if (!result?.success) {
+    await env.DB.prepare('DELETE FROM batch_uploads WHERE id = ?').bind(id).run().catch(() => {});
+    return;
+  }
   await env.DB.prepare('UPDATE batch_uploads SET status = ?, result = ? WHERE id = ?')
     .bind('complete', JSON.stringify(result), id).run().catch(() => {});
+}
+
+async function abortBatchUpload(env, id) {
+  if (!id) return;
+  await env.DB.prepare('DELETE FROM batch_uploads WHERE id = ?').bind(id).run().catch(() => {});
 }
 
 async function handlePostPersonalLinksBatch(request, userId, env, corsHeaders) {
@@ -4819,7 +4828,8 @@ async function handlePostPersonalLinksBatch(request, userId, env, corsHeaders) {
   if (replayState.inProgress) {
     return Response.json({ success: false, error: 'Batch upload already in progress', code: 'BATCH_IN_PROGRESS' }, { status: 409, headers: corsHeaders });
   }
-  await ensureLinkMetaColumns(env);
+  try {
+    await ensureLinkMetaColumns(env);
 
   const now = Date.now();
   const displayName = 'athena-tui';
@@ -4890,7 +4900,11 @@ async function handlePostPersonalLinksBatch(request, userId, env, corsHeaders) {
     failed: failed.map((f) => f.url),
   };
   await finishBatchUpload(env, replayState.id, result);
-  return Response.json(result, { headers: corsHeaders });
+    return Response.json(result, { headers: corsHeaders });
+  } catch (error) {
+    await abortBatchUpload(env, replayState.id);
+    throw error;
+  }
 }
 
 async function handlePostCommunityLinksBatch(request, user, env, corsHeaders) {
@@ -4922,7 +4936,8 @@ async function handlePostCommunityLinksBatch(request, user, env, corsHeaders) {
     return Response.json({ success: false, error: 'Batch upload already in progress', code: 'BATCH_IN_PROGRESS' }, { status: 409, headers: corsHeaders });
   }
 
-  await ensureLinkMetaColumns(env);
+  try {
+    await ensureLinkMetaColumns(env);
   const now = Date.now();
   const displayName = user.display_name || user.username || user.id;
   const inserted = [];
@@ -4993,7 +5008,11 @@ async function handlePostCommunityLinksBatch(request, user, env, corsHeaders) {
     failed: failed.map((f) => f.url),
   };
   await finishBatchUpload(env, replayState.id, result);
-  return Response.json(result, { headers: corsHeaders });
+    return Response.json(result, { headers: corsHeaders });
+  } catch (error) {
+    await abortBatchUpload(env, replayState.id);
+    throw error;
+  }
 }
 
 async function handlePostPersonalLink(request, userId, env, corsHeaders) {
