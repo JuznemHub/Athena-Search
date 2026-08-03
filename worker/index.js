@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.10',
+          version: '1.0.11',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -9348,11 +9348,7 @@ async function enrichLinksInBackground(env, scope, key, links) {
 
 function queueMissingLinkEnrichment(env, scope, key, rows) {
   const missing = (rows || [])
-    .filter((row) => {
-      const notes = String(row.notes || '').trim();
-      const genericReddit = row.site_name === 'Reddit' && /^Reddit (thread|discussion)\b/i.test(notes);
-      return row?.url && Number(row.metadata_version || 0) < 2 && (!notes || (!row.site_name && !row.image_url) || genericReddit);
-    })
+    .filter(row => row?.url && Number(row.metadata_version || 0) < 2)
     .slice(0, 10)
     .map(row => ({
       id: row.id,
