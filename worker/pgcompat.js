@@ -29,6 +29,7 @@ export const PRIMARY_KEYS = {
   link_reports: ['id'],
   notifications: ['id'],
   personal_links: ['id'],
+  batch_uploads: ['id'],
   uploaded_documents: ['id'],
   oauth_states: ['state'],
   telegram_bots: ['bot_token'],

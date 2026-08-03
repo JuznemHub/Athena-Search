@@ -2234,6 +2234,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const sessionTokenBtn = $('sessionTokenBtn');
     if (sessionTokenBtn) {
       sessionTokenBtn.addEventListener('click', async () => {
+        if (!state.currentUser && !state.sessionToken) {
+          showToast('Login required to copy a session token', true);
+          return;
+        }
         try {
           const res = await fetch(`${API_BASE}/api/auth/session-token`, {
             method: 'GET',

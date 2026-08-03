@@ -2884,9 +2884,7 @@ async function handlePostCommunityLink(request, user, env, corsHeaders) {
   }
 
   const urlHash = generateUrlHash(rawUrl);
-  const existing = await env.DB.prepare(
-    'SELECT id, title FROM links WHERE community_id = ? AND (url_hash = ? OR url = ?)'
-  ).bind(communityId, urlHash, rawUrl).first();
+  const existing = await findExistingLink(env, 'links', 'community_id', communityId, rawUrl);
 
   if (existing) {
     return Response.json(
@@ -2894,6 +2892,7 @@ async function handlePostCommunityLink(request, user, env, corsHeaders) {
         success: false,
         duplicate: true,
         error: 'Website is already added',
+        code: 'DUPLICATE_URL',
         existing_id: existing.id,
         existing_title: existing.title
       },
@@ -2932,9 +2931,12 @@ async function handlePostCommunityLink(request, user, env, corsHeaders) {
   } catch (error) {
     if (isUniqueConstraintError(error)) {
       return Response.json(
-        { success: false, duplicate: true, error: 'Website is already added' },
+        { success: false, duplicate: true, error: 'Website is already added', code: 'DUPLICATE_URL' },
         { status: 409, headers: corsHeaders }
       );
+    }
+    if (!isMissingLinkMetaColumnError(error)) {
+      return Response.json({ success: false, error: error.message || 'Database insert failed', code: 'DB_INSERT_FAILED' }, { status: 500, headers: corsHeaders });
     }
     await env.DB.prepare(
       `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
@@ -2967,10 +2969,7 @@ async function handleDeleteCommunityLink(request, user, env, corsHeaders) {
   if (id) {
     link = await env.DB.prepare('SELECT * FROM links WHERE id = ?').bind(id).first();
   } else if (communityId && rawUrl) {
-    const urlHash = generateUrlHash(rawUrl);
-    link = await env.DB.prepare(
-      'SELECT * FROM links WHERE community_id = ? AND (url_hash = ? OR url = ?)'
-    ).bind(communityId, urlHash, rawUrl).first();
+    link = await findExistingLink(env, 'links', 'community_id', communityId, rawUrl);
   }
 
   if (!link) {
@@ -4738,8 +4737,75 @@ function isUniqueConstraintError(error) {
   return code === '23505' || /unique constraint|duplicate key|already exists|constraint failed/.test(message);
 }
 
+function isMissingLinkMetaColumnError(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return /no such column|column .* does not exist|undefined column/.test(message) &&
+    /(image_url|site_name)/.test(message);
+}
+
 function batchLinkId(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${randomToken().slice(0, 10)}`;
+}
+
+async function ensureBatchUploadsTable(env) {
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS batch_uploads (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      scope_key TEXT NOT NULL,
+      request_key TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'processing',
+      result TEXT,
+      created_at INTEGER NOT NULL
+    )
+  `).run().catch(() => {});
+  await env.DB.prepare(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_batch_uploads_request ON batch_uploads(user_id, scope, scope_key, request_key)'
+  ).run().catch(() => {});
+}
+
+function batchRequestKey(request) {
+  const key = String(request.headers.get('X-Athena-Batch-Key') || '').trim();
+  return /^[A-Za-z0-9._:-]{16,128}$/.test(key) ? key : null;
+}
+
+async function beginBatchUpload(env, userId, scope, scopeKey, requestKey) {
+  if (!requestKey) return { id: null };
+  await ensureBatchUploadsTable(env);
+  const old = await env.DB.prepare(
+    'SELECT id, status, result, created_at FROM batch_uploads WHERE user_id = ? AND scope = ? AND scope_key = ? AND request_key = ?'
+  ).bind(userId, scope, scopeKey, requestKey).first();
+  if (old) {
+    if (old.status === 'complete' && old.result) {
+      try { return { replay: JSON.parse(old.result) }; } catch (_) {}
+    }
+    if (Date.now() - Number(old.created_at || 0) < 10 * 60 * 1000) return { inProgress: true };
+    await env.DB.prepare('DELETE FROM batch_uploads WHERE id = ?').bind(old.id).run().catch(() => {});
+  }
+
+  const id = `batch_${Date.now().toString(36)}_${randomToken().slice(0, 10)}`;
+  try {
+    await env.DB.prepare(
+      'INSERT INTO batch_uploads (id, user_id, scope, scope_key, request_key, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).bind(id, userId, scope, scopeKey, requestKey, 'processing', Date.now()).run();
+    return { id };
+  } catch (error) {
+    if (!isUniqueConstraintError(error)) throw error;
+    const raced = await env.DB.prepare(
+      'SELECT id, status, result FROM batch_uploads WHERE user_id = ? AND scope = ? AND scope_key = ? AND request_key = ?'
+    ).bind(userId, scope, scopeKey, requestKey).first();
+    if (raced?.status === 'complete' && raced.result) {
+      try { return { replay: JSON.parse(raced.result) }; } catch (_) {}
+    }
+    return { inProgress: true };
+  }
+}
+
+async function finishBatchUpload(env, id, result) {
+  if (!id) return;
+  await env.DB.prepare('UPDATE batch_uploads SET status = ?, result = ? WHERE id = ?')
+    .bind('complete', JSON.stringify(result), id).run().catch(() => {});
 }
 
 async function handlePostPersonalLinksBatch(request, userId, env, corsHeaders) {
@@ -4747,6 +4813,11 @@ async function handlePostPersonalLinksBatch(request, userId, env, corsHeaders) {
   const items = Array.isArray(body.links) ? body.links.slice(0, 500) : [];
   if (!items.length) {
     return Response.json({ success: false, error: 'links[] required' }, { status: 400, headers: corsHeaders });
+  }
+  const replayState = await beginBatchUpload(env, userId, 'personal', userId, batchRequestKey(request));
+  if (replayState.replay) return Response.json({ ...replayState.replay, replayed: true }, { headers: corsHeaders });
+  if (replayState.inProgress) {
+    return Response.json({ success: false, error: 'Batch upload already in progress', code: 'BATCH_IN_PROGRESS' }, { status: 409, headers: corsHeaders });
   }
   await ensureLinkMetaColumns(env);
 
@@ -4762,9 +4833,7 @@ async function handlePostPersonalLinksBatch(request, userId, env, corsHeaders) {
     const urlHash = generateUrlHash(rawUrl);
     if (seenHashes.has(urlHash)) { dupes.push(rawUrl); continue; }
     seenHashes.add(urlHash);
-    const existing = await env.DB.prepare(
-      'SELECT 1 FROM personal_links WHERE user_id = ? AND (url_hash = ? OR url = ?)'
-    ).bind(userId, urlHash, rawUrl).first();
+    const existing = await findExistingLink(env, 'personal_links', 'user_id', userId, rawUrl);
     if (existing) { dupes.push(rawUrl); continue; }
     // Dump payloads already carry real titles — title-only fast path, no scrape.
     const title = String(raw.title || '').trim().slice(0, 300);
@@ -4777,10 +4846,6 @@ async function handlePostPersonalLinksBatch(request, userId, env, corsHeaders) {
   }
 
   if (inserted.length) {
-    const gh = await storeAddLinks(env, 'personal', userId, inserted);
-    if (gh.handled && !gh.ok) {
-      return Response.json({ success: false, error: `GitHub write failed: ${gh.error}` }, { status: 502, headers: corsHeaders });
-    }
     const stored = [];
     for (const l of inserted) {
       try {
@@ -4794,19 +4859,38 @@ async function handlePostPersonalLinksBatch(request, userId, env, corsHeaders) {
         else failed.push({ url: l.url, error: 'DB_INSERT_FAILED' });
       }
     }
-    // Dump was fast by design; enrich the fresh links in the background so they
-    // carry descriptions/site names/images like Telegram saves do.
-    if (stored.length) runInBackground(env, enrichLinksInBackground(env, 'personal', userId, stored));
     inserted.splice(0, inserted.length, ...stored);
+    if (stored.length) {
+      const gh = await storeAddLinks(env, 'personal', userId, stored);
+      if (gh.handled && !gh.ok) {
+        for (const l of stored) await env.DB.prepare('DELETE FROM personal_links WHERE id = ? AND user_id = ?').bind(l.id, userId).run().catch(() => {});
+        const failure = {
+          success: false,
+          total: items.length,
+          added: 0,
+          dupes: dupes.length,
+          failed: [...failed.map((f) => f.url), ...stored.map((l) => l.url)],
+          error: `GitHub write failed: ${gh.error}`,
+          code: 'STORAGE_WRITE_FAILED',
+        };
+        await finishBatchUpload(env, replayState.id, failure);
+        return Response.json(failure, { status: 502, headers: corsHeaders });
+      }
+      // Dump was fast by design; enrich the fresh links in the background so
+      // they carry descriptions/site names/images like Telegram saves do.
+      runInBackground(env, enrichLinksInBackground(env, 'personal', userId, stored));
+    }
   }
 
-  return Response.json({
+  const result = {
     success: true,
     total: items.length,
     added: inserted.length,
     dupes: dupes.length,
     failed: failed.map((f) => f.url),
-  }, { headers: corsHeaders });
+  };
+  await finishBatchUpload(env, replayState.id, result);
+  return Response.json(result, { headers: corsHeaders });
 }
 
 async function handlePostCommunityLinksBatch(request, user, env, corsHeaders) {
@@ -4832,6 +4916,11 @@ async function handlePostCommunityLinksBatch(request, user, env, corsHeaders) {
       code: 'NOT_MEMBER'
     }, { status: 403, headers: corsHeaders });
   }
+  const replayState = await beginBatchUpload(env, user.id, 'community', communityId, batchRequestKey(request));
+  if (replayState.replay) return Response.json({ ...replayState.replay, replayed: true }, { headers: corsHeaders });
+  if (replayState.inProgress) {
+    return Response.json({ success: false, error: 'Batch upload already in progress', code: 'BATCH_IN_PROGRESS' }, { status: 409, headers: corsHeaders });
+  }
 
   await ensureLinkMetaColumns(env);
   const now = Date.now();
@@ -4846,9 +4935,7 @@ async function handlePostCommunityLinksBatch(request, user, env, corsHeaders) {
     const urlHash = generateUrlHash(rawUrl);
     if (seenHashes.has(urlHash)) { dupes.push(rawUrl); continue; }
     seenHashes.add(urlHash);
-    const existing = await env.DB.prepare(
-      'SELECT id, title FROM links WHERE community_id = ? AND (url_hash = ? OR url = ?)'
-    ).bind(communityId, urlHash, rawUrl).first();
+    const existing = await findExistingLink(env, 'links', 'community_id', communityId, rawUrl);
     if (existing) { dupes.push(rawUrl); continue; }
     const title = String(raw.title || '').trim().slice(0, 300);
     inserted.push({
@@ -4860,10 +4947,6 @@ async function handlePostCommunityLinksBatch(request, user, env, corsHeaders) {
   }
 
   if (inserted.length) {
-    const gh = await storeAddLinks(env, 'community', communityId, inserted);
-    if (gh.handled && !gh.ok) {
-      return Response.json({ success: false, error: `GitHub write failed: ${gh.error}` }, { status: 502, headers: corsHeaders });
-    }
     const stored = [];
     for (const l of inserted) {
       try {
@@ -4881,17 +4964,36 @@ async function handlePostCommunityLinksBatch(request, user, env, corsHeaders) {
         else failed.push({ url: l.url, error: 'DB_INSERT_FAILED' });
       }
     }
-    if (stored.length) runInBackground(env, enrichLinksInBackground(env, 'community', communityId, stored));
     inserted.splice(0, inserted.length, ...stored);
+    if (stored.length) {
+      const gh = await storeAddLinks(env, 'community', communityId, stored);
+      if (gh.handled && !gh.ok) {
+        for (const l of stored) await env.DB.prepare('DELETE FROM links WHERE id = ? AND community_id = ?').bind(l.id, communityId).run().catch(() => {});
+        const failure = {
+          success: false,
+          total: items.length,
+          added: 0,
+          dupes: dupes.length,
+          failed: [...failed.map((f) => f.url), ...stored.map((l) => l.url)],
+          error: `GitHub write failed: ${gh.error}`,
+          code: 'STORAGE_WRITE_FAILED',
+        };
+        await finishBatchUpload(env, replayState.id, failure);
+        return Response.json(failure, { status: 502, headers: corsHeaders });
+      }
+      runInBackground(env, enrichLinksInBackground(env, 'community', communityId, stored));
+    }
   }
 
-  return Response.json({
+  const result = {
     success: true,
     total: items.length,
     added: inserted.length,
     dupes: dupes.length,
     failed: failed.map((f) => f.url),
-  }, { headers: corsHeaders });
+  };
+  await finishBatchUpload(env, replayState.id, result);
+  return Response.json(result, { headers: corsHeaders });
 }
 
 async function handlePostPersonalLink(request, userId, env, corsHeaders) {
@@ -4903,13 +5005,11 @@ async function handlePostPersonalLink(request, userId, env, corsHeaders) {
   // notes without real http links skip scrape
   const isNote = rawUrl.startsWith('note://') || !/^https?:\/\//i.test(rawUrl);
   const urlHash = generateUrlHash(rawUrl);
-  const existing = await env.DB.prepare(
-    'SELECT 1 FROM personal_links WHERE user_id = ? AND (url_hash = ? OR url = ?)'
-  ).bind(userId, urlHash, rawUrl).first();
+  const existing = await findExistingLink(env, 'personal_links', 'user_id', userId, rawUrl);
 
   if (existing) {
     return Response.json(
-      { success: false, duplicate: true, error: 'Website is already added' },
+      { success: false, duplicate: true, error: 'Website is already added', code: 'DUPLICATE_URL' },
       { status: 409, headers: corsHeaders }
     );
   }
@@ -4941,9 +5041,12 @@ async function handlePostPersonalLink(request, userId, env, corsHeaders) {
   } catch (error) {
     if (isUniqueConstraintError(error)) {
       return Response.json(
-        { success: false, duplicate: true, error: 'Website is already added' },
+        { success: false, duplicate: true, error: 'Website is already added', code: 'DUPLICATE_URL' },
         { status: 409, headers: corsHeaders }
       );
+    }
+    if (!isMissingLinkMetaColumnError(error)) {
+      return Response.json({ success: false, error: error.message || 'Database insert failed', code: 'DB_INSERT_FAILED' }, { status: 500, headers: corsHeaders });
     }
     await env.DB.prepare(
       'INSERT INTO personal_links (id, user_id, url, url_hash, title, notes, tags, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
@@ -4998,9 +5101,7 @@ async function handlePatchPersonalLink(request, userId, env, corsHeaders) {
     url = String(body.url).trim();
     urlHash = generateUrlHash(url);
     // prevent collision with another personal link
-    const clash = await env.DB.prepare(
-      'SELECT id FROM personal_links WHERE user_id = ? AND (url_hash = ? OR url = ?) AND id != ?'
-    ).bind(userId, urlHash, url, id).first();
+    const clash = await findExistingLink(env, 'personal_links', 'user_id', userId, url, id);
     if (clash) {
       return Response.json({ success: false, error: 'Another link already uses that URL' }, { status: 409, headers: corsHeaders });
     }
@@ -5075,9 +5176,7 @@ async function handlePatchCommunityLink(request, user, env, corsHeaders) {
   if (body.url != null && String(body.url).trim()) {
     url = String(body.url).trim();
     urlHash = generateUrlHash(url);
-    const clash = await env.DB.prepare(
-      'SELECT id FROM links WHERE community_id = ? AND (url_hash = ? OR url = ?) AND id != ?'
-    ).bind(existing.community_id, urlHash, url, id).first();
+    const clash = await findExistingLink(env, 'links', 'community_id', existing.community_id, url, id);
     if (clash) {
       return Response.json({ success: false, error: 'Another link already uses that URL' }, { status: 409, headers: corsHeaders });
     }
@@ -5344,9 +5443,7 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
     return;
   }
   const urlHash = generateUrlHash(rawUrl);
-  const existing = await env.DB.prepare(
-    'SELECT id FROM links WHERE community_id = ? AND (url_hash = ? OR url = ?)'
-  ).bind(communityId, urlHash, rawUrl).first();
+  const existing = await findExistingLink(env, 'links', 'community_id', communityId, rawUrl);
   if (existing) {
     await sendTelegramMessage(token, chatId, `Already in community: ${rawUrl}`, threadId);
     return;
@@ -5383,6 +5480,10 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
   } catch (error) {
     if (isUniqueConstraintError(error)) {
       await sendTelegramMessage(token, chatId, `Already in community: ${rawUrl}`, threadId);
+      return;
+    }
+    if (!isMissingLinkMetaColumnError(error)) {
+      await sendTelegramMessage(token, chatId, `Could not save link: ${error.message || 'database insert failed'}`, threadId);
       return;
     }
     await env.DB.prepare(
@@ -5864,9 +5965,7 @@ function fuzzyMatchLinks(rows, query) {
 
 async function savePersonalUrl(env, userId, rawUrl, senderName, userNotes = '', titleHint = '') {
   const urlHash = generateUrlHash(rawUrl);
-  const existing = await env.DB.prepare(
-    'SELECT id, title, url FROM personal_links WHERE user_id = ? AND (url_hash = ? OR url = ?)'
-  ).bind(userId, urlHash, rawUrl).first();
+  const existing = await findExistingLink(env, 'personal_links', 'user_id', userId, rawUrl);
   if (existing) return { duplicate: true, existing };
   await ensureLinkMetaColumns(env);
   // Detailed caption/post text → keep as notes, skip scrape overwrite
@@ -5896,6 +5995,7 @@ async function savePersonalUrl(env, userId, rawUrl, senderName, userNotes = '', 
     ).bind(id, userId, rawUrl, urlHash, meta.title, meta.notes, JSON.stringify(['telegram', 'dump']), Date.now(), meta.image_url || null, meta.site_name || null).run();
   } catch (error) {
     if (isUniqueConstraintError(error)) return { duplicate: true, existing: { url: rawUrl } };
+    if (!isMissingLinkMetaColumnError(error)) return { duplicate: false, error: `Database write failed: ${error.message || 'insert failed'}` };
     await env.DB.prepare(
       `INSERT INTO personal_links (id, user_id, url, url_hash, title, notes, tags, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
@@ -5905,20 +6005,14 @@ async function savePersonalUrl(env, userId, rawUrl, senderName, userNotes = '', 
 }
 
 async function deletePersonalUrl(env, userId, rawUrl) {
-  const urlHash = generateUrlHash(rawUrl);
-  const existing = await env.DB.prepare(
-    'SELECT id FROM personal_links WHERE user_id = ? AND (url_hash = ? OR url = ?)'
-  ).bind(userId, urlHash, rawUrl).first();
+  const existing = await findExistingLink(env, 'personal_links', 'user_id', userId, rawUrl);
   if (!existing) return { found: false };
   await env.DB.prepare('DELETE FROM personal_links WHERE id = ? AND user_id = ?').bind(existing.id, userId).run();
   return { found: true, id: existing.id };
 }
 
 async function deleteCommunityUrl(env, communityId, rawUrl) {
-  const urlHash = generateUrlHash(rawUrl);
-  const existing = await env.DB.prepare(
-    'SELECT id FROM links WHERE community_id = ? AND (url_hash = ? OR url = ?)'
-  ).bind(communityId, urlHash, rawUrl).first();
+  const existing = await findExistingLink(env, 'links', 'community_id', communityId, rawUrl);
   if (!existing) return { found: false };
   await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(existing.id).run();
   await env.DB.prepare('DELETE FROM link_votes WHERE link_id = ?').bind(existing.id).run();
@@ -6207,9 +6301,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
   }
 
   if (approve) {
-    const again = await env.DB.prepare(
-      'SELECT 1 FROM links WHERE community_id = ? AND (url_hash = ? OR url = ?)'
-    ).bind(pend.community_id, pend.url_hash, pend.url).first();
+    const again = await findExistingLink(env, 'links', 'community_id', pend.community_id, pend.url);
     if (!again) {
       const id = 'tg_' + Date.now().toString(36);
       try {
@@ -8371,26 +8463,59 @@ function italicHtml(str) { return `<i>${escHtml(str)}</i>`; }
 function canonicalUrlForHash(rawUrl) {
   const parsed = new URL(rawUrl);
   const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+  const port = parsed.port ? `:${parsed.port}` : '';
   const pathname = parsed.pathname.replace(/\/+$/, '') || '/';
   // Fragments never reach the server and should not create a second bookmark;
   // query parameters can change the resource, so they remain part of identity.
-  return `${host}${pathname}${parsed.search}`;
+  return `${parsed.protocol}//${host}${port}${pathname}${parsed.search}`;
+}
+
+function hashUrlIdentity(value) {
+  let hash = 1469598103934665603n;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= BigInt(value.charCodeAt(i));
+    hash = BigInt.asUintN(64, hash * 1099511628211n);
+  }
+  return hash.toString(36);
+}
+
+function legacyUrlHash(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    const normalized = (parsed.hostname.replace(/^www\./, '') + parsed.pathname.replace(/\/$/, '')).toLowerCase();
+    let hash = 0;
+    for (let i = 0; i < normalized.length; i++) {
+      hash = ((hash << 5) - hash) + normalized.charCodeAt(i);
+      hash |= 0;
+    }
+    return Math.abs(hash).toString(36);
+  } catch (_) {
+    return hashUrlIdentity(`raw:${String(rawUrl)}`);
+  }
 }
 
 function generateUrlHash(rawUrl) {
   try {
-    const normalized = canonicalUrlForHash(rawUrl);
     // 64-bit FNV-1a avoids the frequent collisions of the old signed 32-bit
     // Java-style hash while remaining synchronous for all existing call sites.
-    let hash = 1469598103934665603n;
-    for (let i = 0; i < normalized.length; i++) {
-      hash ^= BigInt(normalized.charCodeAt(i));
-      hash = BigInt.asUintN(64, hash * 1099511628211n);
-    }
-    return hash.toString(36);
+    return hashUrlIdentity(canonicalUrlForHash(rawUrl));
   } catch (_) {
-    return 'raw_' + String(rawUrl).length;
+    return hashUrlIdentity(`raw:${String(rawUrl)}`);
   }
+}
+
+async function findExistingLink(env, table, scopeColumn, scopeKey, rawUrl, excludeId = null) {
+  const currentHash = generateUrlHash(rawUrl);
+  const oldHash = legacyUrlHash(rawUrl);
+  let sql = `SELECT * FROM ${table} WHERE ${scopeColumn} = ? AND (url_hash = ? OR url_hash = ? OR url = ?)`;
+  const params = [scopeKey, currentHash, oldHash, rawUrl];
+  if (excludeId) { sql += ' AND id != ?'; params.push(excludeId); }
+  const { results } = await env.DB.prepare(sql).bind(...params).all();
+  let target;
+  try { target = canonicalUrlForHash(rawUrl); } catch (_) { target = `raw:${String(rawUrl)}`; }
+  return (results || []).find((row) => {
+    try { return canonicalUrlForHash(row.url) === target; } catch (_) { return String(row.url) === String(rawUrl); }
+  }) || null;
 }
 
 /**

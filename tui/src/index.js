@@ -2,6 +2,7 @@
 // Athena Search TUI — dump your browser bookmarks into your Athena brain.
 
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import readline from 'node:readline';
 
 import { makeTheme } from './theme.js';
@@ -59,7 +60,8 @@ function wait(ms) {
 
 function retryableBatchError(error) {
   return error instanceof ApiError && (
-    error.status === 0 || error.status === 408 || error.status === 425 || error.status === 429 ||
+    error.status === 0 || error.status === 408 || error.status === 409 || error.status === 425 || error.status === 429 ||
+    error.code === 'BATCH_IN_PROGRESS' ||
     (error.status >= 500 && error.status < 600)
   );
 }
@@ -104,14 +106,16 @@ async function stepConnectInstance() {
     await withSpinner(io, theme, 'Pinging instance…', () => client.health());
     const next = url.replace(/\/+$/, '');
     if (state.instance && state.instance !== next) {
-      delete state.token;
-      delete state.name;
-      delete state.rank;
-      delete state.provider;
-      delete state.community_id;
-      delete state.community_name;
-      delete state.scanned;
-      delete state.last_dump;
+      Object.assign(state, {
+        token: undefined,
+        name: undefined,
+        rank: undefined,
+        provider: undefined,
+        community_id: undefined,
+        community_name: undefined,
+        scanned: undefined,
+        last_dump: undefined,
+      });
     }
     state.instance = next;
     saveConfig(state);
@@ -293,6 +297,7 @@ async function stepDump() {
   const total = clean.length;
   let added = 0, dupes = 0, failed = 0;
   const errors = [];
+  const batchKey = randomUUID();
   const payloads = clean.map((link) => ({
     url: link.url,
     ...(link.title ? { title: link.title.slice(0, 200) } : {}),
@@ -310,8 +315,8 @@ async function stepDump() {
     for (let attempt = 0; ; attempt++) {
       try {
         res = target === 'personal'
-          ? await client.postPersonalLinksBatch(payloads)
-          : await client.postLinksBatch(payloads, state.community_id);
+          ? await client.postPersonalLinksBatch(payloads, { idempotencyKey: batchKey })
+          : await client.postLinksBatch(payloads, state.community_id, { idempotencyKey: batchKey });
         break;
       } catch (e) {
         if (e instanceof ApiError && e.status === 404) throw e;

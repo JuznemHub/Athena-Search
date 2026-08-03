@@ -33,13 +33,14 @@ function errorMessage(data, statusText) {
   return data?.error?.message || data?.message || statusText || 'Request failed';
 }
 
-async function request(base, path, { method = 'GET', body, token, timeout = 15_000 } = {}) {
+async function request(base, path, { method = 'GET', body, token, timeout = 15_000, headers = {} } = {}) {
   let res;
   try {
     res = await fetch(`${normalize(base)}${path}`, {
       method,
       headers: {
         'content-type': 'application/json',
+        ...headers,
         ...(token ? { authorization: `Bearer ${token}` } : {}),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -81,10 +82,12 @@ export function makeClient(instanceUrl, token) {
     postLinksBatch: (links, communityId, options = {}) => request(base, '/api/links/batch', {
       method: 'POST', body: { community_id: communityId, links }, token,
       timeout: options.timeout || BATCH_TIMEOUT_MS,
+      headers: options.idempotencyKey ? { 'X-Athena-Batch-Key': options.idempotencyKey } : {},
     }),
     postPersonalLinksBatch: (links, options = {}) => request(base, '/api/personal-links/batch', {
       method: 'POST', body: { links }, token,
       timeout: options.timeout || BATCH_TIMEOUT_MS,
+      headers: options.idempotencyKey ? { 'X-Athena-Batch-Key': options.idempotencyKey } : {},
     }),
   };
 }
