@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.7',
+          version: '1.0.8',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -9391,6 +9391,20 @@ async function recentTagsForScope(env, scope, key, limit = 30) {
   return out;
 }
 
+function inferredLinkTags(rawUrl, meta = {}) {
+  const haystack = `${rawUrl} ${meta.title || ''} ${meta.content || ''} ${meta.notes || ''}`.toLowerCase();
+  const tags = inferredLinkTags(rawUrl, meta);
+  const add = tag => { if (!tags.includes(tag)) tags.push(tag); };
+  if (/reddit\.com|\breddit\b/.test(haystack)) add('reddit');
+  if (/github\.com|gist\.github|\bgithub\b/.test(haystack)) add('github');
+  if (/open[- ]source|opensource/.test(haystack)) add('open-source');
+  if (/localllama|local\s+llm|ollama|llama\b/.test(haystack)) add('local-llm');
+  if (/\bocr\b|optical character recognition/.test(haystack)) add('ocr');
+  if (/\bai\b|artificial intelligence|machine learning/.test(haystack)) add('ai');
+  if (/computer vision|vision model/.test(haystack)) add('computer-vision');
+  return tags;
+}
+
 /**
  * AI describe + tag (karakeep-style) for a saved link. Uses the instance AI
  * config; identical link types get identical tags because the prompt is
@@ -9480,7 +9494,7 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
 
   const description = String(parsed.description || '').replace(/\s+/g, ' ').trim().slice(0, 400);
   const rawTags = Array.isArray(parsed.tags) ? parsed.tags : [];
-  const tags = [];
+  const tags = inferredLinkTags(rawUrl, meta);
   for (const t of rawTags) {
     let s = String(t).replace(/^#/, '').trim().toLowerCase().replace(/\s+/g, '-').slice(0, 24);
     if (s === 'localllm' || s === 'local-llms') s = 'local-llm';
