@@ -238,11 +238,12 @@ async function stepScan() {
   const allTags = [...new Set(unique.flatMap((l) => l.tags || []))].sort();
   const previous = Array.isArray(state.scanned?.fingerprints) ? new Set(state.scanned.fingerprints) : null;
   const fingerprints = unique.map((link) => bookmarkFingerprint(link.url));
+  const fingerprintSet = new Set(fingerprints);
   const newCount = previous
     ? fingerprints.filter((fingerprint) => !previous.has(fingerprint)).length
     : null;
   const removedCount = previous
-    ? [...previous].filter((fingerprint) => !fingerprints.includes(fingerprint)).length
+    ? [...previous].filter((fingerprint) => !fingerprintSet.has(fingerprint)).length
     : null;
   state.scanned = { count: unique.length, folders: allTags, fingerprints, time: Date.now(), sources };
   saveConfig(state);
@@ -338,6 +339,7 @@ async function stepDump() {
     ...(link.tags?.length ? { tags: link.tags.slice(0, 10) } : {}),
   }));
   let uploadPayloads = payloads;
+  let preflightDupes = 0;
   let similarCount = 0;
   let preflightWarning = '';
 
@@ -351,7 +353,8 @@ async function stepDump() {
     const remoteLinks = Array.isArray(remote?.links) ? remote.links : [];
     const remoteKeys = new Set(remoteLinks.map((link) => bookmarkKey(link.url)));
     const exact = payloads.filter((payload) => remoteKeys.has(bookmarkKey(payload.url)));
-    dupes = exact.length;
+    preflightDupes = exact.length;
+    dupes = preflightDupes;
     uploadPayloads = payloads.filter((payload) => !remoteKeys.has(bookmarkKey(payload.url)));
     similarCount = uploadPayloads.filter((payload) => remoteLinks.some((link) => (
       bookmarkKey(link.url) !== bookmarkKey(payload.url) && titleSimilarity(payload.title, link.title) >= 0.75
@@ -399,7 +402,7 @@ async function stepDump() {
     }
     if (!res || typeof res.total !== 'number') throw new ApiError('batch unsupported', 'HTTP_404', 404);
     added = res.added || 0;
-    dupes = res.dupes || 0;
+    dupes = preflightDupes + (res.dupes || 0);
     const rejected = Array.isArray(res.failed) ? res.failed : [];
     failed = rejected.length;
     if (failed) errors.push(...rejected.slice(0, 5).map((url) => `REJECTED: ${url}`));
@@ -432,7 +435,7 @@ async function stepDump() {
       }
       sent += 1;
       if (sent % 5 === 0 || sent === total) {
-        stderr(ERASE_EOL + `\r${theme.accent(added)} added · ${theme.dim(dupes)} dupes · ${theme.danger(failed)} failed — ${dupes + sent}/${total}`);
+        stderr(ERASE_EOL + `\r${theme.accent(added)} added · ${theme.dim(dupes)} dupes · ${theme.danger(failed)} failed — ${preflightDupes + sent}/${total}`);
       }
     }
   }
