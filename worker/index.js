@@ -82,10 +82,13 @@ function clientIp(request) {
  */
 function corsAllowedOrigin(env, request) {
   const own = request?.url ? new URL(request.url).origin : '';
-  const configured = String(env.ATHENA_FRONTEND_URL || '').trim().replace(/\/+$/, '');
+  const configured = [env.ATHENA_FRONTEND_URL, env.ATHENA_ALLOWED_ORIGINS]
+    .flatMap(value => String(value || '').split(/[\s,]+/))
+    .map(value => value.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
   const allowed = new Set();
   if (own) allowed.add(own);
-  if (configured) allowed.add(configured);
+  for (const origin of configured) allowed.add(origin);
   const origin = (request?.headers?.get('Origin') || '').trim();
   if (origin && allowed.has(origin)) return origin;
   return allowed.size ? [...allowed][0] : own;
@@ -3776,7 +3779,10 @@ function selfHostedEngine(env) {
  * backend and the site are the same origin.
  */
 function frontendOrigin(env, url) {
-  const configured = String(env.ATHENA_FRONTEND_URL || '').trim().replace(/\/+$/, '');
+  const configured = String(env.ATHENA_FRONTEND_URL || '')
+    .split(/[\s,]+/)
+    .map(value => value.trim().replace(/\/+$/, ''))
+    .find(Boolean) || '';
   if (configured) return configured;
   return url.origin;
 }
