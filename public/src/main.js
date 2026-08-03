@@ -1702,12 +1702,14 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   let searchSeq = 0;
+  let enrichmentRefreshKey = '';
 
   async function runSearch() {
     const q = searchInput.value.trim();
     state.hasSearched = true;
     aiAnswerCard.classList.add('hidden');
     if (!q) {
+      enrichmentRefreshKey = '';
       renderHome();
       return;
     }
@@ -1730,6 +1732,12 @@ document.addEventListener('DOMContentLoaded', () => {
       if (res.ok && data.success && Array.isArray(data.links)) {
         const documents = filterLinks(corpus().filter(item => item.isDocument), q);
         renderGoogleResults([...data.links.map(normalizeLink), ...documents], q);
+        if (data.enrichment_pending && enrichmentRefreshKey !== q) {
+          enrichmentRefreshKey = q;
+          setTimeout(() => {
+            if (searchInput.value.trim() === q) runSearch();
+          }, 1800);
+        }
       }
     } catch (_) {
       // Offline or denied — the local results already on screen stand.

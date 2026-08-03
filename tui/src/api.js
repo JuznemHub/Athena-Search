@@ -74,6 +74,8 @@ export function makeClient(instanceUrl, token) {
     storageConfig: () => request(base, '/api/storage/config'),
     me: () => request(base, '/api/auth/me', { token }),
     communities: () => request(base, '/api/communities', { token }),
+    personalLinks: () => request(base, '/api/personal-links', { token }),
+    links: (communityId) => request(base, `/api/links?community_id=${encodeURIComponent(communityId)}`, { token }),
     joinCommunity: (communityId) => request(base, '/api/communities/join', {
       method: 'POST', body: { community_id: communityId }, token,
     }),

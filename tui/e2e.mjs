@@ -18,6 +18,7 @@ const server = http.createServer((req, res) => {
     if (req.url === '/api/communities/join' && req.method === 'POST') {
       return send(200, { community: { id: JSON.parse(raw).community_id, name: 'Neo Circle', role: 'owner' } });
     }
+    if (req.url === '/api/personal-links' && req.method === 'GET') return send(200, { links: [] });
     if (req.url === '/api/personal-links' && req.method === 'POST') return send(200, { link: { id: 1 } });
     if (req.url === '/api/personal-links/batch' && req.method === 'POST') {
       const links = JSON.parse(raw).links || [];
