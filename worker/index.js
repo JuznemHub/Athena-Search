@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.8',
+          version: '1.0.9',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -9325,7 +9325,7 @@ async function enrichLinksInBackground(env, scope, key, links) {
           if (ai.tags?.length) {
             let existingTags = [];
             try { existingTags = Array.isArray(link.tags) ? link.tags : JSON.parse(link.tags || '[]'); } catch (_) {}
-            update.tags = [...new Set([...existingTags, ...ai.tags])].slice(0, 8);
+            update.tags = [...new Set([...ai.tags, ...existingTags])].slice(0, 8);
           }
         }
         if (!update.notes && !update.image_url && !update.site_name && !update.tags) continue;
