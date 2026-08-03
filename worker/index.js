@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.9',
+          version: '1.0.10',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -9393,7 +9393,7 @@ async function recentTagsForScope(env, scope, key, limit = 30) {
 
 function inferredLinkTags(rawUrl, meta = {}) {
   const haystack = `${rawUrl} ${meta.title || ''} ${meta.content || ''} ${meta.notes || ''}`.toLowerCase();
-  const tags = inferredLinkTags(rawUrl, meta);
+  const tags = [];
   const add = tag => { if (!tags.includes(tag)) tags.push(tag); };
   if (/reddit\.com|\breddit\b/.test(haystack)) add('reddit');
   if (/github\.com|gist\.github|\bgithub\b/.test(haystack)) add('github');
