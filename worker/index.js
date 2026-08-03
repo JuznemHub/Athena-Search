@@ -124,7 +124,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.5',
+          version: '1.0.6',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -2884,9 +2884,7 @@ async function handlePostCommunityLink(request, user, env, corsHeaders) {
   }
 
   const urlHash = generateUrlHash(rawUrl);
-  const existing = await env.DB.prepare(
-    'SELECT id, title FROM links WHERE community_id = ? AND url_hash = ?'
-  ).bind(communityId, urlHash).first();
+  const existing = await findExistingLink(env, 'links', 'community_id', communityId, rawUrl);
 
   if (existing) {
     return Response.json(
@@ -2894,6 +2892,7 @@ async function handlePostCommunityLink(request, user, env, corsHeaders) {
         success: false,
         duplicate: true,
         error: 'Website is already added',
+        code: 'DUPLICATE_URL',
         existing_id: existing.id,
         existing_title: existing.title
       },
@@ -2929,7 +2928,16 @@ async function handlePostCommunityLink(request, user, env, corsHeaders) {
       JSON.stringify(body.tags || []), displayName, user.id, user.provider || null, displayName,
       now, meta.image_url || null, meta.site_name || null
     ).run();
-  } catch {
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      return Response.json(
+        { success: false, duplicate: true, error: 'Website is already added', code: 'DUPLICATE_URL' },
+        { status: 409, headers: corsHeaders }
+      );
+    }
+    if (!isMissingLinkMetaColumnError(error)) {
+      return Response.json({ success: false, error: error.message || 'Database insert failed', code: 'DB_INSERT_FAILED' }, { status: 500, headers: corsHeaders });
+    }
     await env.DB.prepare(
       `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
         added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at)
@@ -2961,10 +2969,7 @@ async function handleDeleteCommunityLink(request, user, env, corsHeaders) {
   if (id) {
     link = await env.DB.prepare('SELECT * FROM links WHERE id = ?').bind(id).first();
   } else if (communityId && rawUrl) {
-    const urlHash = generateUrlHash(rawUrl);
-    link = await env.DB.prepare(
-      'SELECT * FROM links WHERE community_id = ? AND url_hash = ?'
-    ).bind(communityId, urlHash).first();
+    link = await findExistingLink(env, 'links', 'community_id', communityId, rawUrl);
   }
 
   if (!link) {
@@ -4158,8 +4163,8 @@ async function handleSaveStorageConfig(request, env, corsHeaders) {
  *  - overwriting GitHub with D1 destroys links added or hand-written on GitHub;
  *  - letting a GitHub read replace D1 destroys links captured while the
  *    instance was running on the D1 provider.
- * Merging on url hash keeps everything. GitHub wins on a genuine collision
- * because it is the declared source of truth.
+ * Merging on canonical URL keeps everything. GitHub wins only when both stores
+ * contain the same URL because it is the declared source of truth.
  */
 async function mergeScope(env, store, scope, key) {
   const folder = folderFor(scope, key);
@@ -4176,10 +4181,12 @@ async function mergeScope(env, store, scope, key) {
   const parkedD1 = provider === 'github' ? await parkedLinksFor(env, 'd1', scope, key) : liveLinks;
   const cloudflareLinks = provider === 'github' ? parkedD1 : liveLinks;
 
-  const keyOf = l => (l.url_hash || generateUrlHash(l.url || '') || l.url || '').toString();
+  const keyOf = (l) => {
+    try { return canonicalUrlForHash(l.url || ''); } catch (_) { return String(l.url_hash || l.url || ''); }
+  };
 
-  // Union both stores, de-duplicated on url hash. GitHub wins a true collision
-  // only because one side has to; the URL is identical either way.
+  // Union both stores, de-duplicated on canonical URL. Query parameters remain
+  // meaningful, so two pages under one path are not silently collapsed.
   const union = new Map();
   for (const l of cloudflareLinks) union.set(keyOf(l), l);
   let addedToGitHub = 0;
@@ -4724,31 +4731,124 @@ async function handleGetPersonalLinks(userId, env, corsHeaders) {
   return Response.json({ success: true, links: dedupeLinkRows(results || []) }, { headers: corsHeaders });
 }
 
+function isUniqueConstraintError(error) {
+  const code = String(error?.code || error?.cause?.code || '').toUpperCase();
+  const message = String(error?.message || error || '').toLowerCase();
+  return code === '23505' || /unique constraint|duplicate key|already exists|constraint failed/.test(message);
+}
+
+function isMissingLinkMetaColumnError(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return /no such column|column .* does not exist|undefined column/.test(message) &&
+    /(image_url|site_name)/.test(message);
+}
+
+function batchLinkId(prefix) {
+  return `${prefix}_${Date.now().toString(36)}_${randomToken().slice(0, 10)}`;
+}
+
+async function ensureBatchUploadsTable(env) {
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS batch_uploads (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      scope_key TEXT NOT NULL,
+      request_key TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'processing',
+      result TEXT,
+      created_at INTEGER NOT NULL
+    )
+  `).run().catch(() => {});
+  await env.DB.prepare(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_batch_uploads_request ON batch_uploads(user_id, scope, scope_key, request_key)'
+  ).run().catch(() => {});
+}
+
+function batchRequestKey(request) {
+  const key = String(request.headers.get('X-Athena-Batch-Key') || '').trim();
+  return /^[A-Za-z0-9._:-]{16,128}$/.test(key) ? key : null;
+}
+
+async function beginBatchUpload(env, userId, scope, scopeKey, requestKey) {
+  if (!requestKey) return { id: null };
+  await ensureBatchUploadsTable(env);
+  const old = await env.DB.prepare(
+    'SELECT id, status, result, created_at FROM batch_uploads WHERE user_id = ? AND scope = ? AND scope_key = ? AND request_key = ?'
+  ).bind(userId, scope, scopeKey, requestKey).first();
+  if (old) {
+    if (old.status === 'complete' && old.result) {
+      try { return { replay: JSON.parse(old.result) }; } catch (_) {}
+    }
+    if (Date.now() - Number(old.created_at || 0) < 10 * 60 * 1000) return { inProgress: true };
+    await env.DB.prepare('DELETE FROM batch_uploads WHERE id = ?').bind(old.id).run().catch(() => {});
+  }
+
+  const id = `batch_${Date.now().toString(36)}_${randomToken().slice(0, 10)}`;
+  try {
+    await env.DB.prepare(
+      'INSERT INTO batch_uploads (id, user_id, scope, scope_key, request_key, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).bind(id, userId, scope, scopeKey, requestKey, 'processing', Date.now()).run();
+    return { id };
+  } catch (error) {
+    if (!isUniqueConstraintError(error)) throw error;
+    const raced = await env.DB.prepare(
+      'SELECT id, status, result FROM batch_uploads WHERE user_id = ? AND scope = ? AND scope_key = ? AND request_key = ?'
+    ).bind(userId, scope, scopeKey, requestKey).first();
+    if (raced?.status === 'complete' && raced.result) {
+      try { return { replay: JSON.parse(raced.result) }; } catch (_) {}
+    }
+    return { inProgress: true };
+  }
+}
+
+async function finishBatchUpload(env, id, result) {
+  if (!id) return;
+  if (!result?.success) {
+    await env.DB.prepare('DELETE FROM batch_uploads WHERE id = ?').bind(id).run().catch(() => {});
+    return;
+  }
+  await env.DB.prepare('UPDATE batch_uploads SET status = ?, result = ? WHERE id = ?')
+    .bind('complete', JSON.stringify(result), id).run().catch(() => {});
+}
+
+async function abortBatchUpload(env, id) {
+  if (!id) return;
+  await env.DB.prepare('DELETE FROM batch_uploads WHERE id = ?').bind(id).run().catch(() => {});
+}
+
 async function handlePostPersonalLinksBatch(request, userId, env, corsHeaders) {
   const body = await request.json();
   const items = Array.isArray(body.links) ? body.links.slice(0, 500) : [];
   if (!items.length) {
     return Response.json({ success: false, error: 'links[] required' }, { status: 400, headers: corsHeaders });
   }
-  await ensureLinkMetaColumns(env);
+  const replayState = await beginBatchUpload(env, userId, 'personal', userId, batchRequestKey(request));
+  if (replayState.replay) return Response.json({ ...replayState.replay, replayed: true }, { headers: corsHeaders });
+  if (replayState.inProgress) {
+    return Response.json({ success: false, error: 'Batch upload already in progress', code: 'BATCH_IN_PROGRESS' }, { status: 409, headers: corsHeaders });
+  }
+  try {
+    await ensureLinkMetaColumns(env);
 
   const now = Date.now();
   const displayName = 'athena-tui';
   const inserted = [];
   const dupes = [];
   const failed = [];
+  const seenHashes = new Set();
   for (const raw of items) {
     const rawUrl = typeof raw?.url === 'string' ? raw.url.trim() : '';
     if (!/^https?:\/\//i.test(rawUrl)) { failed.push({ url: rawUrl || '(empty)', error: 'BAD_URL' }); continue; }
     const urlHash = generateUrlHash(rawUrl);
-    const existing = await env.DB.prepare(
-      'SELECT 1 FROM personal_links WHERE user_id = ? AND url_hash = ?'
-    ).bind(userId, urlHash).first();
+    if (seenHashes.has(urlHash)) { dupes.push(rawUrl); continue; }
+    seenHashes.add(urlHash);
+    const existing = await findExistingLink(env, 'personal_links', 'user_id', userId, rawUrl);
     if (existing) { dupes.push(rawUrl); continue; }
     // Dump payloads already carry real titles — title-only fast path, no scrape.
     const title = String(raw.title || '').trim().slice(0, 300);
     inserted.push({
-      id: 'pl_' + Date.now().toString(36) + '_' + inserted.length,
+      id: batchLinkId('pl'),
       url: rawUrl, url_hash: urlHash, title,
       notes: '', tags: Array.isArray(raw.tags) ? raw.tags.slice(0, 10) : [],
       created_at: now, added_by_user_id: userId, added_by_name: displayName,
@@ -4756,30 +4856,55 @@ async function handlePostPersonalLinksBatch(request, userId, env, corsHeaders) {
   }
 
   if (inserted.length) {
-    const gh = await storeAddLinks(env, 'personal', userId, inserted);
-    if (gh.handled && !gh.ok) {
-      return Response.json({ success: false, error: `GitHub write failed: ${gh.error}` }, { status: 502, headers: corsHeaders });
-    }
+    const stored = [];
     for (const l of inserted) {
       try {
         await env.DB.prepare(
           `INSERT INTO personal_links (id, user_id, url, url_hash, title, notes, tags, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(l.id, userId, l.url, l.url_hash, l.title, l.notes, JSON.stringify(l.tags), l.created_at).run();
-      } catch (_) { /* id collision from a concurrent batch — row already there */ }
+        stored.push(l);
+      } catch (error) {
+        if (isUniqueConstraintError(error)) dupes.push(l.url);
+        else failed.push({ url: l.url, error: 'DB_INSERT_FAILED' });
+      }
     }
-    // Dump was fast by design; enrich the fresh links in the background so they
-    // carry descriptions/site names/images like Telegram saves do.
-    runInBackground(env, enrichLinksInBackground(env, 'personal', userId, inserted));
+    inserted.splice(0, inserted.length, ...stored);
+    if (stored.length) {
+      const gh = await storeAddLinks(env, 'personal', userId, stored);
+      if (gh.handled && !gh.ok) {
+        for (const l of stored) await env.DB.prepare('DELETE FROM personal_links WHERE id = ? AND user_id = ?').bind(l.id, userId).run().catch(() => {});
+        const failure = {
+          success: false,
+          total: items.length,
+          added: 0,
+          dupes: dupes.length,
+          failed: [...failed.map((f) => f.url), ...stored.map((l) => l.url)],
+          error: `GitHub write failed: ${gh.error}`,
+          code: 'STORAGE_WRITE_FAILED',
+        };
+        await finishBatchUpload(env, replayState.id, failure);
+        return Response.json(failure, { status: 502, headers: corsHeaders });
+      }
+      // Dump was fast by design; enrich the fresh links in the background so
+      // they carry descriptions/site names/images like Telegram saves do.
+      runInBackground(env, enrichLinksInBackground(env, 'personal', userId, stored));
+    }
   }
 
-  return Response.json({
+  const result = {
     success: true,
     total: items.length,
     added: inserted.length,
     dupes: dupes.length,
     failed: failed.map((f) => f.url),
-  }, { headers: corsHeaders });
+  };
+  await finishBatchUpload(env, replayState.id, result);
+    return Response.json(result, { headers: corsHeaders });
+  } catch (error) {
+    await abortBatchUpload(env, replayState.id);
+    throw error;
+  }
 }
 
 async function handlePostCommunityLinksBatch(request, user, env, corsHeaders) {
@@ -4805,24 +4930,31 @@ async function handlePostCommunityLinksBatch(request, user, env, corsHeaders) {
       code: 'NOT_MEMBER'
     }, { status: 403, headers: corsHeaders });
   }
+  const replayState = await beginBatchUpload(env, user.id, 'community', communityId, batchRequestKey(request));
+  if (replayState.replay) return Response.json({ ...replayState.replay, replayed: true }, { headers: corsHeaders });
+  if (replayState.inProgress) {
+    return Response.json({ success: false, error: 'Batch upload already in progress', code: 'BATCH_IN_PROGRESS' }, { status: 409, headers: corsHeaders });
+  }
 
-  await ensureLinkMetaColumns(env);
+  try {
+    await ensureLinkMetaColumns(env);
   const now = Date.now();
   const displayName = user.display_name || user.username || user.id;
   const inserted = [];
   const dupes = [];
   const failed = [];
+  const seenHashes = new Set();
   for (const raw of items) {
     const rawUrl = typeof raw?.url === 'string' ? raw.url.trim() : '';
     if (!/^https?:\/\//i.test(rawUrl)) { failed.push({ url: rawUrl || '(empty)', error: 'BAD_URL' }); continue; }
     const urlHash = generateUrlHash(rawUrl);
-    const existing = await env.DB.prepare(
-      'SELECT id, title FROM links WHERE community_id = ? AND url_hash = ?'
-    ).bind(communityId, urlHash).first();
+    if (seenHashes.has(urlHash)) { dupes.push(rawUrl); continue; }
+    seenHashes.add(urlHash);
+    const existing = await findExistingLink(env, 'links', 'community_id', communityId, rawUrl);
     if (existing) { dupes.push(rawUrl); continue; }
     const title = String(raw.title || '').trim().slice(0, 300);
     inserted.push({
-      id: 'link_' + Date.now().toString(36) + '_' + inserted.length,
+      id: batchLinkId('link'),
       community_id: communityId, url: rawUrl, url_hash: urlHash, title,
       notes: '', tags: Array.isArray(raw.tags) ? raw.tags.slice(0, 10) : [],
       created_at: now, added_by_name: displayName, added_by_user_id: user.id,
@@ -4830,10 +4962,7 @@ async function handlePostCommunityLinksBatch(request, user, env, corsHeaders) {
   }
 
   if (inserted.length) {
-    const gh = await storeAddLinks(env, 'community', communityId, inserted);
-    if (gh.handled && !gh.ok) {
-      return Response.json({ success: false, error: `GitHub write failed: ${gh.error}` }, { status: 502, headers: corsHeaders });
-    }
+    const stored = [];
     for (const l of inserted) {
       try {
         await env.DB.prepare(
@@ -4844,18 +4973,46 @@ async function handlePostCommunityLinksBatch(request, user, env, corsHeaders) {
           l.id, communityId, l.url, l.url_hash, l.title, l.notes, JSON.stringify(l.tags),
           displayName, user.id, user.provider || null, displayName, l.created_at
         ).run();
-      } catch (_) { /* id collision from a concurrent batch — row already there */ }
+        stored.push(l);
+      } catch (error) {
+        if (isUniqueConstraintError(error)) dupes.push(l.url);
+        else failed.push({ url: l.url, error: 'DB_INSERT_FAILED' });
+      }
     }
-    runInBackground(env, enrichLinksInBackground(env, 'community', communityId, inserted));
+    inserted.splice(0, inserted.length, ...stored);
+    if (stored.length) {
+      const gh = await storeAddLinks(env, 'community', communityId, stored);
+      if (gh.handled && !gh.ok) {
+        for (const l of stored) await env.DB.prepare('DELETE FROM links WHERE id = ? AND community_id = ?').bind(l.id, communityId).run().catch(() => {});
+        const failure = {
+          success: false,
+          total: items.length,
+          added: 0,
+          dupes: dupes.length,
+          failed: [...failed.map((f) => f.url), ...stored.map((l) => l.url)],
+          error: `GitHub write failed: ${gh.error}`,
+          code: 'STORAGE_WRITE_FAILED',
+        };
+        await finishBatchUpload(env, replayState.id, failure);
+        return Response.json(failure, { status: 502, headers: corsHeaders });
+      }
+      runInBackground(env, enrichLinksInBackground(env, 'community', communityId, stored));
+    }
   }
 
-  return Response.json({
+  const result = {
     success: true,
     total: items.length,
     added: inserted.length,
     dupes: dupes.length,
     failed: failed.map((f) => f.url),
-  }, { headers: corsHeaders });
+  };
+  await finishBatchUpload(env, replayState.id, result);
+    return Response.json(result, { headers: corsHeaders });
+  } catch (error) {
+    await abortBatchUpload(env, replayState.id);
+    throw error;
+  }
 }
 
 async function handlePostPersonalLink(request, userId, env, corsHeaders) {
@@ -4867,13 +5024,11 @@ async function handlePostPersonalLink(request, userId, env, corsHeaders) {
   // notes without real http links skip scrape
   const isNote = rawUrl.startsWith('note://') || !/^https?:\/\//i.test(rawUrl);
   const urlHash = generateUrlHash(rawUrl);
-  const existing = await env.DB.prepare(
-    'SELECT 1 FROM personal_links WHERE user_id = ? AND url_hash = ?'
-  ).bind(userId, urlHash).first();
+  const existing = await findExistingLink(env, 'personal_links', 'user_id', userId, rawUrl);
 
   if (existing) {
     return Response.json(
-      { success: false, duplicate: true, error: 'Website is already added' },
+      { success: false, duplicate: true, error: 'Website is already added', code: 'DUPLICATE_URL' },
       { status: 409, headers: corsHeaders }
     );
   }
@@ -4902,7 +5057,16 @@ async function handlePostPersonalLink(request, userId, env, corsHeaders) {
       `INSERT INTO personal_links (id, user_id, url, url_hash, title, notes, tags, created_at, image_url, site_name)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(id, userId, rawUrl, urlHash, meta.title, meta.notes, JSON.stringify(body.tags || []), now, meta.image_url || null, meta.site_name || null).run();
-  } catch (_) {
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      return Response.json(
+        { success: false, duplicate: true, error: 'Website is already added', code: 'DUPLICATE_URL' },
+        { status: 409, headers: corsHeaders }
+      );
+    }
+    if (!isMissingLinkMetaColumnError(error)) {
+      return Response.json({ success: false, error: error.message || 'Database insert failed', code: 'DB_INSERT_FAILED' }, { status: 500, headers: corsHeaders });
+    }
     await env.DB.prepare(
       'INSERT INTO personal_links (id, user_id, url, url_hash, title, notes, tags, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
     ).bind(id, userId, rawUrl, urlHash, meta.title, meta.notes, JSON.stringify(body.tags || []), now).run();
@@ -4956,9 +5120,7 @@ async function handlePatchPersonalLink(request, userId, env, corsHeaders) {
     url = String(body.url).trim();
     urlHash = generateUrlHash(url);
     // prevent collision with another personal link
-    const clash = await env.DB.prepare(
-      'SELECT id FROM personal_links WHERE user_id = ? AND url_hash = ? AND id != ?'
-    ).bind(userId, urlHash, id).first();
+    const clash = await findExistingLink(env, 'personal_links', 'user_id', userId, url, id);
     if (clash) {
       return Response.json({ success: false, error: 'Another link already uses that URL' }, { status: 409, headers: corsHeaders });
     }
@@ -5033,9 +5195,7 @@ async function handlePatchCommunityLink(request, user, env, corsHeaders) {
   if (body.url != null && String(body.url).trim()) {
     url = String(body.url).trim();
     urlHash = generateUrlHash(url);
-    const clash = await env.DB.prepare(
-      'SELECT id FROM links WHERE community_id = ? AND url_hash = ? AND id != ?'
-    ).bind(existing.community_id, urlHash, id).first();
+    const clash = await findExistingLink(env, 'links', 'community_id', existing.community_id, url, id);
     if (clash) {
       return Response.json({ success: false, error: 'Another link already uses that URL' }, { status: 409, headers: corsHeaders });
     }
@@ -5302,9 +5462,7 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
     return;
   }
   const urlHash = generateUrlHash(rawUrl);
-  const existing = await env.DB.prepare(
-    'SELECT id FROM links WHERE community_id = ? AND url_hash = ?'
-  ).bind(communityId, urlHash).first();
+  const existing = await findExistingLink(env, 'links', 'community_id', communityId, rawUrl);
   if (existing) {
     await sendTelegramMessage(token, chatId, `Already in community: ${rawUrl}`, threadId);
     return;
@@ -5338,7 +5496,15 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
       senderName, athenaUser?.id || null, senderName,
       Date.now(), meta.image_url || null, meta.site_name || null
     ).run();
-  } catch (_) {
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      await sendTelegramMessage(token, chatId, `Already in community: ${rawUrl}`, threadId);
+      return;
+    }
+    if (!isMissingLinkMetaColumnError(error)) {
+      await sendTelegramMessage(token, chatId, `Could not save link: ${error.message || 'database insert failed'}`, threadId);
+      return;
+    }
     await env.DB.prepare(
       'INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
     ).bind(id, communityId, rawUrl, urlHash, meta.title, meta.notes || '', JSON.stringify(['telegram']), senderName, Date.now()).run();
@@ -5818,9 +5984,7 @@ function fuzzyMatchLinks(rows, query) {
 
 async function savePersonalUrl(env, userId, rawUrl, senderName, userNotes = '', titleHint = '') {
   const urlHash = generateUrlHash(rawUrl);
-  const existing = await env.DB.prepare(
-    'SELECT id, title, url FROM personal_links WHERE user_id = ? AND url_hash = ?'
-  ).bind(userId, urlHash).first();
+  const existing = await findExistingLink(env, 'personal_links', 'user_id', userId, rawUrl);
   if (existing) return { duplicate: true, existing };
   await ensureLinkMetaColumns(env);
   // Detailed caption/post text → keep as notes, skip scrape overwrite
@@ -5848,7 +6012,9 @@ async function savePersonalUrl(env, userId, rawUrl, senderName, userNotes = '', 
       `INSERT INTO personal_links (id, user_id, url, url_hash, title, notes, tags, created_at, image_url, site_name)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(id, userId, rawUrl, urlHash, meta.title, meta.notes, JSON.stringify(['telegram', 'dump']), Date.now(), meta.image_url || null, meta.site_name || null).run();
-  } catch (_) {
+  } catch (error) {
+    if (isUniqueConstraintError(error)) return { duplicate: true, existing: { url: rawUrl } };
+    if (!isMissingLinkMetaColumnError(error)) return { duplicate: false, error: `Database write failed: ${error.message || 'insert failed'}` };
     await env.DB.prepare(
       `INSERT INTO personal_links (id, user_id, url, url_hash, title, notes, tags, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
@@ -5858,20 +6024,14 @@ async function savePersonalUrl(env, userId, rawUrl, senderName, userNotes = '', 
 }
 
 async function deletePersonalUrl(env, userId, rawUrl) {
-  const urlHash = generateUrlHash(rawUrl);
-  const existing = await env.DB.prepare(
-    'SELECT id FROM personal_links WHERE user_id = ? AND url_hash = ?'
-  ).bind(userId, urlHash).first();
+  const existing = await findExistingLink(env, 'personal_links', 'user_id', userId, rawUrl);
   if (!existing) return { found: false };
   await env.DB.prepare('DELETE FROM personal_links WHERE id = ? AND user_id = ?').bind(existing.id, userId).run();
   return { found: true, id: existing.id };
 }
 
 async function deleteCommunityUrl(env, communityId, rawUrl) {
-  const urlHash = generateUrlHash(rawUrl);
-  const existing = await env.DB.prepare(
-    'SELECT id FROM links WHERE community_id = ? AND url_hash = ?'
-  ).bind(communityId, urlHash).first();
+  const existing = await findExistingLink(env, 'links', 'community_id', communityId, rawUrl);
   if (!existing) return { found: false };
   await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(existing.id).run();
   await env.DB.prepare('DELETE FROM link_votes WHERE link_id = ?').bind(existing.id).run();
@@ -6160,9 +6320,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
   }
 
   if (approve) {
-    const again = await env.DB.prepare(
-      'SELECT 1 FROM links WHERE community_id = ? AND url_hash = ?'
-    ).bind(pend.community_id, pend.url_hash).first();
+    const again = await findExistingLink(env, 'links', 'community_id', pend.community_id, pend.url);
     if (!again) {
       const id = 'tg_' + Date.now().toString(36);
       try {
@@ -6298,8 +6456,12 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
 
   const chatId = String(msg.chat.id);
   const from = msg.from || {};
-  const senderName = from.first_name || from.username || 'Telegram User';
+  const senderName = from.first_name || from.username || msg.sender_chat?.title || 'Telegram User';
   const tgUserId = from.id ? String(from.id) : null;
+  const isAnonymousAdmin = tgUserId === '1087968824' || (
+    msg.sender_chat?.id != null && String(msg.sender_chat.id) === chatId &&
+    ['group', 'supergroup', 'channel'].includes(String(msg.sender_chat.type || '').toLowerCase())
+  );
   const captionNotes = telegramUserNotes(msg);
   // Keep bot replies in the same forum topic as the user message (not General/#)
   const forumThreadId = msg.message_thread_id != null ? Number(msg.message_thread_id) : null;
@@ -6342,10 +6504,8 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   // Telegram's "Anonymous Admin" (id 1087968824, @GroupAnonymousBot) posts as a
   // special account that can break getChatMember presence lookups. It is an
   // administrator by definition — never ban-reply its messages.
-  const IS_ANON_ADMIN = tgUserId === '1087968824';
-
   // Live presence + ban: THIS community only (multi-community: ban on X does not lock Y)
-  if (binding?.community_id && tgUserId && !isGodTgId(tgUserId, env) && !IS_ANON_ADMIN) {
+  if (binding?.community_id && tgUserId && !isGodTgId(tgUserId, env) && !isAnonymousAdmin) {
     try {
       const pres = await enforceGroupPresenceOrBan(env, binding.community_id, tgUserId, athenaUser);
       const bannedHere = pres.banned
@@ -6374,7 +6534,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
 
   // Fully site-banned = not in ANY community TG group + has bans → block bot
   // (still allow /start /help /id /rank /community_list /community_join so they can recover)
-  if (tgUserId && !isGodTgId(tgUserId, env) && athenaUser && await isUserFullySiteBanned(env, athenaUser)) {
+  if (tgUserId && !isGodTgId(tgUserId, env) && !isAnonymousAdmin && athenaUser && await isUserFullySiteBanned(env, athenaUser)) {
     const allowWhenFullyBanned = new Set([
       '/start', '/help', '/id', '/rank', '/community_list', '/communities', '/clist',
       '/community_join', '/cjoin', '/join_community', '/db'
@@ -8318,7 +8478,27 @@ function boldHtml(str) { return `<b>${escHtml(str)}</b>`; }
 function codeHtml(str) { return `<code>${escHtml(str)}</code>`; }
 function linkHtml(url, text) { return `<a href="${escHtml(url)}">${escHtml(text || url)}</a>`; }
 function italicHtml(str) { return `<i>${escHtml(str)}</i>`; }
-function generateUrlHash(rawUrl) {
+
+function canonicalUrlForHash(rawUrl) {
+  const parsed = new URL(rawUrl);
+  const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+  const port = parsed.port ? `:${parsed.port}` : '';
+  const pathname = parsed.pathname.replace(/\/+$/, '') || '/';
+  // Fragments never reach the server and should not create a second bookmark;
+  // query parameters can change the resource, so they remain part of identity.
+  return `${parsed.protocol}//${host}${port}${pathname}${parsed.search}`;
+}
+
+function hashUrlIdentity(value) {
+  let hash = 1469598103934665603n;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= BigInt(value.charCodeAt(i));
+    hash = BigInt.asUintN(64, hash * 1099511628211n);
+  }
+  return hash.toString(36);
+}
+
+function legacyUrlHash(rawUrl) {
   try {
     const parsed = new URL(rawUrl);
     const normalized = (parsed.hostname.replace(/^www\./, '') + parsed.pathname.replace(/\/$/, '')).toLowerCase();
@@ -8329,20 +8509,45 @@ function generateUrlHash(rawUrl) {
     }
     return Math.abs(hash).toString(36);
   } catch (_) {
-    return 'raw_' + String(rawUrl).length;
+    return hashUrlIdentity(`raw:${String(rawUrl)}`);
   }
+}
+
+function generateUrlHash(rawUrl) {
+  try {
+    // 64-bit FNV-1a avoids the frequent collisions of the old signed 32-bit
+    // Java-style hash while remaining synchronous for all existing call sites.
+    return hashUrlIdentity(canonicalUrlForHash(rawUrl));
+  } catch (_) {
+    return hashUrlIdentity(`raw:${String(rawUrl)}`);
+  }
+}
+
+async function findExistingLink(env, table, scopeColumn, scopeKey, rawUrl, excludeId = null) {
+  const currentHash = generateUrlHash(rawUrl);
+  const oldHash = legacyUrlHash(rawUrl);
+  let sql = `SELECT * FROM ${table} WHERE ${scopeColumn} = ? AND (url_hash = ? OR url_hash = ? OR url = ?)`;
+  const params = [scopeKey, currentHash, oldHash, rawUrl];
+  if (excludeId) { sql += ' AND id != ?'; params.push(excludeId); }
+  const { results } = await env.DB.prepare(sql).bind(...params).all();
+  let target;
+  try { target = canonicalUrlForHash(rawUrl); } catch (_) { target = `raw:${String(rawUrl)}`; }
+  return (results || []).find((row) => {
+    try { return canonicalUrlForHash(row.url) === target; } catch (_) { return String(row.url) === String(rawUrl); }
+  }) || null;
 }
 
 /**
  * Defensive de-dupe of read results. Inserts check url_hash first, but a bot
  * share and a TUI dump can still race past the EXISTS check — or an older
- * sync can leave two rows for one URL. The list API must never show the same
- * page twice, so keep the newest row per url_hash on every read path.
+ * sync can leave two rows for one URL. Use the canonical URL here so query
+ * parameters remain distinct and legacy hashes cannot collapse unrelated URLs.
  */
 function dedupeLinkRows(rows) {
   const seen = new Map();
   for (const r of rows || []) {
-    const key = String(r.url_hash || generateUrlHash(r.url || '') || r.url || '').toLowerCase();
+    let key;
+    try { key = canonicalUrlForHash(r.url || ''); } catch (_) { key = `hash:${r.url_hash || r.url || ''}`; }
     const cur = seen.get(key);
     if (!cur || Number(r.created_at || 0) >= Number(cur.created_at || 0)) seen.set(key, r);
   }
@@ -8945,6 +9150,8 @@ async function enrichLinkFields(env, rawUrl, { title, notes } = {}) {
 async function enrichLinksInBackground(env, scope, key, links) {
   const CONCURRENCY = 4;
   const vocab = await recentTagsForScope(env, scope, key);
+  let aiConfig = null;
+  try { aiConfig = await getInstanceAiConfig(env); } catch (_) {}
   let next = 0;
   const run = async () => {
     while (next < links.length) {
@@ -8960,7 +9167,7 @@ async function enrichLinksInBackground(env, scope, key, links) {
         };
         // AI describe + tag (karakeep-style); stable tags because the prompt
         // is seeded with the vocabulary already in use for this scope.
-        const ai = await aiDescribeAndTag(env, link.url, { title, notes: meta.description }, vocab);
+        const ai = await aiDescribeAndTag(env, link.url, { title, notes: meta.description }, vocab, aiConfig);
         if (ai) {
           if (ai.description) update.notes = ai.description;
           if (ai.tags?.length) update.tags = [...new Set([...['telegram', 'dump'], ...ai.tags])].slice(0, 8);
@@ -9016,9 +9223,13 @@ async function recentTagsForScope(env, scope, key, limit = 30) {
  * means "AI unavailable" and callers fall back to the plain reply.
  * Returns { description, tags } or null.
  */
-async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = []) {
+async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], config = undefined) {
   let cfg;
-  try { cfg = await getInstanceAiConfig(env); } catch (_) { return null; }
+  if (config === undefined) {
+    try { cfg = await getInstanceAiConfig(env); } catch (_) { return null; }
+  } else {
+    cfg = config;
+  }
   if (!cfg || !cfg.api_key) return null;
   const baseUrl = cleanApiBase(cfg.base_url);
   const model = normalizeModelId(cfg.model, baseUrl);
@@ -9067,7 +9278,7 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = []) {
 
   let text;
   try {
-    const res = await fetchWithTimeout(endpoint, { method: 'POST', headers, body: JSON.stringify(payload) }, 12000);
+    const res = await fetchWithTimeout(endpoint, { method: 'POST', headers, body: JSON.stringify(payload), env }, 12000);
     if (!res.ok) return null;
     const data = await res.json();
     if (mode === 'anthropic') text = String(data?.content?.[0]?.text || '');

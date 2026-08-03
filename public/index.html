@@ -29,8 +29,8 @@
       }
     })();
   </script>
-<link rel="stylesheet" href="./src/style.css?v=1.0.5">
-<link rel="stylesheet" href="./src/themes.css?v=1.0.5">
+<link rel="stylesheet" href="./src/style.css?v=1.0.6">
+<link rel="stylesheet" href="./src/themes.css?v=1.0.6">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -243,6 +243,7 @@
           <label class="field-label" for="storageProvider">Provider</label>
           <select id="storageProvider" class="input">
             <option value="d1">Cloudflare D1 (default)</option>
+            <option value="local">PostgreSQL (self-hosted)</option>
             <option value="github">GitHub Markdown</option>
           </select>
           <div id="githubFields" class="hidden">
@@ -272,6 +273,7 @@
             <option value="openrouter">OpenRouter</option>
             <option value="anthropic">Anthropic</option>
             <option value="groq">Groq</option>
+            <option value="deepseek">DeepSeek</option>
             <option value="custom">Custom endpoint</option>
           </select>
         </div>
@@ -338,9 +340,9 @@
     </div>
   </aside>
 
-  <script src="./src/lib/dedupe.js?v=1.0.5"></script>
-  <script src="./src/lib/search.js?v=1.0.5"></script>
-  <script src="./src/lib/ai.js?v=1.0.5"></script>
-  <script src="./src/main.js?v=1.0.5"></script>
+  <script src="./src/lib/dedupe.js?v=1.0.6"></script>
+  <script src="./src/lib/search.js?v=1.0.6"></script>
+  <script src="./src/lib/ai.js?v=1.0.6"></script>
+  <script src="./src/main.js?v=1.0.6"></script>
 </body>
 </html>

@@ -19,7 +19,7 @@ const server = http.createServer((req, res) => {
     const raw = Buffer.concat(body).toString();
     const send = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
     const auth = req.headers.authorization === 'Bearer test-token';
-    if (req.url === '/api/health') return send(200, { ok: true, version: '6.18.8' });
+    if (req.url === '/api/health') return send(200, { ok: true, version: '1.0.5' });
     if (req.url === '/api/storage/config') return send(200, { provider: 'postgres' });
     if (req.url === '/api/auth/me') return send(auth ? 200 : 401, auth ? { user: { username: 'neo', is_god: true } } : { error: { type: 'UNAUTHORIZED' } });
     if (req.url === '/api/communities/join' && req.method === 'POST') {

@@ -154,6 +154,21 @@ CREATE TABLE IF NOT EXISTS personal_links (
 CREATE INDEX IF NOT EXISTS idx_personal_user ON personal_links(user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_personal_user_url_hash ON personal_links(user_id, url_hash);
 
+-- Safe replay of retried CLI batch uploads after an ambiguous timeout.
+CREATE TABLE IF NOT EXISTS batch_uploads (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'processing',
+    result TEXT,
+    created_at INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_batch_uploads_request
+  ON batch_uploads(user_id, scope, scope_key, request_key);
+
 CREATE TABLE IF NOT EXISTS uploaded_documents (
     id TEXT PRIMARY KEY,
     scope TEXT NOT NULL,

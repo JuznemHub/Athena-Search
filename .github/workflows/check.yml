@@ -22,6 +22,8 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run check:version
+      - run: npm test
+        working-directory: tui
 
   secrets:
     runs-on: ubuntu-latest

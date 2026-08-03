@@ -2,6 +2,7 @@
 // Athena Search TUI — dump your browser bookmarks into your Athena brain.
 
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import readline from 'node:readline';
 
 import { makeTheme } from './theme.js';
@@ -12,6 +13,7 @@ import { keyStream } from './keys.js';
 import { makeClient, ApiError, STORAGE_LABELS, rankOf } from './api.js';
 import { detectBookmarks, loadBookmarks, dedupe, scanDiagnose, filterSynthetic } from './browsers.js';
 import { loadConfig, saveConfig } from './config.js';
+import { parseSessionToken } from './session.js';
 
 const theme = makeTheme();
 const stderr = (s) => process.stderr.write(s);
@@ -52,9 +54,21 @@ function openBrowser(url) {
   }
 }
 
-function parseSessionToken(text) {
-  const m = text.match(/[?&#]session=([^&]+)/) || text.match(/^[A-Za-z0-9_-]{20,}$/);
-  return m ? decodeURIComponent(m[1]) : null;
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function retryableBatchError(error) {
+  return error instanceof ApiError && (
+    error.status === 0 || error.status === 408 || error.status === 409 || error.status === 425 || error.status === 429 ||
+    error.code === 'BATCH_IN_PROGRESS' ||
+    (error.status >= 500 && error.status < 600)
+  );
+}
+
+function retryDelay(error, attempt) {
+  if (Number.isFinite(error?.retryAfterMs)) return Math.min(Math.max(error.retryAfterMs, 500), 60_000);
+  return Math.min(1_000 * (2 ** attempt), 8_000);
 }
 
 async function statusBox() {
@@ -90,7 +104,20 @@ async function stepConnectInstance() {
   const client = makeClient(url);
   try {
     await withSpinner(io, theme, 'Pinging instance…', () => client.health());
-    state.instance = url.replace(/\/+$/, '');
+    const next = url.replace(/\/+$/, '');
+    if (state.instance && state.instance !== next) {
+      Object.assign(state, {
+        token: undefined,
+        name: undefined,
+        rank: undefined,
+        provider: undefined,
+        community_id: undefined,
+        community_name: undefined,
+        scanned: undefined,
+        last_dump: undefined,
+      });
+    }
+    state.instance = next;
     saveConfig(state);
     stderr(theme.ok('Connected.\n'));
     return true;
@@ -270,6 +297,7 @@ async function stepDump() {
   const total = clean.length;
   let added = 0, dupes = 0, failed = 0;
   const errors = [];
+  const batchKey = randomUUID();
   const payloads = clean.map((link) => ({
     url: link.url,
     ...(link.title ? { title: link.title.slice(0, 200) } : {}),
@@ -280,21 +308,38 @@ async function stepDump() {
   // GitHub folder in a single commit). Older instances without the batch
   // endpoint fall back to per-link POSTs.
   let batchSkipped = false;
+  let batchError = null;
+  let unconfirmed = 0;
   try {
-    const res = target === 'personal'
-      ? await client.postPersonalLinksBatch(payloads)
-      : await client.postLinksBatch(payloads, state.community_id);
+    let res;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        res = target === 'personal'
+          ? await client.postPersonalLinksBatch(payloads, { idempotencyKey: batchKey })
+          : await client.postLinksBatch(payloads, state.community_id, { idempotencyKey: batchKey });
+        break;
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) throw e;
+        if (!retryableBatchError(e) || attempt >= 2) throw e;
+        const delay = retryDelay(e, attempt);
+        stderr(ERASE_EOL + `\r${theme.dim(`Batch request failed (${e.code || e.type}); retrying in ${Math.ceil(delay / 1000)}s…`)}`);
+        await wait(delay);
+      }
+    }
     if (!res || typeof res.total !== 'number') throw new ApiError('batch unsupported', 'HTTP_404', 404);
     added = res.added || 0;
     dupes = res.dupes || 0;
-    failed = res.failed?.length || 0;
+    const rejected = Array.isArray(res.failed) ? res.failed : [];
+    failed = rejected.length;
+    if (failed) errors.push(...rejected.slice(0, 5).map((url) => `REJECTED: ${url}`));
     stderr(ERASE_EOL + `\r${theme.accent(added)} added · ${theme.dim(dupes)} dupes · ${theme.danger(failed)} failed — ${total}/${total}`);
   } catch (e) {
     if (e instanceof ApiError && e.status === 404) {
       batchSkipped = true; // instance predates the batch endpoint
     } else {
-      errors.push(e.message);
-      failed = total;
+      batchError = `${e.code || e.type || 'UPLOAD_FAILED'}: ${e.message}`;
+      unconfirmed = total;
+      errors.push(batchError);
     }
   }
 
@@ -322,12 +367,15 @@ async function stepDump() {
   }
   stderr('\n\n');
   stderr(SHOW_CURSOR);
-  state.last_dump = { added, dupes, failed, where, time: Date.now() };
+  state.last_dump = { added, dupes, failed, unconfirmed, where, time: Date.now() };
   saveConfig(state);
   stderr(box([
-    `${theme.ok(`✓ ${added} bookmarks stored in ${where}`)}`,
+    ...(batchError
+      ? [theme.danger(`! Batch upload was not confirmed for ${unconfirmed} bookmarks`)]
+      : [theme.ok(`✓ ${added} bookmarks stored in ${where}`)]),
     ...(dupes ? [theme.dim(`${dupes} already known (skipped)`)] : []),
     ...(failed ? [theme.danger(`${failed} failed`), ...errors.map((e) => theme.dim(e))] : []),
+    ...(batchError ? errors.map((e) => theme.dim(e)) : []),
   ], theme).join('\n') + '\n');
   return true;
 }
@@ -342,7 +390,7 @@ async function stepStatus() {
       `account    ${theme.bold(s.name)} · ${s.rank.style === 'danger' ? theme.danger(s.rank.label) : theme.accent(s.rank.label)}`,
       ...(s.joined ? [`community  ${s.joined.name}${s.joined.role ? ` · ${s.joined.role}` : ''}`] : []),
       ...(state.scanned ? [`bookmarks  ${state.scanned.count} scanned`] : []),
-      ...(state.last_dump ? [`last dump  ${state.last_dump.added} added · ${state.last_dump.dupes} dupes · ${state.last_dump.failed} failed`] : []),
+      ...(state.last_dump ? [`last dump  ${state.last_dump.added} added · ${state.last_dump.dupes} dupes · ${state.last_dump.failed} failed${state.last_dump.unconfirmed ? ` · ${state.last_dump.unconfirmed} unconfirmed` : ''}`] : []),
     ];
     stderr(box(lines, theme, { label: 'STATUS' }).join('\n') + '\n');
   } catch (e) {

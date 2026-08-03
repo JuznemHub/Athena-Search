@@ -12,7 +12,7 @@ const server = http.createServer((req, res) => {
   req.on('end', () => {
     const raw = Buffer.concat(body).toString();
     const send = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
-    if (req.url === '/api/health') return send(200, { ok: true, version: '6.18.8' });
+    if (req.url === '/api/health') return send(200, { ok: true, version: '1.0.5' });
     if (req.url === '/api/storage/config') return send(200, { provider: 'postgres' });
     if (req.url === '/api/auth/me') return send(200, { user: { username: 'neo', is_god: true } });
     if (req.url === '/api/communities/join' && req.method === 'POST') {
@@ -33,17 +33,24 @@ const server = http.createServer((req, res) => {
 await new Promise((r) => server.listen(0, r));
 const port = server.address().port;
 
-const chromeDir = path.join(os.homedir(), '.config', 'google-chrome', 'Default');
+const testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'athena-tui-e2e-'));
+const chromeDir = path.join(testHome, '.config', 'google-chrome', 'Default');
 fs.mkdirSync(chromeDir, { recursive: true });
+const fixtureBookmarks = Array.from({ length: 221 }, (_, i) => ({
+  type: 'url',
+  name: `Bookmark ${i + 1}`,
+  url: `https://bookmark-site-${i + 1}.com/item/${i + 1}`,
+}));
 fs.writeFileSync(path.join(chromeDir, 'Bookmarks'), JSON.stringify({
   roots: { bookmark_bar: { type: 'folder', name: 'bar', children: [
-    { type: 'url', name: 'Cf', url: 'https://cloudflare.com/' },
-    { type: 'url', name: 'Gh', url: 'https://github.com/' },
+    ...fixtureBookmarks,
   ] }, other: { type: 'folder', children: [] }, synced: { type: 'folder', children: [] } },
 }));
 
 const env = {
   ...process.env,
+  HOME: testHome,
+  USERPROFILE: testHome,
   ATHENA_INSTANCE: `http://127.0.0.1:${port}`,
   ATHENA_TOKEN: 'test-token',
   ATHENA_TUI_NO_ANIMATION: '1',
@@ -94,7 +101,7 @@ const killer = setTimeout(() => {
 await new Promise((r) => proc.on('close', r));
 clearTimeout(killer);
 
-fs.rmSync(path.dirname(chromeDir), { recursive: true, force: true });
+fs.rmSync(testHome, { recursive: true, force: true });
 server.closeAllConnections();
 server.close();
 
@@ -103,7 +110,7 @@ const checks = [
   ['scan ok', /unique bookmarks/],
   ['god personal target', /personal brain/],
   ['dump summary', /stored in personal brain/],
-  ['added count', /2 bookmarks stored/],
+  ['added count', /221 bookmarks stored/],
 ];
 let fail = 0;
 for (const [name, re] of checks) {

@@ -453,8 +453,10 @@ document.addEventListener('DOMContentLoaded', () => {
       history.replaceState({}, '', window.location.pathname);
     }
     if (fromOAuth) {
+      // Keep the OAuth token in memory and in the address bar for the TUI.
+      // The backend also set an HttpOnly cookie for the website session; do not
+      // copy this bearer credential into browser storage.
       state.sessionToken = fromOAuth;
-      localStorage.setItem('athena_session', fromOAuth);
       // Keep ?session= in the address bar on purpose: terminal clients
       // (athena-tui) log in via this URL and must be able to copy the token.
       if (navigator.clipboard?.writeText) {
@@ -1972,7 +1974,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let serverOk = false;
     try {
       const { data } = await api('/api/ai/config');
-      serverOk = !!(data && data.configured);
+      serverOk = !!(data && data.configured && data.hasKey);
       if (data?.configured) {
         if (base && !base.value) base.value = data.baseUrl || '';
         if (model && !model.value) model.value = data.model || '';
@@ -2235,8 +2237,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const sessionTokenBtn = $('sessionTokenBtn');
     if (sessionTokenBtn) {
       sessionTokenBtn.addEventListener('click', async () => {
+        if (!state.currentUser) {
+          showToast('Login required to copy a session token', true);
+          return;
+        }
         try {
-          const res = await fetch('/api/auth/session-token', { method: 'GET' });
+          const res = await fetch(`${API_BASE}/api/auth/session-token`, {
+            method: 'GET',
+            headers: authHeaders(),
+          });
           const data = await res.json();
           if (!res.ok || !data?.token) {
             showToast('Login required to copy a session token', true);
