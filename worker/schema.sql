@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS links (
     created_at INTEGER NOT NULL,
     image_url TEXT,
     site_name TEXT,
+    metadata_version INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY(community_id) REFERENCES communities(id)
 );
 
@@ -148,7 +149,8 @@ CREATE TABLE IF NOT EXISTS personal_links (
     tags TEXT,
     created_at INTEGER NOT NULL,
     image_url TEXT,
-    site_name TEXT
+    site_name TEXT,
+    metadata_version INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_personal_user ON personal_links(user_id);

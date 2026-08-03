@@ -2841,6 +2841,7 @@ async function handleGetCommunityLinks(url, user, env, corsHeaders) {
     return Response.json({ success: false, error: 'Not a member — join with /community_join ' + communityId, code: 'NOT_MEMBER' }, { status: 403, headers: corsHeaders });
   }
   await ensureFresh(env, 'community', communityId);
+  await ensureLinkMetaColumns(env);
   const { results } = await env.DB.prepare(
     'SELECT * FROM links WHERE community_id = ? ORDER BY created_at DESC LIMIT 500'
   ).bind(communityId).all();
@@ -3015,6 +3016,7 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
       return deny(corsHeaders, 'Personal mode is for GOD rank (instance host) only', 'PERSONAL_LOCKED');
     }
     await ensureFresh(env, 'personal', user.id);
+    await ensureLinkMetaColumns(env);
     const rows = await candidateLinks(env, 'personal', user.id, q);
     const links = rankLinks(dedupeLinkRows(rows), q);
     const enrichmentPending = queueMissingLinkEnrichment(env, 'personal', user.id, links);
@@ -3031,6 +3033,7 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
   const gate = await requireActiveMember(env, communityId, user, corsHeaders);
   if (gate) return gate;
   await ensureFresh(env, 'community', communityId);
+  await ensureLinkMetaColumns(env);
   const rows = await candidateLinks(env, 'community', communityId, q);
   const links = rankLinks(dedupeLinkRows(rows), q);
   const enrichmentPending = queueMissingLinkEnrichment(env, 'community', communityId, links);
@@ -4736,6 +4739,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
 
 async function handleGetPersonalLinks(userId, env, corsHeaders) {
   await ensureFresh(env, 'personal', userId);
+  await ensureLinkMetaColumns(env);
   const { results } = await env.DB.prepare(
     'SELECT * FROM personal_links WHERE user_id = ? ORDER BY created_at DESC LIMIT 1000'
   ).bind(userId).all();
@@ -5531,7 +5535,7 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
         ? [...new Set([...['telegram', 'community'], ...ai.tags])].slice(0, 8)
         : ['telegram', 'community'];
       try {
-        await env.DB.prepare('UPDATE links SET tags = ?, notes = ? WHERE id = ?')
+        await env.DB.prepare('UPDATE links SET tags = ?, notes = ?, metadata_version = 2 WHERE id = ?')
           .bind(JSON.stringify(merged), ai.description || meta.notes || '', id).run();
         await storeMutateLink(env, 'community', communityId, id, { notes: ai.description || '', tags: merged });
       } catch (_) {}
@@ -8407,7 +8411,7 @@ ${ctx}`;
               ? [...new Set([...['telegram', 'personal'], ...ai.tags])].slice(0, 8)
               : ['telegram', 'personal'];
             try {
-              await env.DB.prepare('UPDATE personal_links SET tags = ?, notes = ? WHERE id = ?')
+              await env.DB.prepare('UPDATE personal_links SET tags = ?, notes = ?, metadata_version = 2 WHERE id = ?')
                 .bind(JSON.stringify(merged), ai.description || r.notes || '', r.id).run();
               await storeMutateLink(env, 'personal', athenaUser.id, r.id, { notes: ai.description || '', tags: merged });
             } catch (_) {}
@@ -9008,6 +9012,7 @@ async function scrapeRedditMetadata(rawUrl, env) {
     const host = page.hostname.replace(/^www\./, '').toLowerCase();
     if (host !== 'reddit.com' && !host.endsWith('.reddit.com')) return null;
     if (!/^\/r\/[^/]+\/comments\//i.test(page.pathname)) return null;
+    const subreddit = page.pathname.match(/^\/r\/([^/]+)/i)?.[1] || 'unknown';
     const endpoint = `https://www.reddit.com${page.pathname.replace(/\/+$/, '')}.json?raw_json=1`;
     const response = await fetchWithTimeout(endpoint, {
       env,
@@ -9026,8 +9031,8 @@ async function scrapeRedditMetadata(rawUrl, env) {
       if (!data?.title) return null;
       return {
         title: String(data.title).slice(0, 160),
-        description: `Reddit discussion by ${data.author_name || 'the community'}.`,
-        content: `Reddit title: ${data.title}\nAuthor: ${data.author_name || 'unknown'}`,
+        description: `Reddit discussion in r/${subreddit} by ${data.author_name || 'the community'}.`,
+        content: `Subreddit: r/${subreddit}\nReddit title: ${data.title}\nAuthor: ${data.author_name || 'unknown'}`,
         image: '',
         siteName: 'Reddit'
       };
@@ -9218,8 +9223,10 @@ async function ensureLinkMetaColumns(env) {
   for (const sql of [
     `ALTER TABLE personal_links ADD COLUMN image_url TEXT`,
     `ALTER TABLE personal_links ADD COLUMN site_name TEXT`,
+    `ALTER TABLE personal_links ADD COLUMN metadata_version INTEGER DEFAULT 0`,
     `ALTER TABLE links ADD COLUMN image_url TEXT`,
-    `ALTER TABLE links ADD COLUMN site_name TEXT`
+    `ALTER TABLE links ADD COLUMN site_name TEXT`,
+    `ALTER TABLE links ADD COLUMN metadata_version INTEGER DEFAULT 0`
   ]) {
     try { await env.DB.prepare(sql).run(); } catch (_) {}
   }
@@ -9324,11 +9331,11 @@ async function enrichLinksInBackground(env, scope, key, links) {
         if (!update.notes && !update.image_url && !update.site_name && !update.tags) continue;
         if (scope === 'personal') {
           await env.DB.prepare(
-            'UPDATE personal_links SET title = ?, notes = ?, image_url = ?, site_name = ?' + (update.tags ? ', tags = ?' : '') + ' WHERE id = ?'
+            'UPDATE personal_links SET title = ?, notes = ?, image_url = ?, site_name = ?, metadata_version = 2' + (update.tags ? ', tags = ?' : '') + ' WHERE id = ?'
           ).bind(update.title, update.notes, update.image_url, update.site_name, ...(update.tags ? [JSON.stringify(update.tags)] : []), link.id).run();
         } else {
           await env.DB.prepare(
-            'UPDATE links SET title = ?, notes = ?, image_url = ?, site_name = ?' + (update.tags ? ', tags = ?' : '') + ' WHERE id = ?'
+            'UPDATE links SET title = ?, notes = ?, image_url = ?, site_name = ?, metadata_version = 2' + (update.tags ? ', tags = ?' : '') + ' WHERE id = ?'
           ).bind(update.title, update.notes, update.image_url, update.site_name, ...(update.tags ? [JSON.stringify(update.tags)] : []), link.id).run();
         }
         // Best effort on GitHub storage: the .md entry catches up with the row.
@@ -9341,7 +9348,11 @@ async function enrichLinksInBackground(env, scope, key, links) {
 
 function queueMissingLinkEnrichment(env, scope, key, rows) {
   const missing = (rows || [])
-    .filter(row => row?.url && (!String(row.notes || '').trim() || (!row.site_name && !row.image_url)))
+    .filter((row) => {
+      const notes = String(row.notes || '').trim();
+      const genericReddit = row.site_name === 'Reddit' && /^Reddit (thread|discussion)\b/i.test(notes);
+      return row?.url && Number(row.metadata_version || 0) < 2 && (!notes || (!row.site_name && !row.image_url) || genericReddit);
+    })
     .slice(0, 10)
     .map(row => ({
       id: row.id,
