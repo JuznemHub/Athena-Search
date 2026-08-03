@@ -7,6 +7,7 @@
  * environment; see server/.env.example.
  */
 import http from 'node:http';
+import { exec } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -70,6 +71,7 @@ const env = {
   // Gates the Cloudflare-only paths in worker/index.js.
   ATHENA_RUNTIME: 'selfhost',
   runBackup: () => runBackupOnce({ connectionString: DATABASE_URL, env: process.env, db: DB }),
+  restartService: () => exec('systemctl restart athena', () => {}),
 };
 
 const ctx = { waitUntil(p) { Promise.resolve(p).catch(() => {}); }, passThroughOnException() {} };
