@@ -9451,13 +9451,13 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
   let payload, headers;
   if (mode === 'anthropic') {
     headers = { 'Content-Type': 'application/json', 'x-api-key': cfg.api_key, 'anthropic-version': '2023-06-01' };
-    payload = { model, max_tokens: maxTok, system, messages: [{ role: 'user', content: user }] };
+    payload = { model, max_tokens: maxTok, system, messages: [{ role: 'user', content: user }], stream: false };
   } else {
     headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cfg.api_key}` };
     payload = { model, max_tokens: maxTok, messages: [
       { role: 'system', content: system },
       { role: 'user', content: user }
-    ] };
+    ], stream: false, temperature: 0.1 };
   }
 
   let text;
