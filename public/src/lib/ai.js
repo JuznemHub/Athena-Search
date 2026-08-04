@@ -54,8 +54,8 @@
 
   function formatDoc(item, i) {
     const tags = Array.isArray(item.tags) ? item.tags.join(', ') : (item.tags || '');
-    const notes = (item.notes || '').slice(0, 800);
-    const content = (item.content || '').slice(0, 60000);
+    const notes = item.notes || '';
+    const content = item.content || '';
     return [
       `[#${i + 1}]`,
       `Title: ${item.title || 'Untitled'}`,
@@ -90,12 +90,8 @@ Rules:
         ? `BRAIN has ${corpusSize} saved item(s), but no relevant matches were retrieved for this question.`
         : 'BRAIN CONTEXT: (truly empty — 0 saved items)';
     }
-    let used = 0;
     const ctx = docs.map((d, i) => {
-      const remaining = Math.max(0, 80000 - used);
-      const formatted = formatDoc(d, i).slice(0, remaining);
-      used += formatted.length;
-      return formatted;
+      return formatDoc(d, i);
     }).filter(Boolean).join('\n\n');
     return `BRAIN has ${corpusSize} saved item(s). Retrieved items:\n\n${ctx}`;
   }
@@ -121,15 +117,14 @@ Rules:
     const token = window.getAthenaSessionToken?.() || localStorage.getItem('athena_session');
     const prior = (conversationHistory || [])
       .filter(message => message.role === 'user')
-      .slice(-3)
-      .map(message => String(message.content || '').slice(0, 500));
-    const retrievalQuestion = [...prior, question].filter(Boolean).join(' ').slice(-1600);
+      .map(message => String(message.content || ''));
+    const retrievalQuestion = [...prior, question].filter(Boolean).join(' ');
     const expanded = window.AthenaSearch?.expandQueryTerms?.(retrievalQuestion)?.expanded || [];
-    const queries = [...new Set([retrievalQuestion, ...expanded.slice(0, 3)])].filter(Boolean);
+    const queries = [...new Set([retrievalQuestion, ...expanded])].filter(Boolean);
     const docs = new Map();
     let total = 0;
     for (const q of queries) {
-      const params = new URLSearchParams({ q, scope: context.scope || 'personal', limit: '200' });
+      const params = new URLSearchParams({ q, scope: context.scope || 'personal', limit: '100000' });
       if (context.scope === 'community' && context.communityId) params.set('community_id', context.communityId);
       try {
         const res = await fetch(`${apiBase}/api/links/search?${params}`, {
@@ -253,19 +248,19 @@ Rules:
     const cfg = loadConfig();
     const list = corpus || [];
     const history = conversationHistory && conversationHistory.length
-      ? conversationHistory.slice(-8).map(message => ({
+      ? conversationHistory.map(message => ({
         role: message.role,
-        content: String(message.content || '').slice(0, 4000)
+        content: String(message.content || '')
       }))
       : [{ role: 'user', content: q }];
     const retrieve = window.AthenaSearch?.retrieveForQuestion;
-    const retrievalQuestion = history.filter(message => message.role === 'user').map(message => message.content).join(' ').slice(-1600);
-    const localDocs = retrieve ? retrieve(retrievalQuestion || q, list, 12, { minScore: 18, strict: true }) : list.slice(0, 12);
+    const retrievalQuestion = history.filter(message => message.role === 'user').map(message => message.content).join(' ');
+    const localDocs = retrieve ? retrieve(retrievalQuestion || q, list, list.length || 12, { minScore: 18, strict: true }) : list;
     const remote = await retrieveRemoteDocs(q, history);
     const merged = new Map();
     for (const doc of remote.docs) merged.set(doc.id || doc.url || `remote-${merged.size}`, doc);
     for (const doc of localDocs) merged.set(doc.id || doc.url || `local-${merged.size}`, doc);
-    const docs = [...merged.values()].slice(0, 40);
+    const docs = [...merged.values()];
     const corpusSize = Math.max(list.length, remote.total || 0);
 
     const hasLocalKey = !!(cfg.apiKey && cfg.baseUrl && cfg.model);
