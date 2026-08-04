@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.12',
+          version: '1.0.13',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -9528,13 +9528,32 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
     ], stream: false, temperature: 0.1 };
   }
 
-  let text;
+  let text = '';
   try {
     const res = await fetchWithTimeout(endpoint, { method: 'POST', headers, body: JSON.stringify(payload), env }, 12000);
     if (!res.ok) return null;
-    const data = await res.json();
-    if (mode === 'anthropic') text = String(data?.content?.[0]?.text || '');
-    else text = String(data?.choices?.[0]?.message?.content || '');
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('text/event-stream')) {
+      const streamText = await res.text();
+      for (const line of streamText.split('\n')) {
+        if (!line.startsWith('data:')) continue;
+        const payloadLine = line.slice(5).trim();
+        if (!payloadLine || payloadLine === '[DONE]') continue;
+        try {
+          const event = JSON.parse(payloadLine);
+          text += mode === 'anthropic'
+            ? String(event.delta?.text || '')
+            : String(event.choices?.[0]?.delta?.content || event.choices?.[0]?.message?.content || '');
+        } catch (_) {}
+      }
+    } else {
+      const data = await res.json();
+      if (mode === 'anthropic') text = String(data?.content?.[0]?.text || '');
+      else {
+        const content = data?.choices?.[0]?.message?.content;
+        text = typeof content === 'string' ? content : JSON.stringify(content || '');
+      }
+    }
   } catch (_) { return null; }
   if (!text.trim()) return null;
   let parsed = null;
