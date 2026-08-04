@@ -54,6 +54,7 @@ document.addEventListener('DOMContentLoaded', () => {
     hostedMode: isHosted,
     authConfig: null,
     hasSearched: false,
+    authReady: false,
     isInstanceOwner: true // until /auth/me says otherwise; empty owner lists = all owners
   };
   function isGod() {
@@ -62,8 +63,15 @@ document.addEventListener('DOMContentLoaded', () => {
   // ai.js only sends per-request AI credentials for GOD — the server rejects
   // them for anyone else.
   window.athenaIsGod = isGod;
+  window.getAthenaSessionToken = () => state.sessionToken;
+  window.athenaSearchContext = () => ({
+    scope: state.scope,
+    communityId: state.activeCommunity,
+  });
   function canUseAi() {
-    return !!state.currentUser; // all logged-in ranks
+    // A restored token can exist briefly before /auth/me finishes; do not
+    // bounce an intentional AI-mode click back to Search during that window.
+    return !state.authReady || !!(state.currentUser || state.sessionToken); // all logged-in ranks
   }
   function canEditAiConfig() {
     return !!state.currentUser?.can_ai_config;
@@ -1462,7 +1470,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  function renderGoogleResults(items, query) {
+  function renderGoogleResults(items, query, corpusTotal = null) {
     compactHero(true);
     resultsList.innerHTML = '';
     if (!items.length) {
@@ -1475,7 +1483,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     emptyState.classList.add('hidden');
     resultsMeta.classList.remove('hidden');
-    resultsMeta.textContent = `About ${items.length} result${items.length === 1 ? '' : 's'}${query ? ` for “${query}”` : ''}`;
+    resultsMeta.textContent = `About ${items.length} result${items.length === 1 ? '' : 's'}${query ? ` for “${query}”` : ''}${corpusTotal != null ? ` · ${corpusTotal} saved items searched` : ''}`;
 
     const isCommunity = state.scope === 'community';
 
@@ -1731,7 +1739,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (searchInput.value.trim() !== q) return; // input moved on
       if (res.ok && data.success && Array.isArray(data.links)) {
         const documents = filterLinks(corpus().filter(item => item.isDocument), q);
-        renderGoogleResults([...data.links.map(normalizeLink), ...documents], q);
+        renderGoogleResults([...data.links.map(normalizeLink), ...documents], q, data.total);
         if (data.enrichment_pending && enrichmentRefreshKey !== q) {
           enrichmentRefreshKey = q;
           setTimeout(() => {
@@ -1744,17 +1752,63 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function renderMarkdownLite(text) {
+  function renderInlineMarkdown(text) {
     return escapeHtml(text || '')
-      .replace(/\n/g, '<br>')
-      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       .replace(/`([^`]+)`/g, '<code>$1</code>')
-      .replace(/\[(\d+)\]/g, '<span class="ai-cite">[$1]</span>')
-      .replace(/\[#(\d+)\]/g, '<span class="ai-cite">[#$1]</span>');
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\[#(\d+)\]/g, '<span class="ai-cite">[#$1]</span>')
+      .replace(/\[(\d+)\]/g, '<span class="ai-cite">[$1]</span>');
+  }
+
+  function renderMarkdownLite(text) {
+    const lines = String(text || '').split(/\r?\n/);
+    const isTable = line => /^\s*\|.*\|\s*$/.test(line);
+    const cells = line => line.trim().replace(/^\||\|$/g, '').split('|').map(cell => cell.trim());
+    let html = '';
+    for (let i = 0; i < lines.length;) {
+      const line = lines[i];
+      if (isTable(line) && isTable(lines[i + 1]) && /^\s*\|?\s*:?-{2,}/.test(lines[i + 1])) {
+        const header = cells(line);
+        const rows = [];
+        i += 2;
+        while (i < lines.length && isTable(lines[i])) rows.push(cells(lines[i++]));
+        html += '<div class="ai-table-wrap"><table><thead><tr>';
+        html += header.map(cell => `<th>${renderInlineMarkdown(cell)}</th>`).join('');
+        html += '</tr></thead><tbody>';
+        html += rows.map(row => `<tr>${header.map((_, n) => `<td>${renderInlineMarkdown(row[n] || '')}</td>`).join('')}</tr>`).join('');
+        html += '</tbody></table></div>';
+        continue;
+      }
+      if (/^\s*[-*]\s+/.test(line)) {
+        const items = [];
+        while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) items.push(lines[i++].replace(/^\s*[-*]\s+/, ''));
+        html += `<ul>${items.map(item => `<li>${renderInlineMarkdown(item)}</li>`).join('')}</ul>`;
+        continue;
+      }
+      if (/^\s*\d+\.\s+/.test(line)) {
+        const items = [];
+        while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) items.push(lines[i++].replace(/^\s*\d+\.\s+/, ''));
+        html += `<ol>${items.map(item => `<li>${renderInlineMarkdown(item)}</li>`).join('')}</ol>`;
+        continue;
+      }
+      if (/^\s*#{1,4}\s+/.test(line)) {
+        const match = line.match(/^\s*(#{1,4})\s+(.*)$/);
+        const level = match[1].length;
+        html += `<h${level}>${renderInlineMarkdown(match[2])}</h${level}>`;
+        i++;
+        continue;
+      }
+      if (!line.trim()) { i++; continue; }
+      const paragraph = [line];
+      i++;
+      while (i < lines.length && lines[i].trim() && !isTable(lines[i]) && !/^\s*[-*]\s+/.test(lines[i]) && !/^\s*\d+\.\s+/.test(lines[i]) && !/^\s*#{1,4}\s+/.test(lines[i])) paragraph.push(lines[i++]);
+      html += `<p>${renderInlineMarkdown(paragraph.join('\n')).replace(/\n/g, '<br>')}</p>`;
+    }
+    return html;
   }
 
   async function runAi() {
-    if (!canUseAi()) {
+    if (state.authReady && !state.currentUser && !state.sessionToken) {
       showToast('Login to use AI', true);
       return;
     }
@@ -2640,6 +2694,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.Telegram?.WebApp?.initData) {
       const wa = await tryTelegramWebAppLogin();
       if (wa && wa.ok) {
+        state.authReady = true;
         showLoggedIn();
         updateUserUI();
         await bootstrapAppData();
@@ -2647,6 +2702,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }
     const ok = await restoreSession();
+    state.authReady = true;
     if (ok) await bootstrapAppData();
   }
 

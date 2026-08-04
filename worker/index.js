@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.11',
+          version: '1.0.12',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -3009,6 +3009,7 @@ async function handleDeleteCommunityLink(request, user, env, corsHeaders) {
 async function handleSearchLinks(url, user, env, corsHeaders) {
   const q = (url.searchParams.get('q') || '').trim();
   const scope = (url.searchParams.get('scope') || 'community').toLowerCase();
+  const requestedLimit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '200', 10) || 200, 1), 500);
   if (!q) return Response.json({ success: true, links: [], query: '' }, { headers: corsHeaders });
 
   if (scope === 'personal') {
@@ -3017,11 +3018,12 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
     }
     await ensureFresh(env, 'personal', user.id);
     await ensureLinkMetaColumns(env);
-    const rows = await candidateLinks(env, 'personal', user.id, q);
-    const links = rankLinks(dedupeLinkRows(rows), q);
+    const rows = await candidateLinks(env, 'personal', user.id, q, requestedLimit);
+    const links = rankLinks(dedupeLinkRows(rows), q, requestedLimit);
     const enrichmentPending = queueMissingLinkEnrichment(env, 'personal', user.id, links);
+    const total = await countScopeLinks(env, 'personal', user.id);
     return Response.json(
-      { success: true, query: q, scope, links, enrichment_pending: enrichmentPending },
+      { success: true, query: q, scope, links, total, enrichment_pending: enrichmentPending },
       { headers: corsHeaders }
     );
   }
@@ -3034,11 +3036,12 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
   if (gate) return gate;
   await ensureFresh(env, 'community', communityId);
   await ensureLinkMetaColumns(env);
-  const rows = await candidateLinks(env, 'community', communityId, q);
-  const links = rankLinks(dedupeLinkRows(rows), q);
+  const rows = await candidateLinks(env, 'community', communityId, q, requestedLimit);
+  const links = rankLinks(dedupeLinkRows(rows), q, requestedLimit);
   const enrichmentPending = queueMissingLinkEnrichment(env, 'community', communityId, links);
+  const total = await countScopeLinks(env, 'community', communityId);
   return Response.json(
-    { success: true, query: q, scope, links, enrichment_pending: enrichmentPending },
+    { success: true, query: q, scope, links, total, enrichment_pending: enrichmentPending },
     { headers: corsHeaders }
   );
 }
@@ -3048,6 +3051,7 @@ function rankLinks(rows, query, limit = 100) {
   const q = String(query || '').toLowerCase().trim();
   const qa = q.replace(/[^a-z0-9]/g, '');
   if (!q) return rows.slice(0, limit);
+  const terms = expandServerSearchTerms(q);
   const scored = [];
   for (const r of rows) {
     const title = String(r.title || '').toLowerCase();
@@ -3061,6 +3065,16 @@ function rankLinks(rows, query, limit = 100) {
     if (urlStr.includes(q)) score += 20;
     if (bag.includes(q)) score += 10;
     if (qa.length >= 2 && ba.includes(qa)) score += 8;
+    let termHits = 0;
+    for (const term of terms) {
+      const compact = term.replace(/[^a-z0-9]/g, '');
+      if (bag.includes(term) || (compact.length >= 2 && ba.includes(compact))) {
+        termHits++;
+        score += term === q ? 20 : 8;
+      }
+    }
+    if (terms.length && termHits === terms.length) score += 30;
+    else if (termHits > 1) score += termHits * 5;
     if (score > 0) scored.push({ r, score });
   }
   scored.sort((a, b) => b.score - a.score || (b.r.created_at || 0) - (a.r.created_at || 0));
@@ -5932,27 +5946,69 @@ async function backfillSearchBlobs(env, table, whereCol, whereVal, batch = 400) 
  * Candidate rows for a query across the ENTIRE store — no recency window.
  * Returns [] for an empty query so callers can fall back to "recent".
  */
-async function searchAllLinks(env, scope, key, query, limit = 200) {
-  const q = String(query || '').toLowerCase().trim();
+const SEARCH_SYNONYMS = {
+  ai: ['llm', 'artificial intelligence', 'machine learning', 'local llm'],
+  ddl: ['direct download', 'download'],
+  download: ['ddl', 'direct download'],
+  movie: ['movies', 'film', 'cinema', 'bollywood', 'web series'],
+  movies: ['movie', 'film', 'cinema', 'bollywood', 'web series'],
+  indian: ['india', 'hindi', 'bollywood', 'south indian'],
+  ocr: ['optical character recognition', 'document scanning', 'computer vision'],
+  github: ['repository', 'repo', 'open source'],
+  localllama: ['local llm', 'llama', 'ollama'],
+};
+
+function expandServerSearchTerms(query) {
+  const base = String(query || '').toLowerCase().trim().split(/\s+/).filter(Boolean);
+  const out = new Set(base);
+  for (const term of base) {
+    const key = term.replace(/[^a-z0-9]/g, '');
+    for (const synonym of SEARCH_SYNONYMS[key] || []) out.add(synonym);
+  }
+  if (/local\s*llama|local\s*llm/i.test(query)) {
+    for (const term of SEARCH_SYNONYMS.localllama) out.add(term);
+  }
+  return [...out].filter(term => term.length >= 2).slice(0, 24);
+}
+
+async function countScopeLinks(env, scope, key) {
+  const table = scope === 'personal' ? 'personal_links' : 'links';
+  const col = scope === 'personal' ? 'user_id' : 'community_id';
+  try {
+    const row = await env.DB.prepare(`SELECT COUNT(*) AS total FROM ${table} WHERE ${col} = ?`).bind(key).first();
+    return Number(row?.total || 0);
+  } catch (_) { return null; }
+}
+
+async function searchAllLinks(env, scope, key, query, limit = 500) {
+  const q = String(query || '').toLowerCase().trim().slice(0, 240);
   if (!q) return [];
   const table = scope === 'personal' ? 'personal_links' : 'links';
   const col = scope === 'personal' ? 'user_id' : 'community_id';
   await backfillSearchBlobs(env, table, col, key);
 
-  const collapsed = q.replace(/[^a-z0-9]/g, '');
-  const like = `%${q}%`;
-  const likeCollapsed = `%${collapsed}%`;
+  const terms = expandServerSearchTerms(q);
+  if (!terms.length) return [];
+  const clauses = terms.map(() => `(
+    lower(COALESCE(title,'')) LIKE ? OR
+    lower(COALESCE(url,'')) LIKE ? OR
+    lower(COALESCE(notes,'')) LIKE ? OR
+    lower(COALESCE(tags,'')) LIKE ? OR
+    COALESCE(search_blob,'') LIKE ?
+  )`).join(' OR ');
+  const params = [key];
+  for (const term of terms) {
+    const like = `%${term}%`;
+    params.push(like, like, like, like, `%${term.replace(/[^a-z0-9]/g, '')}%`);
+  }
   try {
     const { results } = await env.DB.prepare(
       `SELECT * FROM ${table}
        WHERE ${col} = ?
-         AND ( lower(COALESCE(title,'')) LIKE ?
-            OR lower(COALESCE(url,'')) LIKE ?
-            OR lower(COALESCE(notes,'')) LIKE ?
-            OR (LENGTH(?) >= 2 AND COALESCE(search_blob,'') LIKE ?) )
+         AND (${clauses})
        ORDER BY created_at DESC
        LIMIT ${limit}`
-    ).bind(key, like, like, like, collapsed, likeCollapsed).all();
+    ).bind(...params).all();
     await ensureDocumentsTable(env);
     const docCol = scope === 'personal' ? 'user_id' : 'community_id';
     const { results: documents } = await env.DB.prepare(
@@ -5960,7 +6016,7 @@ async function searchAllLinks(env, scope, key, query, limit = 200) {
        WHERE scope = ? AND ${docCol} = ?
          AND (lower(filename) LIKE ? OR lower(content) LIKE ?)
        ORDER BY created_at DESC LIMIT ${limit}`
-    ).bind(scope, key, like, like).all();
+    ).bind(scope, key, `%${q}%`, `%${q}%`).all();
     return [...(results || []), ...(documents || []).map(documentAsLink)];
   } catch (_) { return []; }
 }
@@ -9013,15 +9069,7 @@ async function scrapeRedditMetadata(rawUrl, env) {
     if (host !== 'reddit.com' && !host.endsWith('.reddit.com')) return null;
     if (!/^\/r\/[^/]+\/comments\//i.test(page.pathname)) return null;
     const subreddit = page.pathname.match(/^\/r\/([^/]+)/i)?.[1] || 'unknown';
-    const endpoint = `https://www.reddit.com${page.pathname.replace(/\/+$/, '')}.json?raw_json=1`;
-    const response = await fetchWithTimeout(endpoint, {
-      env,
-      headers: {
-        Accept: 'application/json',
-        'User-Agent': 'AthenaBot/1.3 (bookmark metadata)'
-      }
-    });
-    if (!response.ok) {
+    const oembedFallback = async () => {
       const embed = await fetchWithTimeout(
         `https://www.reddit.com/oembed?url=${encodeURIComponent(rawUrl)}`,
         { env, headers: { Accept: 'application/json', 'User-Agent': 'AthenaBot/1.3 (bookmark metadata)' } }
@@ -9036,10 +9084,20 @@ async function scrapeRedditMetadata(rawUrl, env) {
         image: '',
         siteName: 'Reddit'
       };
-    }
-    const data = await response.json();
+    };
+    const endpoint = `https://www.reddit.com${page.pathname.replace(/\/+$/, '')}.json?raw_json=1`;
+    const response = await fetchWithTimeout(endpoint, {
+      env,
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'AthenaBot/1.3 (bookmark metadata)'
+      }
+    });
+    if (!response.ok) return oembedFallback();
+    let data;
+    try { data = await response.json(); } catch (_) { return oembedFallback(); }
     const post = data?.[0]?.data?.children?.find(child => child?.data)?.data;
-    if (!post?.title) return null;
+    if (!post?.title) return oembedFallback();
     const comments = (data?.[1]?.data?.children || [])
       .map(child => child?.data)
       .filter(comment => comment?.body)
