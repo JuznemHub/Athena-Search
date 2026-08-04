@@ -77,12 +77,19 @@ Rules:
 3. Answer DIRECTLY. NEVER include "Thinking", numbered analysis steps, evaluation of items, or meta-commentary about your reasoning. Start immediately with the answer.
 4. When an uploaded DOCUMENT answers the question, read its relevant sections and present them clearly. Cite as [#n].
 5. Recommend saved URLs when applicable. Cite as [#n].
-6. Stay strictly grounded in BRAIN CONTEXT; never invent facts not present in it.
-7. The user may ask follow-up questions. Use the conversation history to understand context. If they say "tell me more" or "which sections", refer back to the documents discussed.`;
+ 6. Stay strictly grounded in BRAIN CONTEXT; never invent facts not present in it.
+ 7. Cite only source IDs that appear in BRAIN CONTEXT. Never invent URLs, titles, tags, or facts.
+ 8. BRAIN CONTEXT is a retrieved subset. If the user asks for more, use every relevant retrieved item and state that the answer is limited to retrieved matches; never claim only five exist unless the context says the total is five.
+ 9. Use clean Markdown: headings, bullets, and tables only when useful. Do not output a Thinking section or raw pipe tables without a header.
+ 10. The user may ask follow-up questions. Use the conversation history to understand context. If they say "tell me more" or "which sections", refer back to the documents discussed.`;
   }
 
   function buildContextMessage(docs, corpusSize) {
-    if (!docs.length) return 'BRAIN CONTEXT: (truly empty — 0 saved items)';
+    if (!docs.length) {
+      return corpusSize
+        ? `BRAIN has ${corpusSize} saved item(s), but no relevant matches were retrieved for this question.`
+        : 'BRAIN CONTEXT: (truly empty — 0 saved items)';
+    }
     let used = 0;
     const ctx = docs.map((d, i) => {
       const remaining = Math.max(0, 80000 - used);
@@ -93,12 +100,61 @@ Rules:
     return `BRAIN has ${corpusSize} saved item(s). Retrieved items:\n\n${ctx}`;
   }
 
-  function answerLocal(question, corpus) {
+  function normalizeRemoteDoc(row) {
+    let tags = row.tags || [];
+    if (typeof tags === 'string') {
+      try { tags = JSON.parse(tags); } catch (_) { tags = tags.split(',').map(t => t.trim()).filter(Boolean); }
+    }
+    return {
+      ...row,
+      tags: Array.isArray(tags) ? tags : [],
+      createdAt: row.createdAt || row.created_at || 0,
+      imageUrl: row.imageUrl || row.image_url || '',
+      siteName: row.siteName || row.site_name || '',
+      addedBy: row.addedBy || row.added_by_name || row.added_by || ''
+    };
+  }
+
+  async function retrieveRemoteDocs(question, conversationHistory) {
+    const context = window.athenaSearchContext?.() || {};
+    const apiBase = window.getAthenaApiBase?.() || window.location.origin;
+    const token = window.getAthenaSessionToken?.() || localStorage.getItem('athena_session');
+    const prior = (conversationHistory || [])
+      .filter(message => message.role === 'user')
+      .slice(-3)
+      .map(message => String(message.content || '').slice(0, 500));
+    const retrievalQuestion = [...prior, question].filter(Boolean).join(' ').slice(-1600);
+    const expanded = window.AthenaSearch?.expandQueryTerms?.(retrievalQuestion)?.expanded || [];
+    const queries = [...new Set([retrievalQuestion, ...expanded.slice(0, 3)])].filter(Boolean);
+    const docs = new Map();
+    let total = 0;
+    for (const q of queries) {
+      const params = new URLSearchParams({ q, scope: context.scope || 'personal', limit: '200' });
+      if (context.scope === 'community' && context.communityId) params.set('community_id', context.communityId);
+      try {
+        const res = await fetch(`${apiBase}/api/links/search?${params}`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {}
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !Array.isArray(data.links)) continue;
+        total = Math.max(total, Number(data.total || 0));
+        for (const row of data.links) {
+          const doc = normalizeRemoteDoc(row);
+          if (doc.id && !docs.has(doc.id)) docs.set(doc.id, doc);
+        }
+      } catch (_) {}
+    }
+    return { docs: [...docs.values()], total: total || docs.size };
+  }
+
+  function answerLocal(question, corpus, corpusSize = (corpus || []).length) {
     const retrieve = window.AthenaSearch?.retrieveForQuestion || ((q, c) => c.slice(0, 5));
     const docs = retrieve(question, corpus || [], 8);
     if (!docs.length) {
       return {
-        answer: 'Your brain has no saved notes/links yet. Dump some first.',
+        answer: corpusSize
+          ? 'No saved items matched that question in the current retrieval pass.'
+          : 'Your brain has no saved notes/links yet. Dump some first.',
         sources: [],
         results: []
       };
@@ -117,7 +173,7 @@ Rules:
   async function callViaProxy({ baseUrl, apiKey, model, mode, system, user, messages, onDelta, onThinking }) {
     // A same-origin login has no bearer token — the HttpOnly session cookie is
     // sent by the browser instead. Only a cross-origin backend needs the header.
-    const token = localStorage.getItem('athena_session');
+    const token = window.getAthenaSessionToken?.() || localStorage.getItem('athena_session');
 
     const apiBase = window.getAthenaApiBase?.() || window.location.origin;
     const res = await fetch(`${apiBase}/api/ai/chat`, {
@@ -139,6 +195,12 @@ Rules:
     });
 
     const ct = res.headers.get('content-type') || '';
+    if (!res.ok && !ct.includes('text/event-stream')) {
+      const data = await res.json().catch(() => ({}));
+      const providerError = typeof data.error === 'string' ? data.error : data.error?.message;
+      throw new Error(providerError || `AI proxy failed (${res.status})`);
+    }
+    if (!res.ok) throw new Error(`AI proxy failed (${res.status})`);
     if (ct.includes('text/event-stream')) {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -158,7 +220,10 @@ Rules:
           if (!payload || payload === '[DONE]') continue;
           let j;
           try { j = JSON.parse(payload); } catch (_) { continue; }
-          if (j.error) throw new Error(typeof j.error === 'string' ? j.error : 'AI stream error');
+          if (j.error) {
+            const message = typeof j.error === 'string' ? j.error : j.error.message || j.error.type || 'AI stream error';
+            throw new Error(message);
+          }
           if (j.delta) {
             full += j.delta;
             if (onDelta) onDelta(j.delta, full);
@@ -187,16 +252,26 @@ Rules:
     const q = (question || '').trim();
     const cfg = loadConfig();
     const list = corpus || [];
+    const history = conversationHistory && conversationHistory.length
+      ? conversationHistory.slice(-8).map(message => ({
+        role: message.role,
+        content: String(message.content || '').slice(0, 4000)
+      }))
+      : [{ role: 'user', content: q }];
     const retrieve = window.AthenaSearch?.retrieveForQuestion;
-    let docs = retrieve ? retrieve(q, list, 5, { minScore: 30, strict: true }) : list.slice(0, 5);
-    if (!docs.length && list.length) {
-      docs = [...list].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 3);
-    }
+    const retrievalQuestion = history.filter(message => message.role === 'user').map(message => message.content).join(' ').slice(-1600);
+    const localDocs = retrieve ? retrieve(retrievalQuestion || q, list, 12, { minScore: 18, strict: true }) : list.slice(0, 12);
+    const remote = await retrieveRemoteDocs(q, history);
+    const merged = new Map();
+    for (const doc of remote.docs) merged.set(doc.id || doc.url || `remote-${merged.size}`, doc);
+    for (const doc of localDocs) merged.set(doc.id || doc.url || `local-${merged.size}`, doc);
+    const docs = [...merged.values()].slice(0, 40);
+    const corpusSize = Math.max(list.length, remote.total || 0);
 
     const hasLocalKey = !!(cfg.apiKey && cfg.baseUrl && cfg.model);
     const serverConfigured = await instanceAiConfigured();
     if (!hasLocalKey && !serverConfigured) {
-      const local = answerLocal(q, list);
+      const local = answerLocal(q, docs, corpusSize);
       return { ...local, mode: 'local', thinking: '' };
     }
 
@@ -207,15 +282,12 @@ Rules:
     const isGod = window.athenaIsGod?.() ?? false;
     const sendOwn = isGod && hasLocalKey;
     if (!isGod && !serverConfigured) {
-      const local = answerLocal(q, list);
+      const local = answerLocal(q, docs, corpusSize);
       return { ...local, mode: 'local', thinking: '' };
     }
 
     // Build messages: system prompt with brain context, then conversation history.
-    const system = buildSystemPrompt() + '\n\n' + buildContextMessage(docs, list.length);
-    const history = conversationHistory && conversationHistory.length
-      ? conversationHistory
-      : [{ role: 'user', content: q }];
+    const system = buildSystemPrompt() + '\n\n' + buildContextMessage(docs, corpusSize);
     const messages = [{ role: 'system', content: system }, ...history];
 
     try {
@@ -249,7 +321,7 @@ Rules:
         mode: 'llm'
       };
     } catch (err) {
-      const local = answerLocal(q, list);
+      const local = answerLocal(q, docs, corpusSize);
       return { ...local, mode: 'local', thinking: '', error: err.message || String(err) };
     }
   }
@@ -259,7 +331,7 @@ Rules:
   async function instanceAiConfigured() {
     if (_serverCfg !== null) return _serverCfg;
     try {
-      const token = localStorage.getItem('athena_session');
+      const token = window.getAthenaSessionToken?.() || localStorage.getItem('athena_session');
       const apiBase = window.getAthenaApiBase?.() || window.location.origin;
       const res = await fetch(`${apiBase}/api/ai/config`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {}
