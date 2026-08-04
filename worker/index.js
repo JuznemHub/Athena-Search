@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.13',
+          version: '1.0.14',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -3009,7 +3009,7 @@ async function handleDeleteCommunityLink(request, user, env, corsHeaders) {
 async function handleSearchLinks(url, user, env, corsHeaders) {
   const q = (url.searchParams.get('q') || '').trim();
   const scope = (url.searchParams.get('scope') || 'community').toLowerCase();
-  const requestedLimit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '200', 10) || 200, 1), 500);
+  const requestedLimit = Math.max(parseInt(url.searchParams.get('limit') || '1000', 10) || 1000, 1);
   if (!q) return Response.json({ success: true, links: [], query: '' }, { headers: corsHeaders });
 
   if (scope === 'personal') {
@@ -6026,7 +6026,7 @@ async function searchAllLinks(env, scope, key, query, limit = 500) {
  * fallback so an empty or unmatched query still has something to show.
  */
 async function candidateLinks(env, scope, key, query, recentLimit = 300) {
-  const matches = await searchAllLinks(env, scope, key, query);
+  const matches = await searchAllLinks(env, scope, key, query, recentLimit);
   const table = scope === 'personal' ? 'personal_links' : 'links';
   const col = scope === 'personal' ? 'user_id' : 'community_id';
   const { results: recent } = await env.DB.prepare(
@@ -9425,7 +9425,7 @@ function runInBackground(env, promise) {
 }
 
 /** Collect the tag vocabulary a community/user already uses, newest rows first. */
-async function recentTagsForScope(env, scope, key, limit = 30) {
+async function recentTagsForScope(env, scope, key, limit = 200) {
   const out = [];
   try {
     const q = scope === 'personal'
@@ -9443,20 +9443,6 @@ async function recentTagsForScope(env, scope, key, limit = 30) {
     }
   } catch (_) {}
   return out;
-}
-
-function inferredLinkTags(rawUrl, meta = {}) {
-  const haystack = `${rawUrl} ${meta.title || ''} ${meta.content || ''} ${meta.notes || ''}`.toLowerCase();
-  const tags = [];
-  const add = tag => { if (!tags.includes(tag)) tags.push(tag); };
-  if (/reddit\.com|\breddit\b/.test(haystack)) add('reddit');
-  if (/github\.com|gist\.github|\bgithub\b/.test(haystack)) add('github');
-  if (/open[- ]source|opensource/.test(haystack)) add('open-source');
-  if (/localllama|local\s+llm|ollama|llama\b/.test(haystack)) add('local-llm');
-  if (/\bocr\b|optical character recognition/.test(haystack)) add('ocr');
-  if (/\bai\b|artificial intelligence|machine learning/.test(haystack)) add('ai');
-  if (/computer vision|vision model/.test(haystack)) add('computer-vision');
-  return tags;
 }
 
 /**
@@ -9489,20 +9475,15 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
   const vocab = (existingTags || [])
     .map(tag => String(tag).replace(/^#/, '').trim().toLowerCase())
     .filter(tag => tag && !['telegram', 'community', 'personal', 'dump'].includes(tag))
-    .slice(0, 30);
+    .filter((tag, index, all) => all.indexOf(tag) === index);
   const mode = (cfg.mode || 'openai').toLowerCase();
-  const controlledTags = [
-    'ai', 'ocr', 'local-llm', 'machine-learning', 'computer-vision', 'open-source',
-    'github', 'programming', 'research', 'tutorial', 'tools', 'reddit', 'web',
-    'security', 'productivity', 'data', 'documentation', 'news', 'video', 'design'
-  ];
 
   const system = [
     'You are a bookmarking assistant for a link archive.',
     'Write a useful context summary in 1-2 factual sentences: preserve the question, problem, subject, or decision the page is about, not just the site name.',
-    'Choose 3-5 short lowercase tags (no #, no spaces) that describe the content.',
+    'Choose 3-7 short lowercase tags (no #, no spaces) that describe the content.',
     'Reuse an existing tag exactly whenever it fits; do not invent a synonym for an existing tag.',
-    `Prefer these controlled tags when applicable: ${controlledTags.join(', ')}.`,
+    'Derive tags from the extracted page content, title, URL, and existing vocabulary; never use a fixed application taxonomy.',
     'Reply with ONLY one JSON object: {"description": "...", "tags": ["a", "b", "c"]}'
   ].join(' ');
 
@@ -9567,13 +9548,11 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
 
   const description = String(parsed.description || '').replace(/\s+/g, ' ').trim().slice(0, 400);
   const rawTags = Array.isArray(parsed.tags) ? parsed.tags : [];
-  const tags = inferredLinkTags(rawUrl, meta);
-  for (const t of rawTags) {
-    let s = String(t).replace(/^#/, '').trim().toLowerCase().replace(/\s+/g, '-').slice(0, 24);
-    if (s === 'localllm' || s === 'local-llms') s = 'local-llm';
-    if (s === 'artificial-intelligence' || s === 'machine-intelligence') s = 'ai';
+   const tags = [];
+   for (const t of rawTags) {
+    const s = String(t).replace(/^#/, '').trim().toLowerCase().replace(/\s+/g, '-').slice(0, 40);
     if (s && !tags.includes(s)) tags.push(s);
-    if (tags.length >= 5) break;
+    if (tags.length >= 12) break;
   }
   if (!description && !tags.length) return null;
   return { description, tags };
