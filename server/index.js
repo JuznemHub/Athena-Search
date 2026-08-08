@@ -12,7 +12,7 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import worker from '../worker/index.js';
+import worker, { getInstanceAiConfig, syncAiConfigToPeer } from '../worker/index.js';
 import { createAssets } from './assets.js';
 import { startBackups, runBackupOnce } from './backup.js';
 import { PostgresD1, translateSchema } from './pgdb.js';
@@ -73,6 +73,23 @@ const env = {
   runBackup: () => runBackupOnce({ connectionString: DATABASE_URL, env: process.env, db: DB }),
   restartService: () => exec('systemctl restart athena', () => {}),
 };
+
+// Keep the Cloudflare Worker mirror aligned with the self-hosted instance row
+// after restarts, including configurations saved before peer sync existed.
+try {
+  const aiConfig = await getInstanceAiConfig(env);
+  if (aiConfig?.base_url && aiConfig.api_key) {
+    await syncAiConfigToPeer(env, {
+      baseUrl: aiConfig.base_url,
+      apiKey: aiConfig.api_key,
+      model: aiConfig.model,
+      mode: aiConfig.mode,
+      updatedAt: aiConfig.updated_at || Date.now()
+    });
+  }
+} catch (err) {
+  console.error('[athena] AI config peer sync failed:', err.message);
+}
 
 const ctx = { waitUntil(p) { Promise.resolve(p).catch(() => {}); }, passThroughOnException() {} };
 
