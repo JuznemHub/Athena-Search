@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.16',
+          version: '1.0.17',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -5611,15 +5611,17 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
     const vocab = await recentTagsForScope(env, 'community', communityId);
       const ai = await aiDescribeAndTag(env, rawUrl, meta, vocab);
       if (ai) {
+        const savedTitle = ai.title || meta.title;
         const merged = ai.tags?.length
           ? [...new Set([...['telegram', 'community'], ...ai.tags])]
           : ['telegram', 'community'];
+        await ensureSearchColumns(env);
       try {
-        await env.DB.prepare('UPDATE links SET tags = ?, notes = ?, metadata_version = 2 WHERE id = ?')
-          .bind(JSON.stringify(merged), ai.description || meta.notes || '', id).run();
-        await storeMutateLink(env, 'community', communityId, id, { notes: ai.description || '', tags: merged });
+        await env.DB.prepare('UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = 2, search_blob = NULL WHERE id = ?')
+          .bind(savedTitle, JSON.stringify(merged), ai.description || meta.notes || '', id).run();
+        await storeMutateLink(env, 'community', communityId, id, { title: savedTitle, notes: ai.description || meta.notes || '', tags: merged });
       } catch (_) {}
-      reply = formatSavedLinkReply('community', meta.title, rawUrl, ai);
+      reply = formatSavedLinkReply('community', savedTitle, rawUrl, ai);
     } else {
       reply = formatSavedLinkReply('community', meta.title, rawUrl, null, meta.notes);
     }
@@ -7947,7 +7949,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         let line = `${prefix} ${boldHtml(t)}`;
         if (h.url) line += `\n${linkHtml(h.url, h.url)}`;
         else if (isDoc) line += `\n${italicHtml('(document)')}`;
-        if (d) line += `\n${escHtml(d.slice(0, 150))}`;
+        if (d) line += `\n${escHtml(d)}`;
         return line;
       }).join('\n\n');
       await sendTelegramFormatted(token, chatId, `${boldHtml('🔍 Personal Search')} (${hits.length} results)\n\n${lines}`, forumThreadId);
@@ -7989,7 +7991,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       let line = `${prefix} ${boldHtml(t)}`;
       if (h.url) line += `\n${linkHtml(h.url, h.url)}`;
       else if (isDoc) line += `\n${italicHtml('(document)')}`;
-      if (d) line += `\n${escHtml(d.slice(0, 150))}`;
+      if (d) line += `\n${escHtml(d)}`;
       return line;
     }).join('\n\n');
     await sendTelegramFormatted(token, chatId, `${boldHtml('🔍 Community Search')} (${hits.length} results)\n\n${lines}`, forumThreadId);
@@ -8514,12 +8516,14 @@ Rules:
                 content: add.content
               }, vocab);
               if (ai && add.id) {
+                const savedTitle = ai.title || add.title;
                 const tags = [...new Set([...(ai.tags || []), 'telegram', 'dump'])];
                 await ensureSearchColumns(env);
                 await env.DB.prepare(
-                  'UPDATE personal_links SET notes = ?, tags = ?, metadata_version = 2, search_blob = NULL WHERE id = ?'
-                ).bind(ai.description || add.notes || '', JSON.stringify(tags), add.id).run();
+                  'UPDATE personal_links SET title = ?, notes = ?, tags = ?, metadata_version = 2, search_blob = NULL WHERE id = ?'
+                ).bind(savedTitle, ai.description || add.notes || '', JSON.stringify(tags), add.id).run();
                 await storeMutateLink(env, 'personal', athenaUser.id, add.id, {
+                  title: savedTitle,
                   notes: ai.description || add.notes || '',
                   tags
                 });
@@ -8563,12 +8567,14 @@ Rules:
             const vocab = await recentTagsForScope(env, 'community', binding.community_id);
             const ai = await aiDescribeAndTag(env, rawUrl, meta, vocab);
             if (ai) {
+              const savedTitle = ai.title || meta.title;
               const tags = [...new Set([...(ai.tags || []), 'telegram'])];
               await ensureSearchColumns(env);
               await env.DB.prepare(
-                'UPDATE links SET notes = ?, tags = ?, metadata_version = 2, search_blob = NULL WHERE id = ?'
-              ).bind(ai.description || meta.notes || '', JSON.stringify(tags), id).run();
+                'UPDATE links SET title = ?, notes = ?, tags = ?, metadata_version = 2, search_blob = NULL WHERE id = ?'
+              ).bind(savedTitle, ai.description || meta.notes || '', JSON.stringify(tags), id).run();
               await storeMutateLink(env, 'community', binding.community_id, id, {
+                title: savedTitle,
                 notes: ai.description || meta.notes || '',
                 tags
               });
@@ -8653,22 +8659,24 @@ Rules:
         let reply;
         try {
           const vocab = await recentTagsForScope(env, 'personal', athenaUser.id);
-           const ai = await aiDescribeAndTag(env, rawUrl, {
-             title: r.title,
-             notes: r.notes,
-             content: r.content
-           }, vocab);
-           if (ai && r.id) {
-             const merged = ai.tags?.length
-               ? [...new Set([...['telegram', 'personal'], ...ai.tags])]
-               : ['telegram', 'personal'];
-            try {
-              await env.DB.prepare('UPDATE personal_links SET tags = ?, notes = ?, metadata_version = 2 WHERE id = ?')
-                .bind(JSON.stringify(merged), ai.description || r.notes || '', r.id).run();
-              await storeMutateLink(env, 'personal', athenaUser.id, r.id, { notes: ai.description || '', tags: merged });
-            } catch (_) {}
-          }
-          reply = formatSavedLinkReply('personal', r.title, rawUrl, ai, r.notes);
+            const ai = await aiDescribeAndTag(env, rawUrl, {
+              title: r.title,
+              notes: r.notes,
+              content: r.content
+            }, vocab);
+            if (ai && r.id) {
+              const savedTitle = ai.title || r.title;
+              const merged = ai.tags?.length
+                ? [...new Set([...['telegram', 'personal'], ...ai.tags])]
+                : ['telegram', 'personal'];
+              await ensureSearchColumns(env);
+             try {
+               await env.DB.prepare('UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = 2, search_blob = NULL WHERE id = ?')
+                 .bind(savedTitle, JSON.stringify(merged), ai.description || r.notes || '', r.id).run();
+               await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: savedTitle, notes: ai.description || r.notes || '', tags: merged });
+             } catch (_) {}
+           }
+           reply = formatSavedLinkReply('personal', ai?.title || r.title, rawUrl, ai, r.notes);
         } catch (_) {
           reply = formatSavedLinkReply('personal', r.title, rawUrl, null, r.notes);
         }
@@ -9551,6 +9559,7 @@ async function enrichLinkFields(env, rawUrl, { title, notes } = {}) {
  */
 async function enrichLinksInBackground(env, scope, key, links) {
   const CONCURRENCY = 4;
+  await ensureSearchColumns(env);
   const vocab = await recentTagsForScope(env, scope, key);
   let aiConfig = null;
   try { aiConfig = await getInstanceAiConfig(env); } catch (_) {}
@@ -9575,6 +9584,7 @@ async function enrichLinksInBackground(env, scope, key, links) {
           content: meta.content
         }, vocab, aiConfig);
         if (ai) {
+          if (ai.title) update.title = ai.title;
           if (ai.description) update.notes = ai.description;
           if (ai.tags?.length) {
             let existingTags = [];
@@ -9585,11 +9595,11 @@ async function enrichLinksInBackground(env, scope, key, links) {
         if (!update.notes && !update.image_url && !update.site_name && !update.tags) continue;
         if (scope === 'personal') {
           await env.DB.prepare(
-            'UPDATE personal_links SET title = ?, notes = ?, image_url = ?, site_name = ?, metadata_version = 2' + (update.tags ? ', tags = ?' : '') + ' WHERE id = ?'
+            'UPDATE personal_links SET title = ?, notes = ?, image_url = ?, site_name = ?, metadata_version = 2, search_blob = NULL' + (update.tags ? ', tags = ?' : '') + ' WHERE id = ?'
           ).bind(update.title, update.notes, update.image_url, update.site_name, ...(update.tags ? [JSON.stringify(update.tags)] : []), link.id).run();
         } else {
           await env.DB.prepare(
-            'UPDATE links SET title = ?, notes = ?, image_url = ?, site_name = ?, metadata_version = 2' + (update.tags ? ', tags = ?' : '') + ' WHERE id = ?'
+            'UPDATE links SET title = ?, notes = ?, image_url = ?, site_name = ?, metadata_version = 2, search_blob = NULL' + (update.tags ? ', tags = ?' : '') + ' WHERE id = ?'
           ).bind(update.title, update.notes, update.image_url, update.site_name, ...(update.tags ? [JSON.stringify(update.tags)] : []), link.id).run();
         }
         // Best effort on GitHub storage: the .md entry catches up with the row.
@@ -9646,8 +9656,30 @@ async function recentTagsForScope(env, scope, key, limit = 200) {
  * config; identical link types get identical tags because the prompt is
  * seeded with the community's existing tag vocabulary. Never throws — null
  * means "AI unavailable" and callers fall back to the plain reply.
- * Returns { description, tags } or null.
+ * Returns { title, description, tags } or null.
  */
+function parseAiDescribeResponse(text) {
+  if (!String(text || '').trim()) return null;
+  let parsed = null;
+  try {
+    parsed = JSON.parse(String(text).replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim());
+  } catch (_) {
+    const match = String(text).match(/\{[\s\S]*\}/);
+    if (match) { try { parsed = JSON.parse(match[0]); } catch (_) {} }
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+
+  const title = String(parsed.title || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+  const description = String(parsed.description || '').replace(/\s+/g, ' ').trim().slice(0, 400);
+  const tags = [];
+  for (const t of Array.isArray(parsed.tags) ? parsed.tags : []) {
+    const tag = String(t).replace(/^#/, '').trim().toLowerCase().replace(/\s+/g, '-').slice(0, 40);
+    if (tag && !tags.includes(tag)) tags.push(tag);
+  }
+  if (!title && !description && !tags.length) return null;
+  return { title, description, tags };
+}
+
 async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], config = undefined) {
   let cfg;
   if (config === undefined) {
@@ -9667,7 +9699,11 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
   } catch (_) { return null; }
 
   const title = String(meta?.title || '').trim().slice(0, 200);
-  const snippet = String(meta?.content || meta?.notes || '').replace(/\s+/g, ' ');
+  const snippet = [meta?.notes, meta?.content]
+    .map(value => String(value || '').trim())
+    .filter(Boolean)
+    .join('\n\n')
+    .replace(/\s+/g, ' ');
   const vocab = (existingTags || [])
     .map(tag => String(tag).replace(/^#/, '').trim().toLowerCase())
     .filter(tag => tag && !['telegram', 'community', 'personal', 'dump'].includes(tag))
@@ -9676,11 +9712,13 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
 
   const system = [
     'You are a bookmarking assistant for a link archive.',
-    'Write a useful context summary in 1-2 factual sentences: preserve the question, problem, subject, or decision the page is about, not just the site name.',
-    'Choose 3-7 short lowercase tags (no #, no spaces) that describe the content.',
+    'Translate the title, summary, and tags to English before returning them, even when the source page is in another language.',
+    'Return a useful context summary in 1-2 factual English sentences: preserve the question, problem, subject, or decision the page is about, not just the site name.',
+    'Return an English title when the source title is not English.',
+    'Choose 3-7 short lowercase English tags (no #, no spaces) that describe the content.',
     'Reuse an existing tag exactly whenever it fits; do not invent a synonym for an existing tag.',
     'Derive tags from the extracted page content, title, URL, and existing vocabulary; never use a fixed application taxonomy.',
-    'Reply with ONLY one JSON object: {"description": "...", "tags": ["a", "b", "c"]}'
+    'Reply with ONLY one JSON object: {"title": "...", "description": "...", "tags": ["a", "b", "c"]}'
   ].join(' ');
 
   const user = [
@@ -9707,50 +9745,51 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
 
   let text = '';
   try {
-    const res = await fetchWithTimeout(endpoint, { method: 'POST', headers, body: JSON.stringify(payload), env }, 12000);
-    if (!res.ok) return null;
+    payload.stream = true;
+    const res = await fetchWithTimeout(endpoint, { method: 'POST', headers, body: JSON.stringify(payload), env }, AI_PROXY_TIMEOUT_MS);
+    if (!res.ok) {
+      const errorText = await res.text().catch(() => '');
+      console.error('AI link enrichment provider failed', res.status, errorText.slice(0, 240));
+      return null;
+    }
     const contentType = res.headers.get('content-type') || '';
     if (contentType.includes('text/event-stream')) {
       const streamText = await res.text();
+      let reasoning = '';
       for (const line of streamText.split('\n')) {
         if (!line.startsWith('data:')) continue;
         const payloadLine = line.slice(5).trim();
         if (!payloadLine || payloadLine === '[DONE]') continue;
         try {
           const event = JSON.parse(payloadLine);
-          text += mode === 'anthropic'
-            ? String(event.delta?.text || '')
-            : String(event.choices?.[0]?.delta?.content || event.choices?.[0]?.message?.content || '');
+          if (mode === 'anthropic') {
+            text += String(event.delta?.text || '');
+          } else {
+            const delta = event.choices?.[0]?.delta || {};
+            text += String(delta.content || event.choices?.[0]?.message?.content || '');
+            reasoning += String(delta.reasoning_content || delta.reasoning || '');
+          }
         } catch (_) {}
       }
+      if (!text.trim()) text = reasoning;
     } else {
       const data = await res.json();
-      if (mode === 'anthropic') text = String(data?.content?.[0]?.text || '');
-      else {
+      if (mode === 'anthropic') {
+        text = String(data?.content?.[0]?.text || '');
+      } else {
         const content = data?.choices?.[0]?.message?.content;
-        text = typeof content === 'string' ? content : JSON.stringify(content || '');
+        text = typeof content === 'string'
+          ? content
+          : Array.isArray(content)
+            ? content.map(part => String(part?.text || part?.content || '')).join('')
+            : String(data?.choices?.[0]?.message?.reasoning_content || data?.output_text || JSON.stringify(content || ''));
       }
     }
-  } catch (_) { return null; }
-  if (!text.trim()) return null;
-  let parsed = null;
-  try {
-    parsed = JSON.parse(text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim());
-  } catch (_) {
-    const m = text.match(/\{[\s\S]*\}/);
-    if (m) { try { parsed = JSON.parse(m[0]); } catch (_) {} }
+  } catch (err) {
+    console.error('AI link enrichment request failed', err?.message || err);
+    return null;
   }
-  if (!parsed || typeof parsed !== 'object') return null;
-
-  const description = String(parsed.description || '').replace(/\s+/g, ' ').trim().slice(0, 400);
-  const rawTags = Array.isArray(parsed.tags) ? parsed.tags : [];
-   const tags = [];
-   for (const t of rawTags) {
-    const s = String(t).replace(/^#/, '').trim().toLowerCase().replace(/\s+/g, '-').slice(0, 40);
-    if (s && !tags.includes(s)) tags.push(s);
-  }
-  if (!description && !tags.length) return null;
-  return { description, tags };
+  return parseAiDescribeResponse(text);
 }
 
 /** Format the saved-link reply karakeep-style: what it is → link → #tags. */
@@ -9772,6 +9811,7 @@ export {
   expandServerSearchTerms,
   fuzzyMatchLinks,
   helpTextForSection,
+  parseAiDescribeResponse,
   parseTelegramEditPayload,
   resultLimitClause
 };

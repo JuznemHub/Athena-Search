@@ -6,6 +6,7 @@ import {
   buildSearchBlob,
   fuzzyMatchLinks,
   helpTextForSection,
+  parseAiDescribeResponse,
   parseTelegramEditPayload,
   resultLimitClause
 } from '../worker/index.js';
@@ -28,6 +29,12 @@ assert.deepEqual(shorthandEdit, {
   queryPart: 'https://example.com/item',
   newTitle: null,
   newNotes: 'notes only'
+});
+
+assert.deepEqual(parseAiDescribeResponse('```json\n{"title":"English title","description":"Context summary","tags":["#tools","AI tools"]}\n```'), {
+  title: 'English title',
+  description: 'Context summary',
+  tags: ['tools', 'ai-tools']
 });
 
 const document = {
