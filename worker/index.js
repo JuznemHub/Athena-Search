@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.17',
+          version: '1.0.18',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -5617,7 +5617,7 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
           : ['telegram', 'community'];
         await ensureSearchColumns(env);
       try {
-        await env.DB.prepare('UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = 2, search_blob = NULL WHERE id = ?')
+        await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
           .bind(savedTitle, JSON.stringify(merged), ai.description || meta.notes || '', id).run();
         await storeMutateLink(env, 'community', communityId, id, { title: savedTitle, notes: ai.description || meta.notes || '', tags: merged });
       } catch (_) {}
@@ -8448,11 +8448,11 @@ Rules:
     try {
       if (scope === 'personal') {
         await env.DB.prepare(
-          'UPDATE personal_links SET title = ?, notes = ?, metadata_version = 2, search_blob = NULL WHERE id = ? AND user_id = ?'
+          `UPDATE personal_links SET title = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ? AND user_id = ?`
         ).bind(title, notes, hit.id, athenaUser.id).run();
       } else {
         await env.DB.prepare(
-          'UPDATE links SET title = ?, notes = ?, metadata_version = 2, search_blob = NULL WHERE id = ?'
+          `UPDATE links SET title = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
         ).bind(title, notes, hit.id).run();
       }
     } catch (_) {
@@ -8520,7 +8520,7 @@ Rules:
                 const tags = [...new Set([...(ai.tags || []), 'telegram', 'dump'])];
                 await ensureSearchColumns(env);
                 await env.DB.prepare(
-                  'UPDATE personal_links SET title = ?, notes = ?, tags = ?, metadata_version = 2, search_blob = NULL WHERE id = ?'
+                  `UPDATE personal_links SET title = ?, notes = ?, tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
                 ).bind(savedTitle, ai.description || add.notes || '', JSON.stringify(tags), add.id).run();
                 await storeMutateLink(env, 'personal', athenaUser.id, add.id, {
                   title: savedTitle,
@@ -8571,7 +8571,7 @@ Rules:
               const tags = [...new Set([...(ai.tags || []), 'telegram'])];
               await ensureSearchColumns(env);
               await env.DB.prepare(
-                'UPDATE links SET title = ?, notes = ?, tags = ?, metadata_version = 2, search_blob = NULL WHERE id = ?'
+                `UPDATE links SET title = ?, notes = ?, tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
               ).bind(savedTitle, ai.description || meta.notes || '', JSON.stringify(tags), id).run();
               await storeMutateLink(env, 'community', binding.community_id, id, {
                 title: savedTitle,
@@ -8671,7 +8671,7 @@ Rules:
                 : ['telegram', 'personal'];
               await ensureSearchColumns(env);
              try {
-               await env.DB.prepare('UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = 2, search_blob = NULL WHERE id = ?')
+                await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
                  .bind(savedTitle, JSON.stringify(merged), ai.description || r.notes || '', r.id).run();
                await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: savedTitle, notes: ai.description || r.notes || '', tags: merged });
              } catch (_) {}
@@ -9494,6 +9494,8 @@ async function ensureLinkMetaColumns(env) {
   }
 }
 
+const AI_METADATA_VERSION = 3;
+
 /** Merge user-provided fields with scraped page meta. Skip scrape if notes already detailed. */
 async function enrichLinkFields(env, rawUrl, { title, notes } = {}) {
   const userTitle = String(title || '').trim();
@@ -9593,13 +9595,14 @@ async function enrichLinksInBackground(env, scope, key, links) {
           }
         }
         if (!update.notes && !update.image_url && !update.site_name && !update.tags) continue;
+        const metadataVersion = ai?.tags?.length && ai.description ? AI_METADATA_VERSION : 2;
         if (scope === 'personal') {
           await env.DB.prepare(
-            'UPDATE personal_links SET title = ?, notes = ?, image_url = ?, site_name = ?, metadata_version = 2, search_blob = NULL' + (update.tags ? ', tags = ?' : '') + ' WHERE id = ?'
+            `UPDATE personal_links SET title = ?, notes = ?, image_url = ?, site_name = ?, metadata_version = ${metadataVersion}, search_blob = NULL` + (update.tags ? ', tags = ?' : '') + ' WHERE id = ?'
           ).bind(update.title, update.notes, update.image_url, update.site_name, ...(update.tags ? [JSON.stringify(update.tags)] : []), link.id).run();
         } else {
           await env.DB.prepare(
-            'UPDATE links SET title = ?, notes = ?, image_url = ?, site_name = ?, metadata_version = 2, search_blob = NULL' + (update.tags ? ', tags = ?' : '') + ' WHERE id = ?'
+            `UPDATE links SET title = ?, notes = ?, image_url = ?, site_name = ?, metadata_version = ${metadataVersion}, search_blob = NULL` + (update.tags ? ', tags = ?' : '') + ' WHERE id = ?'
           ).bind(update.title, update.notes, update.image_url, update.site_name, ...(update.tags ? [JSON.stringify(update.tags)] : []), link.id).run();
         }
         // Best effort on GitHub storage: the .md entry catches up with the row.
@@ -9612,7 +9615,7 @@ async function enrichLinksInBackground(env, scope, key, links) {
 
 function queueMissingLinkEnrichment(env, scope, key, rows) {
   const missing = (rows || [])
-    .filter(row => row?.url && Number(row.metadata_version || 0) < 2)
+    .filter(row => row?.url && Number(row.metadata_version || 0) < AI_METADATA_VERSION)
     .slice(0, 10)
     .map(row => ({
       id: row.id,
