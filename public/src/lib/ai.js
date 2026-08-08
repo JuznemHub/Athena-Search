@@ -84,16 +84,39 @@ Rules:
  10. The user may ask follow-up questions. Use the conversation history to understand context. If they say "tell me more" or "which sections", refer back to the documents discussed.`;
   }
 
-  function buildContextMessage(docs, corpusSize) {
+  function buildContextMessage(docs, corpusSize, maxChars = null) {
     if (!docs.length) {
       return corpusSize
         ? `BRAIN has ${corpusSize} saved item(s), but no relevant matches were retrieved for this question.`
         : 'BRAIN CONTEXT: (truly empty — 0 saved items)';
     }
-    const ctx = docs.map((d, i) => {
+    const prefix = `BRAIN has ${corpusSize} saved item(s). Retrieved items:\n\n`;
+    const sections = docs.map((d, i) => {
       return formatDoc(d, i);
-    }).filter(Boolean).join('\n\n');
-    return `BRAIN has ${corpusSize} saved item(s). Retrieved items:\n\n${ctx}`;
+    }).filter(Boolean);
+    const full = sections.join('\n\n');
+    if (!Number.isFinite(maxChars) || full.length + prefix.length <= maxChars) {
+      return prefix + full;
+    }
+    const available = Math.max(0, maxChars - prefix.length);
+    const compact = [];
+    let used = 0;
+    for (const section of sections) {
+      if (used >= available) break;
+      const separator = compact.length ? '\n\n' : '';
+      const remaining = available - used - separator.length;
+      if (remaining <= 0) break;
+      compact.push(separator + (section.length > remaining
+        ? `${section.slice(0, remaining)}\n[content shortened for provider context]`
+        : section));
+      used += separator.length + Math.min(section.length, remaining);
+    }
+    return prefix + compact.join('');
+  }
+
+  function isProviderContextError(error) {
+    return /context length|context window|maximum context|too many tokens|prompt is too long|request too large|input.{0,20}long/i
+      .test(String(error?.message || error || ''));
   }
 
   function normalizeRemoteDoc(row) {
@@ -124,7 +147,7 @@ Rules:
     const docs = new Map();
     let total = 0;
     for (const q of queries) {
-      const params = new URLSearchParams({ q, scope: context.scope || 'personal', limit: '100000' });
+      const params = new URLSearchParams({ q, scope: context.scope || 'personal', limit: 'all' });
       if (context.scope === 'community' && context.communityId) params.set('community_id', context.communityId);
       try {
         const res = await fetch(`${apiBase}/api/links/search?${params}`, {
@@ -143,8 +166,9 @@ Rules:
   }
 
   function answerLocal(question, corpus, corpusSize = (corpus || []).length) {
-    const retrieve = window.AthenaSearch?.retrieveForQuestion || ((q, c) => c.slice(0, 5));
-    const docs = retrieve(question, corpus || [], 8);
+    const retrieve = window.AthenaSearch?.retrieveForQuestion || ((q, c) => c);
+    const list = corpus || [];
+    const docs = retrieve(question, list, list.length);
     if (!docs.length) {
       return {
         answer: corpusSize
@@ -154,13 +178,13 @@ Rules:
         results: []
       };
     }
-    const lines = docs.slice(0, 5).map((d, i) => {
+    const lines = docs.map((d, i) => {
       const label = d.title || d.url || 'Note';
       return `${i + 1}. **${label}**${d.url ? ` — ${d.url}` : ''}`;
     });
     return {
       answer: `Closest matches in your brain:\n\n${lines.join('\n\n')}`,
-      sources: docs.slice(0, 5),
+      sources: docs,
       results: docs
     };
   }
@@ -255,7 +279,7 @@ Rules:
       : [{ role: 'user', content: q }];
     const retrieve = window.AthenaSearch?.retrieveForQuestion;
     const retrievalQuestion = history.filter(message => message.role === 'user').map(message => message.content).join(' ');
-    const localDocs = retrieve ? retrieve(retrievalQuestion || q, list, list.length || 12, { minScore: 18, strict: true }) : list;
+    const localDocs = retrieve ? retrieve(retrievalQuestion || q, list, list.length, { minScore: 18, strict: true }) : list;
     const remote = await retrieveRemoteDocs(q, history);
     const merged = new Map();
     for (const doc of remote.docs) merged.set(doc.id || doc.url || `remote-${merged.size}`, doc);
@@ -281,20 +305,30 @@ Rules:
       return { ...local, mode: 'local', thinking: '' };
     }
 
-    // Build messages: system prompt with brain context, then conversation history.
-    const system = buildSystemPrompt() + '\n\n' + buildContextMessage(docs, corpusSize);
-    const messages = [{ role: 'system', content: system }, ...history];
-
     try {
-      const result = await callViaProxy({
-        baseUrl: sendOwn ? cfg.baseUrl : '',
-        apiKey: sendOwn ? cfg.apiKey : '',
-        model: sendOwn ? normalizeModelId(cfg.model, cfg.baseUrl) : '',
-        mode: sendOwn ? (cfg.mode || 'openai') : '',
-        messages,
-        onDelta,
-        onThinking
-      });
+      let result;
+      let contextLimit = null;
+      for (;;) {
+        const system = buildSystemPrompt() + '\n\n' + buildContextMessage(docs, corpusSize, contextLimit);
+        try {
+          result = await callViaProxy({
+            baseUrl: sendOwn ? cfg.baseUrl : '',
+            apiKey: sendOwn ? cfg.apiKey : '',
+            model: sendOwn ? normalizeModelId(cfg.model, cfg.baseUrl) : '',
+            mode: sendOwn ? (cfg.mode || 'openai') : '',
+            messages: [{ role: 'system', content: system }, ...history],
+            onDelta,
+            onThinking
+          });
+          break;
+        } catch (err) {
+          if (!isProviderContextError(err) || !docs.length) throw err;
+          const currentSize = buildContextMessage(docs, corpusSize, contextLimit).length;
+          const nextLimit = Math.floor(currentSize * 0.6);
+          if (nextLimit < 1000 || nextLimit >= currentSize) throw err;
+          contextLimit = nextLimit;
+        }
+      }
       const text = result.text || '';
       const thinking = result.thinking || '';
       let cleaned = text;
@@ -311,7 +345,7 @@ Rules:
       return {
         answer: cleaned || text || 'Empty response from model.',
         thinking,
-        sources: docs.slice(0, 8),
+        sources: docs,
         results: docs,
         mode: 'llm'
       };

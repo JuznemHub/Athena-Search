@@ -238,9 +238,10 @@
    *                  irrelevant docs (Spotify, Google for a "piracy" question)
    *                  never pollute the prompt.
    */
-  function retrieveForQuestion(question, corpus, limit = 12, opts = {}) {
+  function retrieveForQuestion(question, corpus, limit = null, opts = {}) {
     const list = corpus || [];
     if (!list.length) return [];
+    const maxResults = limit == null ? list.length : limit;
 
     const minScore = opts.minScore || 12;
 
@@ -255,7 +256,7 @@
     const { expanded } = expandQueryTerms(question);
     const extra = [];
     for (const term of expanded) {
-      for (const item of searchCorpus(list, term, 6)) {
+      for (const item of searchCorpus(list, term, list.length)) {
         if (!strong.find(b => b.id === item.id) && !extra.find(e => e.id === item.id)) {
           extra.push(item);
         }
@@ -265,7 +266,7 @@
     let out = [];
     const push = (arr) => {
       for (const it of arr) {
-        if (out.length >= limit) break;
+        if (out.length >= maxResults) break;
         if (!out.find(x => x.id === it.id)) out.push(it);
       }
     };
@@ -275,7 +276,7 @@
     // In strict mode (AI context) we only send items that truly matched —
     // no dumping of unrelated recent items into the prompt.
     if (opts.strict) {
-      return out.slice(0, limit);
+      return out.slice(0, maxResults);
     }
 
     push(weak);
@@ -291,7 +292,7 @@
       push(ranked.map(r => r.item));
     }
 
-    return out.slice(0, limit);
+    return out.slice(0, maxResults);
   }
 
   window.AthenaSearch = { searchCorpus, scoreItem, retrieveForQuestion, alnum, soft, expandQueryTerms };
