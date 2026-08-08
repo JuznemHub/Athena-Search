@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.25',
+          version: '1.0.26',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -9761,16 +9761,24 @@ async function enrichLinkFields(env, rawUrl, { title, notes } = {}) {
  * Markdown entry too. Bounded concurrency; one bad site only costs its own
  * 9s timeout.
  */
+function isFreeTierModel(modelId) {
+  const m = String(modelId || '').toLowerCase();
+  return m.includes('free') || m === 'big-pickle';
+}
+
 async function enrichLinksInBackground(env, scope, key, links) {
-  const CONCURRENCY = 1;
   await ensureSearchColumns(env);
   const vocab = await recentTagsForScope(env, scope, key);
   let aiConfig = null;
   try { aiConfig = await getInstanceAiConfig(env); } catch (_) {}
+  const isFree = isFreeTierModel(aiConfig?.model);
+  const CONCURRENCY = isFree ? 1 : 4;
+  let enrichedLinks = links;
+  if (isFree && links.length > 3) enrichedLinks = links.slice(0, 3);
   let next = 0;
   const run = async () => {
-    while (next < links.length) {
-      const link = links[next++];
+    while (next < enrichedLinks.length) {
+      const link = enrichedLinks[next++];
       try {
         const meta = await scrapeLinkMetadata(link.url, env);
         const title = (isWeakTitle(link.title, link.url) && meta.title) ? meta.title : link.title;
@@ -9787,8 +9795,7 @@ async function enrichLinksInBackground(env, scope, key, links) {
           notes: meta.description,
           content: meta.content
         }, vocab, aiConfig);
-        // Throttle free-tier (Hermes uses on-demand only; Athena was bursting 4 concurrent)
-        await new Promise(r => setTimeout(r, 900));
+        if (isFree) await new Promise(r => setTimeout(r, 900));
         if (ai) {
           if (ai.title) update.title = ai.title;
           if (ai.description) update.notes = ai.description;
@@ -9820,7 +9827,7 @@ async function enrichLinksInBackground(env, scope, key, links) {
 function queueMissingLinkEnrichment(env, scope, key, rows) {
   const missing = (rows || [])
     .filter(row => row?.url && Number(row.metadata_version || 0) < AI_METADATA_VERSION)
-    .slice(0, 3)
+    .slice(0, 10)
     .map(row => ({
       id: row.id,
       url: row.url,
