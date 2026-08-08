@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.19',
+          version: '1.0.20',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -184,6 +184,10 @@ export default {
           return new Response('Bad Request', { status: 400, headers: corsHeaders });
         }
         return await handleTelegramWebhook(update, env, corsHeaders);
+      }
+
+      if (pathname === '/api/internal/ai-config' && request.method === 'POST') {
+        return await handleInternalAiConfigSync(request, env, corsHeaders);
       }
 
       // ---- Session for all other /api ----
@@ -3517,6 +3521,101 @@ async function handleGetAiConfig(user, env, corsHeaders) {
   }, { headers: corsHeaders });
 }
 
+async function writeInstanceAiConfig(env, { baseUrl, apiKey, model, mode, updatedAt = Date.now(), userId = null }) {
+  await ensureAiConfigTable(env);
+  const encKey = await encryptSecret(env, apiKey);
+  await env.DB.prepare(
+    `INSERT INTO user_ai_config (user_id, base_url, api_key, model, mode, updated_at)
+     VALUES ('__instance__', ?, ?, ?, ?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET
+       base_url = excluded.base_url,
+       api_key = excluded.api_key,
+       model = excluded.model,
+       mode = excluded.mode,
+       updated_at = excluded.updated_at`
+  ).bind(baseUrl, encKey, model, mode, updatedAt).run();
+  if (userId) {
+    await env.DB.prepare(
+      `INSERT INTO user_ai_config (user_id, base_url, api_key, model, mode, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET
+         base_url = excluded.base_url,
+         api_key = excluded.api_key,
+         model = excluded.model,
+         mode = excluded.mode,
+         updated_at = excluded.updated_at`
+    ).bind(userId, baseUrl, encKey, model, mode, updatedAt).run();
+  }
+}
+
+async function aiConfigPeerUrl(env) {
+  const configured = isSelfHosted(env)
+    ? env.ATHENA_FRONTEND_URL
+    : await getInstanceSetting(env, 'default_backend');
+  const value = String(configured || '').trim().replace(/\/+$/, '');
+  if (!value) return '';
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' ? url.origin : '';
+  } catch (_) { return ''; }
+}
+
+async function syncAiConfigToPeer(env, payload) {
+  // Both runtimes already share this secret for Telegram webhook auth. Prefer a
+  // dedicated sync secret when one is supplied, then use the existing shared
+  // secret so config sync works on older deployments without new provisioning.
+  const secret = String(env.AI_CONFIG_SYNC_SECRET || env.TELEGRAM_WEBHOOK_SECRET || env.STORAGE_KEY || '');
+  const peer = await aiConfigPeerUrl(env);
+  if (!secret || !peer) return false;
+  try {
+    const response = await fetchWithTimeout(`${peer}/api/internal/ai-config`, {
+      method: 'POST',
+      env,
+      redirect: 'error',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Athena-Internal-Key': secret
+      },
+      body: JSON.stringify(payload)
+    }, 10000);
+    return response.ok;
+  } catch (err) {
+    console.error('AI config peer sync failed', err?.message || err);
+    return false;
+  }
+}
+
+async function handleInternalAiConfigSync(request, env, corsHeaders) {
+  const expected = String(env.AI_CONFIG_SYNC_SECRET || env.TELEGRAM_WEBHOOK_SECRET || env.STORAGE_KEY || '');
+  const provided = request.headers.get('X-Athena-Internal-Key') || '';
+  if (!expected || provided !== expected) {
+    return Response.json({ success: false, error: 'Forbidden' }, { status: 403, headers: corsHeaders });
+  }
+  const body = await request.json().catch(() => ({}));
+  if (body.clear) {
+    await ensureAiConfigTable(env);
+    await env.DB.prepare('DELETE FROM user_ai_config').run();
+    return Response.json({ success: true, cleared: true }, { headers: corsHeaders });
+  }
+  const baseUrl = cleanApiBase(body.baseUrl || body.base_url || '');
+  const apiKey = String(body.apiKey || body.api_key || '').trim();
+  const model = normalizeModelId(body.model, baseUrl);
+  const mode = String(body.mode || 'openai').toLowerCase();
+  const updatedAt = Number(body.updatedAt || body.updated_at || Date.now());
+  if (!baseUrl || !apiKey || !model || !Number.isFinite(updatedAt)) {
+    return Response.json({ success: false, error: 'Invalid AI config' }, { status: 400, headers: corsHeaders });
+  }
+  await ensureAiConfigTable(env);
+  const existing = await env.DB.prepare(
+    "SELECT updated_at FROM user_ai_config WHERE user_id = '__instance__'"
+  ).first();
+  if (existing && Number(existing.updated_at || 0) > updatedAt) {
+    return Response.json({ success: true, ignored: true }, { headers: corsHeaders });
+  }
+  await writeInstanceAiConfig(env, { baseUrl, apiKey, model, mode, updatedAt });
+  return Response.json({ success: true, synced: true }, { headers: corsHeaders });
+}
+
 async function handleSaveAiConfig(request, user, env, corsHeaders) {
   await ensureAiConfigTable(env);
   const body = await request.json();
@@ -3527,28 +3626,18 @@ async function handleSaveAiConfig(request, user, env, corsHeaders) {
   if (!baseUrl || !apiKey || !model) {
     return Response.json({ success: false, error: 'baseUrl, apiKey, model required' }, { status: 400, headers: corsHeaders });
   }
-  // Instance-wide config under __instance__ + mirror on GOD user for legacy bot /ai
-  const encKey = await encryptSecret(env, apiKey);
-  for (const uid of ['__instance__', user.id]) {
-    await env.DB.prepare(
-      `INSERT INTO user_ai_config (user_id, base_url, api_key, model, mode, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(user_id) DO UPDATE SET
-         base_url = excluded.base_url,
-         api_key = excluded.api_key,
-         model = excluded.model,
-         mode = excluded.mode,
-         updated_at = excluded.updated_at`
-    ).bind(uid, baseUrl, encKey, model, mode, Date.now()).run();
-  }
-  return Response.json({ success: true }, { headers: corsHeaders });
+  const updatedAt = Date.now();
+  await writeInstanceAiConfig(env, { baseUrl, apiKey, model, mode, updatedAt, userId: user.id });
+  const peerSynced = await syncAiConfigToPeer(env, { baseUrl, apiKey, model, mode, updatedAt });
+  return Response.json({ success: true, peer_synced: peerSynced }, { headers: corsHeaders });
 }
 
 async function handleClearAiConfig(user, env, corsHeaders) {
   await ensureAiConfigTable(env);
   await env.DB.prepare("DELETE FROM user_ai_config WHERE user_id = '__instance__'").run();
   await env.DB.prepare('DELETE FROM user_ai_config WHERE user_id = ?').bind(user.id).run();
-  return Response.json({ success: true }, { headers: corsHeaders });
+  const peerSynced = await syncAiConfigToPeer(env, { clear: true, updatedAt: Date.now() });
+  return Response.json({ success: true, peer_synced: peerSynced }, { headers: corsHeaders });
 }
 
 // ============================================================
