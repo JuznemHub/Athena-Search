@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.15',
+          version: '1.0.16',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -1020,6 +1020,11 @@ async function clearCommunityLinksOnly(env, communityId) {
   // Only the ACTIVE store is cleared. In GitHub mode that means the Markdown
   // too; the parked Cloudflare copy is deliberately left alone, and vice versa.
   await clearActiveStoreFolder(env, 'community', communityId);
+  runInBackground(env, logOperationalEvent(
+    env,
+    '🧹 Community database cleared',
+    `${c.name} (${c.id}); removed ${(linkRows || []).length} links`
+  ));
   return { ok: true, name: c.name, id: c.id, cleared: (linkRows || []).length };
 }
 
@@ -1324,10 +1329,17 @@ async function banUserFromCommunity(env, communityId, { platform, platformUserId
     const target = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(uid).first();
     if (target && await isGodUserAsync(target, env)) return;
   }
+  const banReason = reason || 'banned';
+  let previous = null;
+  try {
+    previous = await env.DB.prepare(
+      'SELECT reason FROM community_bans WHERE community_id = ? AND platform = ? AND platform_user_id = ?'
+    ).bind(communityId, platform, String(platformUserId)).first();
+  } catch (_) {}
   await env.DB.prepare(
     `INSERT OR REPLACE INTO community_bans (community_id, platform, platform_user_id, user_id, reason, created_at)
      VALUES (?, ?, ?, ?, ?, ?)`
-  ).bind(communityId, platform, String(platformUserId), uid, reason || 'banned', Date.now()).run();
+  ).bind(communityId, platform, String(platformUserId), uid, banReason, Date.now()).run();
   // NOTE: the membership row is deliberately preserved. Deleting it made every ban
   // irreversible (unban never restored it) and silently destroyed owner/admin roles,
   // so a brief Telegram hiccup permanently demoted staff. Access is gated on the ban
@@ -1335,6 +1347,23 @@ async function banUserFromCommunity(env, communityId, { platform, platformUserId
   if (uid) {
     // Kill website sessions immediately so the ban takes effect at once.
     await destroyUserSessions(env, uid);
+  }
+  if (!previous || previous.reason !== banReason) {
+    let communityName = communityId;
+    let targetName = uid || platformUserId;
+    try {
+      const c = await env.DB.prepare('SELECT name FROM communities WHERE id = ?').bind(communityId).first();
+      if (c?.name) communityName = c.name;
+      if (uid) {
+        const u = await env.DB.prepare('SELECT username, display_name FROM users WHERE id = ?').bind(uid).first();
+        targetName = u?.username ? `@${u.username}` : (u?.display_name || targetName);
+      }
+    } catch (_) {}
+    runInBackground(env, logOperationalEvent(
+      env,
+      '🚫 Community access revoked',
+      `${targetName} banned from ${communityName} (${communityId}); reason: ${banReason}`
+    ));
   }
 }
 
@@ -1352,6 +1381,8 @@ async function handleWipePersonalAccount(request, user, env, corsHeaders) {
       'CONFIRM_REQUIRED', 400);
   }
   const uid = user.id;
+  await ensureBotBindingColumns(env);
+  const logTarget = await getConfiguredLogTarget(env, uid);
   try {
     await env.DB.prepare('DELETE FROM personal_links WHERE user_id = ?').bind(uid).run();
   } catch (_) {}
@@ -1375,6 +1406,7 @@ async function handleWipePersonalAccount(request, user, env, corsHeaders) {
     await env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(uid).run();
   } catch (_) {}
   // keep user row so OAuth identity remains; strip personal data only
+  await logOperationalEvent(env, '🧹 Personal database cleared', `${user.username || user.display_name || uid} wiped personal links, documents, and settings`, uid, logTarget);
   return Response.json({ success: true, wiped: true }, { headers: corsHeaders });
 }
 
@@ -1654,6 +1686,7 @@ async function handleTelegramWebAppAuth(request, env, corsHeaders, url) {
     const body = await request.json().catch(() => ({}));
     const initData = body.initData || body.init_data || '';
     if (!initData) {
+      await logWebsiteAuthFailure(env, 'Telegram', 'initData missing');
       return Response.json({
         success: false,
         error: 'initData required — open Athena as a Telegram Mini App, or use Continue with Telegram'
@@ -1670,6 +1703,7 @@ async function handleTelegramWebAppAuth(request, env, corsHeaders, url) {
       } catch (_) {}
     }
     if (!botToken) {
+      await logWebsiteAuthFailure(env, 'Telegram', 'bot token is not configured');
       return Response.json({
         success: false,
         error: 'TELEGRAM_BOT_TOKEN missing (GOD: Settings → Bot, or wrangler secret put TELEGRAM_BOT_TOKEN)'
@@ -1677,6 +1711,7 @@ async function handleTelegramWebAppAuth(request, env, corsHeaders, url) {
     }
     const verified = await verifyTelegramInitData(initData, botToken);
     if (!verified) {
+      await logWebsiteAuthFailure(env, 'Telegram', 'invalid Mini App signature');
       return Response.json({
         success: false,
         error: 'Invalid Telegram signature (bot token must match the Mini App bot)'
@@ -1685,12 +1720,14 @@ async function handleTelegramWebAppAuth(request, env, corsHeaders, url) {
     const params = verified.params;
     const authDate = parseInt(params.get('auth_date') || '0', 10);
     if (authDate && (Date.now() / 1000 - authDate) > 86400 * 2) {
+      await logWebsiteAuthFailure(env, 'Telegram', 'Mini App login expired');
       return Response.json({ success: false, error: 'Telegram login expired — reopen the Mini App' }, { status: 401, headers: corsHeaders });
     }
     let tgUser = {};
     try { tgUser = JSON.parse(params.get('user') || '{}'); } catch (_) { tgUser = {}; }
     const tgId = String(tgUser.id || params.get('id') || '');
     if (!tgId) {
+      await logWebsiteAuthFailure(env, 'Telegram', 'Telegram user is missing from initData');
       return Response.json({ success: false, error: 'No Telegram user in initData' }, { status: 400, headers: corsHeaders });
     }
     const username = tgUser.username || params.get('username') || (`tg_${tgId}`);
@@ -1727,6 +1764,7 @@ async function handleTelegramWebAppAuth(request, env, corsHeaders, url) {
     } catch (_) {}
     if (await isUserFullySiteBanned(env, user)) {
       await destroyUserSessions(env, user.id);
+      await logWebsiteAuthFailure(env, 'Telegram', 'user is fully banned', `@${username}`);
       return Response.json({ success: false, error: BANNED_SITE_MSG, code: 'SITE_BANNED' }, { status: 403, headers: corsHeaders });
     }
     const sessionToken = await createSession(user.id, env);
@@ -1743,18 +1781,8 @@ async function handleTelegramWebAppAuth(request, env, corsHeaders, url) {
        for (const god of (godUsers || [])) {
          await createNotification(env, { userId: god.id, type: 'login', title: 'Website Login', body: loginMsg }).catch(() => {});
        }
-       // Telegram notification: send to log channel if set, otherwise to GOD DMs
-       const logChannelId = await getLogChannelId(env, godUsers?.[0]?.id);
-       const notifyText = `🌐 ${boldHtml(loginLabel)}${loginTgId ? ` | ${codeHtml(String(loginTgId))}` : ''} logged in to website`;
-       if (logChannelId && env.TELEGRAM_BOT_TOKEN) {
-         await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, logChannelId, notifyText).catch(() => {});
-       } else {
-         for (const ownerId of ownerIds) {
-           if (ownerId && env.TELEGRAM_BOT_TOKEN) {
-             await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
-           }
-         }
-       }
+        const notifyText = `🌐 ${boldHtml(loginLabel)}${loginTgId ? ` | ${codeHtml(String(loginTgId))}` : ''} logged in to website`;
+        await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id);
      } catch (_) {}
      const owner = await isInstanceOwnerUserAsync(user, env);
     const elevated = owner || (await isElevatedUser(user, env));
@@ -1885,12 +1913,15 @@ async function handleTelegramCallback(url, env, corsHeaders, request) {
   }
   const err = url.searchParams.get('error');
   if (err) {
+    await logWebsiteAuthFailure(env, 'Telegram', `OAuth provider error: ${err}`);
     return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=telegram_${encodeURIComponent(err)}`, 302);
   }
   if (!code || !state) {
+    await logWebsiteAuthFailure(env, 'Telegram', 'OAuth callback missing code or state');
     return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=telegram_missing`, 302);
   }
   if (!env.TELEGRAM_CLIENT_ID || !env.TELEGRAM_CLIENT_SECRET) {
+    await logWebsiteAuthFailure(env, 'Telegram', 'OAuth credentials are not configured');
     return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=telegram_config`, 302);
   }
 
@@ -1918,6 +1949,7 @@ async function handleTelegramCallback(url, env, corsHeaders, request) {
       onward.searchParams.set('state', state);
       return Response.redirect(onward.toString(), 302);
     }
+    await logWebsiteAuthFailure(env, 'Telegram', 'OAuth state was not found');
     return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=telegram_state`, 302);
   }
   const exp = Number(row.expires_at);
@@ -1925,6 +1957,7 @@ async function handleTelegramCallback(url, env, corsHeaders, request) {
     try {
       await env.DB.prepare('DELETE FROM oauth_states WHERE state = ?').bind(state).run();
     } catch (_) {}
+    await logWebsiteAuthFailure(env, 'Telegram', 'OAuth state expired');
     return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=telegram_state_expired`, 302);
   }
   // Bind the flow to the browser that started it. Skipped only when the
@@ -1932,6 +1965,7 @@ async function handleTelegramCallback(url, env, corsHeaders, request) {
   // set elsewhere and cannot be presented here; that topology relays above.
   const ownRedirect = telegramRedirectUri(env, url).startsWith(`${url.origin}/`);
   if (ownRedirect && readOauthStateCookie(request) !== state) {
+    await logWebsiteAuthFailure(env, 'Telegram', 'OAuth browser state cookie mismatch');
     return redirectWithCookie(`${frontendOrigin(env, url)}/?auth_error=telegram_state`, oauthStateCookie(url, ''));
   }
 
@@ -1956,16 +1990,19 @@ async function handleTelegramCallback(url, env, corsHeaders, request) {
     // Keep state so a single UI retry within TTL can still work if Telegram reuses nothing;
     // usually user must click Login again for a fresh code.
     console.error('telegram token exchange failed', tokenRes.status, tokens);
+    await logWebsiteAuthFailure(env, 'Telegram', `OAuth token exchange failed (${tokenRes.status})`);
     return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=telegram_token`, 302);
   }
 
   const claims = await verifyTelegramIdToken(tokens.id_token, env.TELEGRAM_CLIENT_ID);
   if (!claims) {
+    await logWebsiteAuthFailure(env, 'Telegram', 'OAuth ID token verification failed');
     return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=telegram_jwt`, 302);
   }
 
   const providerId = String(claims.sub || claims.id || '');
   if (!providerId) {
+    await logWebsiteAuthFailure(env, 'Telegram', 'OAuth user identity missing');
     return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=telegram_user`, 302);
   }
   const username = claims.preferred_username || claims.username || `tg_${providerId}`;
@@ -2004,6 +2041,7 @@ async function handleTelegramCallback(url, env, corsHeaders, request) {
       await env.DB.prepare('DELETE FROM oauth_states WHERE state = ?').bind(state).run();
     } catch (_) {}
     await destroyUserSessions(env, user.id);
+    await logWebsiteAuthFailure(env, 'Telegram', 'user is fully banned', `@${username}`);
     return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=banned`, 302);
   }
 
@@ -2021,18 +2059,8 @@ async function handleTelegramCallback(url, env, corsHeaders, request) {
      for (const god of (godUsers || [])) {
        await createNotification(env, { userId: god.id, type: 'login', title: 'Website Login', body: loginMsg }).catch(() => {});
      }
-     // Telegram notification: send to log channel if set, otherwise to GOD DMs
-     const logChannelId = await getLogChannelId(env, godUsers?.[0]?.id);
-     const notifyText = `🌐 ${boldHtml(loginLabel)}${loginTgId ? ` | ${codeHtml(String(loginTgId))}` : ''} logged in to website (Telegram)`;
-     if (logChannelId && env.TELEGRAM_BOT_TOKEN) {
-       await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, logChannelId, notifyText).catch(() => {});
-     } else {
-       for (const ownerId of ownerIds) {
-         if (ownerId && env.TELEGRAM_BOT_TOKEN) {
-           await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
-         }
-       }
-     }
+      const notifyText = `🌐 ${boldHtml(loginLabel)}${loginTgId ? ` | ${codeHtml(String(loginTgId))}` : ''} logged in to website (Telegram)`;
+      await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id);
    } catch (_) {}
    // Consume state only after success
   try {
@@ -2086,13 +2114,16 @@ async function handleDiscordCallback(url, env, request) {
   const state = (url.searchParams.get('state') || '').trim();
   const clearState = oauthStateCookie(url, '');
   if (!code || !env.DISCORD_CLIENT_ID || !env.DISCORD_CLIENT_SECRET) {
+    await logWebsiteAuthFailure(env, 'Discord', 'OAuth callback is missing code or credentials');
     return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=discord`, 302);
   }
   if (!state) {
+    await logWebsiteAuthFailure(env, 'Discord', 'OAuth callback state is missing');
     return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=discord_state`, 302);
   }
   // redirect_uri is always this origin, so the start cookie is always presented.
   if (readOauthStateCookie(request) !== state) {
+    await logWebsiteAuthFailure(env, 'Discord', 'OAuth browser state cookie mismatch');
     return redirectWithCookie(`${frontendOrigin(env, url)}/?auth_error=discord_state`, clearState);
   }
 
@@ -2105,6 +2136,7 @@ async function handleDiscordCallback(url, env, request) {
     if (row) {
       try { await env.DB.prepare('DELETE FROM oauth_states WHERE state = ?').bind(state).run(); } catch (_) {}
     }
+    await logWebsiteAuthFailure(env, 'Discord', 'OAuth state expired or was not found');
     return redirectWithCookie(`${frontendOrigin(env, url)}/?auth_error=discord_state`, clearState);
   }
 
@@ -2122,6 +2154,7 @@ async function handleDiscordCallback(url, env, request) {
   });
   const tokenData = await tokenRes.json();
   if (!tokenData.access_token) {
+    await logWebsiteAuthFailure(env, 'Discord', `OAuth token exchange failed (${tokenRes.status})`);
     return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=discord_token`, 302);
   }
 
@@ -2130,6 +2163,7 @@ async function handleDiscordCallback(url, env, request) {
   });
   const me = await meRes.json();
   if (!me.id) {
+    await logWebsiteAuthFailure(env, 'Discord', 'Discord user identity lookup failed');
     return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=discord_user`, 302);
   }
 
@@ -2149,6 +2183,7 @@ async function handleDiscordCallback(url, env, request) {
 
   if (await isUserFullySiteBanned(env, user)) {
     await destroyUserSessions(env, user.id);
+    await logWebsiteAuthFailure(env, 'Discord', 'user is fully banned', `@${username}`);
     return Response.redirect(`${frontendOrigin(env, url)}/?auth_error=banned`, 302);
   }
 
@@ -2165,18 +2200,8 @@ async function handleDiscordCallback(url, env, request) {
      for (const god of (godUsers || [])) {
        await createNotification(env, { userId: god.id, type: 'login', title: 'Website Login', body: loginMsg }).catch(() => {});
      }
-     // Telegram notification: send to log channel if set, otherwise to GOD DMs
-     const logChannelId = await getLogChannelId(env, godUsers?.[0]?.id);
-     const notifyText = `🌐 ${boldHtml(loginLabel)} logged in to website (Discord)`;
-     if (logChannelId && env.TELEGRAM_BOT_TOKEN) {
-       await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, logChannelId, notifyText).catch(() => {});
-     } else {
-       for (const ownerId of ownerIds) {
-         if (ownerId && env.TELEGRAM_BOT_TOKEN) {
-           await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
-         }
-       }
-     }
+      const notifyText = `🌐 ${boldHtml(loginLabel)} logged in to website (Discord)`;
+      await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id);
    } catch (_) {}
    // Consume the state on success (single-use).
    try { await env.DB.prepare('DELETE FROM oauth_states WHERE state = ?').bind(state).run(); } catch (_) {}
@@ -2313,6 +2338,7 @@ async function handleCreateCommunity(request, user, env, corsHeaders) {
   } catch (err) {
     return Response.json({ success: false, error: err.message || 'Failed to create community' }, { status: 500, headers: corsHeaders });
   }
+  await logOperationalEvent(env, '🆕 Community created', `${name} (${id}) by ${user.username || user.display_name || user.id}`, user.id);
   return Response.json({
     success: true,
     community: { id, name, creator_id: user.id, created_at: now, role: 'owner', is_staff: true }
@@ -2349,27 +2375,32 @@ async function handleJoinCommunity(request, user, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
   const communityId = (body.community_id || body.id || '').trim();
   if (!communityId) {
+    await logOperationalEvent(env, '⚠️ Community join failed', 'community_id missing');
     return Response.json({ success: false, error: 'community_id required' }, { status: 400, headers: corsHeaders });
   }
   const c = await env.DB.prepare(
     'SELECT id, name, creator_id, created_at FROM communities WHERE id = ?'
   ).bind(communityId).first();
   if (!c) {
+    await logOperationalEvent(env, '⚠️ Community join failed', `Community not found: ${communityId}`);
     return Response.json({ success: false, error: 'Community not found (invalid invite)' }, { status: 404, headers: corsHeaders });
   }
   if (await isBannedFromCommunity(env, communityId, user)) {
+    await logOperationalEvent(env, '🚫 Community join blocked', `${user.username || user.display_name || user.id} is banned from ${c.name} (${c.id})`, user.id);
     return deny(corsHeaders, 'You are banned from this community', 'BANNED');
   }
   // Must be in the Telegram group linked to this community (members; owners skip)
   if (!(await isInstanceOwnerUserAsync(user, env)) && c.creator_id !== user.id) {
     const tgId = await resolveTgApiIdForUser(user);
     if (!tgId) {
+      await logOperationalEvent(env, '⚠️ Community join blocked', `${user.username || user.display_name || user.id} has no linked Telegram ID for ${c.name}`, user.id);
       return deny(corsHeaders,
         'Open the Athena bot in Telegram and send /start once (links your Telegram user id), join the community group, then /community_join again',
         'NEED_TG_API_ID');
     }
     const inGroup = await isTelegramUserInCommunityGroup(env, communityId, tgId);
     if (!inGroup) {
+      await logOperationalEvent(env, '⚠️ Community join blocked', `${user.username || user.display_name || user.id} is not in the Telegram group for ${c.name}`, user.id);
       return deny(corsHeaders, 'First join the Telegram group for this community, then /community_join again', 'NOT_IN_GROUP');
     }
   }
@@ -2407,18 +2438,8 @@ async function handleJoinCommunity(request, user, env, corsHeaders) {
      for (const god of (godUsers || [])) {
        await createNotification(env, { userId: god.id, type: 'community_join', title: 'New Community Member', body: notifyMsg }).catch(() => {});
      }
-     // Telegram notification: send to log channel if set, otherwise to GOD DMs
-     const logChannelId = await getLogChannelId(env, godUsers?.[0]?.id);
-     const notifyText = `👤 ${boldHtml(joinerLabel)}${joinerTgId ? ` | ${codeHtml(String(joinerTgId))}` : ''} joined ${boldHtml(c.name)} community`;
-     if (logChannelId && env.TELEGRAM_BOT_TOKEN) {
-       await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, logChannelId, notifyText).catch(() => {});
-     } else {
-       for (const ownerId of ownerIds) {
-         if (ownerId && env.TELEGRAM_BOT_TOKEN) {
-           await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
-         }
-       }
-     }
+      const notifyText = `👤 ${boldHtml(joinerLabel)}${joinerTgId ? ` | ${codeHtml(String(joinerTgId))}` : ''} joined ${boldHtml(c.name)} community`;
+      await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id);
    } catch (_) {}
    return Response.json({
      success: true,
@@ -5343,20 +5364,57 @@ async function findPersonalBotForOwner(env, ownerUserId) {
   ).bind(ownerUserId, ownerUserId).first();
 }
 
-/** Get the log_channel_id from the personal bot binding for the given owner. */
-async function getLogChannelId(env, ownerUserId) {
-  if (!ownerUserId) return null;
+/** Resolve the configured log channel and the bot token that owns it. */
+async function getConfiguredLogTarget(env, ownerUserId = null) {
   try {
-    const binding = await env.DB.prepare(
-      `SELECT log_channel_id FROM community_bots
-       WHERE platform = 'telegram'
-         AND COALESCE(scope, 'personal') = 'personal'
-         AND (created_by = ? OR user_id = ?)
-         AND log_channel_id IS NOT NULL AND log_channel_id != ''
-       ORDER BY created_at DESC LIMIT 1`
-    ).bind(ownerUserId, ownerUserId).first();
-    return binding?.log_channel_id || null;
+    await ensureBotBindingColumns(env);
+    let binding = null;
+    if (ownerUserId) {
+      binding = await env.DB.prepare(
+        `SELECT log_channel_id, bot_token FROM community_bots
+         WHERE platform = 'telegram'
+           AND COALESCE(scope, 'personal') = 'personal'
+           AND (created_by = ? OR user_id = ?)
+           AND log_channel_id IS NOT NULL AND log_channel_id != ''
+         ORDER BY created_at DESC LIMIT 1`
+      ).bind(ownerUserId, ownerUserId).first();
+    }
+    if (!binding) {
+      binding = await env.DB.prepare(
+        `SELECT log_channel_id, bot_token FROM community_bots
+         WHERE platform = 'telegram'
+           AND COALESCE(scope, 'personal') = 'personal'
+           AND log_channel_id IS NOT NULL AND log_channel_id != ''
+         ORDER BY created_at DESC LIMIT 1`
+      ).first();
+    }
+    if (!binding?.log_channel_id) return null;
+    const token = (binding.bot_token && await decryptBotToken(env, binding.bot_token)) || env.TELEGRAM_BOT_TOKEN;
+    if (!token) return null;
+    return { channelId: String(binding.log_channel_id), token };
   } catch (_) { return null; }
+}
+
+/** Send operational events only to the explicitly configured log channel. */
+async function sendConfiguredLog(env, text, ownerUserId = null, target = null) {
+  const logTarget = target || await getConfiguredLogTarget(env, ownerUserId);
+  if (!logTarget?.channelId || !logTarget.token) return false;
+  const result = await sendTelegramFormatted(logTarget.token, logTarget.channelId, text).catch(() => null);
+  return !!result?.ok;
+}
+
+async function logWebsiteAuthFailure(env, provider, reason, subject = '') {
+  const details = [
+    `${boldHtml('⚠️ Website login failed')} (${escHtml(provider)})`,
+    escHtml(reason),
+    subject ? `User: ${escHtml(subject)}` : ''
+  ].filter(Boolean).join('\n');
+  await sendConfiguredLog(env, details);
+}
+
+async function logOperationalEvent(env, title, details, ownerUserId = null, target = null) {
+  const text = [boldHtml(title), details ? escHtml(details) : ''].filter(Boolean).join('\n');
+  await sendConfiguredLog(env, text, ownerUserId, target);
 }
 
 async function isBotOwnerTg(env, binding, tgUserId, athenaUser) {
@@ -5463,6 +5521,11 @@ async function deleteCommunityFully(env, communityId) {
   } catch (_) {}
 
   await env.DB.prepare('DELETE FROM communities WHERE id = ?').bind(communityId).run();
+  runInBackground(env, logOperationalEvent(
+    env,
+    '🗑️ Community deleted',
+    `${c.name} (${c.id}); all community data was removed`
+  ));
   return { ok: true, name: c.name, id: c.id };
 }
 
@@ -6250,8 +6313,9 @@ function helpTextForSection(section) {
       '/search <query> — search active brain',
       '/ai <question> — AI over brain (all ranks community; personal GOD-only)',
       '/delete <url> — delete (or add if missing); or reply /delete',
-      '/edit <url or title> | <new description>',
-      '  /edit … | title: New | notes: …',
+      '/edit <url or title words> | notes: New description',
+      '/edit <url> | title: New Title | notes: New notes',
+      'Reply to a saved link: /edit | title: New Title',
       '',
       'Multi-link posts',
       '/dumpall on — save every URL',
@@ -6286,12 +6350,14 @@ function helpTextForSection(section) {
       '',
       'Admin + owner',
       '/delete <url> · reply /delete — remove link (staff)',
-      '/edit <url|title> | notes… — edit link',
+      '/edit <url|title> | notes: … — edit link',
+      '  Reply: /edit | title: … or notes: …',
       '/topic <id> — lock bot to that forum topic only',
       '/topic off — whole group · /topic — show lock',
       '/topic here — lock to current topic',
       '/dumpall on|off · /dumpsmart — multi-link mode',
-      '/clear <@user|id> — remove member (can rejoin); reply /clear',
+      '/kick <@user|id> — remove community access (can rejoin); reply /kick',
+      '/clear <@user|id> — same as /kick',
       '  Admin: members only · Owner/GOD: members+admins',
       '',
       'Owner only',
@@ -6323,16 +6389,45 @@ function helpTextForSection(section) {
   ].join('\n');
 }
 
-async function editTelegramMessage(token, chatId, messageId, text, replyMarkup, threadId = null) {
+function parseTelegramEditPayload(rest, replyMessage = null) {
+  let payload = String(rest || '').trim();
+  if (replyMessage) {
+    const replyUrls = extractUrlsFromTelegramMessage(replyMessage);
+    const replyText = (replyMessage.text || replyMessage.caption || '').trim();
+    const replyTarget = replyUrls[0] || replyText.split(/\s+/).find(part => /^https?:\/\//i.test(part)) || '';
+    if (replyTarget && /^\|/.test(payload)) payload = `${replyTarget} ${payload}`;
+    else if (replyTarget && !payload.includes('|') && payload) payload = `${replyTarget} | ${payload}`;
+  }
+  if (!payload || !payload.includes('|')) return null;
+  const pipe = payload.indexOf('|');
+  const queryPart = payload.slice(0, pipe).trim();
+  const editPart = payload.slice(pipe + 1).trim();
+  if (!queryPart || !editPart) return null;
+
+  let newTitle = null;
+  let newNotes = null;
+  if (/title\s*:/i.test(editPart) || /notes\s*:/i.test(editPart)) {
+    const titleMatch = editPart.match(/title\s*:\s*([\s\S]*?)(?=\|\s*notes\s*:|$)/i);
+    const notesMatch = editPart.match(/notes\s*:\s*([\s\S]*?)$/i);
+    if (titleMatch) newTitle = titleMatch[1].replace(/\|\s*$/, '').trim();
+    if (notesMatch) newNotes = notesMatch[1].trim();
+    if (newTitle == null && newNotes == null) newNotes = editPart;
+  } else {
+    newNotes = editPart;
+  }
+  return { queryPart, newTitle, newNotes };
+}
+
+async function editTelegramMessage(token, chatId, messageId, text, replyMarkup, threadId = null, parseMode = 'HTML') {
   if (!token || !chatId || !messageId) return { ok: false };
   const payload = {
     chat_id: chatId,
     message_id: messageId,
     // editMessageText is single-message only — prefer full text when short, else truncate cleanly
     text: chunkTelegramText(text, TG_MSG_MAX)[0] || String(text).slice(0, TG_MSG_MAX),
-    parse_mode: 'HTML',
     disable_web_page_preview: true
   };
+  if (parseMode) payload.parse_mode = parseMode;
   if (replyMarkup) payload.reply_markup = replyMarkup;
   if (threadId != null && threadId !== '' && !Number.isNaN(Number(threadId))) {
     payload.message_thread_id = Number(threadId);
@@ -6359,9 +6454,9 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
     await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id });
     const section = data.slice(5); // menu | global | personal | community
     if (section === 'menu') {
-      await editTelegramMessage(token, chatId, msgId, helpTextForSection('menu'), helpMenuKeyboard(), threadId);
+      await editTelegramMessage(token, chatId, msgId, helpTextForSection('menu'), helpMenuKeyboard(), threadId, null);
     } else if (section === 'global' || section === 'personal' || section === 'community') {
-      await editTelegramMessage(token, chatId, msgId, helpTextForSection(section), helpBackKeyboard(), threadId);
+      await editTelegramMessage(token, chatId, msgId, helpTextForSection(section), helpBackKeyboard(), threadId, null);
     }
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
@@ -6825,7 +6920,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   const dumpLinkMode = (binding?.dump_link_mode || 'smart').toLowerCase();
 
   const STAFF_OR_ABOVE = new Set([
-    '/delete', '/edit', '/topic', '/dumpall', '/dumpsmart', '/admin', '/demote', '/clear',
+    '/delete', '/edit', '/topic', '/dumpall', '/dumpsmart', '/admin', '/demote', '/clear', '/kick',
     '/personal', '/community', '/mode', '/community_verify', '/verify_community', '/communityverify',
     '/community_delete', '/delete_community', '/cdelete',
     // every /clear_db alias must be listed, or the alias skips this gate entirely
@@ -6917,20 +7012,24 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   if (cmd === '/community_join' || cmd === '/cjoin' || cmd === '/join_community') {
     const cid = rest.trim().split(/\s+/)[0] || '';
     if (!cid) {
+      await logOperationalEvent(env, '⚠️ Community join failed', `Telegram user ${tgUserId || 'unknown'} did not provide a community id`);
       await sendTelegramMessage(token, chatId, 'Usage: /community_join <community_id>\nGet id from owner: /community_list', forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     if (!athenaUser) {
+      await logOperationalEvent(env, '⚠️ Community join blocked', `Telegram user ${tgUserId || 'unknown'} is not logged in; requested ${cid}`);
       await sendTelegramMessage(token, chatId,
         'Login on the website with Telegram first, then send /community_join ' + cid, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     const c = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(cid).first();
     if (!c) {
+      await logOperationalEvent(env, '⚠️ Community join failed', `Unknown community ${cid} requested by ${tgUserId || athenaUser.id}`, athenaUser.id);
       await sendTelegramMessage(token, chatId, `Community not found: ${cid}`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     if (await isBannedFromCommunity(env, cid, athenaUser)) {
+      await logOperationalEvent(env, '🚫 Community join blocked', `${athenaUser.username || athenaUser.display_name || athenaUser.id} is banned from ${c.name} (${cid})`, athenaUser.id);
       await sendTelegramMessage(token, chatId, [
         bannedFromCommunityBotMsg(cid, c.name),
         '',
@@ -6944,6 +7043,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       const tgCheckId = tgUserId || (await resolveTgApiIdForUser(athenaUser));
       const inGroup = await isTelegramUserInCommunityGroup(env, cid, tgCheckId);
       if (!inGroup) {
+        await logOperationalEvent(env, '⚠️ Community join blocked', `${athenaUser.username || athenaUser.display_name || athenaUser.id} is not in the Telegram group for ${c.name}`, athenaUser.id);
         await sendTelegramMessage(token, chatId, [
           'First join the Telegram group for this community.',
           'Then come back and send:',
@@ -6980,18 +7080,8 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        for (const god of (godUsers || [])) {
          await createNotification(env, { userId: god.id, type: 'community_join', title: 'New Community Member', body: notifyMsg }).catch(() => {});
        }
-       // Telegram notification: send to log channel if set, otherwise to GOD DMs
-       const logChannelId = await getLogChannelId(env, godUsers?.[0]?.id);
-       const notifyText = `👤 ${boldHtml(joinerLabel)}${joinerTgId ? ` | ${codeHtml(String(joinerTgId))}` : ''} joined ${boldHtml(c.name)} community`;
-       if (logChannelId && env.TELEGRAM_BOT_TOKEN) {
-         await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, logChannelId, notifyText).catch(() => {});
-       } else {
-         for (const ownerId of ownerIds) {
-           if (ownerId && env.TELEGRAM_BOT_TOKEN) {
-             await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
-           }
-         }
-       }
+        const notifyText = `👤 ${boldHtml(joinerLabel)}${joinerTgId ? ` | ${codeHtml(String(joinerTgId))}` : ''} joined ${boldHtml(c.name)} community`;
+        await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id);
      } catch (_) {}
      await sendTelegramMessage(token, chatId, [
       `Joined community: ${c.name}`,
@@ -7166,6 +7256,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         binding = await env.DB.prepare('SELECT * FROM community_bots WHERE id = ?').bind(botId).first();
       }
 
+      await logOperationalEvent(env, '🆕 Community created', `${chatTitle} (${id}) by ${owner.username || owner.display_name || owner.id}`, owner.id);
       await sendTelegramMessage(replyToken, chatId, [
         'Community linked to Athena ✓',
         `${chatTitle} | ${id}`,
@@ -7312,6 +7403,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     try {
       await env.DB.prepare('DELETE FROM personal_links WHERE user_id = ?').bind(athenaUser.id).run();
     } catch (_) {}
+    await logOperationalEvent(env, '🧹 Personal database cleared', `${athenaUser.username || athenaUser.display_name || athenaUser.id} cleared personal links`, athenaUser.id);
     await sendTelegramMessage(token, chatId, 'Personal DB cleared for your GOD account.', forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
@@ -7512,11 +7604,11 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
-  // ---- /clear <@user|id> — remove from community (admin+; admin cannot clear owner/god/admin) ----
-  if (cmd === '/clear') {
+  // ---- /kick (alias /clear) — remove from community without a Telegram ban ----
+  if (cmd === '/clear' || cmd === '/kick') {
     const cid = binding?.community_id;
     if (!cid) {
-      await sendTelegramMessage(token, chatId, 'Use /clear in a verified community group (or with community linked).', forumThreadId);
+      await sendTelegramMessage(token, chatId, 'Use /kick in a verified community group (or with community linked).', forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     if (!isCommAdmin && !isGod) {
@@ -7535,7 +7627,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     } else {
       const arg = rest.trim().split(/\s+/)[0] || '';
       if (!arg) {
-        await sendTelegramMessage(token, chatId, 'Usage: /clear <@username|telegram_id>\nOr reply to their message with /clear', forumThreadId);
+        await sendTelegramMessage(token, chatId, 'Usage: /kick <@username|telegram_id>\nOr reply to their message with /kick', forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
       targetUser = await resolveTgUserByUsernameOrId(env, arg);
@@ -7549,14 +7641,14 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     }
     // Protect GOD
     if (isGodTgId(targetTg, env) || (targetUser && await isGodUserAsync(targetUser, env))) {
-      await sendTelegramMessage(token, chatId, 'Cannot /clear GOD rank.', forumThreadId);
+      await sendTelegramMessage(token, chatId, 'Cannot /kick GOD rank.', forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     const targetRole = targetUser ? await getCommunityMemberRole(env, cid, targetUser) : null;
     // Admin cannot clear owner or other admins; owner/god can clear admin+member
     if (!isGod && userRank === 'admin') {
       if (targetRole === 'owner' || targetRole === 'admin') {
-        await sendTelegramMessage(token, chatId, 'Admins can only /clear member rank (not owner/admin).', forumThreadId);
+        await sendTelegramMessage(token, chatId, 'Admins can only /kick member rank (not owner/admin).', forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
       // platform admin ids
@@ -7564,7 +7656,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         `SELECT 1 FROM community_admins WHERE community_id = ? AND platform = 'telegram' AND platform_user_id = ?`
       ).bind(cid, targetTg).first();
       if (padm) {
-        await sendTelegramMessage(token, chatId, 'Admins can only /clear member rank (not admin).', forumThreadId);
+        await sendTelegramMessage(token, chatId, 'Admins can only /kick member rank (not admin).', forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
     }
@@ -7572,7 +7664,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       // only god can clear owner? actually owner clearing self weird; other owners N/A
       const creator = await env.DB.prepare('SELECT creator_id FROM communities WHERE id = ?').bind(cid).first();
       if (targetUser && creator?.creator_id === targetUser.id) {
-        await sendTelegramMessage(token, chatId, 'Cannot /clear community owner.', forumThreadId);
+        await sendTelegramMessage(token, chatId, 'Cannot /kick community owner.', forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
     }
@@ -7587,6 +7679,12 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         `DELETE FROM community_admins WHERE community_id = ? AND platform = 'telegram' AND platform_user_id = ?`
       ).bind(cid, targetTg).run();
     } catch (_) {}
+    await logOperationalEvent(
+      env,
+      '👢 Community member removed',
+      `${targetName} (${targetTg}) removed from ${cid} by ${senderName}`,
+      athenaUser?.id
+    );
     // not a ban — can rejoin via /community_join
     await sendTelegramMessage(token, chatId,
       'Removed from community: ' + targetName + ' (' + targetTg + ')\nThey can /community_join ' + cid + ' again after login.',
@@ -8287,39 +8385,13 @@ Rules:
       await sendTelegramMessage(token, chatId, 'Not linked.', forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    // /edit query | new notes   OR  /edit query | title: X | notes: Y
-    let payload = rest;
-    if ((!payload || !payload.includes('|')) && msg.reply_to_message) {
-      const ru = extractUrlsFromTelegramMessage(msg.reply_to_message);
-      const rt = (msg.reply_to_message.text || msg.reply_to_message.caption || '').trim();
-      const left = ru[0] || rt.split(/\s+/)[0] || '';
-      if (left && rest) payload = `${left} | ${rest}`;
-      else if (left) payload = left;
-    }
-    if (!payload || !payload.includes('|')) {
+    const edit = parseTelegramEditPayload(rest, msg.reply_to_message);
+    if (!edit) {
       await sendTelegramMessage(token, chatId,
         'Usage:\n/edit <url or title words> | <new description>\n/edit <url> | title: New Title | notes: New notes\nOr reply to a saved-link message: /edit | new description', forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    const pipe = payload.indexOf('|');
-    const queryPart = payload.slice(0, pipe).trim();
-    const editPart = payload.slice(pipe + 1).trim();
-    if (!queryPart || !editPart) {
-      await sendTelegramMessage(token, chatId, 'Need both search side and edit side, separated by |', forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-
-    let newTitle = null;
-    let newNotes = null;
-    if (/title\s*:/i.test(editPart) || /notes\s*:/i.test(editPart)) {
-      const tm = editPart.match(/title\s*:\s*([\s\S]*?)(?=\|\s*notes\s*:|$)/i);
-      const nm = editPart.match(/notes\s*:\s*([\s\S]*?)$/i);
-      if (tm) newTitle = tm[1].replace(/\|\s*$/, '').trim();
-      if (nm) newNotes = nm[1].trim();
-      if (newTitle == null && newNotes == null) newNotes = editPart;
-    } else {
-      newNotes = editPart;
-    }
+    const { queryPart, newTitle, newNotes } = edit;
 
     const scope = binding.scope || (binding.community_id ? 'community' : 'personal');
     let rows;
@@ -8348,6 +8420,8 @@ Rules:
       rows = await candidateLinks(env, 'community', binding.community_id, queryPart);
     }
 
+    // Documents are searchable but not editable through the link command.
+    rows = rows.filter(row => row?.url);
     // Match by exact url first, then fuzzy
     const qUrls = extractUrls(queryPart);
     let hit = null;
@@ -8367,17 +8441,37 @@ Rules:
 
     const title = newTitle != null ? newTitle : hit.title;
     const notes = newNotes != null ? newNotes : hit.notes;
-    if (scope === 'personal') {
-      await env.DB.prepare(
-        'UPDATE personal_links SET title = ?, notes = ? WHERE id = ? AND user_id = ?'
-      ).bind(title, notes, hit.id, athenaUser.id).run();
-    } else {
-      await env.DB.prepare(
-        'UPDATE links SET title = ?, notes = ? WHERE id = ?'
-      ).bind(title, notes, hit.id).run();
+    await ensureLinkMetaColumns(env);
+    await ensureSearchColumns(env);
+    try {
+      if (scope === 'personal') {
+        await env.DB.prepare(
+          'UPDATE personal_links SET title = ?, notes = ?, metadata_version = 2, search_blob = NULL WHERE id = ? AND user_id = ?'
+        ).bind(title, notes, hit.id, athenaUser.id).run();
+      } else {
+        await env.DB.prepare(
+          'UPDATE links SET title = ?, notes = ?, metadata_version = 2, search_blob = NULL WHERE id = ?'
+        ).bind(title, notes, hit.id).run();
+      }
+    } catch (_) {
+      if (scope === 'personal') {
+        await env.DB.prepare(
+          'UPDATE personal_links SET title = ?, notes = ? WHERE id = ? AND user_id = ?'
+        ).bind(title, notes, hit.id, athenaUser.id).run();
+      } else {
+        await env.DB.prepare(
+          'UPDATE links SET title = ?, notes = ? WHERE id = ?'
+        ).bind(title, notes, hit.id).run();
+      }
+    }
+    const storeScopeKey = scope === 'personal' ? athenaUser.id : binding.community_id;
+    const storePatch = await storeMutateLink(env, scope, storeScopeKey, hit.id, { title, notes });
+    if (storePatch.handled && !storePatch.ok) {
+      await sendTelegramMessage(token, chatId, `Updated in database, but storage sync failed: ${storePatch.error}`, forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
     }
     await sendTelegramMessage(token, chatId,
-      `Updated:\n${title || hit.url}\n${hit.url}\n${String(notes || '')}`, forumThreadId);
+      `Updated:\nTitle: ${title || '(untitled)'}\nURL: ${hit.url}\nNotes: ${String(notes || '(empty)')}`, forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
@@ -8411,7 +8505,28 @@ Rules:
         } else {
           const add = await savePersonalUrl(env, athenaUser.id, rawUrl, senderName);
           if (add.duplicate) await sendTelegramMessage(token, chatId, `Website is already added: ${rawUrl}`, forumThreadId);
-          else await sendTelegramMessage(token, chatId, `Was not in DB — added to personal: ${rawUrl}`, forumThreadId);
+          else {
+            try {
+              const vocab = await recentTagsForScope(env, 'personal', athenaUser.id);
+              const ai = await aiDescribeAndTag(env, rawUrl, {
+                title: add.title,
+                notes: add.notes,
+                content: add.content
+              }, vocab);
+              if (ai && add.id) {
+                const tags = [...new Set([...(ai.tags || []), 'telegram', 'dump'])];
+                await ensureSearchColumns(env);
+                await env.DB.prepare(
+                  'UPDATE personal_links SET notes = ?, tags = ?, metadata_version = 2, search_blob = NULL WHERE id = ?'
+                ).bind(ai.description || add.notes || '', JSON.stringify(tags), add.id).run();
+                await storeMutateLink(env, 'personal', athenaUser.id, add.id, {
+                  notes: ai.description || add.notes || '',
+                  tags
+                });
+              }
+            } catch (_) {}
+            await sendTelegramMessage(token, chatId, `Was not in DB — added to personal: ${rawUrl}`, forumThreadId);
+          }
         }
       } else {
         if (!binding.community_id) {
@@ -8444,6 +8559,21 @@ Rules:
               'INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
             ).bind(id, binding.community_id, rawUrl, urlHash, meta.title, meta.notes, JSON.stringify(['telegram']), senderName, Date.now()).run();
           }
+          try {
+            const vocab = await recentTagsForScope(env, 'community', binding.community_id);
+            const ai = await aiDescribeAndTag(env, rawUrl, meta, vocab);
+            if (ai) {
+              const tags = [...new Set([...(ai.tags || []), 'telegram'])];
+              await ensureSearchColumns(env);
+              await env.DB.prepare(
+                'UPDATE links SET notes = ?, tags = ?, metadata_version = 2, search_blob = NULL WHERE id = ?'
+              ).bind(ai.description || meta.notes || '', JSON.stringify(tags), id).run();
+              await storeMutateLink(env, 'community', binding.community_id, id, {
+                notes: ai.description || meta.notes || '',
+                tags
+              });
+            }
+          } catch (_) {}
           await sendTelegramMessage(token, chatId, `Was not in DB — added to community: ${rawUrl}`, forumThreadId);
         }
       }
@@ -9637,4 +9767,11 @@ function formatSavedLinkReply(kindLabel, title, rawUrl, ai, fallbackNotes = '') 
   return lines.join('\n');
 }
 
-export { buildSearchBlob, expandServerSearchTerms, fuzzyMatchLinks, resultLimitClause };
+export {
+  buildSearchBlob,
+  expandServerSearchTerms,
+  fuzzyMatchLinks,
+  helpTextForSection,
+  parseTelegramEditPayload,
+  resultLimitClause
+};

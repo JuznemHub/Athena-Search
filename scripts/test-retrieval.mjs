@@ -2,10 +2,33 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 
-import { buildSearchBlob, fuzzyMatchLinks, resultLimitClause } from '../worker/index.js';
+import {
+  buildSearchBlob,
+  fuzzyMatchLinks,
+  helpTextForSection,
+  parseTelegramEditPayload,
+  resultLimitClause
+} from '../worker/index.js';
 
 assert.equal(resultLimitClause(null), '');
 assert.equal(resultLimitClause(20), ' LIMIT 20');
+assert.match(helpTextForSection('personal'), /\/search <query>/);
+assert.match(helpTextForSection('community'), /\/clear_db <id>/);
+
+const replyEdit = parseTelegramEditPayload('| title: Correct title | notes: Correct notes', {
+  text: 'Saved link https://example.com/item'
+});
+assert.deepEqual(replyEdit, {
+  queryPart: 'https://example.com/item',
+  newTitle: 'Correct title',
+  newNotes: 'Correct notes'
+});
+const shorthandEdit = parseTelegramEditPayload('https://example.com/item | notes only');
+assert.deepEqual(shorthandEdit, {
+  queryPart: 'https://example.com/item',
+  newTitle: null,
+  newNotes: 'notes only'
+});
 
 const document = {
   filename: 'README.md',
