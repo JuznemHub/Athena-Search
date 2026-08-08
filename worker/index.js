@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.26',
+          version: '1.0.27',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -9761,9 +9761,70 @@ async function enrichLinkFields(env, rawUrl, { title, notes } = {}) {
  * Markdown entry too. Bounded concurrency; one bad site only costs its own
  * 9s timeout.
  */
-function isFreeTierModel(modelId) {
+const FREE_MODEL_CACHE = new Map();
+const FREE_MODEL_LIST_TTL_MS = 60 * 60 * 1000;
+
+function isModelFreeEntry(entry) {
+  const p = entry.pricing || entry.cost || {};
+  const vals = [p.prompt, p.completion, p.input, p.output, entry.input, entry.output];
+  for (const v of vals) {
+    if (v === 0 || v === '0' || v === '0.0' || v === '0.00') return true;
+  }
+  if (p && typeof p === 'object') {
+    const nums = Object.values(p).map(v => Number(v));
+    if (nums.length && nums.every(n => n === 0)) return true;
+  }
+  return false;
+}
+
+async function fetchModelList(baseUrl, env, apiKey) {
+  const root = cleanApiBase(baseUrl);
+  if (!root) return null;
+  const url = `${root}/models`;
+  try {
+    if (!(await isSafeExternalUrl(new URL(url), env))) return null;
+  } catch (_) { return null; }
+  const headers = {};
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  try {
+    const res = await fetchWithTimeout(url, { headers, env }, 5000);
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    if (!data) return null;
+    const list = Array.isArray(data.data) ? data.data : Array.isArray(data.models) ? data.models : Array.isArray(data) ? data : [];
+    return list;
+  } catch (_) { return null; }
+}
+
+async function isFreeTierModel(modelId, baseUrl, env, apiKey) {
   const m = String(modelId || '').toLowerCase();
-  return m.includes('free') || m === 'big-pickle';
+  if (m.includes('free')) return true;
+  const root = cleanApiBase(baseUrl);
+  if (!root) return false;
+  let cache = FREE_MODEL_CACHE.get(root);
+  const now = Date.now();
+  if (cache && cache.until > now) {
+    if (cache.map.has(m)) return cache.map.get(m);
+    const slug = m.split('/').pop();
+    if (slug && cache.map.has(slug)) return cache.map.get(slug);
+    return false;
+  }
+  const list = await fetchModelList(baseUrl, env, apiKey);
+  if (!list) return false;
+  const map = new Map();
+  for (const entry of list) {
+    const id = String(entry.id || entry.model || '').toLowerCase();
+    if (!id) continue;
+    const free = isModelFreeEntry(entry);
+    map.set(id, free);
+    const slug = id.split('/').pop();
+    if (slug) map.set(slug, free);
+  }
+  FREE_MODEL_CACHE.set(root, { map, until: now + FREE_MODEL_LIST_TTL_MS });
+  if (map.has(m)) return map.get(m);
+  const slug = m.split('/').pop();
+  if (slug && map.has(slug)) return map.get(slug);
+  return false;
 }
 
 async function enrichLinksInBackground(env, scope, key, links) {
@@ -9771,7 +9832,7 @@ async function enrichLinksInBackground(env, scope, key, links) {
   const vocab = await recentTagsForScope(env, scope, key);
   let aiConfig = null;
   try { aiConfig = await getInstanceAiConfig(env); } catch (_) {}
-  const isFree = isFreeTierModel(aiConfig?.model);
+  const isFree = await isFreeTierModel(aiConfig?.model, aiConfig?.base_url, env, aiConfig?.api_key);
   const CONCURRENCY = isFree ? 1 : 4;
   let enrichedLinks = links;
   if (isFree && links.length > 3) enrichedLinks = links.slice(0, 3);
