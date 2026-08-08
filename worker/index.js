@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.22',
+          version: '1.0.23',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -4459,6 +4459,7 @@ function cleanApiBase(baseUrl) {
   root = root.replace(/\/+$/g, '');
   // drop accidental path suffixes
   root = root.replace(/\/chat\/completions$/i, '');
+  root = root.replace(/\/responses$/i, '');
   root = root.replace(/\/messages$/i, '');
   root = root.replace(/\/+$/g, '');
   // OpenCode Zen / Go: ensure /v1 (saved as .../zen/go without /v1 → 404)
@@ -4568,10 +4569,26 @@ function isPublicIp(ip) {
   return true;
 }
 
-function resolveChatEndpoint(baseUrl, mode) {
+function resolveChatEndpoint(baseUrl, mode, model = '') {
   let root = cleanApiBase(baseUrl);
   if (!root) return null;
   if (!/^https?:\/\//i.test(root)) root = `https://${root}`;
+
+  const modelId = String(model || '').toLowerCase();
+
+  // OpenCode Zen/Go: some models use Responses or Anthropic Messages endpoints
+  if (/opencode\.ai\/zen/i.test(root)) {
+    if (/^gpt-5(\.|$|-)/i.test(modelId) || modelId.includes('gpt-5')) {
+      if (/\/responses$/i.test(root)) return root;
+      if (/\/v1$/i.test(root)) return `${root}/responses`;
+      return `${root}/v1/responses`;
+    }
+    if (/^(minimax|qwen)/i.test(modelId)) {
+      if (/\/messages$/i.test(root)) return root;
+      if (/\/v1$/i.test(root)) return `${root}/messages`;
+      return `${root}/v1/messages`;
+    }
+  }
 
   if (mode === 'anthropic') {
     if (/\/messages$/i.test(root)) return root;
@@ -4591,6 +4608,14 @@ function normalizeModelId(model, baseUrl) {
   // OpenCode config uses opencode-go/deepseek-v4-flash; API wants deepseek-v4-flash
   if (/opencode\.ai/i.test(baseUrl || '') || /^opencode/i.test(m)) {
     m = m.replace(/^opencode-go\//i, '').replace(/^opencode\//i, '');
+  }
+  // Normalize display names like "Big Pickle" -> "big-pickle"
+  // Handles caps, spaces, underscores pasted from UI/docs
+  if (/[A-Z\s]/.test(m)) {
+    m = m.toLowerCase().replace(/[\s_]+/g, '-').replace(new RegExp('[^a-z0-9/.-]', 'g'), '');
+    m = m.replace(/-+/g, '-').replace(/^-|-$/g, '');
+  } else {
+    m = m.trim().replace(/-+/g, '-');
   }
   return m;
 }
@@ -4658,7 +4683,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
     return Response.json({ success: false, error: 'Invalid baseUrl' }, { status: 400, headers: corsHeaders });
   }
 
-  const endpoint = resolveChatEndpoint(baseUrl, mode);
+  const endpoint = resolveChatEndpoint(baseUrl, mode, model);
   if (!endpoint) {
     return Response.json({ success: false, error: 'Could not resolve chat endpoint' }, { status: 400, headers: corsHeaders });
   }
@@ -4691,6 +4716,23 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
             system: system || undefined,
             messages: messages || [{ role: 'user', content: userMsg }],
             stream: true
+          })
+        }, AI_PROXY_TIMEOUT_MS);
+      } else if (endpoint.endsWith('/responses')) {
+        const input = messages
+          ? messages.map(m => `${m.role}: ${m.content}`).join('\n\n')
+          : (system ? `${system}\n\n${userMsg}` : userMsg);
+        upstreamRes = await fetchWithTimeout(endpoint, {
+          method: 'POST',
+          env,
+          redirect: 'error',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`
+          },
+          body: JSON.stringify({
+            model,
+            input
           })
         }, AI_PROXY_TIMEOUT_MS);
       } else {
@@ -4740,6 +4782,27 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
           endpoint,
           model
         }, { status: 502, headers: corsHeaders });
+      }
+
+      if (endpoint.endsWith('/responses')) {
+        const data = await upstreamRes.json().catch(() => ({}));
+        const content = data.output_text
+          || (Array.isArray(data.output) ? data.output.map(o => Array.isArray(o.content) ? o.content.map(c => c.text || '').join('') : '').join('\n') : '')
+          || data.choices?.[0]?.message?.content || '';
+        if (!wantStream) {
+          return Response.json({ success: true, content, thinking: null, endpoint, model, usage: null }, { headers: corsHeaders });
+        }
+        const encoder = new TextEncoder();
+        return new Response(new ReadableStream({
+          start(controller) {
+            const chunk = 40;
+            for (let i = 0; i < content.length; i += chunk) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ delta: content.slice(i, i + chunk) })}\n\n`));
+            }
+            controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
+            controller.close();
+          }
+        }), { headers: { ...corsHeaders, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' } });
       }
 
       // Client that can't consume a stream (older frontends) gets a classic
@@ -8182,9 +8245,9 @@ Rules:
      const thinkMsg = await sendTelegramFormatted(token, chatId, `${boldHtml('🧠')} Thinking with your${scope === 'personal' ? ' personal' : ''} brain…`, forumThreadId);
      const thinkMsgId = thinkMsg.message_id;
 
-     const endpoint = resolveChatEndpoint(cfg.base_url, cfg.mode || 'openai');
-     const model = normalizeModelId(cfg.model, cfg.base_url);
-      const aiMode = (cfg.mode || 'openai').toLowerCase();
+      const model = normalizeModelId(cfg.model, cfg.base_url);
+      const endpoint = resolveChatEndpoint(cfg.base_url, cfg.mode || 'openai', model);
+       const aiMode = (cfg.mode || 'openai').toLowerCase();
 
       try {
         let content = '';
@@ -8207,6 +8270,18 @@ Rules:
               }
               const data = await res.json().catch(() => ({}));
               content = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
+            } else if (endpoint.endsWith('/responses')) {
+              const res = await fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.api_key}` },
+                body: JSON.stringify({ model, input: `${systemPrompt}\n\n${q}`, stream: false })
+              });
+              if (!res.ok) {
+                const errText = await res.text().catch(() => '');
+                throw new Error(`HTTP ${res.status}: ${errText.slice(0, 200)}`);
+              }
+              const data = await res.json().catch(() => ({}));
+              content = data.output_text || data.output?.map(o => o.content?.map(c => c.text).join('')).join('\n') || data.choices?.[0]?.message?.content || '';
             } else {
               const res = await fetch(endpoint, {
                 method: 'POST',
@@ -9788,7 +9863,7 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
   if (!baseUrl || !model) return null;
   let endpoint;
   try {
-    const ep = resolveChatEndpoint(baseUrl, cfg.mode || 'openai');
+    const ep = resolveChatEndpoint(baseUrl, cfg.mode || 'openai', model);
     if (!(await isSafeExternalUrl(new URL(ep), env))) return null;
     endpoint = ep;
   } catch (_) { return null; }
@@ -9830,6 +9905,9 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
   if (mode === 'anthropic') {
     headers = { 'Content-Type': 'application/json', 'x-api-key': cfg.api_key, 'anthropic-version': '2023-06-01' };
     payload = { model, max_tokens: maxTok, system, messages: [{ role: 'user', content: user }], stream: false };
+  } else if (endpoint.endsWith('/responses')) {
+    headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cfg.api_key}` };
+    payload = { model, input: `${system}\n\n${user}`, stream: false };
   } else {
     headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cfg.api_key}` };
     payload = { model, max_tokens: maxTok, messages: [
@@ -9840,7 +9918,7 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
 
   let text = '';
   try {
-    payload.stream = true;
+    if (!endpoint.endsWith('/responses')) payload.stream = true;
     const res = await fetchWithTimeout(endpoint, { method: 'POST', headers, body: JSON.stringify(payload), env }, AI_PROXY_TIMEOUT_MS);
     if (!res.ok) {
       const errorText = await res.text().catch(() => '');
@@ -9871,6 +9949,10 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
       const data = await res.json();
       if (mode === 'anthropic') {
         text = String(data?.content?.[0]?.text || '');
+      } else if (endpoint.endsWith('/responses')) {
+        text = String(data.output_text
+          || (Array.isArray(data.output) ? data.output.map(o => Array.isArray(o.content) ? o.content.map(c => c.text || '').join('') : '').join('\n') : '')
+          || data.choices?.[0]?.message?.content || '');
       } else {
         const content = data?.choices?.[0]?.message?.content;
         text = typeof content === 'string'
@@ -9905,10 +9987,13 @@ export {
   buildSearchBlob,
   expandServerSearchTerms,
   fuzzyMatchLinks,
+  cleanApiBase,
   getInstanceAiConfig,
   helpTextForSection,
+  normalizeModelId,
   parseAiDescribeResponse,
   parseTelegramEditPayload,
+  resolveChatEndpoint,
   resultLimitClause,
   syncAiConfigToPeer
 };

@@ -4,15 +4,28 @@ import vm from 'node:vm';
 
 import {
   buildSearchBlob,
+  cleanApiBase,
   fuzzyMatchLinks,
   helpTextForSection,
+  normalizeModelId,
   parseAiDescribeResponse,
   parseTelegramEditPayload,
+  resolveChatEndpoint,
   resultLimitClause
 } from '../worker/index.js';
 
 assert.equal(resultLimitClause(null), '');
 assert.equal(resultLimitClause(20), ' LIMIT 20');
+assert.equal(normalizeModelId('Big Pickle', 'https://opencode.ai/zen/v1'), 'big-pickle');
+assert.equal(normalizeModelId('DeepSeek V4 Flash', 'https://opencode.ai/zen/v1'), 'deepseek-v4-flash');
+assert.equal(normalizeModelId('opencode/big-pickle', 'https://opencode.ai/zen/v1'), 'big-pickle');
+assert.equal(normalizeModelId('openai/gpt-4o-mini', 'https://openrouter.ai/api/v1'), 'openai/gpt-4o-mini');
+assert.equal(cleanApiBase('https://opencode.ai/zen/v1/chat/completions'), 'https://opencode.ai/zen/v1');
+assert.equal(resolveChatEndpoint('https://opencode.ai/zen/v1', 'openai', 'big-pickle'), 'https://opencode.ai/zen/v1/chat/completions');
+assert.equal(resolveChatEndpoint('https://opencode.ai/zen/v1', 'openai', 'gpt-5.6-sol'), 'https://opencode.ai/zen/v1/responses');
+assert.equal(resolveChatEndpoint('https://opencode.ai/zen/go/v1', 'openai', 'minimax-m3'), 'https://opencode.ai/zen/go/v1/messages');
+assert.equal(resolveChatEndpoint('https://api.openai.com/v1', 'openai', 'gpt-4o-mini'), 'https://api.openai.com/v1/chat/completions');
+assert.equal(resolveChatEndpoint('https://api.anthropic.com', 'anthropic', 'claude-sonnet-4-20250514'), 'https://api.anthropic.com/v1/messages');
 assert.match(helpTextForSection('personal'), /\/search <query>/);
 assert.match(helpTextForSection('community'), /\/clear_db <id>/);
 

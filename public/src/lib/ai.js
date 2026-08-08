@@ -22,6 +22,18 @@
       mode: 'openai',
       model: 'deepseek-v4-flash'
     },
+    opencode_big_pickle: {
+      label: 'Big Pickle (OpenCode Zen)',
+      baseUrl: 'https://opencode.ai/zen/v1',
+      mode: 'openai',
+      model: 'big-pickle'
+    },
+    cohere_command: {
+      label: 'Cohere Command',
+      baseUrl: 'https://api.cohere.ai/compatibility/v1',
+      mode: 'openai',
+      model: 'command-r-plus'
+    },
     custom: { label: 'Custom (OpenAI-compatible)', baseUrl: '', mode: 'openai', model: '' }
   };
 
@@ -48,6 +60,12 @@
     let m = String(model || '').trim().replace(/^['"]|['"]$/g, '');
     if (/opencode\.ai/i.test(baseUrl || '') || /^opencode/i.test(m)) {
       m = m.replace(/^opencode-go\//i, '').replace(/^opencode\//i, '');
+    }
+    if (/[A-Z\s]/.test(m)) {
+      m = m.toLowerCase().replace(/[\s_]+/g, '-').replace(new RegExp('[^a-z0-9/.-]', 'g'), '');
+      m = m.replace(/-+/g, '-').replace(/^-|-$/g, '');
+    } else {
+      m = m.trim().replace(/-+/g, '-');
     }
     return m;
   }
