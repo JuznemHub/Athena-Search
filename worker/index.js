@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.23',
+          version: '1.0.24',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -1785,10 +1785,17 @@ async function handleTelegramWebAppAuth(request, env, corsHeaders, url) {
        for (const god of (godUsers || [])) {
          await createNotification(env, { userId: god.id, type: 'login', title: 'Website Login', body: loginMsg }).catch(() => {});
        }
-        const notifyText = `🌐 ${boldHtml(loginLabel)}${loginTgId ? ` | ${codeHtml(String(loginTgId))}` : ''} logged in to website`;
-        await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id);
-     } catch (_) {}
-     const owner = await isInstanceOwnerUserAsync(user, env);
+         const notifyText = `🌐 ${boldHtml(loginLabel)}${loginTgId ? ` | ${codeHtml(String(loginTgId))}` : ''} logged in to website`;
+        const sent = await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id);
+        if (!sent) {
+          for (const ownerId of ownerIds) {
+            if (ownerId && env.TELEGRAM_BOT_TOKEN) {
+              await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
+            }
+          }
+        }
+      } catch (_) {}
+      const owner = await isInstanceOwnerUserAsync(user, env);
     const elevated = owner || (await isElevatedUser(user, env));
     const cookieMaxAge = Math.floor(SESSION_TTL_MS / 1000);
     return Response.json({
@@ -2063,9 +2070,16 @@ async function handleTelegramCallback(url, env, corsHeaders, request) {
      for (const god of (godUsers || [])) {
        await createNotification(env, { userId: god.id, type: 'login', title: 'Website Login', body: loginMsg }).catch(() => {});
      }
-      const notifyText = `🌐 ${boldHtml(loginLabel)}${loginTgId ? ` | ${codeHtml(String(loginTgId))}` : ''} logged in to website (Telegram)`;
-      await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id);
-   } catch (_) {}
+       const notifyText = `🌐 ${boldHtml(loginLabel)}${loginTgId ? ` | ${codeHtml(String(loginTgId))}` : ''} logged in to website (Telegram)`;
+      const sent = await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id);
+      if (!sent) {
+        for (const ownerId of ownerIds) {
+          if (ownerId && env.TELEGRAM_BOT_TOKEN) {
+            await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
+          }
+        }
+      }
+    } catch (_) {}
    // Consume state only after success
   try {
     await env.DB.prepare('DELETE FROM oauth_states WHERE state = ?').bind(state).run();
@@ -2204,9 +2218,16 @@ async function handleDiscordCallback(url, env, request) {
      for (const god of (godUsers || [])) {
        await createNotification(env, { userId: god.id, type: 'login', title: 'Website Login', body: loginMsg }).catch(() => {});
      }
-      const notifyText = `🌐 ${boldHtml(loginLabel)} logged in to website (Discord)`;
-      await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id);
-   } catch (_) {}
+       const notifyText = `🌐 ${boldHtml(loginLabel)} logged in to website (Discord)`;
+      const sent = await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id);
+      if (!sent) {
+        for (const ownerId of ownerIds) {
+          if (ownerId && env.TELEGRAM_BOT_TOKEN) {
+            await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
+          }
+        }
+      }
+    } catch (_) {}
    // Consume the state on success (single-use).
    try { await env.DB.prepare('DELETE FROM oauth_states WHERE state = ?').bind(state).run(); } catch (_) {}
    const sameOrigin = frontendOrigin(env, url) === url.origin;
@@ -2442,12 +2463,19 @@ async function handleJoinCommunity(request, user, env, corsHeaders) {
      for (const god of (godUsers || [])) {
        await createNotification(env, { userId: god.id, type: 'community_join', title: 'New Community Member', body: notifyMsg }).catch(() => {});
      }
-      const notifyText = `👤 ${boldHtml(joinerLabel)}${joinerTgId ? ` | ${codeHtml(String(joinerTgId))}` : ''} joined ${boldHtml(c.name)} community`;
-      await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id);
-   } catch (_) {}
-   return Response.json({
-     success: true,
-     already_member: false,
+       const notifyText = `👤 ${boldHtml(joinerLabel)}${joinerTgId ? ` | ${codeHtml(String(joinerTgId))}` : ''} joined ${boldHtml(c.name)} community`;
+      const sent = await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id);
+      if (!sent) {
+        for (const ownerId of ownerIds) {
+          if (ownerId && env.TELEGRAM_BOT_TOKEN) {
+            await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
+          }
+        }
+      }
+    } catch (_) {}
+    return Response.json({
+      success: true,
+      already_member: false,
      community: { ...c, role, is_staff: role === 'owner' }
    }, { headers: corsHeaders });
   }
@@ -7234,11 +7262,18 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        for (const god of (godUsers || [])) {
          await createNotification(env, { userId: god.id, type: 'community_join', title: 'New Community Member', body: notifyMsg }).catch(() => {});
        }
-        const notifyText = `👤 ${boldHtml(joinerLabel)}${joinerTgId ? ` | ${codeHtml(String(joinerTgId))}` : ''} joined ${boldHtml(c.name)} community`;
-        await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id);
-     } catch (_) {}
-     await sendTelegramMessage(token, chatId, [
-      `Joined community: ${c.name}`,
+         const notifyText = `👤 ${boldHtml(joinerLabel)}${joinerTgId ? ` | ${codeHtml(String(joinerTgId))}` : ''} joined ${boldHtml(c.name)} community`;
+        const sent = await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id);
+        if (!sent) {
+          for (const ownerId of ownerIds) {
+            if (ownerId && env.TELEGRAM_BOT_TOKEN) {
+              await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
+            }
+          }
+        }
+      } catch (_) {}
+      await sendTelegramMessage(token, chatId, [
+       `Joined community: ${c.name}`,
       `id: ${c.id}`,
       '',
       'Open the website → Communities to see it and dump links.',
