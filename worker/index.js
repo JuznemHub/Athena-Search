@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.24',
+          version: '1.0.25',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -9762,7 +9762,7 @@ async function enrichLinkFields(env, rawUrl, { title, notes } = {}) {
  * 9s timeout.
  */
 async function enrichLinksInBackground(env, scope, key, links) {
-  const CONCURRENCY = 4;
+  const CONCURRENCY = 1;
   await ensureSearchColumns(env);
   const vocab = await recentTagsForScope(env, scope, key);
   let aiConfig = null;
@@ -9787,6 +9787,8 @@ async function enrichLinksInBackground(env, scope, key, links) {
           notes: meta.description,
           content: meta.content
         }, vocab, aiConfig);
+        // Throttle free-tier (Hermes uses on-demand only; Athena was bursting 4 concurrent)
+        await new Promise(r => setTimeout(r, 900));
         if (ai) {
           if (ai.title) update.title = ai.title;
           if (ai.description) update.notes = ai.description;
@@ -9818,7 +9820,7 @@ async function enrichLinksInBackground(env, scope, key, links) {
 function queueMissingLinkEnrichment(env, scope, key, rows) {
   const missing = (rows || [])
     .filter(row => row?.url && Number(row.metadata_version || 0) < AI_METADATA_VERSION)
-    .slice(0, 10)
+    .slice(0, 3)
     .map(row => ({
       id: row.id,
       url: row.url,
