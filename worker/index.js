@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.14',
+          version: '1.0.15',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -3009,7 +3009,10 @@ async function handleDeleteCommunityLink(request, user, env, corsHeaders) {
 async function handleSearchLinks(url, user, env, corsHeaders) {
   const q = (url.searchParams.get('q') || '').trim();
   const scope = (url.searchParams.get('scope') || 'community').toLowerCase();
-  const requestedLimit = Math.max(parseInt(url.searchParams.get('limit') || '1000', 10) || 1000, 1);
+  const rawLimit = (url.searchParams.get('limit') || '').trim().toLowerCase();
+  const requestedLimit = rawLimit === 'all'
+    ? null
+    : Math.max(parseInt(rawLimit || '1000', 10) || 1000, 1);
   if (!q) return Response.json({ success: true, links: [], query: '' }, { headers: corsHeaders });
 
   if (scope === 'personal') {
@@ -3047,16 +3050,16 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
 }
 
 /** Rank candidates by how well they match, best first. */
-function rankLinks(rows, query, limit = 100) {
+function rankLinks(rows, query, limit = null) {
   const q = String(query || '').toLowerCase().trim();
   const qa = q.replace(/[^a-z0-9]/g, '');
-  if (!q) return rows.slice(0, limit);
+  if (!q) return takeResults(rows, limit);
   const terms = expandServerSearchTerms(q);
   const scored = [];
   for (const r of rows) {
     const title = String(r.title || '').toLowerCase();
     const urlStr = String(r.url || '').toLowerCase();
-    const bag = [r.title, r.url, r.notes, r.tags].join(' ').toLowerCase();
+    const bag = [r.title, r.url, r.filename, r.notes, r.content, r.tags].join(' ').toLowerCase();
     const ba = bag.replace(/[^a-z0-9]/g, '');
     let score = 0;
     if (title === q) score += 100;
@@ -3078,7 +3081,7 @@ function rankLinks(rows, query, limit = 100) {
     if (score > 0) scored.push({ r, score });
   }
   scored.sort((a, b) => b.score - a.score || (b.r.created_at || 0) - (a.r.created_at || 0));
-  return scored.slice(0, limit).map(s => s.r);
+  return takeResults(scored.map(s => s.r), limit);
 }
 
 const DOCUMENT_MAX_BYTES = 512 * 1024;
@@ -3094,7 +3097,7 @@ async function ensureDocumentsTable(env) {
     `CREATE TABLE IF NOT EXISTS uploaded_documents (
       id TEXT PRIMARY KEY, scope TEXT NOT NULL, user_id TEXT, community_id TEXT,
       filename TEXT NOT NULL, content TEXT NOT NULL, uploaded_by TEXT NOT NULL,
-      github_path TEXT, created_at INTEGER NOT NULL
+      github_path TEXT, created_at INTEGER NOT NULL, search_blob TEXT
     )`
   ).run();
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_documents_personal ON uploaded_documents(scope, user_id, created_at)').run();
@@ -5543,11 +5546,11 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
   let reply;
   try {
     const vocab = await recentTagsForScope(env, 'community', communityId);
-    const ai = await aiDescribeAndTag(env, rawUrl, meta, vocab);
-    if (ai) {
-      const merged = ai.tags?.length
-        ? [...new Set([...['telegram', 'community'], ...ai.tags])].slice(0, 8)
-        : ['telegram', 'community'];
+      const ai = await aiDescribeAndTag(env, rawUrl, meta, vocab);
+      if (ai) {
+        const merged = ai.tags?.length
+          ? [...new Set([...['telegram', 'community'], ...ai.tags])]
+          : ['telegram', 'community'];
       try {
         await env.DB.prepare('UPDATE links SET tags = ?, notes = ?, metadata_version = 2 WHERE id = ?')
           .bind(JSON.stringify(merged), ai.description || meta.notes || '', id).run();
@@ -5900,10 +5903,10 @@ function titleFromUrl(rawUrl) {
 //
 // Search and AI used to pull the newest 200-300 rows and match inside that
 // window, so anything older was invisible no matter how good the match. These
-// helpers push the filter into SQL so every row is considered, however many
-// Markdown files the corpus spans.
+// helpers push the filter into SQL so every row is considered, including
+// uploaded Markdown and JSON documents.
 //
-// search_blob holds a lowercased, alphanumeric-only copy of title+url+notes+tags
+// search_blob holds a lowercased, alphanumeric-only copy of title+url+content+tags
 // so a collapsed query ("ytdlp") still matches "yt-dlp" — the same trick
 // fuzzyMatchLinks does in JS, but done where the whole table can be scanned.
 // ---------------------------------------------------------------------------
@@ -5912,6 +5915,7 @@ async function ensureSearchColumns(env) {
   for (const sql of [
     'ALTER TABLE personal_links ADD COLUMN search_blob TEXT',
     'ALTER TABLE links ADD COLUMN search_blob TEXT',
+    'ALTER TABLE uploaded_documents ADD COLUMN search_blob TEXT',
   ]) {
     try { await env.DB.prepare(sql).run(); } catch (_) {}
   }
@@ -5920,7 +5924,7 @@ async function ensureSearchColumns(env) {
 function buildSearchBlob(row) {
   let tags = row.tags;
   if (typeof tags === 'string') { try { tags = JSON.parse(tags); } catch (_) { /* keep raw */ } }
-  const bag = [row.title, row.url, row.notes, Array.isArray(tags) ? tags.join(' ') : tags]
+  const bag = [row.title, row.url, row.filename, row.notes, row.content, Array.isArray(tags) ? tags.join(' ') : tags]
     .filter(Boolean).join(' ').toLowerCase();
   return bag.replace(/[^a-z0-9]/g, '');
 }
@@ -5936,6 +5940,24 @@ async function backfillSearchBlobs(env, table, whereCol, whereVal, batch = 400) 
     ).bind(whereVal).all();
     for (const r of (results || [])) {
       await env.DB.prepare(`UPDATE ${table} SET search_blob = ? WHERE id = ?`)
+        .bind(buildSearchBlob(r), r.id).run();
+    }
+    return (results || []).length;
+  } catch (_) { return 0; }
+}
+
+async function backfillDocumentSearchBlobs(env, scope, whereCol, whereVal, batch = 20) {
+  await ensureDocumentsTable(env);
+  await ensureSearchColumns(env);
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT id, filename, content
+       FROM uploaded_documents
+       WHERE scope = ? AND ${whereCol} = ? AND (search_blob IS NULL OR search_blob = '')
+       LIMIT ${batch}`
+    ).bind(scope, whereVal).all();
+    for (const r of (results || [])) {
+      await env.DB.prepare('UPDATE uploaded_documents SET search_blob = ? WHERE id = ?')
         .bind(buildSearchBlob(r), r.id).run();
     }
     return (results || []).length;
@@ -5975,17 +5997,32 @@ async function countScopeLinks(env, scope, key) {
   const table = scope === 'personal' ? 'personal_links' : 'links';
   const col = scope === 'personal' ? 'user_id' : 'community_id';
   try {
+    await ensureDocumentsTable(env);
     const row = await env.DB.prepare(`SELECT COUNT(*) AS total FROM ${table} WHERE ${col} = ?`).bind(key).first();
-    return Number(row?.total || 0);
+    const docRow = await env.DB.prepare(
+      `SELECT COUNT(*) AS total FROM uploaded_documents WHERE scope = ? AND ${col} = ?`
+    ).bind(scope, key).first();
+    return Number(row?.total || 0) + Number(docRow?.total || 0);
   } catch (_) { return null; }
 }
 
-async function searchAllLinks(env, scope, key, query, limit = 500) {
+function resultLimitClause(limit) {
+  if (limit == null) return '';
+  const n = Number(limit);
+  return Number.isFinite(n) && n >= 0 ? ` LIMIT ${Math.floor(n)}` : '';
+}
+
+function takeResults(rows, limit) {
+  return limit == null ? rows : rows.slice(0, Math.max(0, Number(limit)));
+}
+
+async function searchAllLinks(env, scope, key, query, limit = null) {
   const q = String(query || '').toLowerCase().trim().slice(0, 240);
   if (!q) return [];
   const table = scope === 'personal' ? 'personal_links' : 'links';
   const col = scope === 'personal' ? 'user_id' : 'community_id';
   await backfillSearchBlobs(env, table, col, key);
+  await backfillDocumentSearchBlobs(env, scope, col, key);
 
   const terms = expandServerSearchTerms(q);
   if (!terms.length) return [];
@@ -6006,17 +6043,26 @@ async function searchAllLinks(env, scope, key, query, limit = 500) {
       `SELECT * FROM ${table}
        WHERE ${col} = ?
          AND (${clauses})
-       ORDER BY created_at DESC
-       LIMIT ${limit}`
+       ORDER BY created_at DESC${resultLimitClause(limit)}`
     ).bind(...params).all();
     await ensureDocumentsTable(env);
     const docCol = scope === 'personal' ? 'user_id' : 'community_id';
+    const docClauses = terms.map(() => `(
+      lower(COALESCE(filename,'')) LIKE ? OR
+      lower(COALESCE(content,'')) LIKE ? OR
+      COALESCE(search_blob,'') LIKE ?
+    )`).join(' OR ');
+    const docParams = [scope, key];
+    for (const term of terms) {
+      const like = `%${term}%`;
+      docParams.push(like, like, `%${term.replace(/[^a-z0-9]/g, '')}%`);
+    }
     const { results: documents } = await env.DB.prepare(
       `SELECT * FROM uploaded_documents
        WHERE scope = ? AND ${docCol} = ?
-         AND (lower(filename) LIKE ? OR lower(content) LIKE ?)
-       ORDER BY created_at DESC LIMIT ${limit}`
-    ).bind(scope, key, `%${q}%`, `%${q}%`).all();
+         AND (${docClauses})
+        ORDER BY created_at DESC${resultLimitClause(limit)}`
+    ).bind(...docParams).all();
     return [...(results || []), ...(documents || []).map(documentAsLink)];
   } catch (_) { return []; }
 }
@@ -6025,16 +6071,16 @@ async function searchAllLinks(env, scope, key, query, limit = 500) {
  * Rows to search over: every match in the store, plus the recent tail as a
  * fallback so an empty or unmatched query still has something to show.
  */
-async function candidateLinks(env, scope, key, query, recentLimit = 300) {
+async function candidateLinks(env, scope, key, query, recentLimit = null) {
   const matches = await searchAllLinks(env, scope, key, query, recentLimit);
   const table = scope === 'personal' ? 'personal_links' : 'links';
   const col = scope === 'personal' ? 'user_id' : 'community_id';
   const { results: recent } = await env.DB.prepare(
-    `SELECT * FROM ${table} WHERE ${col} = ? ORDER BY created_at DESC LIMIT ${recentLimit}`
+    `SELECT * FROM ${table} WHERE ${col} = ? ORDER BY created_at DESC${resultLimitClause(recentLimit)}`
   ).bind(key).all();
   await ensureDocumentsTable(env);
   const { results: recentDocuments } = await env.DB.prepare(
-    `SELECT * FROM uploaded_documents WHERE scope = ? AND ${col} = ? ORDER BY created_at DESC LIMIT ${recentLimit}`
+    `SELECT * FROM uploaded_documents WHERE scope = ? AND ${col} = ? ORDER BY created_at DESC${resultLimitClause(recentLimit)}`
   ).bind(scope, key).all();
 
   const byId = new Map();
@@ -6047,12 +6093,17 @@ async function candidateLinks(env, scope, key, query, recentLimit = 300) {
 function fuzzyMatchLinks(rows, query) {
   const q = String(query || '').toLowerCase().trim();
   const qa = q.replace(/[^a-z0-9]/g, '');
-  if (!q) return rows.slice(0, 8);
+  if (!q) return rows;
   return rows.filter(r => {
-    const bag = [r.title, r.url, r.notes, r.tags].join(' ').toLowerCase();
+    const bag = [r.title, r.url, r.filename, r.notes, r.content, r.tags].join(' ').toLowerCase();
     const ba = bag.replace(/[^a-z0-9]/g, '');
     return bag.includes(q) || (qa.length >= 2 && ba.includes(qa));
-  }).slice(0, 8);
+  });
+}
+
+function isAiContextError(error) {
+  return /context length|context window|maximum context|too many tokens|prompt is too long|request too large|input.{0,20}long/i
+    .test(String(error?.message || error || ''));
 }
 
 async function savePersonalUrl(env, userId, rawUrl, senderName, userNotes = '', titleHint = '') {
@@ -6093,7 +6144,15 @@ async function savePersonalUrl(env, userId, rawUrl, senderName, userNotes = '', 
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(id, userId, rawUrl, urlHash, meta.title, meta.notes, JSON.stringify(['telegram', 'dump']), Date.now()).run();
   }
-  return { duplicate: false, id, title: meta.title, url: rawUrl, notes: meta.notes, scraped: meta.scraped };
+  return {
+    duplicate: false,
+    id,
+    title: meta.title,
+    url: rawUrl,
+    notes: meta.notes,
+    content: meta.content,
+    scraped: meta.scraped
+  };
 }
 
 async function deletePersonalUrl(env, userId, rawUrl) {
@@ -7892,41 +7951,31 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        }
      }
 
-     // RAG retrieval — same logic as website (candidateLinks + fuzzyMatchLinks)
-     const scopeKey = scope === 'personal' ? athenaUser.id : aiCommunityId;
-     await ensureFresh(env, scope, scopeKey);
-     const rows = await candidateLinks(env, scope, scopeKey, q);
-     let docs = fuzzyMatchLinks(rows, q);
-     if (docs.length < 3 && rows.length) {
-       const recent = rows.slice(0, 10);
-       for (const it of recent) { if (!docs.find(d => d.id === it.id)) docs.push(it); }
-       docs = docs.slice(0, 10);
-     }
-     if (!docs.length && rows.length) docs = rows.slice(0, 8);
+      // RAG retrieval — same logic as website (candidateLinks + fuzzyMatchLinks)
+      const scopeKey = scope === 'personal' ? athenaUser.id : aiCommunityId;
+      await ensureFresh(env, scope, scopeKey);
+      const rows = await candidateLinks(env, scope, scopeKey, q);
+      let docs = fuzzyMatchLinks(rows, q);
+      if (!docs.length && rows.length) docs = rows;
 
-     // Build context — same format as website (includes document content)
-     const formatDoc = (item, i) => {
-       const notes = (item.notes || '').slice(0, 800);
-       const content = (item.content || '').slice(0, 60000);
-       const parts = [`[#${i + 1}]`, `Title: ${item.title || 'Untitled'}`];
-       if (item.filename) parts.push(`Document: ${item.filename}`);
-       if (item.url) parts.push(`URL: ${item.url}`);
-       if (notes) parts.push(`Notes: ${notes}`);
-       if (content) parts.push(`Content:\n${content}`);
-       return parts.join('\n');
-     };
-     let used = 0;
-     const ctx = docs.length
-       ? docs.map((d, i) => {
-         const remaining = Math.max(0, 30000 - used);
-         const formatted = formatDoc(d, i).slice(0, remaining);
-         used += formatted.length;
-         return formatted;
-       }).filter(Boolean).join('\n\n')
-       : '(no saved items)';
+      // Build context — same format as website (includes document content)
+      const formatDoc = (item, i) => {
+        const notes = item.notes || '';
+        const content = item.content || '';
+        const parts = [`[#${i + 1}]`, `Title: ${item.title || 'Untitled'}`];
+        if (item.filename) parts.push(`Document: ${item.filename}`);
+        if (item.url) parts.push(`URL: ${item.url}`);
+        if (notes) parts.push(`Notes: ${notes}`);
+        if (content) parts.push(`Content:\n${content}`);
+        return parts.join('\n');
+      };
+      const ctx = docs.length
+        ? docs.map(formatDoc).filter(Boolean).join('\n\n')
+        : '(no saved items)';
 
-     // Same system prompt as website
-     const systemPrompt = `You are Athena, a second-brain assistant. You ONLY use BRAIN CONTEXT below (the user's saved links, notes, and uploaded documents).
+      // Same system prompt as website. The full context is sent first; it is
+      // shortened only after the provider reports a context-size failure.
+      const baseSystemPrompt = `You are Athena, a second-brain assistant. You ONLY use BRAIN CONTEXT below (the user's saved links, notes, and uploaded documents).
 
 Rules:
 1. NEVER say the brain is empty if BRAIN CONTEXT lists any items — use them.
@@ -7936,45 +7985,58 @@ Rules:
 5. Recommend saved URLs when applicable. Cite as [#n].
 6. Stay strictly grounded in BRAIN CONTEXT; never invent facts not present in it.
 
-BRAIN has ${rows.length} saved item(s). Retrieved for this question:
-
-${ctx}`;
+`;
 
      const thinkMsg = await sendTelegramFormatted(token, chatId, `${boldHtml('🧠')} Thinking with your${scope === 'personal' ? ' personal' : ''} brain…`, forumThreadId);
      const thinkMsgId = thinkMsg.message_id;
 
      const endpoint = resolveChatEndpoint(cfg.base_url, cfg.mode || 'openai');
      const model = normalizeModelId(cfg.model, cfg.base_url);
-     const aiMode = (cfg.mode || 'openai').toLowerCase();
+      const aiMode = (cfg.mode || 'openai').toLowerCase();
 
-     try {
-       let content = '';
-
-       if (aiMode === 'anthropic') {
-         const res = await fetch(endpoint, {
-           method: 'POST',
-           headers: { 'Content-Type': 'application/json', 'x-api-key': cfg.api_key, 'anthropic-version': '2023-06-01' },
-           body: JSON.stringify({ model, max_tokens: 3000, system: systemPrompt, messages: [{ role: 'user', content: q }] })
-         });
-         if (!res.ok) {
-           const errText = await res.text().catch(() => '');
-           throw new Error(`HTTP ${res.status}: ${errText.slice(0, 200)}`);
-         }
-         const data = await res.json().catch(() => ({}));
-         content = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
-       } else {
-         const res = await fetch(endpoint, {
-           method: 'POST',
-           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.api_key}` },
-           body: JSON.stringify({ model, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: q }], temperature: 0.2, max_tokens: 3000 })
-         });
-         if (!res.ok) {
-           const errText = await res.text().catch(() => '');
-           throw new Error(`HTTP ${res.status}: ${errText.slice(0, 200)}`);
-         }
-         const data = await res.json().catch(() => ({}));
-         content = data.choices?.[0]?.message?.content || data.choices?.[0]?.text || '';
-       }
+      try {
+        let content = '';
+        let contextLimit = null;
+        for (;;) {
+          const context = contextLimit == null
+            ? ctx
+            : `${ctx.slice(0, contextLimit)}\n[content shortened for provider context]`;
+          const systemPrompt = `${baseSystemPrompt}\n\nBRAIN has ${rows.length} saved item(s). Retrieved for this question:\n\n${context}`;
+          try {
+            if (aiMode === 'anthropic') {
+              const res = await fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'x-api-key': cfg.api_key, 'anthropic-version': '2023-06-01' },
+                body: JSON.stringify({ model, max_tokens: 3000, system: systemPrompt, messages: [{ role: 'user', content: q }] })
+              });
+              if (!res.ok) {
+                const errText = await res.text().catch(() => '');
+                throw new Error(`HTTP ${res.status}: ${errText.slice(0, 200)}`);
+              }
+              const data = await res.json().catch(() => ({}));
+              content = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
+            } else {
+              const res = await fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.api_key}` },
+                body: JSON.stringify({ model, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: q }], temperature: 0.2, max_tokens: 3000 })
+              });
+              if (!res.ok) {
+                const errText = await res.text().catch(() => '');
+                throw new Error(`HTTP ${res.status}: ${errText.slice(0, 200)}`);
+              }
+              const data = await res.json().catch(() => ({}));
+              content = data.choices?.[0]?.message?.content || data.choices?.[0]?.text || '';
+            }
+            break;
+          } catch (err) {
+            if (!isAiContextError(err) || !docs.length) throw err;
+            const currentSize = systemPrompt.length;
+            const nextLimit = Math.floor(currentSize * 0.6);
+            if (nextLimit < 1000 || nextLimit >= currentSize) throw err;
+            contextLimit = nextLimit;
+          }
+        }
 
        // Convert markdown-style links to Telegram HTML: [text](url) → <a href="url">text</a>
        const aiHtml = escHtml(content || '(empty)')
@@ -8001,7 +8063,7 @@ ${ctx}`;
        // Separate main cited sources from other sources
        const mainSources = [];
        const otherSources = [];
-       docs.slice(0, 5).forEach((d, i) => {
+        docs.forEach((d, i) => {
          const t = d.title || titleFromUrl(d.url || '');
          const isDoc = d.isDocument || d.type === 'document';
          const sourceLine = isDoc ? `📄 ${t}` : (d.url ? `🔗 ${t}\n${d.url}` : null);
@@ -8022,7 +8084,7 @@ ${ctx}`;
          msg += `\n\n${boldHtml('📚 Other Sources:')}\n${otherSources.join('\n')}`;
        } else if (!mainSources.length && docs.length) {
          // Fallback: if no citations found, show all as Sources
-         const allSources = docs.slice(0, 5).map(d => {
+          const allSources = docs.map(d => {
            const t = d.title || titleFromUrl(d.url || '');
            const isDoc = d.isDocument || d.type === 'document';
            return isDoc ? `📄 ${t}` : (d.url ? `🔗 ${t}\n${d.url}` : null);
@@ -8461,11 +8523,15 @@ ${ctx}`;
         let reply;
         try {
           const vocab = await recentTagsForScope(env, 'personal', athenaUser.id);
-          const ai = await aiDescribeAndTag(env, rawUrl, { title: r.title, notes: r.notes }, vocab);
-          if (ai && r.id) {
-            const merged = ai.tags?.length
-              ? [...new Set([...['telegram', 'personal'], ...ai.tags])].slice(0, 8)
-              : ['telegram', 'personal'];
+           const ai = await aiDescribeAndTag(env, rawUrl, {
+             title: r.title,
+             notes: r.notes,
+             content: r.content
+           }, vocab);
+           if (ai && r.id) {
+             const merged = ai.tags?.length
+               ? [...new Set([...['telegram', 'personal'], ...ai.tags])]
+               : ['telegram', 'personal'];
             try {
               await env.DB.prepare('UPDATE personal_links SET tags = ?, notes = ?, metadata_version = 2 WHERE id = ?')
                 .bind(JSON.stringify(merged), ai.description || r.notes || '', r.id).run();
@@ -9383,7 +9449,7 @@ async function enrichLinksInBackground(env, scope, key, links) {
           if (ai.tags?.length) {
             let existingTags = [];
             try { existingTags = Array.isArray(link.tags) ? link.tags : JSON.parse(link.tags || '[]'); } catch (_) {}
-            update.tags = [...new Set([...ai.tags, ...existingTags])].slice(0, 8);
+            update.tags = [...new Set([...ai.tags, ...existingTags])];
           }
         }
         if (!update.notes && !update.image_url && !update.site_name && !update.tags) continue;
@@ -9471,7 +9537,7 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
   } catch (_) { return null; }
 
   const title = String(meta?.title || '').trim().slice(0, 200);
-  const snippet = String(meta?.content || meta?.notes || '').replace(/\s+/g, ' ').slice(0, 5000);
+  const snippet = String(meta?.content || meta?.notes || '').replace(/\s+/g, ' ');
   const vocab = (existingTags || [])
     .map(tag => String(tag).replace(/^#/, '').trim().toLowerCase())
     .filter(tag => tag && !['telegram', 'community', 'personal', 'dump'].includes(tag))
@@ -9552,7 +9618,6 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
    for (const t of rawTags) {
     const s = String(t).replace(/^#/, '').trim().toLowerCase().replace(/\s+/g, '-').slice(0, 40);
     if (s && !tags.includes(s)) tags.push(s);
-    if (tags.length >= 12) break;
   }
   if (!description && !tags.length) return null;
   return { description, tags };
@@ -9571,3 +9636,5 @@ function formatSavedLinkReply(kindLabel, title, rawUrl, ai, fallbackNotes = '') 
   if (ai.tags?.length) lines.push('', ai.tags.map(t => `#${t}`).join(' '));
   return lines.join('\n');
 }
+
+export { buildSearchBlob, expandServerSearchTerms, fuzzyMatchLinks, resultLimitClause };

@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS links (
     image_url TEXT,
     site_name TEXT,
     metadata_version INTEGER NOT NULL DEFAULT 0,
+    search_blob TEXT,
     FOREIGN KEY(community_id) REFERENCES communities(id)
 );
 
@@ -150,7 +151,8 @@ CREATE TABLE IF NOT EXISTS personal_links (
     created_at INTEGER NOT NULL,
     image_url TEXT,
     site_name TEXT,
-    metadata_version INTEGER NOT NULL DEFAULT 0
+    metadata_version INTEGER NOT NULL DEFAULT 0,
+    search_blob TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_personal_user ON personal_links(user_id);
@@ -180,7 +182,8 @@ CREATE TABLE IF NOT EXISTS uploaded_documents (
     content TEXT NOT NULL,
     uploaded_by TEXT NOT NULL,
     github_path TEXT,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    search_blob TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_documents_personal
