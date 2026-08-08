@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.18',
+          version: '1.0.19',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -7936,6 +7936,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       }
       await ensureFresh(env, 'personal', athenaUser.id);
       const rows = await candidateLinks(env, 'personal', athenaUser.id, q);
+      queueMissingLinkEnrichment(env, 'personal', athenaUser.id, rows);
       const hits = fuzzyMatchLinks(rows, q);
       if (!hits.length) {
         await sendTelegramFormatted(token, chatId, q ? `No personal results for: ${boldHtml(q)}` : 'No personal links yet.', forumThreadId);
@@ -7978,6 +7979,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     }
     await ensureFresh(env, 'community', searchCommunityId);
     const rows = await candidateLinks(env, 'community', searchCommunityId, q);
+    queueMissingLinkEnrichment(env, 'community', searchCommunityId, rows);
     const hits = fuzzyMatchLinks(rows, q);
     if (!hits.length) {
       await sendTelegramFormatted(token, chatId, q ? `No results for: ${boldHtml(q)}` : 'No links in this community brain yet.', forumThreadId);
@@ -8053,9 +8055,10 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
 
       // RAG retrieval — same logic as website (candidateLinks + fuzzyMatchLinks)
       const scopeKey = scope === 'personal' ? athenaUser.id : aiCommunityId;
-      await ensureFresh(env, scope, scopeKey);
-      const rows = await candidateLinks(env, scope, scopeKey, q);
-      let docs = fuzzyMatchLinks(rows, q);
+       await ensureFresh(env, scope, scopeKey);
+       const rows = await candidateLinks(env, scope, scopeKey, q);
+       queueMissingLinkEnrichment(env, scope, scopeKey, rows);
+       let docs = fuzzyMatchLinks(rows, q);
       if (!docs.length && rows.length) docs = rows;
 
       // Build context — same format as website (includes document content)
