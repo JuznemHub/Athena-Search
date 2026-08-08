@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.20',
+          version: '1.0.21',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -9905,8 +9905,10 @@ export {
   buildSearchBlob,
   expandServerSearchTerms,
   fuzzyMatchLinks,
+  getInstanceAiConfig,
   helpTextForSection,
   parseAiDescribeResponse,
   parseTelegramEditPayload,
-  resultLimitClause
+  resultLimitClause,
+  syncAiConfigToPeer
 };
