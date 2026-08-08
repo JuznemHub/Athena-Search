@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.21',
+          version: '1.0.22',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -3550,7 +3550,7 @@ async function writeInstanceAiConfig(env, { baseUrl, apiKey, model, mode, update
 
 async function aiConfigPeerUrl(env) {
   const configured = isSelfHosted(env)
-    ? env.ATHENA_FRONTEND_URL
+    ? env.ATHENA_AI_PEER_URL
     : await getInstanceSetting(env, 'default_backend');
   const value = String(configured || '').trim().replace(/\/+$/, '');
   if (!value) return '';
