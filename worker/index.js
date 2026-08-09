@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.28',
+          version: '1.0.29',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -9880,6 +9880,22 @@ function isModelFreeEntry(entry) {
 async function fetchModelList(baseUrl, env, apiKey) {
   const root = cleanApiBase(baseUrl);
   if (!root) return null;
+  if (root.includes('opencode.ai')) {
+    try {
+      const url = 'https://models.dev/api.json';
+      if (await isSafeExternalUrl(new URL(url), env)) {
+        const res = await fetchWithTimeout(url, { env }, 5000);
+        if (res.ok) {
+          const data = await res.json().catch(() => null);
+          const opencodeModels = data?.opencode?.models;
+          if (opencodeModels && typeof opencodeModels === 'object') {
+            const list = Object.entries(opencodeModels).map(([id, meta]) => ({ id, ...meta }));
+            if (list.length) return list;
+          }
+        }
+      }
+    } catch (_) {}
+  }
   const url = `${root}/models`;
   try {
     if (!(await isSafeExternalUrl(new URL(url), env))) return null;
@@ -10196,6 +10212,7 @@ export {
   getInstanceAiConfig,
   getSteroidMode,
   helpTextForSection,
+  isFreeTierModel,
   normalizeModelId,
   parseAiDescribeResponse,
   parseTelegramEditPayload,
