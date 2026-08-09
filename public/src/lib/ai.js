@@ -378,20 +378,23 @@ Rules:
   /** Does the server hold usable AI credentials? Cached for the page session. */
   let _serverCfg = null;
   async function instanceAiConfigured() {
-    if (_serverCfg !== null) return _serverCfg;
+    // don't cache false (401 before fix) — retry every call until true, then cache true
+    if (_serverCfg === true) return true;
     try {
       const token = window.getAthenaSessionToken?.() || localStorage.getItem('athena_session');
       const apiBase = window.getAthenaApiBase?.() || window.location.origin;
-      const res = await fetch(`${apiBase}/api/ai/config`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {}
+      const res = await fetch(`${apiBase}/api/ai/config?v=1.0.36`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        cache: 'no-store'
       });
       const data = await res.json().catch(() => ({}));
-      // hasKey (not just `configured`) — a row with no API key cannot answer.
       _serverCfg = !!(data && data.hasKey);
+      if (_serverCfg) return true;
+      // keep false as transient, don't cache permanently
+      return false;
     } catch (_) {
-      _serverCfg = false;
+      return false;
     }
-    return _serverCfg;
   }
 
   window.AthenaAI = {
