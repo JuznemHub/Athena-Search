@@ -3,6 +3,10 @@
  * Matches: ytdlp↔yt-dlp, "context engineering"↔lean-ctx, github paths, stems.
  */
 (function () {
+  function isSteroidEnabled() {
+    return !!window.__athenaSteroid;
+  }
+
   function alnum(s) {
     return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   }
@@ -255,8 +259,9 @@
     // expanded term searches
     const { expanded } = expandQueryTerms(question);
     const extra = [];
+    const expandedLimit = isSteroidEnabled() ? list.length : 6;
     for (const term of expanded) {
-      for (const item of searchCorpus(list, term, list.length)) {
+      for (const item of searchCorpus(list, term, expandedLimit)) {
         if (!strong.find(b => b.id === item.id) && !extra.find(e => e.id === item.id)) {
           extra.push(item);
         }

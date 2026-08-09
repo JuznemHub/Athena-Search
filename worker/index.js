@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.27',
+          version: '1.0.28',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -188,6 +188,10 @@ export default {
 
       if (pathname === '/api/internal/ai-config' && request.method === 'POST') {
         return await handleInternalAiConfigSync(request, env, corsHeaders);
+      }
+
+      if (pathname === '/api/internal/steroid' && request.method === 'POST') {
+        return await handleInternalSteroidSync(request, env, corsHeaders);
       }
 
       // ---- Session for all other /api ----
@@ -359,6 +363,37 @@ export default {
         if (request.method === 'POST') {
           return await handleSetInstanceConfig(request, env, corsHeaders, url.origin);
         }
+      }
+
+      if (pathname === '/api/ai/steroid') {
+        if (request.method === 'GET') {
+          const enabled = await getSteroidMode(env);
+          return Response.json({ success: true, steroid: enabled }, { headers: corsHeaders });
+        }
+        if (!(await isInstanceOwnerUserAsync(user, env))) {
+          return deny(corsHeaders, 'Steroid mode is GOD only', 'GOD_ONLY');
+        }
+        if (request.method === 'POST') {
+          const body = await request.json().catch(() => ({}));
+          const enabled = !!(body.steroid ?? body.enabled);
+          await setSteroidMode(env, enabled);
+          const peerSynced = await syncSteroidToPeer(env, enabled);
+          return Response.json({ success: true, steroid: enabled, peer_synced: peerSynced }, { headers: corsHeaders });
+        }
+      }
+
+      if (pathname === '/api/ai/detect-free' && request.method === 'POST') {
+        if (!user) {
+          return Response.json({ success: false, error: 'Login required' }, { status: 401, headers: corsHeaders });
+        }
+        const body = await request.json().catch(() => ({}));
+        const baseUrl = String(body.baseUrl || body.base_url || '').trim();
+        const model = String(body.model || '').trim();
+        if (!baseUrl || !model) {
+          return Response.json({ success: false, error: 'baseUrl and model required' }, { status: 400, headers: corsHeaders });
+        }
+        const free = await isFreeTierModel(model, baseUrl, env, body.apiKey || body.api_key || '');
+        return Response.json({ success: true, free, model, baseUrl }, { headers: corsHeaders });
       }
 
       // Storage backend — readable by all ranks, writable by GOD only
@@ -3066,6 +3101,8 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
   const requestedLimit = rawLimit === 'all'
     ? null
     : Math.max(parseInt(rawLimit || '1000', 10) || 1000, 1);
+  const steroid = await getSteroidMode(env);
+  const effectiveLimit = steroid ? requestedLimit : (requestedLimit == null ? 50 : Math.min(requestedLimit, 50));
   if (!q) return Response.json({ success: true, links: [], query: '' }, { headers: corsHeaders });
 
   if (scope === 'personal') {
@@ -3074,8 +3111,8 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
     }
     await ensureFresh(env, 'personal', user.id);
     await ensureLinkMetaColumns(env);
-    const rows = await candidateLinks(env, 'personal', user.id, q, requestedLimit);
-    const links = rankLinks(dedupeLinkRows(rows), q, requestedLimit);
+    const rows = await candidateLinks(env, 'personal', user.id, q, effectiveLimit);
+    const links = rankLinks(dedupeLinkRows(rows), q, effectiveLimit);
     const enrichmentPending = queueMissingLinkEnrichment(env, 'personal', user.id, links);
     const total = await countScopeLinks(env, 'personal', user.id);
     return Response.json(
@@ -3092,8 +3129,8 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
   if (gate) return gate;
   await ensureFresh(env, 'community', communityId);
   await ensureLinkMetaColumns(env);
-  const rows = await candidateLinks(env, 'community', communityId, q, requestedLimit);
-  const links = rankLinks(dedupeLinkRows(rows), q, requestedLimit);
+  const rows = await candidateLinks(env, 'community', communityId, q, effectiveLimit);
+  const links = rankLinks(dedupeLinkRows(rows), q, effectiveLimit);
   const enrichmentPending = queueMissingLinkEnrichment(env, 'community', communityId, links);
   const total = await countScopeLinks(env, 'community', communityId);
   return Response.json(
@@ -4157,10 +4194,66 @@ async function getInstanceSetting(env, key) {
   } catch (_) { return ''; }
 }
 
+async function getSteroidMode(env) {
+  const val = await getInstanceSetting(env, 'ai_steroid_mode');
+  return val === '1' || val === 'true';
+}
+
+async function setSteroidMode(env, enabled) {
+  await ensureInstanceSettings(env);
+  await env.DB.prepare('INSERT OR REPLACE INTO instance_settings (key, value, updated_at) VALUES (?, ?, ?)').bind('ai_steroid_mode', enabled ? '1' : '0', Date.now()).run();
+}
+
+async function syncSteroidToPeer(env, enabled) {
+  const secret = String(env.AI_CONFIG_SYNC_SECRET || env.TELEGRAM_WEBHOOK_SECRET || env.STORAGE_KEY || '');
+  const peer = await aiConfigPeerUrl(env);
+  if (!secret || !peer) return false;
+  try {
+    const res = await fetchWithTimeout(`${peer}/api/internal/steroid`, {
+      method: 'POST',
+      env,
+      redirect: 'error',
+      headers: { 'Content-Type': 'application/json', 'X-Athena-Internal-Key': secret },
+      body: JSON.stringify({ steroid: !!enabled, updatedAt: Date.now() })
+    }, 10000);
+    return res.ok;
+  } catch (err) {
+    console.error('Steroid peer sync failed', err?.message || err);
+    return false;
+  }
+}
+
+async function handleInternalSteroidSync(request, env, corsHeaders) {
+  const expected = String(env.AI_CONFIG_SYNC_SECRET || env.TELEGRAM_WEBHOOK_SECRET || env.STORAGE_KEY || '');
+  const provided = request.headers.get('X-Athena-Internal-Key') || '';
+  if (!expected || provided !== expected) {
+    return Response.json({ success: false, error: 'Forbidden' }, { status: 403, headers: corsHeaders });
+  }
+  const body = await request.json().catch(() => ({}));
+  const enabled = !!(body.steroid ?? body.enabled);
+  const updatedAt = Number(body.updatedAt || Date.now());
+  await ensureInstanceSettings(env);
+  const existing = await env.DB.prepare('SELECT value, updated_at FROM instance_settings WHERE key = ?').bind('ai_steroid_mode').first();
+  if (existing && Number(existing.updated_at || 0) > updatedAt) {
+    return Response.json({ success: true, ignored: true }, { headers: corsHeaders });
+  }
+  await setSteroidMode(env, enabled);
+  return Response.json({ success: true, steroid: enabled }, { headers: corsHeaders });
+}
+
+async function getWebsiteDisplayUrl(env) {
+  try {
+    const backend = await getInstanceSetting(env, 'default_backend');
+    const url = (backend || env.ATHENA_FRONTEND_URL || 'https://athena.juznem.eu.org').trim().replace(/\/+$/, '');
+    return url || 'https://athena.juznem.eu.org';
+  } catch (_) { return 'https://athena.juznem.eu.org'; }
+}
+
 async function handleGetInstanceConfig(env, corsHeaders) {
   return Response.json({
     success: true,
     default_backend: await getInstanceSetting(env, 'default_backend'),
+    steroid: await getSteroidMode(env),
     runtime: isSelfHosted(env) ? 'selfhost' : 'cloudflare',
   }, { headers: corsHeaders });
 }
@@ -5717,7 +5810,7 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
   }
   if (!athenaUser) {
     await sendTelegramMessage(token, chatId,
-      'Login on the website with Telegram, then /community_join ' + communityId, threadId);
+      `Login at ${await getWebsiteDisplayUrl(env)} with Telegram, then /community_join ${communityId}`, threadId);
     return;
   }
   // Left/kicked/banned from group → ban; rejoined → unban
@@ -7156,7 +7249,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       await sendTelegramMessage(token, chatId, [
         'Welcome to Athena.',
         '',
-        '1) Login on the website with Telegram',
+        `1) Login at ${await getWebsiteDisplayUrl(env)} with Telegram`,
         '2) Join the community Telegram group',
         '3) /community_join <id>',
         '',
@@ -7200,8 +7293,9 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     }
     if (!athenaUser) {
       await logOperationalEvent(env, '⚠️ Community join blocked', `Telegram user ${tgUserId || 'unknown'} is not logged in; requested ${cid}`);
+      const website = await getWebsiteDisplayUrl(env);
       await sendTelegramMessage(token, chatId,
-        'Login on the website with Telegram first, then send /community_join ' + cid, forumThreadId);
+        `Login at ${website} with Telegram first, then send /community_join ${cid}`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     const c = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(cid).first();
@@ -7289,7 +7383,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      if (!athenaUser) {
-       await sendTelegramFormatted(token, chatId, 'Login on the website with Telegram first.', forumThreadId);
+       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      // If replying to a forwarded message from a channel, use that channel ID
@@ -7451,7 +7545,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         `${chatTitle} | ${id}`,
         '',
         'Members must:',
-        '1) Login on the website',
+        `1) Login at ${await getWebsiteDisplayUrl(env)}`,
         '2) DM bot → /community_join ' + id,
         'Then they can dump links (group or site).',
         '',
@@ -8122,9 +8216,11 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
       await ensureFresh(env, 'personal', athenaUser.id);
-      const rows = await candidateLinks(env, 'personal', athenaUser.id, q);
+      const steroid = await getSteroidMode(env);
+      const rows = await candidateLinks(env, 'personal', athenaUser.id, q, steroid ? null : 300);
       queueMissingLinkEnrichment(env, 'personal', athenaUser.id, rows);
-      const hits = fuzzyMatchLinks(rows, q);
+      let hits = fuzzyMatchLinks(rows, q);
+      if (!steroid) hits = hits.slice(0, 8);
       if (!hits.length) {
         await sendTelegramFormatted(token, chatId, q ? `No personal results for: ${boldHtml(q)}` : 'No personal links yet.', forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
@@ -8165,9 +8261,11 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     await ensureFresh(env, 'community', searchCommunityId);
-    const rows = await candidateLinks(env, 'community', searchCommunityId, q);
+    const steroidCommunity = await getSteroidMode(env);
+    const rows = await candidateLinks(env, 'community', searchCommunityId, q, steroidCommunity ? null : 300);
     queueMissingLinkEnrichment(env, 'community', searchCommunityId, rows);
-    const hits = fuzzyMatchLinks(rows, q);
+    let hits = fuzzyMatchLinks(rows, q);
+    if (!steroidCommunity) hits = hits.slice(0, 8);
     if (!hits.length) {
       await sendTelegramFormatted(token, chatId, q ? `No results for: ${boldHtml(q)}` : 'No links in this community brain yet.', forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
@@ -8241,12 +8339,14 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      }
 
       // RAG retrieval — same logic as website (candidateLinks + fuzzyMatchLinks)
-      const scopeKey = scope === 'personal' ? athenaUser.id : aiCommunityId;
-       await ensureFresh(env, scope, scopeKey);
-       const rows = await candidateLinks(env, scope, scopeKey, q);
-       queueMissingLinkEnrichment(env, scope, scopeKey, rows);
-       let docs = fuzzyMatchLinks(rows, q);
-      if (!docs.length && rows.length) docs = rows;
+       const scopeKey = scope === 'personal' ? athenaUser.id : aiCommunityId;
+        await ensureFresh(env, scope, scopeKey);
+        const steroidAi = await getSteroidMode(env);
+        const rows = await candidateLinks(env, scope, scopeKey, q, steroidAi ? null : 300);
+        queueMissingLinkEnrichment(env, scope, scopeKey, rows);
+        let docs = fuzzyMatchLinks(rows, q);
+        if (!steroidAi) docs = docs.slice(0, 8);
+       if (!docs.length && rows.length) docs = steroidAi ? rows : rows.slice(0, 8);
 
       // Build context — same format as website (includes document content)
       const formatDoc = (item, i) => {
@@ -8470,7 +8570,7 @@ Rules:
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     if (!athenaUser) {
-      await sendTelegramFormatted(token, chatId, 'Login on the website first.', forumThreadId);
+      await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} first.`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     if (isSelfHosted(env)) {
@@ -8535,7 +8635,7 @@ Rules:
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     if (!athenaUser) {
-      await sendTelegramFormatted(token, chatId, 'Login on the website first.', forumThreadId);
+      await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} first.`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     if (!isSelfHosted(env)) {
@@ -9832,10 +9932,10 @@ async function enrichLinksInBackground(env, scope, key, links) {
   const vocab = await recentTagsForScope(env, scope, key);
   let aiConfig = null;
   try { aiConfig = await getInstanceAiConfig(env); } catch (_) {}
-  const isFree = await isFreeTierModel(aiConfig?.model, aiConfig?.base_url, env, aiConfig?.api_key);
-  const CONCURRENCY = isFree ? 1 : 4;
+  const steroid = await getSteroidMode(env);
+  const CONCURRENCY = steroid ? 4 : 1;
   let enrichedLinks = links;
-  if (isFree && links.length > 3) enrichedLinks = links.slice(0, 3);
+  if (!steroid && links.length > 3) enrichedLinks = links.slice(0, 3);
   let next = 0;
   const run = async () => {
     while (next < enrichedLinks.length) {
@@ -9856,7 +9956,7 @@ async function enrichLinksInBackground(env, scope, key, links) {
           notes: meta.description,
           content: meta.content
         }, vocab, aiConfig);
-        if (isFree) await new Promise(r => setTimeout(r, 900));
+        if (!steroid) await new Promise(r => setTimeout(r, 900));
         if (ai) {
           if (ai.title) update.title = ai.title;
           if (ai.description) update.notes = ai.description;

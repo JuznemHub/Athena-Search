@@ -70,6 +70,10 @@
     return m;
   }
 
+  function isSteroidEnabled() {
+    return !!window.__athenaSteroid;
+  }
+
   function formatDoc(item, i) {
     const tags = Array.isArray(item.tags) ? item.tags.join(', ') : (item.tags || '');
     const notes = item.notes || '';
@@ -165,7 +169,7 @@ Rules:
     const docs = new Map();
     let total = 0;
     for (const q of queries) {
-      const params = new URLSearchParams({ q, scope: context.scope || 'personal', limit: 'all' });
+      const params = new URLSearchParams({ q, scope: context.scope || 'personal', limit: isSteroidEnabled() ? 'all' : '50' });
       if (context.scope === 'community' && context.communityId) params.set('community_id', context.communityId);
       try {
         const res = await fetch(`${apiBase}/api/links/search?${params}`, {
@@ -186,7 +190,8 @@ Rules:
   function answerLocal(question, corpus, corpusSize = (corpus || []).length) {
     const retrieve = window.AthenaSearch?.retrieveForQuestion || ((q, c) => c);
     const list = corpus || [];
-    const docs = retrieve(question, list, list.length);
+    const limit = isSteroidEnabled() ? list.length : 8;
+    const docs = retrieve(question, list, limit);
     if (!docs.length) {
       return {
         answer: corpusSize
@@ -196,13 +201,14 @@ Rules:
         results: []
       };
     }
-    const lines = docs.map((d, i) => {
+    const display = isSteroidEnabled() ? docs : docs.slice(0, 5);
+    const lines = display.map((d, i) => {
       const label = d.title || d.url || 'Note';
       return `${i + 1}. **${label}**${d.url ? ` — ${d.url}` : ''}`;
     });
     return {
       answer: `Closest matches in your brain:\n\n${lines.join('\n\n')}`,
-      sources: docs,
+      sources: display,
       results: docs
     };
   }
@@ -297,7 +303,8 @@ Rules:
       : [{ role: 'user', content: q }];
     const retrieve = window.AthenaSearch?.retrieveForQuestion;
     const retrievalQuestion = history.filter(message => message.role === 'user').map(message => message.content).join(' ');
-    const localDocs = retrieve ? retrieve(retrievalQuestion || q, list, list.length, { minScore: 18, strict: true }) : list;
+    const localLimit = isSteroidEnabled() ? list.length : 12;
+    const localDocs = retrieve ? retrieve(retrievalQuestion || q, list, localLimit, { minScore: 18, strict: true }) : list;
     const remote = await retrieveRemoteDocs(q, history);
     const merged = new Map();
     for (const doc of remote.docs) merged.set(doc.id || doc.url || `remote-${merged.size}`, doc);
@@ -360,10 +367,11 @@ Rules:
           }
         }
       }
+      const displaySources = isSteroidEnabled() ? docs : docs.slice(0, 8);
       return {
         answer: cleaned || text || 'Empty response from model.',
         thinking,
-        sources: docs,
+        sources: displaySources,
         results: docs,
         mode: 'llm'
       };
