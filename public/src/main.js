@@ -690,7 +690,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // These must run even if every fetch above failed, or there is no usable UI.
     try {
-      setMode('search');
+      // don't yank the user out of AI mode while data is still loading
+      const initialMode = state.mode && state.mode !== 'search' ? state.mode : 'search';
+      setMode(initialMode);
       updateScopeUI();
       renderHome();
       startLiveSync();
