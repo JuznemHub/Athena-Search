@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.33',
+          version: '1.0.34',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -4822,15 +4822,23 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
   }
 
   try {
+  // hermes-like fallback: try primary then live free models on 429/503/401
+  const tryModels = [model, ...(await getFallbackChain(baseUrl, env, apiKey, model))];
+  let upstreamRes = null;
+  let usedModel = model;
+  let lastErrText = '';
+  for (let mi=0; mi<tryModels.length; mi++) {
+    const curModel = tryModels[mi];
+    try {
       const maxTok = Math.min(parseInt(body.max_tokens, 10) || 500, 8192);
-      let upstreamRes;
+      let curRes;
       // fetchWithTimeout, not fetch: it never follows a redirect blindly. Here
       // redirect:'error' refuses them outright — the request carries the API key
       // and the prompt, and a public-but-hostile hop passes isSafeExternalUrl.
       // Checking upstreamRes.url afterwards would be too late. Time-to-headers
       // only; the timer is cleared before the SSE body streams.
       if (mode === 'anthropic') {
-        upstreamRes = await fetchWithTimeout(endpoint, {
+        curRes = await fetchWithTimeout(endpoint, {
           method: 'POST',
           env,
           redirect: 'error',
@@ -4840,7 +4848,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
             'anthropic-version': '2023-06-01'
           },
           body: JSON.stringify({
-            model,
+            model: curModel,
             max_tokens: maxTok,
             system: system || undefined,
             messages: messages || [{ role: 'user', content: userMsg }],
@@ -4851,7 +4859,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
         const input = messages
           ? messages.map(m => `${m.role}: ${m.content}`).join('\n\n')
           : (system ? `${system}\n\n${userMsg}` : userMsg);
-        upstreamRes = await fetchWithTimeout(endpoint, {
+        curRes = await fetchWithTimeout(endpoint, {
           method: 'POST',
           env,
           redirect: 'error',
@@ -4860,7 +4868,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
             Authorization: `Bearer ${apiKey}`
           },
           body: JSON.stringify({
-            model,
+            model: curModel,
             input
           })
         }, AI_PROXY_TIMEOUT_MS);
@@ -4869,7 +4877,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
           ...(system ? [{ role: 'system', content: system }] : []),
           { role: 'user', content: userMsg }
         ];
-        upstreamRes = await fetchWithTimeout(endpoint, {
+        curRes = await fetchWithTimeout(endpoint, {
           method: 'POST',
           env,
           redirect: 'error',
@@ -4878,7 +4886,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
             Authorization: `Bearer ${apiKey}`
           },
           body: JSON.stringify({
-            model,
+            model: curModel,
             messages: msgs,
             temperature: body.temperature ?? 0.2,
             max_tokens: maxTok,
@@ -4887,8 +4895,14 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
         }, AI_PROXY_TIMEOUT_MS);
       }
 
-      if (!upstreamRes.ok) {
-        const text = await upstreamRes.text();
+      if (!curRes.ok) {
+        const text = await curRes.text();
+        const isRetryable = curRes.status===429 || curRes.status===503 || curRes.status===401;
+        if (isRetryable && mi < tryModels.length-1) {
+          console.warn(`AI chat fallback ${curModel} ${curRes.status} -> trying next`);
+          await new Promise(r=>setTimeout(r, 400*(mi+1)));
+          continue;
+        }
         let data = {};
         try { data = JSON.parse(text); } catch (_) { data = { raw: text.slice(0, 500) }; }
         let msg =
@@ -4899,19 +4913,33 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
           null;
         if (!msg) {
           if (/^\s*</.test(text) || /<!DOCTYPE/i.test(text)) {
-            msg = `Provider returned HTML (HTTP ${upstreamRes.status}) — check base URL. Expected OpenAI chat endpoint.`;
+            msg = `Provider returned HTML (HTTP ${curRes.status}) — check base URL. Expected OpenAI chat endpoint.`;
           } else {
-            msg = text.slice(0, 200) || upstreamRes.statusText;
+            msg = text.slice(0, 200) || curRes.statusText;
           }
         }
+        // non-retryable or last try -> return error
         return Response.json({
           success: false,
           error: msg,
-          status: upstreamRes.status,
+          status: curRes.status,
           endpoint,
-          model
+          model: curModel
         }, { status: 502, headers: corsHeaders });
       }
+      // success -> keep this response for streaming
+      upstreamRes = curRes;
+      usedModel = curModel;
+      break;
+    } catch (e) {
+      lastErrText = e?.message || String(e);
+      if (mi < tryModels.length-1) { await new Promise(r=>setTimeout(r, 300*(mi+1))); continue; }
+      throw e;
+    }
+  }
+  if (!upstreamRes || !upstreamRes.ok) {
+    return Response.json({ success: false, error: lastErrText || 'All AI models failed', model: usedModel, endpoint }, { status: 502, headers: corsHeaders });
+  }
 
       if (endpoint.endsWith('/responses')) {
         const data = await upstreamRes.json().catch(() => ({}));
@@ -10054,6 +10082,38 @@ async function fetchModelList(baseUrl, env, apiKey) {
   } catch (_) { return null; }
 }
 
+// eslint-disable-next-line no-unused-vars
+function detectProviderForModel(model, baseUrl) {
+  const m = String(model||'').toLowerCase();
+  const b = String(baseUrl||'').toLowerCase();
+  if (b.includes('opencode.ai')) return 'opencode';
+  if (b.includes('groq.com')) return 'groq';
+  if (b.includes('anthropic.com')) return 'anthropic';
+  if (b.includes('openai.com')) return 'openai';
+  if (m.startsWith('openai/') || m.startsWith('gpt-')) return 'openai';
+  if (m.startsWith('anthropic/') || m.includes('claude')) return 'anthropic';
+  if (m.includes('groq') || m.includes('llama')) return 'groq';
+  return 'auto';
+}
+
+async function getLiveFreeModels(baseUrl, env, apiKey) {
+  const list = await fetchModelList(baseUrl, env, apiKey);
+  if (!list) return [];
+  return list.filter(e => isModelFreeEntry(e)).map(e => String(e.id||e.model)).filter(Boolean);
+}
+
+async function getFallbackChain(baseUrl, env, apiKey, primaryModel) {
+  const liveFree = await getLiveFreeModels(baseUrl, env, apiKey);
+  const out = [];
+  const seen = new Set([String(primaryModel||'').toLowerCase()]);
+  for (const m of liveFree) {
+    const low = String(m).toLowerCase();
+    if (!seen.has(low)) { out.push(m); seen.add(low); }
+    if (out.length >= 4) break;
+  }
+  return out;
+}
+
 async function isFreeTierModel(modelId, baseUrl, env, apiKey) {
   const m = String(modelId || '').toLowerCase();
   if (m.includes('free')) return true;
@@ -10264,72 +10324,82 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
   ].filter(Boolean).join('\n');
 
   const maxTok = 300;
-  let payload, headers;
-  if (mode === 'anthropic') {
-    headers = { 'Content-Type': 'application/json', 'x-api-key': cfg.api_key, 'anthropic-version': '2023-06-01' };
-    payload = { model, max_tokens: maxTok, system, messages: [{ role: 'user', content: user }], stream: false };
-  } else if (endpoint.endsWith('/responses')) {
-    headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cfg.api_key}` };
-    payload = { model, input: `${system}\n\n${user}`, stream: false };
-  } else {
-    headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cfg.api_key}` };
-    payload = { model, max_tokens: maxTok, messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: user }
-    ], stream: false, temperature: 0.1 };
-  }
-
-  let text = '';
-  try {
-    if (!endpoint.endsWith('/responses')) payload.stream = true;
-    const res = await fetchWithTimeout(endpoint, { method: 'POST', headers, body: JSON.stringify(payload), env }, AI_PROXY_TIMEOUT_MS);
-    if (!res.ok) {
-      const errorText = await res.text().catch(() => '');
-      console.error('AI link enrichment provider failed', res.status, errorText.slice(0, 240));
+  const tryModels = [model, ...(await getFallbackChain(baseUrl, env, cfg.api_key, model))];
+  let lastError = null;
+  for (let mi=0; mi<tryModels.length; mi++) {
+    const curModel = tryModels[mi];
+    let payload, headers;
+    if (mode === 'anthropic') {
+      headers = { 'Content-Type': 'application/json', 'x-api-key': cfg.api_key, 'anthropic-version': '2023-06-01' };
+      payload = { model: curModel, max_tokens: maxTok, system, messages: [{ role: 'user', content: user }], stream: false };
+    } else if (endpoint.endsWith('/responses')) {
+      headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cfg.api_key}` };
+      payload = { model: curModel, input: `${system}\n\n${user}`, stream: false };
+    } else {
+      headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cfg.api_key}` };
+      payload = { model: curModel, max_tokens: maxTok, messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user }
+      ], stream: false, temperature: 0.1 };
+    }
+    let text = '';
+    try {
+      if (!endpoint.endsWith('/responses')) payload.stream = true;
+      const res = await fetchWithTimeout(endpoint, { method: 'POST', headers, body: JSON.stringify(payload), env }, AI_PROXY_TIMEOUT_MS);
+      if (!res.ok) {
+        const errorText = await res.text().catch(() => '');
+        const isRetryable = res.status===429 || res.status===503 || res.status===401;
+        console.error(`AI link enrichment failed ${curModel} ${res.status}`, errorText.slice(0,180));
+        if (isRetryable && mi < tryModels.length-1) { await new Promise(r=>setTimeout(r, 400*(mi+1))); continue; }
+        return null;
+      }
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('text/event-stream')) {
+        const streamText = await res.text();
+        let reasoning = '';
+        for (const line of streamText.split('\n')) {
+          if (!line.startsWith('data:')) continue;
+          const payloadLine = line.slice(5).trim();
+          if (!payloadLine || payloadLine === '[DONE]') continue;
+          try {
+            const event = JSON.parse(payloadLine);
+            if (mode === 'anthropic') {
+              text += String(event.delta?.text || '');
+            } else {
+              const delta = event.choices?.[0]?.delta || {};
+              text += String(delta.content || event.choices?.[0]?.message?.content || '');
+              reasoning += String(delta.reasoning_content || delta.reasoning || '');
+            }
+          } catch (_) {}
+        }
+        if (!text.trim()) text = reasoning;
+      } else {
+        const data = await res.json();
+        if (mode === 'anthropic') {
+          text = String(data?.content?.[0]?.text || '');
+        } else if (endpoint.endsWith('/responses')) {
+          text = String(data.output_text
+            || (Array.isArray(data.output) ? data.output.map(o => Array.isArray(o.content) ? o.content.map(c => c.text || '').join('') : '').join('\n') : '')
+            || data.choices?.[0]?.message?.content || '');
+        } else {
+          const content = data?.choices?.[0]?.message?.content;
+          text = typeof content === 'string'
+            ? content
+            : Array.isArray(content)
+              ? content.map(part => String(part?.text || part?.content || '')).join('')
+              : String(data?.choices?.[0]?.message?.reasoning_content || data?.output_text || JSON.stringify(content || ''));
+        }
+      }
+      return parseAiDescribeResponse(text);
+    } catch (err) {
+      lastError = err;
+      console.error('AI link enrichment request failed', err?.message || err);
+      if (mi < tryModels.length-1) continue;
       return null;
     }
-    const contentType = res.headers.get('content-type') || '';
-    if (contentType.includes('text/event-stream')) {
-      const streamText = await res.text();
-      let reasoning = '';
-      for (const line of streamText.split('\n')) {
-        if (!line.startsWith('data:')) continue;
-        const payloadLine = line.slice(5).trim();
-        if (!payloadLine || payloadLine === '[DONE]') continue;
-        try {
-          const event = JSON.parse(payloadLine);
-          if (mode === 'anthropic') {
-            text += String(event.delta?.text || '');
-          } else {
-            const delta = event.choices?.[0]?.delta || {};
-            text += String(delta.content || event.choices?.[0]?.message?.content || '');
-            reasoning += String(delta.reasoning_content || delta.reasoning || '');
-          }
-        } catch (_) {}
-      }
-      if (!text.trim()) text = reasoning;
-    } else {
-      const data = await res.json();
-      if (mode === 'anthropic') {
-        text = String(data?.content?.[0]?.text || '');
-      } else if (endpoint.endsWith('/responses')) {
-        text = String(data.output_text
-          || (Array.isArray(data.output) ? data.output.map(o => Array.isArray(o.content) ? o.content.map(c => c.text || '').join('') : '').join('\n') : '')
-          || data.choices?.[0]?.message?.content || '');
-      } else {
-        const content = data?.choices?.[0]?.message?.content;
-        text = typeof content === 'string'
-          ? content
-          : Array.isArray(content)
-            ? content.map(part => String(part?.text || part?.content || '')).join('')
-            : String(data?.choices?.[0]?.message?.reasoning_content || data?.output_text || JSON.stringify(content || ''));
-      }
-    }
-  } catch (err) {
-    console.error('AI link enrichment request failed', err?.message || err);
-    return null;
   }
-  return parseAiDescribeResponse(text);
+  console.error('AI all fallbacks failed', lastError?.message||'');
+  return null;
 }
 
 /** Format the saved-link reply karakeep-style: what it is → link → #tags. */
