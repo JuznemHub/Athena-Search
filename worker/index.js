@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.31',
+          version: '1.0.32',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -5652,21 +5652,19 @@ async function getConfiguredLogTarget(env, ownerUserId = null) {
     let binding = null;
     if (ownerUserId) {
       binding = await env.DB.prepare(
-        `SELECT log_channel_id, bot_token FROM community_bots
-         WHERE platform = 'telegram'
-           AND COALESCE(scope, 'personal') = 'personal'
-           AND (created_by = ? OR user_id = ?)
-           AND log_channel_id IS NOT NULL AND log_channel_id != ''
-         ORDER BY created_at DESC LIMIT 1`
+        `SELECT log_channel_id, bot_token, scope FROM community_bots
+          WHERE platform = 'telegram'
+            AND (created_by = ? OR user_id = ?)
+            AND log_channel_id IS NOT NULL AND log_channel_id != ''
+          ORDER BY CASE WHEN COALESCE(scope,'personal')='personal' THEN 0 ELSE 1 END, created_at DESC LIMIT 1`
       ).bind(ownerUserId, ownerUserId).first();
     }
     if (!binding) {
       binding = await env.DB.prepare(
-        `SELECT log_channel_id, bot_token FROM community_bots
-         WHERE platform = 'telegram'
-           AND COALESCE(scope, 'personal') = 'personal'
-           AND log_channel_id IS NOT NULL AND log_channel_id != ''
-         ORDER BY created_at DESC LIMIT 1`
+        `SELECT log_channel_id, bot_token, scope FROM community_bots
+          WHERE platform = 'telegram'
+            AND log_channel_id IS NOT NULL AND log_channel_id != ''
+          ORDER BY CASE WHEN COALESCE(scope,'personal')='personal' THEN 0 ELSE 1 END, created_at DESC LIMIT 1`
       ).first();
     }
     if (!binding?.log_channel_id) return null;
@@ -5887,9 +5885,23 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
       'INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
     ).bind(id, communityId, rawUrl, urlHash, meta.title, meta.notes || '', JSON.stringify(['telegram']), senderName, Date.now()).run();
   }
+  // tagging: user #hashtags win, else karakeep AI (skip AI if tags already present)
+  let userTags = normalizeTagList(extractHashtags(userNotes + ' ' + (titleHint||'')));
+  // also check fullPost if caller left it in global (best effort)
+  try { if (typeof globalThis._lastFullPost === 'string' && globalThis._lastFullPost) { const extra = normalizeTagList(extractHashtags(globalThis._lastFullPost)); for (const t of extra) if (!userTags.includes(t)) userTags.push(t); } } catch(_){}
   let reply;
   try {
-    const vocab = await recentTagsForScope(env, 'community', communityId);
+    if (userTags.length) {
+      const merged = [...new Set([...['telegram','community'], ...userTags])];
+      await ensureSearchColumns(env);
+      try {
+        await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
+          .bind(meta.title, JSON.stringify(merged), meta.notes || '', id).run();
+        await storeMutateLink(env, 'community', communityId, id, { title: meta.title, notes: meta.notes || '', tags: merged });
+      } catch (_) {}
+      reply = formatSavedLinkReply('community', meta.title, rawUrl, { title: meta.title, description: meta.notes || '', tags: userTags });
+    } else {
+      const vocab = await recentTagsForScope(env, 'community', communityId);
       const ai = await aiDescribeAndTag(env, rawUrl, meta, vocab);
       if (ai) {
         const savedTitle = ai.title || meta.title;
@@ -5897,14 +5909,15 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
           ? [...new Set([...['telegram', 'community'], ...ai.tags])]
           : ['telegram', 'community'];
         await ensureSearchColumns(env);
-      try {
-        await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
-          .bind(savedTitle, JSON.stringify(merged), ai.description || meta.notes || '', id).run();
-        await storeMutateLink(env, 'community', communityId, id, { title: savedTitle, notes: ai.description || meta.notes || '', tags: merged });
-      } catch (_) {}
-      reply = formatSavedLinkReply('community', savedTitle, rawUrl, ai);
-    } else {
-      reply = formatSavedLinkReply('community', meta.title, rawUrl, null, meta.notes);
+        try {
+          await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
+            .bind(savedTitle, JSON.stringify(merged), ai.description || meta.notes || '', id).run();
+          await storeMutateLink(env, 'community', communityId, id, { title: savedTitle, notes: ai.description || meta.notes || '', tags: merged });
+        } catch (_) {}
+        reply = formatSavedLinkReply('community', savedTitle, rawUrl, ai);
+      } else {
+        reply = formatSavedLinkReply('community', meta.title, rawUrl, null, meta.notes);
+      }
     }
   } catch (_) {
     reply = formatSavedLinkReply('community', meta.title, rawUrl, null, meta.notes);
@@ -6160,10 +6173,34 @@ function selectPrimaryLinks(urls, fullText = '') {
   };
 }
 
+function extractHashtags(text) {
+  const raw = String(text || '').match(/#[\w-]{1,40}/g);
+  if (!raw) return [];
+  const out = [];
+  for (const h of raw) {
+    const tag = h.slice(1).toLowerCase().replace(/\s+/g, '-').slice(0,40).trim();
+    if (!tag) continue;
+    if (['telegram','community','personal','dump'].includes(tag)) continue;
+    if (!out.includes(tag)) out.push(tag);
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+
+function normalizeTagList(tags) {
+  const out = [];
+  for (const t of Array.isArray(tags) ? tags : []) {
+    const tag = String(t).replace(/^#/,'').trim().toLowerCase().replace(/\s+/g,'-').slice(0,40);
+    if (!tag || out.includes(tag)) continue;
+    out.push(tag);
+  }
+  return out;
+}
+
 /**
  * Clean multi-link channel captions into readable notes.
  * Keep: title + description (+ optional special thanks).
- * Drop: Links block, support/donate fluff, hashtags.
+ * Drop: Links block, support/donate fluff, hashtags (tags extracted separately via extractHashtags).
  */
 function buildMultiLinkNotes(fullText) {
   let body = String(fullText || '').trim();
@@ -7432,8 +7469,19 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await env.DB.prepare('UPDATE community_bots SET log_channel_id = NULL WHERE id = ?').bind(personalBot.id).run();
        await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Log channel removed.`, forumThreadId);
      } else {
-       await env.DB.prepare('UPDATE community_bots SET log_channel_id = ? WHERE id = ?').bind(channelId, personalBot.id).run();
-       await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Log channel set to: ${codeHtml(channelId)}\nLogin and community join notifications will be sent there.`, forumThreadId);
+       const cid = String(channelId).trim();
+       if (!/^-\\d+$/.test(cid)) {
+         await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Invalid channel ID. Use -100... for channels. Forward msg to @userinfobot.`, forumThreadId);
+         return new Response('OK', { status: 200, headers: corsHeaders });
+       }
+       const probeTok = (await decryptBotToken(env, personalBot.bot_token)) || token || env.TELEGRAM_BOT_TOKEN;
+       const probe = await sendTelegramFormatted(probeTok, cid, `${boldHtml('✅')} Athena log channel linked — test ok`);
+       if (!probe?.ok) {
+         await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Cannot post to ${codeHtml(cid)}: ${escHtml(probe?.error || 'bot not admin')}. Not saved.`, forumThreadId);
+         return new Response('OK', { status: 200, headers: corsHeaders });
+       }
+       await env.DB.prepare('UPDATE community_bots SET log_channel_id = ? WHERE id = ?').bind(cid, personalBot.id).run();
+       await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Log channel set to: ${codeHtml(cid)}\nLogs now ONLY go to channel (no DM).`, forumThreadId);
      }
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
@@ -8886,20 +8934,30 @@ Rules:
             ).bind(id, binding.community_id, rawUrl, urlHash, meta.title, meta.notes, JSON.stringify(['telegram']), senderName, Date.now()).run();
           }
           try {
-            const vocab = await recentTagsForScope(env, 'community', binding.community_id);
-            const ai = await aiDescribeAndTag(env, rawUrl, meta, vocab);
-            if (ai) {
-              const savedTitle = ai.title || meta.title;
-              const tags = [...new Set([...(ai.tags || []), 'telegram'])];
+            const userTags2 = normalizeTagList(extractHashtags(telegramFullPostText(msg) || meta.notes || ''));
+            if (userTags2.length) {
+              const tags = [...new Set([...['telegram'], ...userTags2])];
               await ensureSearchColumns(env);
               await env.DB.prepare(
                 `UPDATE links SET title = ?, notes = ?, tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
-              ).bind(savedTitle, ai.description || meta.notes || '', JSON.stringify(tags), id).run();
-              await storeMutateLink(env, 'community', binding.community_id, id, {
-                title: savedTitle,
-                notes: ai.description || meta.notes || '',
-                tags
-              });
+              ).bind(meta.title, meta.notes || '', JSON.stringify(tags), id).run();
+              await storeMutateLink(env, 'community', binding.community_id, id, { title: meta.title, notes: meta.notes || '', tags });
+            } else {
+              const vocab = await recentTagsForScope(env, 'community', binding.community_id);
+              const ai = await aiDescribeAndTag(env, rawUrl, meta, vocab);
+              if (ai) {
+                const savedTitle = ai.title || meta.title;
+                const tags = [...new Set([...(ai.tags || []), 'telegram'])];
+                await ensureSearchColumns(env);
+                await env.DB.prepare(
+                  `UPDATE links SET title = ?, notes = ?, tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
+                ).bind(savedTitle, ai.description || meta.notes || '', JSON.stringify(tags), id).run();
+                await storeMutateLink(env, 'community', binding.community_id, id, {
+                  title: savedTitle,
+                  notes: ai.description || meta.notes || '',
+                  tags
+                });
+              }
             }
           } catch (_) {}
           await sendTelegramMessage(token, chatId, `Was not in DB — added to community: ${rawUrl}`, forumThreadId);
@@ -8961,6 +9019,8 @@ Rules:
     if (isDetailedNotes(fullPost)) notesForSave = fullPost;
   }
 
+  // expose hashtags from fullPost for tagging helper (karakeep: user tags win)
+  try { globalThis._lastFullPost = fullPost; } catch(_){}
   for (const rawUrl of toSave) {
     if (scope === 'community') {
       await saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, athenaUser, chatId, notesForSave, titleHint, forumThreadId);
@@ -8978,9 +9038,20 @@ Rules:
       if (r.duplicate) {
         await sendTelegramMessage(token, chatId, `Website is already added: ${rawUrl}`, forumThreadId);
       } else {
+        const userTagsPersonal = normalizeTagList(extractHashtags(fullPost));
         let reply;
         try {
-          const vocab = await recentTagsForScope(env, 'personal', athenaUser.id);
+          if (userTagsPersonal.length && r.id) {
+            const merged = [...new Set([...['telegram','personal'], ...userTagsPersonal])];
+            await ensureSearchColumns(env);
+            try {
+              await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
+                .bind(r.title, JSON.stringify(merged), r.notes || '', r.id).run();
+              await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: r.title, notes: r.notes || '', tags: merged });
+            } catch (_) {}
+            reply = formatSavedLinkReply('personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: userTagsPersonal }, r.notes);
+          } else {
+            const vocab = await recentTagsForScope(env, 'personal', athenaUser.id);
             const ai = await aiDescribeAndTag(env, rawUrl, {
               title: r.title,
               notes: r.notes,
@@ -8992,13 +9063,14 @@ Rules:
                 ? [...new Set([...['telegram', 'personal'], ...ai.tags])]
                 : ['telegram', 'personal'];
               await ensureSearchColumns(env);
-             try {
+              try {
                 await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
-                 .bind(savedTitle, JSON.stringify(merged), ai.description || r.notes || '', r.id).run();
-               await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: savedTitle, notes: ai.description || r.notes || '', tags: merged });
-             } catch (_) {}
-           }
-           reply = formatSavedLinkReply('personal', ai?.title || r.title, rawUrl, ai, r.notes);
+                  .bind(savedTitle, JSON.stringify(merged), ai.description || r.notes || '', r.id).run();
+                await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: savedTitle, notes: ai.description || r.notes || '', tags: merged });
+              } catch (_) {}
+            }
+            reply = formatSavedLinkReply('personal', ai?.title || r.title, rawUrl, ai, r.notes);
+          }
         } catch (_) {
           reply = formatSavedLinkReply('personal', r.title, rawUrl, null, r.notes);
         }

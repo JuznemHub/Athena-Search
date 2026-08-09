@@ -12,6 +12,9 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_provider ON users(provider, provider_id);
+-- telegram_api_id added for Bot API id mapping
+-- ALTER TABLE users ADD COLUMN telegram_api_id TEXT;
+-- ALTER TABLE users ADD COLUMN display_name TEXT;
 
 CREATE TABLE IF NOT EXISTS sessions (
     token TEXT PRIMARY KEY,
@@ -74,6 +77,7 @@ CREATE TABLE IF NOT EXISTS community_bots (
     bot_token TEXT,
     dump_link_mode TEXT DEFAULT 'smart',
     topic_id TEXT,
+    log_channel_id TEXT,
     FOREIGN KEY(created_by) REFERENCES users(id)
 );
 
