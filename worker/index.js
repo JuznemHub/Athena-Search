@@ -10190,15 +10190,17 @@ function formatSavedLinkReply(kindLabel, title, rawUrl, ai, fallbackNotes = '') 
 
 export {
   buildSearchBlob,
+  cleanApiBase,
   expandServerSearchTerms,
   fuzzyMatchLinks,
-  cleanApiBase,
   getInstanceAiConfig,
+  getSteroidMode,
   helpTextForSection,
   normalizeModelId,
   parseAiDescribeResponse,
   parseTelegramEditPayload,
   resolveChatEndpoint,
   resultLimitClause,
-  syncAiConfigToPeer
+  syncAiConfigToPeer,
+  syncSteroidToPeer
 };
