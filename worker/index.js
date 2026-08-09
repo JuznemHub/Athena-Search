@@ -128,7 +128,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.35',
+          version: '1.0.36',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -4898,10 +4898,12 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
 
       if (!curRes.ok) {
         const text = await curRes.text();
-        const isRetryable = curRes.status===429 || curRes.status===503 || curRes.status===401;
+        const isRetryable = curRes.status===429 || curRes.status===503 || curRes.status===401 || curRes.status===402;
+        const retryAfter = parseInt(curRes.headers.get('retry-after')||curRes.headers.get('Retry-After')||'0',10);
+        const waitMs = Number.isFinite(retryAfter) && retryAfter>0 ? retryAfter*1000 : 400*(mi+1);
         if (isRetryable && mi < tryModels.length-1) {
-          console.warn(`AI chat fallback ${curModel} ${curRes.status} -> trying next`);
-          await new Promise(r=>setTimeout(r, 400*(mi+1)));
+          console.warn(`AI chat fallback ${curModel} ${curRes.status} retryAfter ${retryAfter}s -> next`);
+          await new Promise(r=>setTimeout(r, waitMs));
           continue;
         }
         let data = {};
@@ -10036,6 +10038,8 @@ const FREE_MODEL_CACHE = new Map();
 const FREE_MODEL_LIST_TTL_MS = 60 * 60 * 1000;
 
 function isModelFreeEntry(entry) {
+  const id = String(entry.id || entry.model || '');
+  if (id.endsWith(':free')) return true;
   const p = entry.pricing || entry.cost || {};
   const vals = [p.prompt, p.completion, p.input, p.output, entry.input, entry.output];
   for (const v of vals) {
@@ -10349,9 +10353,11 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
       const res = await fetchWithTimeout(endpoint, { method: 'POST', headers, body: JSON.stringify(payload), env }, AI_PROXY_TIMEOUT_MS);
       if (!res.ok) {
         const errorText = await res.text().catch(() => '');
-        const isRetryable = res.status===429 || res.status===503 || res.status===401;
+        const isRetryable = res.status===429 || res.status===503 || res.status===401 || res.status===402;
+        const retryAfter = parseInt(res.headers.get('retry-after')||res.headers.get('Retry-After')||'0',10);
+        const waitMs = Number.isFinite(retryAfter) && retryAfter>0 ? retryAfter*1000 : 400*(mi+1);
         console.error(`AI link enrichment failed ${curModel} ${res.status}`, errorText.slice(0,180));
-        if (isRetryable && mi < tryModels.length-1) { await new Promise(r=>setTimeout(r, 400*(mi+1))); continue; }
+        if (isRetryable && mi < tryModels.length-1) { await new Promise(r=>setTimeout(r, waitMs)); continue; }
         return null;
       }
       const contentType = res.headers.get('content-type') || '';
