@@ -128,7 +128,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.37',
+          version: '1.0.38',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -394,7 +394,8 @@ export default {
           return Response.json({ success: false, error: 'baseUrl and model required' }, { status: 400, headers: corsHeaders });
         }
         const free = await isFreeTierModel(model, baseUrl, env, body.apiKey || body.api_key || '');
-        return Response.json({ success: true, free, model, baseUrl }, { headers: corsHeaders });
+        const limits = providerLimitInfo(baseUrl, model, free);
+        return Response.json({ success: true, free, model, baseUrl, limits, provider: detectProviderForModel(model, baseUrl) }, { headers: corsHeaders });
       }
 
       // Storage backend — readable by all ranks, writable by GOD only
@@ -10052,6 +10053,20 @@ function isModelFreeEntry(entry) {
   return false;
 }
 
+function providerLimitInfo(baseUrl, model, free) {
+  const p = detectProviderForModel(model, baseUrl);
+  const data = {
+    opencode: { rpm: 30, rpd: 'varies', notes: 'go key: zen free via zen/v1; deepseek/nemotron 401 credits, most *-free 429 on quota' },
+    groq: { rpm: 30, tpm: 12000, notes: 'free tier 12000 tpm shared; 70b->429 on RAG, use 8b/instant' },
+    nvidia: { rpm: 32, notes: 'free key: worker request limit 35/32; nemotron-ultra 503, use llama-3.1-8b' },
+    openai: { rpm: 'varies', notes: 'paid per-usage / tier rate limits' },
+    anthropic: { rpd: 'varies', notes: 'paid; 429 on usage tier' },
+    openrouter: { rpm: free ? 20 : null, rpd: free ? 50 : null, notes: free ? 'free models: 20/min 50/day; 402 = no balance' : 'paid per-usage' },
+    auto: { notes: 'unknown provider — check provider console' }
+  };
+  return data[p] || data.auto;
+}
+
 async function fetchModelList(baseUrl, env, apiKey) {
   const root = cleanApiBase(baseUrl);
   if (!root) return null;
@@ -10087,7 +10102,6 @@ async function fetchModelList(baseUrl, env, apiKey) {
   } catch (_) { return null; }
 }
 
-// eslint-disable-next-line no-unused-vars
 function detectProviderForModel(model, baseUrl) {
   const m = String(model||'').toLowerCase();
   const b = String(baseUrl||'').toLowerCase();

@@ -2103,15 +2103,21 @@ document.addEventListener('DOMContentLoaded', () => {
       if (badge) badge.textContent = '';
       return;
     }
-    badge.textContent = 'Checking free/paid…';
+    badge.textContent = 'Checking model + limits…';
     try {
       const { data } = await api('/api/ai/detect-free', {
         method: 'POST',
         body: JSON.stringify({ baseUrl: base, model })
       });
-      badge.innerHTML = data.free
-        ? '<span style="color:var(--success-color)">● Free model (hermes throttling unless steroid on)</span>'
-        : '<span style="color:var(--text-muted)">● Paid model</span>';
+      const lim = data.limits || {};
+      const parts = [];
+      if (data.free) parts.push('<span style="color:var(--success-color)">● Free</span>');
+      else parts.push('<span style="color:var(--text-muted)">● Paid</span>');
+      if (lim.rpm != null) parts.push(`RPM ${lim.rpm}`);
+      if (lim.tpm != null) parts.push(`TPM ${lim.tpm}`);
+      if (lim.rpd != null) parts.push(`RPD ${lim.rpd}`);
+      if (lim.notes) parts.push(`<span style="opacity:.7">${lim.notes}</span>`);
+      badge.innerHTML = parts.join(' · ') || '';
     } catch (_) {
       badge.textContent = '';
     }
@@ -2746,7 +2752,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
           await api('/api/ai/steroid', { method: 'POST', body: JSON.stringify({ steroid: steroidToggle.checked }) });
           window.__athenaSteroid = !!steroidToggle.checked;
-          showToast(steroidToggle.checked ? 'Steroid mode ON — unlimited' : 'Steroid mode OFF — hermes throttling');
+          showToast(steroidToggle.checked ? 'Steroid mode ON — unlimited' : 'Steroid mode OFF — throttled');
         } catch (err) {
           showToast(err.message || 'Failed', true);
           steroidToggle.checked = !steroidToggle.checked;

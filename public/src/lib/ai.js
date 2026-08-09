@@ -9,6 +9,7 @@
     openrouter: { label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', mode: 'openai', model: 'openai/gpt-4o-mini' },
     anthropic: { label: 'Anthropic', baseUrl: 'https://api.anthropic.com', mode: 'anthropic', model: 'claude-sonnet-4-20250514' },
     groq: { label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', mode: 'openai', model: 'llama-3.3-70b-versatile' },
+    nvidia: { label: 'NVIDIA NIM', baseUrl: 'https://integrate.api.nvidia.com/v1', mode: 'openai', model: 'meta/llama-3.1-8b-instruct' },
     deepseek: { label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', mode: 'openai', model: 'deepseek-v4-flash' },
     opencode_go: {
       label: 'OpenCode Zen Go',
