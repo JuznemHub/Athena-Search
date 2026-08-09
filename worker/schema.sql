@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS users (
     avatar_url TEXT,
     provider TEXT,
     provider_id TEXT,
+    telegram_api_id TEXT,
     created_at INTEGER NOT NULL
 );
 

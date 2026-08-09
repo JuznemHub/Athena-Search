@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.32',
+          version: '1.0.33',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -5659,14 +5659,7 @@ async function getConfiguredLogTarget(env, ownerUserId = null) {
           ORDER BY CASE WHEN COALESCE(scope,'personal')='personal' THEN 0 ELSE 1 END, created_at DESC LIMIT 1`
       ).bind(ownerUserId, ownerUserId).first();
     }
-    if (!binding) {
-      binding = await env.DB.prepare(
-        `SELECT log_channel_id, bot_token, scope FROM community_bots
-          WHERE platform = 'telegram'
-            AND log_channel_id IS NOT NULL AND log_channel_id != ''
-          ORDER BY CASE WHEN COALESCE(scope,'personal')='personal' THEN 0 ELSE 1 END, created_at DESC LIMIT 1`
-      ).first();
-    }
+    // no unscoped fallback: don't leak another user's channel
     if (!binding?.log_channel_id) return null;
     const token = (binding.bot_token && await decryptBotToken(env, binding.bot_token)) || env.TELEGRAM_BOT_TOKEN;
     if (!token) return null;
@@ -5808,7 +5801,7 @@ async function deleteCommunityFully(env, communityId) {
   return { ok: true, name: c.name, id: c.id };
 }
 
-async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, athenaUser, chatId, userNotes = '', titleHint = '', threadId = null) {
+async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, athenaUser, chatId, userNotes = '', titleHint = '', threadId = null, fullPost = '') {
   const communityId = binding.community_id;
   if (!communityId) {
     await sendTelegramMessage(token, chatId, 'Group not linked as community. Owner: /community_verify', threadId);
@@ -5886,9 +5879,8 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
     ).bind(id, communityId, rawUrl, urlHash, meta.title, meta.notes || '', JSON.stringify(['telegram']), senderName, Date.now()).run();
   }
   // tagging: user #hashtags win, else karakeep AI (skip AI if tags already present)
-  let userTags = normalizeTagList(extractHashtags(userNotes + ' ' + (titleHint||'')));
-  // also check fullPost if caller left it in global (best effort)
-  try { if (typeof globalThis._lastFullPost === 'string' && globalThis._lastFullPost) { const extra = normalizeTagList(extractHashtags(globalThis._lastFullPost)); for (const t of extra) if (!userTags.includes(t)) userTags.push(t); } } catch(_){}
+  const fromPost = fullPost || userNotes + ' ' + (titleHint||'');
+  let userTags = normalizeTagList(extractHashtags(fromPost + ' ' + userNotes + ' ' + (titleHint||'')));
   let reply;
   try {
     if (userTags.length) {
@@ -5897,9 +5889,9 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
       try {
         await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
           .bind(meta.title, JSON.stringify(merged), meta.notes || '', id).run();
-        await storeMutateLink(env, 'community', communityId, id, { title: meta.title, notes: meta.notes || '', tags: merged });
-      } catch (_) {}
-      reply = formatSavedLinkReply('community', meta.title, rawUrl, { title: meta.title, description: meta.notes || '', tags: userTags });
+        const g1 = await storeMutateLink(env, 'community', communityId, id, { title: meta.title, notes: meta.notes || '', tags: merged });
+        if (g1?.handled && !g1.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${g1.error||'unknown'}`, threadId); reply = formatSavedLinkReply('community', meta.title, rawUrl, { title: meta.title, description: meta.notes || '', tags: userTags }); } else { reply = formatSavedLinkReply('community', meta.title, rawUrl, { title: meta.title, description: meta.notes || '', tags: userTags }); }
+      } catch (_) { reply = formatSavedLinkReply('community', meta.title, rawUrl, { title: meta.title, description: meta.notes || '', tags: userTags }); }
     } else {
       const vocab = await recentTagsForScope(env, 'community', communityId);
       const ai = await aiDescribeAndTag(env, rawUrl, meta, vocab);
@@ -5912,7 +5904,8 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
         try {
           await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
             .bind(savedTitle, JSON.stringify(merged), ai.description || meta.notes || '', id).run();
-          await storeMutateLink(env, 'community', communityId, id, { title: savedTitle, notes: ai.description || meta.notes || '', tags: merged });
+          const g2 = await storeMutateLink(env, 'community', communityId, id, { title: savedTitle, notes: ai.description || meta.notes || '', tags: merged });
+          if (g2?.handled && !g2.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${g2.error||'unknown'}`, threadId); }
         } catch (_) {}
         reply = formatSavedLinkReply('community', savedTitle, rawUrl, ai);
       } else {
@@ -7503,6 +7496,18 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
          return new Response('OK', { status: 200, headers: corsHeaders });
        }
        const probeTok = (await decryptBotToken(env, personalBot.bot_token)) || token || env.TELEGRAM_BOT_TOKEN;
+       // validate channel type via getChat
+       try {
+         const chk = await telegramApi(probeTok, 'getChat', { chat_id: cid });
+         const ctype = chk?.result?.type || '';
+         if (!chk?.ok || !chk?.result || ctype !== 'channel') {
+           await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} ID ${codeHtml(cid)} is not a channel (type=${escHtml(ctype||'unknown')}). Use channel ID (-100...).`, forumThreadId);
+           return new Response('OK', { status: 200, headers: corsHeaders });
+         }
+       } catch (e) {
+         await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Cannot validate ${codeHtml(cid)}: ${escHtml(e.message||'getChat failed')}.`, forumThreadId);
+         return new Response('OK', { status: 200, headers: corsHeaders });
+       }
        const probe = await sendTelegramFormatted(probeTok, cid, `${boldHtml('✅')} Athena log channel linked — test ok`);
        if (!probe?.ok) {
          await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Cannot post to ${codeHtml(cid)}: ${escHtml(probe?.error || 'bot not admin')}. Not saved.`, forumThreadId);
@@ -8962,14 +8967,16 @@ Rules:
             ).bind(id, binding.community_id, rawUrl, urlHash, meta.title, meta.notes, JSON.stringify(['telegram']), senderName, Date.now()).run();
           }
           try {
-            const userTags2 = normalizeTagList(extractHashtags(telegramFullPostText(msg) || meta.notes || ''));
+            const tagText = [telegramFullPostText(msg.reply_to_message), telegramFullPostText(msg)].filter(Boolean).join(' ');
+            const userTags2 = normalizeTagList(extractHashtags(tagText || meta.notes || ''));
             if (userTags2.length) {
               const tags = [...new Set([...['telegram'], ...userTags2])];
               await ensureSearchColumns(env);
               await env.DB.prepare(
                 `UPDATE links SET title = ?, notes = ?, tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
               ).bind(meta.title, meta.notes || '', JSON.stringify(tags), id).run();
-              await storeMutateLink(env, 'community', binding.community_id, id, { title: meta.title, notes: meta.notes || '', tags });
+              const gd = await storeMutateLink(env, 'community', binding.community_id, id, { title: meta.title, notes: meta.notes || '', tags });
+              if (gd?.handled && !gd.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${gd.error||'unknown'}`, forumThreadId); }
             } else {
               const vocab = await recentTagsForScope(env, 'community', binding.community_id);
               const ai = await aiDescribeAndTag(env, rawUrl, meta, vocab);
@@ -8980,11 +8987,17 @@ Rules:
                 await env.DB.prepare(
                   `UPDATE links SET title = ?, notes = ?, tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
                 ).bind(savedTitle, ai.description || meta.notes || '', JSON.stringify(tags), id).run();
-                await storeMutateLink(env, 'community', binding.community_id, id, {
-                  title: savedTitle,
-                  notes: ai.description || meta.notes || '',
-                  tags
-                });
+                const ga2 = await storeMutateLink(env, 'community', binding.community_id, id, { title: savedTitle, notes: ai.description || meta.notes || '', tags });
+                if (ga2?.handled && !ga2.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${ga2.error||'unknown'}`, forumThreadId); }
+              } else {
+                const fb = fallbackTagsFromMeta(rawUrl, meta);
+                if (fb.length) {
+                  const tagsFb = [...new Set([...['telegram'], ...fb])];
+                  await ensureSearchColumns(env);
+                  await env.DB.prepare(`UPDATE links SET title = ?, notes = ?, tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`).bind(meta.title, meta.notes||'', JSON.stringify(tagsFb), id).run();
+                  const gf = await storeMutateLink(env, 'community', binding.community_id, id, { title: meta.title, notes: meta.notes||'', tags: tagsFb });
+                  if (gf?.handled && !gf.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${gf.error||'unknown'}`, forumThreadId); }
+                }
               }
             }
           } catch (_) {}
@@ -9047,11 +9060,9 @@ Rules:
     if (isDetailedNotes(fullPost)) notesForSave = fullPost;
   }
 
-  // expose hashtags from fullPost for tagging helper (karakeep: user tags win)
-  try { globalThis._lastFullPost = fullPost; } catch(_){}
   for (const rawUrl of toSave) {
     if (scope === 'community') {
-      await saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, athenaUser, chatId, notesForSave, titleHint, forumThreadId);
+      await saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, athenaUser, chatId, notesForSave, titleHint, forumThreadId, fullPost);
     } else {
       if (!athenaUser) {
         await sendTelegramMessage(token, chatId, 'Personal dump needs Telegram login on the website once.', forumThreadId);
@@ -9075,8 +9086,10 @@ Rules:
             try {
               await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
                 .bind(r.title, JSON.stringify(merged), r.notes || '', r.id).run();
-              await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: r.title, notes: r.notes || '', tags: merged });
+              const gp = await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: r.title, notes: r.notes || '', tags: merged });
+              if (gp?.handled && !gp.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${gp.error||'unknown'}`, forumThreadId); }
             } catch (_) {}
+            reply = formatSavedLinkReply('personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: userTagsPersonal }, r.notes);
             reply = formatSavedLinkReply('personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: userTagsPersonal }, r.notes);
           } else {
             const vocab = await recentTagsForScope(env, 'personal', athenaUser.id);
