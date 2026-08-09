@@ -12,7 +12,7 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import worker, { getInstanceAiConfig, syncAiConfigToPeer } from '../worker/index.js';
+import worker, { getInstanceAiConfig, getSteroidMode, syncAiConfigToPeer, syncSteroidToPeer } from '../worker/index.js';
 import { createAssets } from './assets.js';
 import { startBackups, runBackupOnce } from './backup.js';
 import { PostgresD1, translateSchema } from './pgdb.js';
@@ -89,6 +89,12 @@ try {
   }
 } catch (err) {
   console.error('[athena] AI config peer sync failed:', err.message);
+}
+try {
+  const steroid = await getSteroidMode(env);
+  await syncSteroidToPeer(env, steroid);
+} catch (err) {
+  console.error('[athena] Steroid peer sync failed:', err.message);
 }
 
 const ctx = { waitUntil(p) { Promise.resolve(p).catch(() => {}); }, passThroughOnException() {} };

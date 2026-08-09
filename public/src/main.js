@@ -1411,7 +1411,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!query) return links;
     // Prefer Athena fuzzy search (ytdlp ↔ yt-dlp)
     if (window.AthenaSearch?.searchCorpus) {
-      return window.AthenaSearch.searchCorpus(links, query, 80);
+      const limit = window.__athenaSteroid ? 500 : 80;
+      return window.AthenaSearch.searchCorpus(links, query, limit);
     }
     const q = query.toLowerCase();
     const qa = q.replace(/[^a-z0-9]/g, '');
@@ -2063,6 +2064,23 @@ document.addEventListener('DOMContentLoaded', () => {
         ? `<span style="color:var(--success-color)">API ready · ${escapeHtml(cfg.model || model?.value || 'model')} · ${serverOk ? 'synced for bot /ai' : 'click Save to sync bot'}</span>`
         : '<span style="color:var(--text-muted)">No API key — GOD: Settings → AI → Save</span>';
     }
+
+    const steroidToggle = $('steroidModeToggle');
+    if (steroidToggle) {
+      try {
+        const { data: sData } = await api('/api/ai/steroid');
+        steroidToggle.checked = !!sData.steroid;
+        window.__athenaSteroid = !!sData.steroid;
+      } catch (_) {
+        try {
+          const { data: inst } = await api('/api/instance/config');
+          steroidToggle.checked = !!inst.steroid;
+          window.__athenaSteroid = !!inst.steroid;
+        } catch (_) {}
+      }
+      steroidToggle.disabled = !canEditAiConfig();
+    }
+    updateAiFreeBadge();
   }
 
   function applyAiPreset(name) {
@@ -2074,6 +2092,29 @@ document.addEventListener('DOMContentLoaded', () => {
     if (base && (p.baseUrl || name === 'custom')) base.value = p.baseUrl || base.value;
     if (model && p.model) model.value = p.model;
     if (mode && p.mode) mode.value = p.mode;
+    updateAiFreeBadge();
+  }
+
+  async function updateAiFreeBadge() {
+    const badge = $('aiFreeBadge');
+    const base = $('aiBaseUrl')?.value.trim() || '';
+    const model = $('aiModel')?.value.trim() || '';
+    if (!badge || !base || !model) {
+      if (badge) badge.textContent = '';
+      return;
+    }
+    badge.textContent = 'Checking free/paid…';
+    try {
+      const { data } = await api('/api/ai/detect-free', {
+        method: 'POST',
+        body: JSON.stringify({ baseUrl: base, model })
+      });
+      badge.innerHTML = data.free
+        ? '<span style="color:var(--success-color)">● Free model (hermes throttling unless steroid on)</span>'
+        : '<span style="color:var(--text-muted)">● Paid model</span>';
+    } catch (_) {
+      badge.textContent = '';
+    }
   }
 
   async function onSubmit(e) {
@@ -2623,6 +2664,16 @@ document.addEventListener('DOMContentLoaded', () => {
     if (aiPreset) {
       aiPreset.addEventListener('change', () => applyAiPreset(aiPreset.value));
     }
+    const aiBaseUrlEl = $('aiBaseUrl');
+    const aiModelEl = $('aiModel');
+    if (aiBaseUrlEl) {
+      aiBaseUrlEl.addEventListener('change', updateAiFreeBadge);
+      aiBaseUrlEl.addEventListener('input', () => { clearTimeout(window._freeBadgeTimer); window._freeBadgeTimer = setTimeout(updateAiFreeBadge, 700); });
+    }
+    if (aiModelEl) {
+      aiModelEl.addEventListener('change', updateAiFreeBadge);
+      aiModelEl.addEventListener('input', () => { clearTimeout(window._freeBadgeTimer); window._freeBadgeTimer = setTimeout(updateAiFreeBadge, 700); });
+    }
     if (saveAiConfigBtn) {
       saveAiConfigBtn.addEventListener('click', async () => {
         if (!canEditAiConfig()) { showToast('AI credentials: GOD rank only', true); return; }
@@ -2681,6 +2732,25 @@ document.addEventListener('DOMContentLoaded', () => {
         try { await api('/api/ai/config', { method: 'DELETE' }); } catch (_) {}
         loadAiForm();
         showToast('AI config cleared');
+      });
+    }
+
+    const steroidToggle = $('steroidModeToggle');
+    if (steroidToggle) {
+      steroidToggle.addEventListener('change', async () => {
+        if (!canEditAiConfig()) {
+          showToast('GOD only', true);
+          steroidToggle.checked = !steroidToggle.checked;
+          return;
+        }
+        try {
+          await api('/api/ai/steroid', { method: 'POST', body: JSON.stringify({ steroid: steroidToggle.checked }) });
+          window.__athenaSteroid = !!steroidToggle.checked;
+          showToast(steroidToggle.checked ? 'Steroid mode ON — unlimited' : 'Steroid mode OFF — hermes throttling');
+        } catch (err) {
+          showToast(err.message || 'Failed', true);
+          steroidToggle.checked = !steroidToggle.checked;
+        }
       });
     }
   }

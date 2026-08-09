@@ -65,17 +65,21 @@ const rows = Array.from({ length: 20 }, (_, i) => ({
 }));
 assert.equal(fuzzyMatchLinks(rows, 'ytdlp').length, rows.length);
 
-const searchWindow = {};
+const searchWindow = { __athenaSteroid: true };
 vm.runInNewContext(
   fs.readFileSync(new URL('../public/src/lib/search.js', import.meta.url), 'utf8'),
   { window: searchWindow }
 );
 const retrieved = searchWindow.AthenaSearch.retrieveForQuestion('ytdlp', rows);
 assert.equal(retrieved.length, rows.length);
+searchWindow.__athenaSteroid = false;
+const hermesRetrieved = searchWindow.AthenaSearch.retrieveForQuestion('ytdlp', rows, 8);
+assert.equal(hermesRetrieved.length, 8);
 
 const aiWindow = {
   AthenaSearch: searchWindow.AthenaSearch,
   localStorage: { getItem: () => null, setItem: () => {} },
+  __athenaSteroid: true
 };
 vm.runInNewContext(
   fs.readFileSync(new URL('../public/src/lib/ai.js', import.meta.url), 'utf8'),
@@ -84,5 +88,9 @@ vm.runInNewContext(
 const local = aiWindow.AthenaAI.answerLocal('ytdlp', rows);
 assert.equal(local.sources.length, rows.length);
 assert.equal(local.results.length, rows.length);
+aiWindow.__athenaSteroid = false;
+const hermesLocal = aiWindow.AthenaAI.answerLocal('ytdlp', rows);
+assert.equal(hermesLocal.sources.length, 5);
+assert.equal(hermesLocal.results.length, 8);
 
 console.log('retrieval tests passed');
