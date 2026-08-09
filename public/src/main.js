@@ -69,9 +69,9 @@ document.addEventListener('DOMContentLoaded', () => {
     communityId: state.activeCommunity,
   });
   function canUseAi() {
-    // A restored token can exist briefly before /auth/me finishes; do not
-    // bounce an intentional AI-mode click back to Search during that window.
-    return !state.authReady || !!(state.currentUser || state.sessionToken); // all logged-in ranks
+    // all logged-in ranks; if auth hasn't resolved yet, optimistically allow AI
+    // (runAi re-checks with a toast) instead of silently bouncing to Search.
+    return true;
   }
   function canEditAiConfig() {
     return !!state.currentUser?.can_ai_config;
@@ -1314,9 +1314,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // ---- Modes / UI ----
 
   function setMode(mode) {
-    if (mode === 'ai' && !canUseAi()) {
-      showToast('Login to use AI', true);
-      mode = 'search';
+    if (mode === 'ai' && !state.authReady) {
+      showToast('Auth is still loading — wait a second and click AI again', true);
+      return;
     }
     if (mode === 'delete' && state.scope === 'community' && !isCommunityStaff()) {
       showToast('Only community owner or admins can enable Delete mode', true);

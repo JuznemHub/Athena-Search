@@ -245,32 +245,46 @@ Rules:
       let buf = '';
       let full = '';
       let thinkingBuf = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let nl;
-        while ((nl = buf.indexOf('\n')) !== -1) {
-          const line = buf.slice(0, nl).trim();
-          buf = buf.slice(nl + 1);
-          if (!line.startsWith('data:')) continue;
-          const payload = line.slice(5).trim();
-          if (!payload || payload === '[DONE]') continue;
-          let j;
-          try { j = JSON.parse(payload); } catch (_) { continue; }
-          if (j.error) {
-            const message = typeof j.error === 'string' ? j.error : j.error.message || j.error.type || 'AI stream error';
-            throw new Error(message);
-          }
-          if (j.delta) {
-            full += j.delta;
-            if (onDelta) onDelta(j.delta, full);
-          }
-          if (j.thinking) {
-            thinkingBuf += j.thinking;
-            if (onThinking) onThinking(j.thinking, thinkingBuf);
+      // stall guard: if no bytes arrive for 60s, stop waiting (provider froze)
+      const STALL_MS = 60000;
+      let lastByte = Date.now();
+      const stallTimer = setInterval(() => {
+        if (Date.now() - lastByte > STALL_MS) {
+          clearInterval(stallTimer);
+          reader.cancel().catch(() => {});
+        }
+      }, 2000);
+      try {
+        while (true) {
+          const r = await reader.read();
+          if (r.done) break;
+          if (r.value && r.value.length) lastByte = Date.now();
+          buf += decoder.decode(r.value, { stream: true });
+          let nl;
+          while ((nl = buf.indexOf('\n')) !== -1) {
+            const line = buf.slice(0, nl).trim();
+            buf = buf.slice(nl + 1);
+            if (!line.startsWith('data:')) continue;
+            const payload = line.slice(5).trim();
+            if (!payload || payload === '[DONE]') continue;
+            let j;
+            try { j = JSON.parse(payload); } catch (_) { continue; }
+            if (j.error) {
+              const message = typeof j.error === 'string' ? j.error : j.error.message || j.error.type || 'AI stream error';
+              throw new Error(message);
+            }
+            if (j.delta) {
+              full += j.delta;
+              if (onDelta) onDelta(j.delta, full);
+            }
+            if (j.thinking) {
+              thinkingBuf += j.thinking;
+              if (onThinking) onThinking(j.thinking, thinkingBuf);
+            }
           }
         }
+      } finally {
+        clearInterval(stallTimer);
       }
       return { text: full, thinking: thinkingBuf };
     }
