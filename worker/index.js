@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.29',
+          version: '1.0.31',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -1821,8 +1821,10 @@ async function handleTelegramWebAppAuth(request, env, corsHeaders, url) {
          await createNotification(env, { userId: god.id, type: 'login', title: 'Website Login', body: loginMsg }).catch(() => {});
        }
          const notifyText = `🌐 ${boldHtml(loginLabel)}${loginTgId ? ` | ${codeHtml(String(loginTgId))}` : ''} logged in to website`;
-        const sent = await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id);
-        if (!sent) {
+        const logTarget = await getConfiguredLogTarget(env, godUsers?.[0]?.id);
+        if (logTarget) {
+          await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id, logTarget);
+        } else {
           for (const ownerId of ownerIds) {
             if (ownerId && env.TELEGRAM_BOT_TOKEN) {
               await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
@@ -2106,14 +2108,16 @@ async function handleTelegramCallback(url, env, corsHeaders, request) {
        await createNotification(env, { userId: god.id, type: 'login', title: 'Website Login', body: loginMsg }).catch(() => {});
      }
        const notifyText = `🌐 ${boldHtml(loginLabel)}${loginTgId ? ` | ${codeHtml(String(loginTgId))}` : ''} logged in to website (Telegram)`;
-      const sent = await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id);
-      if (!sent) {
-        for (const ownerId of ownerIds) {
-          if (ownerId && env.TELEGRAM_BOT_TOKEN) {
-            await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
+        const logTarget = await getConfiguredLogTarget(env, godUsers?.[0]?.id);
+        if (logTarget) {
+          await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id, logTarget);
+        } else {
+          for (const ownerId of ownerIds) {
+            if (ownerId && env.TELEGRAM_BOT_TOKEN) {
+              await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
+            }
           }
         }
-      }
     } catch (_) {}
    // Consume state only after success
   try {
@@ -2254,14 +2258,16 @@ async function handleDiscordCallback(url, env, request) {
        await createNotification(env, { userId: god.id, type: 'login', title: 'Website Login', body: loginMsg }).catch(() => {});
      }
        const notifyText = `🌐 ${boldHtml(loginLabel)} logged in to website (Discord)`;
-      const sent = await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id);
-      if (!sent) {
-        for (const ownerId of ownerIds) {
-          if (ownerId && env.TELEGRAM_BOT_TOKEN) {
-            await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
+        const logTarget = await getConfiguredLogTarget(env, godUsers?.[0]?.id);
+        if (logTarget) {
+          await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id, logTarget);
+        } else {
+          for (const ownerId of ownerIds) {
+            if (ownerId && env.TELEGRAM_BOT_TOKEN) {
+              await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
+            }
           }
         }
-      }
     } catch (_) {}
    // Consume the state on success (single-use).
    try { await env.DB.prepare('DELETE FROM oauth_states WHERE state = ?').bind(state).run(); } catch (_) {}
@@ -2499,14 +2505,16 @@ async function handleJoinCommunity(request, user, env, corsHeaders) {
        await createNotification(env, { userId: god.id, type: 'community_join', title: 'New Community Member', body: notifyMsg }).catch(() => {});
      }
        const notifyText = `👤 ${boldHtml(joinerLabel)}${joinerTgId ? ` | ${codeHtml(String(joinerTgId))}` : ''} joined ${boldHtml(c.name)} community`;
-      const sent = await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id);
-      if (!sent) {
-        for (const ownerId of ownerIds) {
-          if (ownerId && env.TELEGRAM_BOT_TOKEN) {
-            await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
+        const logTarget = await getConfiguredLogTarget(env, godUsers?.[0]?.id);
+        if (logTarget) {
+          await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id, logTarget);
+        } else {
+          for (const ownerId of ownerIds) {
+            if (ownerId && env.TELEGRAM_BOT_TOKEN) {
+              await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
+            }
           }
         }
-      }
     } catch (_) {}
     return Response.json({
       success: true,
@@ -7287,21 +7295,30 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   if (cmd === '/community_join' || cmd === '/cjoin' || cmd === '/join_community') {
     const cid = rest.trim().split(/\s+/)[0] || '';
     if (!cid) {
+      const websiteForEmpty = await getWebsiteDisplayUrl(env);
+      const hostLabelEmpty = websiteForEmpty.replace(/^https?:\/\//, '');
       await logOperationalEvent(env, '⚠️ Community join failed', `Telegram user ${tgUserId || 'unknown'} did not provide a community id`);
-      await sendTelegramMessage(token, chatId, 'Usage: /community_join <community_id>\nGet id from owner: /community_list', forumThreadId);
+      await sendTelegramMessage(token, chatId, `Usage: /community_join <community_id>\nInstance: ${hostLabelEmpty} (${websiteForEmpty})\nGet id: /community_list or from owner`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     if (!athenaUser) {
       await logOperationalEvent(env, '⚠️ Community join blocked', `Telegram user ${tgUserId || 'unknown'} is not logged in; requested ${cid}`);
       const website = await getWebsiteDisplayUrl(env);
+      const hostLabel = website.replace(/^https?:\/\//, '');
+      const cForNotRegistered = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(cid).first();
+      const communityLabelNotReg = cForNotRegistered ? `${cForNotRegistered.name} (${cForNotRegistered.id})` : cid;
       await sendTelegramMessage(token, chatId,
-        `Login at ${website} with Telegram first, then send /community_join ${cid}`, forumThreadId);
+        `Not registered yet.\nInstance: ${hostLabel} — ${website}\nCommunity: ${communityLabelNotReg}\n\n1) Login at ${website} with Telegram\n2) Join this Telegram group\n3) Then send /community_join ${cid}`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     const c = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(cid).first();
     if (!c) {
       await logOperationalEvent(env, '⚠️ Community join failed', `Unknown community ${cid} requested by ${tgUserId || athenaUser.id}`, athenaUser.id);
       await sendTelegramMessage(token, chatId, `Community not found: ${cid}`, forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    if (isGod) {
+      await sendTelegramMessage(token, chatId, `You are GOD already — you don't need to /community_join. You have full access to ${c.name} (${c.id}) and all communities.`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     if (await isBannedFromCommunity(env, cid, athenaUser)) {
@@ -7338,8 +7355,9 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       'SELECT role FROM community_members WHERE community_id = ? AND user_id = ?'
     ).bind(cid, athenaUser.id).first();
     if (existing) {
+      const websiteForExisting = await getWebsiteDisplayUrl(env);
       await sendTelegramMessage(token, chatId,
-        `Already a member of ${c.name} | ${c.id}\nOpen the website → Communities.`, forumThreadId);
+        `You are already a member of ${c.name} (${c.id}) — you don't need to /community_join again.\nOpen ${websiteForExisting} → Communities.`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     await upsertCommunityMember(env, cid, athenaUser.id, 'member');
@@ -7357,8 +7375,10 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
          await createNotification(env, { userId: god.id, type: 'community_join', title: 'New Community Member', body: notifyMsg }).catch(() => {});
        }
          const notifyText = `👤 ${boldHtml(joinerLabel)}${joinerTgId ? ` | ${codeHtml(String(joinerTgId))}` : ''} joined ${boldHtml(c.name)} community`;
-        const sent = await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id);
-        if (!sent) {
+        const logTarget = await getConfiguredLogTarget(env, godUsers?.[0]?.id);
+        if (logTarget) {
+          await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id, logTarget);
+        } else {
           for (const ownerId of ownerIds) {
             if (ownerId && env.TELEGRAM_BOT_TOKEN) {
               await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
