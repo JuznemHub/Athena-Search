@@ -7470,7 +7470,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Log channel removed.`, forumThreadId);
      } else {
        const cid = String(channelId).trim();
-       if (!/^-\\d+$/.test(cid)) {
+       if (!/^-\d+$/.test(cid)) {
          await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Invalid channel ID. Use -100... for channels. Forward msg to @userinfobot.`, forumThreadId);
          return new Response('OK', { status: 200, headers: corsHeaders });
        }
