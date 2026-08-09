@@ -5916,7 +5916,14 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
         } catch (_) {}
         reply = formatSavedLinkReply('community', savedTitle, rawUrl, ai);
       } else {
-        reply = formatSavedLinkReply('community', meta.title, rawUrl, null, meta.notes);
+        const fb=fallbackTagsFromMeta(rawUrl, meta);
+        if(fb.length){
+          const mergedFb=[...new Set([...['telegram','community'], ...fb])];
+          try{ await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`).bind(meta.title, JSON.stringify(mergedFb), meta.notes||'', id).run(); await storeMutateLink(env,'community',communityId,id,{title:meta.title, notes:meta.notes||'', tags:mergedFb}); }catch(_){}
+          reply = formatSavedLinkReply('community', meta.title, rawUrl, {title: meta.title, description: meta.notes||'', tags: fb}, meta.notes);
+        } else {
+          reply = formatSavedLinkReply('community', meta.title, rawUrl, null, meta.notes);
+        }
       }
     }
   } catch (_) {
@@ -6185,6 +6192,27 @@ function extractHashtags(text) {
     if (out.length >= 10) break;
   }
   return out;
+}
+
+function fallbackTagsFromMeta(rawUrl, meta) {
+  const tags=[];
+  try {
+    const u=new URL(rawUrl.startsWith('http')?rawUrl:`https://${rawUrl}`);
+    const host=u.hostname.replace(/^www\./,'').toLowerCase();
+    const base=host.replace(/\.(com|net|org|io|so|app|dev|me|co|ai)$/i,'').split('.').pop()||'';
+    if(base && !['github','t','telegram'].includes(base) && !tags.includes(base)) tags.push(base);
+    if(host.includes('github') && !tags.includes('github')) tags.push('github');
+    if(host.includes('youtube')||host.includes('youtu.be')) tags.push('video');
+  } catch(_){}
+  const text=`${meta?.title||''} ${meta?.notes||''} ${meta?.content||''}`.toLowerCase();
+  const keywords=['dns','adblock','ublock','block','privacy','vpn','tool','client','proxy','security','network','filter','easylist','tracker'];
+  for(const k of keywords){ if(text.includes(k) && !tags.includes(k)) tags.push(k); if(tags.length>=5) break; }
+  // title words fallback
+  if(tags.length<3){
+    const words=String(meta?.title||'').toLowerCase().match(/[a-z]{3,15}/g)||[];
+    for(const w of words){ if(!['the','and','with','from','this','that','client','project','independent','not'].includes(w) && !tags.includes(w)) tags.push(w); if(tags.length>=4) break; }
+  }
+  return tags.slice(0,6).map(t=>t.replace(/^#/,'').toLowerCase().replace(/\s+/g,'-').slice(0,40)).filter(Boolean);
 }
 
 function normalizeTagList(tags) {
@@ -9068,8 +9096,17 @@ Rules:
                   .bind(savedTitle, JSON.stringify(merged), ai.description || r.notes || '', r.id).run();
                 await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: savedTitle, notes: ai.description || r.notes || '', tags: merged });
               } catch (_) {}
+            } else {
+              const fb=fallbackTagsFromMeta(rawUrl, {title: r.title, notes: r.notes, content: r.content});
+              if(fb.length && r.id){
+                const mergedFb=[...new Set([...['telegram','personal'], ...fb])];
+                try{ await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`).bind(r.title, JSON.stringify(mergedFb), r.notes||'', r.id).run(); await storeMutateLink(env,'personal',athenaUser.id,r.id,{title:r.title, notes:r.notes||'', tags:mergedFb}); }catch(_){}
+                reply = formatSavedLinkReply('personal', r.title, rawUrl, {title: r.title, description: r.notes||'', tags: fb}, r.notes);
+              } else {
+                reply = formatSavedLinkReply('personal', r.title, rawUrl, null, r.notes);
+              }
             }
-            reply = formatSavedLinkReply('personal', ai?.title || r.title, rawUrl, ai, r.notes);
+            if(!reply) reply = formatSavedLinkReply('personal', ai?.title || r.title, rawUrl, ai, r.notes);
           }
         } catch (_) {
           reply = formatSavedLinkReply('personal', r.title, rawUrl, null, r.notes);
