@@ -19,6 +19,7 @@ const PUBLIC_API = new Set([
   '/api/telegram-webhook',
   // Read-only instance defaults; the login page needs these before auth.
   '/api/instance/config',
+  '/api/ai/config',
 ]);
 
 /**
@@ -127,7 +128,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.34',
+          version: '1.0.35',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
