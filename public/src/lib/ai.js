@@ -22,12 +22,6 @@
       mode: 'openai',
       model: 'deepseek-v4-flash'
     },
-    opencode_big_pickle: {
-      label: 'Big Pickle (OpenCode Zen)',
-      baseUrl: 'https://opencode.ai/zen/v1',
-      mode: 'openai',
-      model: 'big-pickle'
-    },
     cohere_command: {
       label: 'Cohere Command',
       baseUrl: 'https://api.cohere.ai/compatibility/v1',
