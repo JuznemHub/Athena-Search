@@ -29,8 +29,8 @@
       }
     })();
   </script>
-<link rel="stylesheet" href="./src/style.css?v=1.0.37">
-<link rel="stylesheet" href="./src/themes.css?v=1.0.37">
+<link rel="stylesheet" href="./src/style.css?v=1.0.38">
+<link rel="stylesheet" href="./src/themes.css?v=1.0.38">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -274,6 +274,7 @@
             <option value="openrouter">OpenRouter</option>
             <option value="anthropic">Anthropic</option>
             <option value="groq">Groq</option>
+            <option value="nvidia">NVIDIA NIM</option>
             <option value="deepseek">DeepSeek</option>
             <option value="custom">Custom endpoint</option>
           </select>
@@ -304,7 +305,7 @@
             <input type="checkbox" id="steroidModeToggle">
             <span>Steroid mode — no search/AI limits, only provider context window</span>
           </label>
-          <p class="section-desc">Off = Hermes throttling (default). On = old unlimited code.</p>
+          <p class="section-desc">Off = throttled (default). On = unlimited.</p>
         </div>
         <button id="saveAiConfigBtn" class="btn btn-primary btn-block">Save AI config</button>
         <button id="clearAiConfigBtn" class="btn btn-secondary btn-block mt-2">Clear key</button>
@@ -349,9 +350,9 @@
     </div>
   </aside>
 
-  <script src="./src/lib/dedupe.js?v=1.0.37"></script>
-  <script src="./src/lib/search.js?v=1.0.37"></script>
-  <script src="./src/lib/ai.js?v=1.0.37"></script>
-  <script src="./src/main.js?v=1.0.37"></script>
+  <script src="./src/lib/dedupe.js?v=1.0.38"></script>
+  <script src="./src/lib/search.js?v=1.0.38"></script>
+  <script src="./src/lib/ai.js?v=1.0.38"></script>
+  <script src="./src/main.js?v=1.0.38"></script>
 </body>
 </html>
