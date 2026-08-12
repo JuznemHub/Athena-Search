@@ -86,26 +86,32 @@
   }
 
   function buildSystemPrompt() {
-    return `You are Athena, a second-brain assistant. You ONLY use BRAIN CONTEXT below (the user's saved links, notes, and uploaded documents).
+    return `You are Athena, a second-brain assistant. You ONLY use BRAIN CONTEXT (saved links, notes, uploaded documents).
 
-Rules:
-1. NEVER say the brain is empty if BRAIN CONTEXT lists any items — use them.
-2. By default give concise, direct answers. When the user says "in detail", "detailed", "explain", or asks for more depth, be thorough and comprehensive.
-3. Answer DIRECTLY. NEVER include "Thinking", numbered analysis steps, evaluation of items, or meta-commentary about your reasoning. Start immediately with the answer.
-4. When an uploaded DOCUMENT answers the question, read its relevant sections and present them clearly. Cite as [#n].
-5. MANDATORY: Base your entire answer on the saved URLs/links in BRAIN CONTEXT. If the question is about a topic and BRAIN CONTEXT contains matching saved links, list THOSE links first with their titles and cite as [#n]. Do NOT fall back to general knowledge or invent websites that are not in BRAIN CONTEXT — only use what is saved in the user's brain.
-6. Stay strictly grounded in BRAIN CONTEXT; never invent facts, URLs, titles, or websites not present in it. If BRAIN CONTEXT has no matching link for the topic, say "You have no saved link on this in your brain" instead of listing general internet sites.
-7. Cite only source IDs that appear in BRAIN CONTEXT. Never invent URLs, titles, tags, or facts.
-8. BRAIN CONTEXT is a retrieved subset. If the user asks for more, use every relevant retrieved item and state that the answer is limited to retrieved matches; never claim only five exist unless the context says the total is five.
-9. Use clean Markdown: headings, bullets, and tables only when useful. Do not output a Thinking section or raw pipe tables without a header.
-10. The user may ask follow-up questions. Use the conversation history to understand context. If they say "tell me more" or "which sections", refer back to the documents discussed.`;
+CRITICAL GROUNDING RULES - VIOLATION IS A FAILURE:
+1. NEVER invent facts, URLs, titles, or explanations not present in BRAIN CONTEXT.
+2. If BRAIN CONTEXT says "no relevant matches were retrieved" or "truly empty" or lists 0 items relevant to the question, you MUST output EXACTLY: "You have no saved link on this in your brain" and nothing else. No extra sentences, no apologies, no general knowledge.
+3. If BRAIN CONTEXT lists items but they contain NO Notes/Content (only Title/URL/Tags), the answer is THIN. In thin case, you MUST output ONLY: "Found saved link: <Title> - <URL> (no description was saved, open the link for details) [#n]" — do NOT elaborate, do NOT invent what the site does.
+4. If BRAIN CONTEXT lists items with Notes/Content, you MUST cite them as [#n] and base your entire answer ONLY on those items. List their titles and URLs and summarize ONLY what is in Notes/Content.
+5. NEVER say the brain is empty if BRAIN CONTEXT lists any items — use them, even if thin.
+6. By default give concise, direct answers. When user says "in detail", "detailed", "explain", be thorough but still only from BRAIN CONTEXT.
+7. Answer DIRECTLY. Never include "Thinking", numbered analysis steps, or meta-commentary. Start immediately with answer.
+8. When an uploaded DOCUMENT answers the question, read its relevant sections and present them clearly. Cite as [#n].
+9. Cite only source IDs that appear in BRAIN CONTEXT.
+10. BRAIN CONTEXT is a retrieved subset. If user asks for more, use every relevant retrieved item and state that answer is limited to retrieved matches.
+11. Use clean Markdown only when useful. No Thinking section.
+12. If you cannot cite at least one [#n] from BRAIN CONTEXT, you have failed grounding - output "You have no saved link on this in your brain" instead of hallucinating.`;
   }
 
   function buildContextMessage(docs, corpusSize, maxChars = null) {
     if (!docs.length) {
       return corpusSize
-        ? `BRAIN has ${corpusSize} saved item(s), but no relevant matches were retrieved for this question.`
-        : 'BRAIN CONTEXT: (truly empty — 0 saved items)';
+        ? `BRAIN has ${corpusSize} saved item(s), but no relevant matches were retrieved for this question.
+
+INSTRUCTION: No relevant matches. You MUST output exactly "You have no saved link on this in your brain" and nothing else. Do NOT invent TokenRouter, blockchain, or any general knowledge. If you output anything else, you have failed.`
+        : `BRAIN CONTEXT: (truly empty — 0 saved items)
+
+INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on this in your brain" and nothing else.`;
     }
     const prefix = `BRAIN has ${corpusSize} saved item(s). Retrieved items:\n\n`;
     const sections = docs.map((d, i) => {
@@ -131,7 +137,8 @@ Rules:
     return prefix + compact.join('');
   }
 
-  function isProviderContextError(error) {
+
+    function isProviderContextError(error) {
     return /context length|context window|maximum context|too many tokens|prompt is too long|request too large|input.{0,20}long/i
       .test(String(error?.message || error || ''));
   }
@@ -157,14 +164,18 @@ Rules:
     const token = window.getAthenaSessionToken?.() || localStorage.getItem('athena_session');
     const prior = (conversationHistory || [])
       .filter(message => message.role === 'user')
-      .map(message => String(message.content || ''));
-    const retrievalQuestion = [...prior, question].filter(Boolean).join(' ');
+      .map(message => String(message.content || '').slice(0, 200))
+      .slice(-2);
+    let retrievalQuestion = [...prior, String(question || '').slice(0, 500)].filter(Boolean).join(' ').slice(0, 500);
+    if (!retrievalQuestion) retrievalQuestion = String(question || '').slice(0, 500);
     const expanded = window.AthenaSearch?.expandQueryTerms?.(retrievalQuestion)?.expanded || [];
-    const queries = [...new Set([retrievalQuestion, ...expanded])].filter(Boolean);
+    const truncatedExpanded = (expanded || []).map(t => String(t).slice(0, 200)).slice(0, 12);
+    const queries = [...new Set([retrievalQuestion, ...truncatedExpanded])].filter(Boolean);
     const docs = new Map();
     let total = 0;
     for (const q of queries) {
-      const params = new URLSearchParams({ q, scope: context.scope || 'personal', limit: isSteroidEnabled() ? 'all' : '50' });
+      const safeQ = String(q).slice(0, 500);
+      const params = new URLSearchParams({ q: safeQ, scope: context.scope || 'personal', limit: isSteroidEnabled() ? 'all' : '50' });
       if (context.scope === 'community' && context.communityId) params.set('community_id', context.communityId);
       try {
         const res = await fetch(`${apiBase}/api/links/search?${params}`, {
@@ -245,11 +256,12 @@ Rules:
       let buf = '';
       let full = '';
       let thinkingBuf = '';
-      // stall guard: if no bytes arrive for 60s, stop waiting (provider froze)
+      let stalled = false;
       const STALL_MS = 60000;
       let lastByte = Date.now();
       const stallTimer = setInterval(() => {
         if (Date.now() - lastByte > STALL_MS) {
+          stalled = true;
           clearInterval(stallTimer);
           reader.cancel().catch(() => {});
         }
@@ -283,8 +295,25 @@ Rules:
             }
           }
         }
+        if (buf.trim().startsWith('data:')) {
+          const payload = buf.trim().slice(5).trim();
+          if (payload && payload !== '[DONE]') {
+            try {
+              const j = JSON.parse(payload);
+              if (j.error) throw new Error(typeof j.error === 'string' ? j.error : j.error.message || 'AI stream error');
+              if (j.delta) {
+                full += j.delta;
+                if (onDelta) onDelta(j.delta, full);
+              }
+            } catch (_) {}
+          }
+        }
       } finally {
         clearInterval(stallTimer);
+      }
+      if (!full && !thinkingBuf) {
+        if (stalled) throw new Error('AI provider stalled (no data for 60s) — try again or check provider status');
+        throw new Error('Empty response from AI provider');
       }
       return { text: full, thinking: thinkingBuf };
     }
@@ -321,22 +350,97 @@ Rules:
     const docs = [...merged.values()];
     const corpusSize = Math.max(list.length, remote.total || 0);
 
-    const hasLocalKey = !!(cfg.apiKey && cfg.baseUrl && cfg.model);
-    const serverConfigured = await instanceAiConfigured();
-    if (!hasLocalKey && !serverConfigured) {
-      const local = answerLocal(q, docs, corpusSize);
-      return { ...local, mode: 'local', thinking: '' };
+    // HARD FAIL-SAFE: If no docs retrieved for this question, do NOT call LLM - it will hallucinate.
+    // Return the canonical "no saved link" message directly.
+    if (!docs.length) {
+      return {
+        answer: corpusSize
+          ? 'You have no saved link on this in your brain'
+          : 'Your brain has no saved notes/links yet. Dump some first.',
+        sources: [],
+        results: [],
+        mode: 'local',
+        thinking: ''
+      };
     }
 
-    // Server accepts per-request credentials only for GOD rank (audit HIGH-1);
-    // everyone else uses the instance config. Don't send a local key that would
-    // be rejected — fall back to instance, or to local search when the instance
-    // has no key configured.
+        // THIN-DOCS GUARD: If retrieved docs have no grounded content for the QUERY-RELEVANT subset, do NOT call LLM.
+    // LLM will invent details for bare URLs like tokenrouter.com with empty notes.
+    // "Relevant" = doc bag contains the core query term (last non-stopword). This prevents
+    // unrelated docs that matched "what"/"is" via expanded terms from masking a thin relevant doc.
+    const STOPWORDS = new Set(['what','is','are','was','were','where','when','why','how','a','an','the','does','do','did','can','could','would','should','tell','me','about','of','for','on','in','to','you','your','it','this','that','with','from','and','or','as','at','be','by','if','we','us']);
+    const qTokens = String(q || '').toLowerCase().split(/\s+/).filter(Boolean);
+    const coreTokens = qTokens.filter(w => {
+      const al = w.replace(/[^a-z0-9]/g, '');
+      return al.length > 2 && !STOPWORDS.has(al);
+    });
+    const coreTerm = (coreTokens.length ? coreTokens[coreTokens.length - 1] : qTokens[qTokens.length - 1] || q || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    function isRelevantDoc(d, term) {
+      if (!term || term.length < 2) return true;
+      const bag = [d.title, d.url, d.filename, d.notes, d.content, Array.isArray(d.tags) ? d.tags.join(' ') : d.tags].join(' ').toLowerCase();
+      const bagAl = bag.replace(/[^a-z0-9]/g, '');
+      return bag.includes(term) || (bagAl.includes(term) && term.length >= 3);
+    }
+    const relevantDocs = coreTerm ? docs.filter(d => isRelevantDoc(d, coreTerm)) : docs;
+    const docsToCheck = relevantDocs.length ? relevantDocs : docs;
+    if (relevantDocs.length === 0) {
+      return {
+        answer: 'You have no saved link on this in your brain',
+        sources: [],
+        results: [],
+        mode: 'local',
+        thinking: ''
+      };
+    }
+    const hasGroundedContent = docsToCheck.some(d => {
+      const notes = String(d.notes || '').trim();
+      const content = String(d.content || '').trim();
+      const combined = notes + content;
+      return combined.length >= 30;
+    });
+    if (!hasGroundedContent) {
+      const lines = docsToCheck.slice(0, 5).map((d, i) => {
+        const label = d.title || d.url || 'Note';
+        const url = d.url ? ` - ${d.url}` : '';
+        const tags = Array.isArray(d.tags) && d.tags.length ? ` (tags: ${d.tags.join(', ')})` : '';
+        const origIdx = docs.indexOf(d);
+        return `${i + 1}. **${label}**${url}${tags} [#${origIdx + 1}]`;
+      });
+      return {
+        answer: `Found ${docsToCheck.length} saved link(s) for this query but no description was saved. Open the link for details:\n\n${lines.join('\n\n')}`,
+        sources: docsToCheck.slice(0, 8),
+        results: docsToCheck,
+        mode: 'local',
+        thinking: ''
+      };
+    }
+
+    const hasLocalKey = !!(cfg.apiKey && cfg.baseUrl && cfg.model);
+    const serverConfigured = await instanceAiConfigured();
     const isGod = window.athenaIsGod?.() ?? false;
     const sendOwn = isGod && hasLocalKey;
+
+    if (!hasLocalKey && !serverConfigured) {
+      const local = answerLocal(q, docs, corpusSize);
+      const hint = isGod
+        ? 'No AI credentials configured — GOD: Settings → AI → Save API key'
+        : 'No instance AI credentials — GOD must configure in Settings → AI';
+      return { ...local, mode: 'local', thinking: '', error: hint };
+    }
+
     if (!isGod && !serverConfigured) {
       const local = answerLocal(q, docs, corpusSize);
-      return { ...local, mode: 'local', thinking: '' };
+      return {
+        ...local,
+        mode: 'local',
+        thinking: '',
+        error: 'Instance AI not configured — GOD rank must save credentials in Settings → AI (server has no key, possibly decryption failed or not synced)'
+      };
+    }
+
+    if (isGod && !hasLocalKey && !serverConfigured) {
+      const local = answerLocal(q, docs, corpusSize);
+      return { ...local, mode: 'local', thinking: '', error: 'GOD: No local key in browser and no instance key on server — save in Settings → AI' };
     }
 
     try {
@@ -392,24 +496,28 @@ Rules:
 
   /** Does the server hold usable AI credentials? Cached for the page session. */
   let _serverCfg = null;
+  let _serverCfgDetails = null;
   async function instanceAiConfigured() {
-    // don't cache false (401 before fix) — retry every call until true, then cache true
     if (_serverCfg === true) return true;
     try {
       const token = window.getAthenaSessionToken?.() || localStorage.getItem('athena_session');
       const apiBase = window.getAthenaApiBase?.() || window.location.origin;
-      const res = await fetch(`${apiBase}/api/ai/config?v=1.0.36`, {
+      const res = await fetch(`${apiBase}/api/ai/config?v=1.0.41`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
         cache: 'no-store'
       });
       const data = await res.json().catch(() => ({}));
+      _serverCfgDetails = data;
       _serverCfg = !!(data && data.hasKey);
       if (_serverCfg) return true;
-      // keep false as transient, don't cache permanently
       return false;
     } catch (_) {
       return false;
     }
+  }
+
+  function getLastServerAiConfig() {
+    return _serverCfgDetails;
   }
 
   window.AthenaAI = {
@@ -418,6 +526,8 @@ Rules:
     loadConfig,
     saveConfig,
     PRESETS,
-    normalizeModelId
+    normalizeModelId,
+    instanceAiConfigured,
+    getLastServerAiConfig
   };
 })();

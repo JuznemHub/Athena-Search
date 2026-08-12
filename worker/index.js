@@ -128,7 +128,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.40',
+          version: '1.0.45',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -3547,7 +3547,6 @@ async function ensureAiConfigTable(env) {
 
 async function getInstanceAiConfig(env) {
   await ensureAiConfigTable(env);
-  // Prefer dedicated instance row; fall back to any GOD user's config
   let row = await env.DB.prepare(
     "SELECT base_url, model, mode, updated_at, api_key FROM user_ai_config WHERE user_id = '__instance__'"
   ).first();
@@ -3566,13 +3565,23 @@ async function getInstanceAiConfig(env) {
     }
   }
   if (!row) {
-    // self-host / no owners: most recently updated config
     row = await env.DB.prepare(
       'SELECT base_url, model, mode, updated_at, api_key FROM user_ai_config ORDER BY updated_at DESC LIMIT 1'
     ).first();
   }
   if (row && row.api_key) {
-    try { row.api_key = await decryptSecret(env, row.api_key); } catch (_) {}
+    try {
+      const decrypted = await decryptSecret(env, row.api_key);
+      if (decrypted === null && String(row.api_key).startsWith('enc:v1:')) {
+        row._decrypt_failed = true;
+        row.api_key = null;
+      } else {
+        row.api_key = decrypted;
+      }
+    } catch (_) {
+      row._decrypt_failed = true;
+      row.api_key = null;
+    }
   }
   return row || null;
 }
@@ -3584,6 +3593,7 @@ async function handleGetAiConfig(user, env, corsHeaders) {
   if (!row) {
     return Response.json({ success: true, configured: false, read_only: !isGod }, { headers: corsHeaders });
   }
+  const decryptFailed = !!row._decrypt_failed;
   return Response.json({
     success: true,
     configured: true,
@@ -3591,6 +3601,8 @@ async function handleGetAiConfig(user, env, corsHeaders) {
     model: row.model,
     mode: row.mode,
     hasKey: !!row.api_key,
+    decrypt_failed: decryptFailed,
+    error: decryptFailed ? 'API key decryption failed — STORAGE_KEY missing or rotated. GOD must re-save credentials.' : undefined,
     updatedAt: row.updated_at,
     read_only: !isGod
   }, { headers: corsHeaders });
@@ -4620,7 +4632,7 @@ const DNS_TTL_MS = 5 * 60 * 1000;
 async function isSafeExternalUrl(u, env) {
   try {
     if (!u) return false;
-    if (!isSelfHosted(env)) return true; // Workers: no internal network
+    if (!isSelfHosted(env)) return true;
     if (u.protocol !== 'https:' && u.protocol !== 'http:') return false;
     const host = (u.hostname || '').trim().toLowerCase();
     if (!host) return false;
@@ -4630,6 +4642,8 @@ async function isSafeExternalUrl(u, env) {
     if (!isIp) {
       const cached = DNS_VERDICTS.get(host);
       if (cached && cached.until > Date.now()) return cached.safe;
+      // Known public AI providers — allow even if DoH temporarily unreachable
+      const KNOWN_PUBLIC = /(?:api\.openai\.com|api\.anthropic\.com|api\.groq\.com|openrouter\.ai|api\.deepseek\.com|api\.cohere\.ai|integrate\.api\.nvidia\.com|opencode\.ai|api\.github\.com|models\.dev)$/i;
       let safe;
       try {
         const [j, j6] = await Promise.all(
@@ -4641,11 +4655,21 @@ async function isSafeExternalUrl(u, env) {
         );
         const addrs = (j.Answer || []).filter(a => a.type === 1).map(a => String(a.data));
         addrs.push(...(j6.Answer || []).filter(a => a.type === 28).map(a => String(a.data)));
-        // No records is NXDOMAIN or a DoH failure — either way, err closed and
-        // do not cache, so a transient outage does not blackhole the host.
-        if (!addrs.length) return false;
+        if (!addrs.length) {
+          // No records: could be NXDOMAIN or DoH outage. For known public AI hosts, assume safe
+          // to avoid breaking AI search during transient DNS issues; otherwise block.
+          if (KNOWN_PUBLIC.test(host)) {
+            return true;
+          }
+          console.warn(`[athena] isSafeExternalUrl: no DNS records for ${host} — blocking (DoH failure or NXDOMAIN)`);
+          return false;
+        }
         safe = addrs.every(isPublicIp);
       } catch (_) {
+        if (KNOWN_PUBLIC.test(host)) {
+          console.warn(`[athena] isSafeExternalUrl: DoH exception for ${host}, but known public — allowing`);
+          return true;
+        }
         return false;
       }
       if (DNS_VERDICTS.size > 1000) DNS_VERDICTS.clear();
@@ -4795,8 +4819,11 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
       (request.headers.get('accept') || '').toLowerCase().includes('text/event-stream');
 
   if (!baseUrl || !apiKey || !model) {
+    const detail = inst?._decrypt_failed
+      ? 'API key decryption failed — STORAGE_KEY missing or rotated. GOD must re-save credentials in Settings → AI.'
+      : 'No AI credentials. GOD: Settings → AI → Save (syncs for website + bot /ai)';
     return Response.json(
-      { success: false, error: 'No AI credentials. GOD: Settings → AI → Save (syncs for website + bot /ai)' },
+      { success: false, error: detail, code: inst?._decrypt_failed ? 'DECRYPT_FAILED' : 'NO_CREDENTIALS' },
       { status: 400, headers: corsHeaders }
     );
   }
@@ -6417,9 +6444,16 @@ const SEARCH_SYNONYMS = {
 };
 
 function expandServerSearchTerms(query) {
+  const STOPWORDS_SERVER = new Set(['what','is','are','was','were','where','when','why','how','a','an','the','does','do','did','can','could','would','should','tell','me','about','of','for','on','in','to','you','your','it','this','that','with','from','and','or','as','at','be','by','if','we','us','my','our']);
   const base = String(query || '').toLowerCase().trim().split(/\s+/).filter(Boolean);
-  const out = new Set(base);
-  for (const term of base) {
+  // Filter stopwords for search matching - "what is tokenrouter" should search for "tokenrouter", not "is"
+  const filtered = base.filter(w => {
+    const al = w.replace(/[^a-z0-9]/g, '');
+    return al.length >= 2 && !STOPWORDS_SERVER.has(al);
+  });
+  const terms = filtered.length ? filtered : base.filter(w => w.replace(/[^a-z0-9]/g, '').length >= 2);
+  const out = new Set(terms);
+  for (const term of terms) {
     const key = term.replace(/[^a-z0-9]/g, '');
     for (const synonym of SEARCH_SYNONYMS[key] || []) out.add(synonym);
   }
@@ -9560,21 +9594,39 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = SCRAPE_TIMEOUT_MS
         throw err;
       }
       const res = await fetch(u, { ...options, env: undefined, redirect: 'manual', signal: ctrl.signal });
-      if ([301, 302, 303, 307, 308].includes(res.status) && redirect === 'error') {
-        const err = new Error(`redirect refused: ${target.hostname} -> ${res.headers.get('location') || 'unknown'}`);
-        err.code = 'REDIRECT_REFUSED';
-        throw err;
-      }
-      if ([301, 302, 303, 307, 308].includes(res.status) && redirect === 'follow') {
+      if ([301, 302, 303, 307, 308].includes(res.status)) {
         const loc = res.headers.get('location');
-        if (!loc) return res;
-        u = new URL(loc, u).toString();
-        if (++hops > 5) {
-          const err = new Error('too many redirects');
-          err.code = 'SSRF_BLOCKED';
+        if (redirect === 'error') {
+          // Allow same-host redirects (e.g., trailing slash) even when redirect is error,
+          // because they are safe and the API key stays on same origin.
+          if (loc) {
+            try {
+              const nextUrl = new URL(loc, u);
+              if (nextUrl.hostname === target.hostname && nextUrl.protocol === target.protocol) {
+                if (++hops > 5) {
+                  const err = new Error('too many redirects');
+                  err.code = 'SSRF_BLOCKED';
+                  throw err;
+                }
+                u = nextUrl.toString();
+                continue;
+              }
+            } catch (_) {}
+          }
+          const err = new Error(`redirect refused: ${target.hostname} -> ${res.headers.get('location') || 'unknown'}`);
+          err.code = 'REDIRECT_REFUSED';
           throw err;
         }
-        continue;
+        if (redirect === 'follow') {
+          if (!loc) return res;
+          u = new URL(loc, u).toString();
+          if (++hops > 5) {
+            const err = new Error('too many redirects');
+            err.code = 'SSRF_BLOCKED';
+            throw err;
+          }
+          continue;
+        }
       }
       return res;
     }
