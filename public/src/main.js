@@ -1825,7 +1825,6 @@ document.addEventListener('DOMContentLoaded', () => {
     aiAnswerCard.classList.remove('hidden');
     aiSources.innerHTML = '';
 
-    // "New chat" button — clear conversation and start fresh
     let newChatBtn = document.getElementById('newChatBtn');
     if (!newChatBtn) {
       newChatBtn = document.createElement('button');
@@ -1842,43 +1841,51 @@ document.addEventListener('DOMContentLoaded', () => {
       aiAnswerCard.insertBefore(newChatBtn, aiAnswerCard.firstChild);
     }
 
-    // Add user message to conversation history
     state.conversationHistory.push({ role: 'user', content: q });
-
-    // Render conversation thread with a loading placeholder
     renderChatThread(true);
 
     try {
       const result = await window.AthenaAI.answerFromBrain(
         q, corpus(),
-        // onDelta: stream the current answer live
         (_delta, full) => {
           const el = aiAnswerText.querySelector('.chat-msg:last-child .chat-answer-content');
           if (el) el.textContent = full;
         },
         state.conversationHistory,
-        // onThinking: stream thinking into the collapsible block
         (_chunk, fullThinking) => {
           const el = aiAnswerText.querySelector('.chat-msg:last-child .thinking-content');
           if (el) el.textContent = fullThinking;
         }
       );
 
-      // Add assistant message to conversation history
       state.conversationHistory.push({
         role: 'assistant',
         content: result.answer,
         thinking: result.thinking || ''
       });
 
-      // Re-render the full thread with the final answer
       renderChatThread(false);
 
       const label = document.querySelector('.ai-answer-label');
       if (label) {
-        label.textContent = result.mode === 'llm'
-          ? 'AI · grounded in your markdown brain'
-          : 'AI · local brain (add API key in Settings for full assistant)';
+        if (result.mode === 'llm') {
+          label.textContent = 'AI · grounded in your markdown brain';
+        } else {
+          const errHint = result.error ? ` — ${result.error}` : '';
+          label.textContent = `AI · local brain${errHint ? '' : ' (add API key in Settings for full assistant)'}`;
+          if (result.error) {
+            showToast(result.error, true);
+            console.warn('[athena] AI fell back to local:', result.error);
+          }
+        }
+      }
+
+      if (result.error && result.mode === 'local') {
+        const errDiv = document.createElement('div');
+        errDiv.className = 'ai-error-banner';
+        errDiv.style.cssText = 'margin:8px 0;padding:8px 12px;background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.35);border-radius:8px;color:var(--danger-color);font-size:0.85em';
+        errDiv.textContent = `AI provider error: ${result.error}`;
+        aiAnswerText.appendChild(errDiv);
       }
 
       aiSources.innerHTML = '';
@@ -1899,10 +1906,10 @@ document.addEventListener('DOMContentLoaded', () => {
       });
       renderGoogleResults(result.results || result.sources || [], q);
     } catch (err) {
-      // Remove the failed user message from history
       state.conversationHistory.pop();
       renderChatThread(false);
       showToast(err.message, true);
+      console.error('[athena] runAi failed:', err);
     }
   }
 
@@ -2062,9 +2069,23 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (_) { /* offline / not logged */ }
 
     if (status) {
-      status.innerHTML = (cfg.apiKey || serverOk)
-        ? `<span style="color:var(--success-color)">API ready · ${escapeHtml(cfg.model || model?.value || 'model')} · ${serverOk ? 'synced for bot /ai' : 'click Save to sync bot'}</span>`
-        : '<span style="color:var(--text-muted)">No API key — GOD: Settings → AI → Save</span>';
+      const isGodUser = isGod() || canEditAiConfig();
+      const hasLocal = !!(cfg.apiKey && cfg.baseUrl && cfg.model);
+      let html;
+      if (serverOk) {
+        html = `<span style="color:var(--success-color)">API ready · ${escapeHtml(cfg.model || model?.value || 'model')} · synced for bot /ai</span>`;
+      } else if (hasLocal && isGodUser) {
+        html = `<span style="color:var(--warning-color)">Local key present (${escapeHtml(cfg.model || model?.value || 'model')}) — not synced to server. Click Save to sync bot & enable AI for all users. If Save fails, check GOD rank and STORAGE_KEY.</span>`;
+      } else if (hasLocal && !isGodUser) {
+        html = `<span style="color:var(--warning-color)">Local key saved in browser but you are not GOD — instance has no key. GOD must configure in Settings → AI.</span>`;
+      } else {
+        html = '<span style="color:var(--text-muted)">No API key — GOD: Settings → AI → Save</span>';
+      }
+      const lastCfg = window.AthenaAI?.getLastServerAiConfig?.();
+      if (lastCfg && lastCfg.configured && !lastCfg.hasKey) {
+        html += `<br><span style="color:var(--danger-color)">Server row exists but key unreadable — STORAGE_KEY missing/rotated? Re-save credentials.</span>`;
+      }
+      status.innerHTML = html;
     }
 
     const steroidToggle = $('steroidModeToggle');
