@@ -238,24 +238,13 @@
 
       <div class="drawer-section auth-only" id="storageSection">
         <h3>Storage backend <span id="storageGodBadge" class="lock-badge hidden">GOD</span></h3>
-        <p class="section-desc" id="storageDesc">Where links are stored. GitHub keeps them as Markdown you own.</p>
+        <p class="section-desc" id="storageDesc">PostgreSQL — the only store. Set <code>DATABASE_URL</code> on the server.</p>
         <div id="storageSettingsBody">
           <label class="field-label" for="storageProvider">Provider</label>
-          <select id="storageProvider" class="input">
-            <option value="d1">Cloudflare D1 (default)</option>
-            <option value="local">PostgreSQL (self-hosted)</option>
-            <option value="github">GitHub Markdown</option>
+          <select id="storageProvider" class="input" disabled>
+            <option value="postgres" selected>PostgreSQL</option>
           </select>
-          <div id="githubFields" class="hidden">
-            <label class="field-label" for="githubRepo">Repository (owner/repo)</label>
-            <input id="githubRepo" class="input" type="text" placeholder="yourname/athena-brain" autocomplete="off">
-            <label class="field-label" for="githubBranch">Branch</label>
-            <input id="githubBranch" class="input" type="text" placeholder="main" autocomplete="off">
-            <label class="field-label" for="githubToken">Access token</label>
-            <input id="githubToken" class="input" type="password" placeholder="github_pat_... (write once, never shown again)" autocomplete="off">
-          </div>
-          <button id="saveStorageBtn" class="btn btn-primary btn-block mt-2">Save storage settings</button>
-          <button id="syncStorageBtn" class="btn btn-secondary btn-block mt-2">Push existing links to GitHub</button>
+          <p class="section-desc" style="margin-top:8px;font-size:0.9em;opacity:0.8">D1 and GitHub Markdown removed — see README Storage. MCP memory uses the same Postgres DB (<code>postgres-mcp</code>).</p>
         </div>
         <div id="storageStatus" class="status-msg mt-2"></div>
       </div>

@@ -3,9 +3,8 @@
  * Telegram + Discord OAuth, session-gated APIs, community bot bindings
  */
 
-import {
-  GitHubStore, readAll, appendLink, appendLinks, rewriteAll, rewriteFileContaining, folderFor, LISTING_TTL_MS,
-} from './storage.js';
+// GitHub/D1 storage removed — PostgreSQL only (see README Storage).
+// storage.js (GitHubStore) is retained on disk but no longer imported.
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const PUBLIC_API = new Set([
@@ -3728,14 +3727,10 @@ async function handleClearAiConfig(user, env, corsHeaders) {
 }
 
 // ============================================================
-// Pluggable link storage (D1 default · GitHub Markdown optional)
-//
-// When the GitHub provider is active the Markdown files are the source of
-// truth and D1 is only a cache, so every existing D1 read path keeps working
-// unchanged — we just revalidate the cache against GitHub before reading and
-// write through GitHub first on every mutation.
+// Pluggable link storage — PostgreSQL only (D1/GitHub removed).
+// Legacy GitHub cache tables (storage_sync, storage_file_cache, parked_*) kept for compat.
 // ============================================================
-
+/* eslint-disable no-unused-vars */
 async function ensureStorageTables(env) {
   await env.DB.prepare(
     `CREATE TABLE IF NOT EXISTS instance_storage_config (
@@ -3766,7 +3761,7 @@ async function ensureStorageTables(env) {
   ).run();
 }
 
-/** Per-file parse cache for readAll(), keyed by git sha. */
+/** Per-file parse cache kept for compat — orphaned after postgres-only (GitHub removed). */
 function fileCacheFor(env, scopeKey) {
   return {
     async get(name, sha) {
@@ -3872,97 +3867,15 @@ async function ensureParkingTables(env) {
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_parked_personal_store ON parked_personal_links(store)').run();
 }
 
-/** Move the live rows out to parking, tagged as belonging to `storeName`. */
-async function parkActiveStore(env, storeName) {
-  await ensureParkingTables(env);
-  await env.DB.prepare(`DELETE FROM parked_links WHERE store = ?`).bind(storeName).run();
-  await env.DB.prepare(`DELETE FROM parked_personal_links WHERE store = ?`).bind(storeName).run();
-  await env.DB.prepare(
-    `INSERT INTO parked_links (store, ${LINK_COLS}) SELECT ?, ${LINK_COLS} FROM links`
-  ).bind(storeName).run();
-  await env.DB.prepare(
-    `INSERT INTO parked_personal_links (store, ${PERSONAL_COLS}) SELECT ?, ${PERSONAL_COLS} FROM personal_links`
-  ).bind(storeName).run();
-  await env.DB.prepare('DELETE FROM links').run();
-  await env.DB.prepare('DELETE FROM personal_links').run();
-}
-
-/** Bring `storeName`'s parked rows back into the live tables. */
-async function restoreStore(env, storeName) {
-  await ensureParkingTables(env);
-  await env.DB.prepare(
-    `INSERT OR REPLACE INTO links (${LINK_COLS}) SELECT ${LINK_COLS} FROM parked_links WHERE store = ?`
-  ).bind(storeName).run();
-  await env.DB.prepare(
-    `INSERT OR REPLACE INTO personal_links (${PERSONAL_COLS}) SELECT ${PERSONAL_COLS} FROM parked_personal_links WHERE store = ?`
-  ).bind(storeName).run();
-  await env.DB.prepare('DELETE FROM parked_links WHERE store = ?').bind(storeName).run();
-  await env.DB.prepare('DELETE FROM parked_personal_links WHERE store = ?').bind(storeName).run();
-}
-
-/**
- * Wipe a scope's Markdown folder, but only when GitHub is the ACTIVE store.
- * In Cloudflare mode a /clear_db must not reach into the GitHub copy.
- */
-async function clearActiveStoreFolder(env, scope, key) {
-  const store = await githubStoreFor(env); // null unless github is active
-  if (!store) return { handled: false };
-  try {
-    const folder = folderFor(scope, key);
-    const { files } = await readAll(store, folder);
-    for (const f of files) {
-      const got = await store.readFile(f.path);
-      if (got) await store.deleteFile(f.path, got.sha, `athena: clear ${folder}`);
-    }
-    await markCacheTrusted(env, scope, key);
-    return { handled: true, ok: true, files: files.length };
-  } catch (err) {
-    return { handled: true, ok: false, error: err.message };
-  }
-}
-
-async function clearActiveDocumentFolder(env, scope, key) {
-  const store = await githubStoreFor(env);
-  if (!store) return { handled: false };
-  const folder = documentFolder(scope, key);
-  try {
-    const files = await store.listDirectFiles(folder);
-    for (const file of files) {
-      const deleted = await store.deleteFile(file.path, file.sha, `athena: clear ${folder}`);
-      if (!deleted.ok) return { handled: true, ok: false, error: deleted.body?.message || `HTTP ${deleted.status}` };
-    }
-    return { handled: true, ok: true, files: files.length };
-  } catch (err) {
-    return { handled: true, ok: false, error: err.message };
-  }
-}
-
-/** Rows belonging to the store that is NOT currently active. */
-async function parkedLinksFor(env, storeName, scope, key) {
-  await ensureParkingTables(env);
-  const rows = scope === 'personal'
-    ? (await env.DB.prepare(
-        `SELECT ${PERSONAL_COLS} FROM parked_personal_links WHERE store = ? AND user_id = ?`
-      ).bind(storeName, key).all()).results
-    : (await env.DB.prepare(
-        `SELECT ${LINK_COLS} FROM parked_links WHERE store = ? AND community_id = ?`
-      ).bind(storeName, key).all()).results;
-  return (rows || []).map(r => ({
-    ...r,
-    created_at: Number(r.created_at) || Date.now(),
-    tags: (() => { try { return JSON.parse(r.tags || '[]'); } catch (_) { return []; } })(),
-  }));
-}
-
+/** Parking/switching removed — PostgreSQL is the only store. Kept as no-ops for call sites. */
+async function parkActiveStore(_env, _storeName) { return; }
+async function restoreStore(_env, _storeName) { return; }
+async function clearActiveStoreFolder(_env, _scope, _key) { return { handled: false }; }
+async function clearActiveDocumentFolder(_env, _scope, _key) { return { handled: false }; }
+async function parkedLinksFor(_env, _storeName, _scope, _key) { return []; }
 async function getStorageConfig(env) {
-  try {
-    await ensureStorageTables(env);
-    const row = await env.DB.prepare(
-      "SELECT * FROM instance_storage_config WHERE id = '__instance__'"
-    ).first();
-    if (!row) return null;
-    return { ...row, token: await decryptSecret(env, row.token) };
-  } catch (_) { return null; }
+  // Single-backend mode: always PostgreSQL. Existing rows (provider='d1'/'github') are ignored.
+  return { provider: 'postgres', repo: '', branch: '', token: null };
 }
 
 /**
@@ -4009,61 +3922,14 @@ function frontendOrigin(env, url) {
   return url.origin;
 }
 
-/** Live GitHubStore for the instance, or null when local SQL is the store. */
-async function githubStoreFor(env) {
-  const cfg = await getStorageConfig(env);
-  if (!cfg || cfg.provider !== 'github' || !cfg.repo || !cfg.token) return null;
-  const store = new GitHubStore({ repo: cfg.repo, branch: cfg.branch || 'main', token: cfg.token });
-  return store.valid ? store : null;
-}
-
+/** GitHub removed — always null. */
+async function githubStoreFor(_env) { return null; }
 function scopeKeyFor(scope, key) {
   return scope === 'personal' ? `personal:${key}` : `community:${key}`;
 }
-
-/**
- * Make the D1 cache match GitHub before a read. Cheap in the steady state: one
- * directory listing, and we skip entirely inside the TTL window.
- */
-async function ensureFresh(env, scope, key, { force = false } = {}) {
-  const store = await githubStoreFor(env);
-  if (!store || !key) return { provider: 'd1' };
-  const sk = scopeKeyFor(scope, key);
-  const now = Date.now();
-  await ensureStorageTables(env);
-
-  let prev = null;
-  try {
-    prev = await env.DB.prepare('SELECT * FROM storage_sync WHERE scope_key = ?').bind(sk).first();
-  } catch (_) {}
-  if (!force && prev && now - (prev.checked_at || 0) < LISTING_TTL_MS) {
-    return { provider: 'github', cached: true };
-  }
-
-  let snapshot;
-  try {
-    snapshot = await readAll(store, folderFor(scope, key), fileCacheFor(env, sk));
-  } catch (err) {
-    // GitHub unreachable: serve the last known cache rather than showing an
-    // empty brain. Never destructive.
-    console.error('storage readAll', err);
-    return { provider: 'github', stale: true, error: err.message };
-  }
-
-  if (!force && prev && prev.sig === snapshot.sig) {
-    try {
-      await env.DB.prepare('UPDATE storage_sync SET checked_at = ? WHERE scope_key = ?').bind(now, sk).run();
-    } catch (_) {}
-    return { provider: 'github', unchanged: true };
-  }
-
-  await replaceCachedLinks(env, scope, key, snapshot.links);
-  try {
-    await env.DB.prepare(
-      'INSERT OR REPLACE INTO storage_sync (scope_key, sig, checked_at) VALUES (?, ?, ?)'
-    ).bind(sk, snapshot.sig, now).run();
-  } catch (_) {}
-  return { provider: 'github', synced: snapshot.links.length, files: snapshot.files.length };
+/** No-op: PostgreSQL is live, no cache to reconcile. */
+async function ensureFresh(_env, _scope, _key, { force = false } = {}) {
+  return { provider: 'postgres' };
 }
 
 /** Rebuild the D1 rows for one scope from the authoritative Markdown. */
@@ -4106,51 +3972,10 @@ function storageHeadingFor(scope, key) {
   return scope === 'personal' ? 'Athena — personal brain' : `Athena — community ${key}`;
 }
 
-/**
- * Write a new link through to GitHub. Returns {handled} — false means the D1
- * provider is active and the caller should do its normal INSERT.
- */
-async function storeAddLink(env, scope, key, link) {
-  const store = await githubStoreFor(env);
-  if (!store) return { handled: false };
-  const res = await appendLink(store, folderFor(scope, key), link, {
-    heading: storageHeadingFor(scope, key),
-  });
-  if (!res.ok) return { handled: true, ok: false, error: res.error };
-  await markCacheTrusted(env, scope, key);
-  return { handled: true, ok: true };
-}
-
-/** Batch variant: all links land in ONE commit per folder. */
-async function storeAddLinks(env, scope, key, links) {
-  const store = await githubStoreFor(env);
-  if (!store) return { handled: false };
-  const res = await appendLinks(store, folderFor(scope, key), links, {
-    heading: storageHeadingFor(scope, key),
-  });
-  if (!res.ok) return { handled: true, ok: false, error: res.error };
-  await markCacheTrusted(env, scope, key);
-  return { handled: true, ok: true };
-}
-
-/**
- * Delete or edit one link, touching only the file that holds it.
- * `replacement` null removes the entry; an object swaps it in place.
- */
-async function storeMutateLink(env, scope, key, linkId, replacement) {
-  const store = await githubStoreFor(env);
-  if (!store) return { handled: false };
-  const res = await rewriteFileContaining(
-    store, folderFor(scope, key), linkId,
-    (links) => replacement
-      ? links.map(l => (l.id === linkId ? { ...l, ...replacement } : l))
-      : links.filter(l => l.id !== linkId),
-    { heading: storageHeadingFor(scope, key) }
-  );
-  if (!res.ok) return { handled: true, ok: false, error: res.error };
-  await markCacheTrusted(env, scope, key);
-  return { handled: true, ok: true };
-}
+/** GitHub removed — always fall through to PostgreSQL direct INSERT. */
+async function storeAddLink(_env, _scope, _key, _link) { return { handled: false }; }
+async function storeAddLinks(_env, _scope, _key, _links) { return { handled: false }; }
+async function storeMutateLink(_env, _scope, _key, _linkId, _replacement) { return { handled: false }; }
 
 /**
  * Called right after we commit to GitHub ourselves.
@@ -4173,7 +3998,7 @@ async function markCacheTrusted(env, scope, key) {
   } catch (_) {}
 }
 
-/** Current D1 rows for a scope, shaped for the Markdown writer. */
+/** Current rows for a scope (legacy Markdown helper, kept). */
 async function cachedLinksFor(env, scope, key) {
   const rows = scope === 'personal'
     ? (await env.DB.prepare(
@@ -4187,6 +4012,7 @@ async function cachedLinksFor(env, scope, key) {
     tags: (() => { try { return JSON.parse(r.tags || '[]'); } catch (_) { return []; } })(),
   }));
 }
+/* eslint-enable no-unused-vars */
 
 // ---------------------------------------------------------------------------
 // Instance defaults
@@ -4323,275 +4149,42 @@ async function handleSetInstanceConfig(request, env, corsHeaders, siteOrigin) {
 }
 
 async function handleGetStorageConfig(env, corsHeaders) {
-  const cfg = await getStorageConfig(env);
-  const provider = cfg?.provider || 'd1';
-  const selfHosted = isSelfHosted(env);
-  const out = {
-    success: true,
-    provider: provider,
-    runtime: selfHosted ? 'selfhost' : 'cloudflare',
-    // Always show all storage options - let GOD choose
-    github_available: true,
-    postgres_available: selfHosted,
-    store_label: provider === 'github' ? 'GitHub Markdown' : (provider === 'local' ? `${selfHostedEngine(env)} (self-hosted)` : 'Cloudflare D1'),
-    db_engine: selfHosted ? selfHostedEngine(env) : 'Cloudflare D1',
-    repo: cfg?.repo || '',
-    branch: cfg?.branch || 'main',
-    has_token: !!cfg?.token,
-    token_encrypted: !!(await storageCryptoKey(env)),
-  };
-  if (provider === 'github' && cfg?.token) {
-    try {
-      const store = new GitHubStore({ repo: cfg.repo, branch: cfg.branch || 'main', token: cfg.token });
-      const files = await store.listFolder('brain');
-      out.file_count = files.length;
-      const sync = await env.DB.prepare("SELECT COUNT(*) AS n FROM personal_links").first();
-      out.link_count = sync?.n || 0;
-    } catch (_) {}
-  }
-  return Response.json(out, { headers: corsHeaders });
-}
-
-async function handleSaveStorageConfig(request, env, corsHeaders) {
-  const body = await request.json().catch(() => ({}));
-  const provider = String(body.provider || 'd1').toLowerCase();
-  const selfHosted = isSelfHosted(env);
-  // Allow local, d1, or github - let GOD choose
-  if (!['d1', 'github', 'local'].includes(provider)) {
-    return Response.json({ success: false, error: 'provider must be d1, github, or local' }, { status: 400, headers: corsHeaders });
-  }
-  // If selecting local, require self-hosted environment
-  if (provider === 'local' && !selfHosted) {
-    return Response.json({ success: false, error: 'Local database only available on self-hosted instances' }, { status: 400, headers: corsHeaders });
-  }
-  await ensureStorageTables(env);
-  const prev = await getStorageConfig(env);
-
-  const wasProvider = prev?.provider || 'd1';
-
-  // Handle local database provider
-  if (provider === 'local') {
-    await env.DB.prepare(
-      `INSERT OR REPLACE INTO instance_storage_config (id, provider, repo, branch, token, updated_at)
-       VALUES ('__instance__', 'local', ?, ?, ?, ?)`
-    ).bind(null, null, null, Date.now()).run();
-    return Response.json({
-      success: true, provider: 'local', switched_from: wasProvider,
-      engine: selfHostedEngine(env),
-    }, { headers: corsHeaders });
-  }
-
-  if (provider === 'd1') {
-    // Park the GitHub mirror and bring the Cloudflare store back untouched.
-    if (wasProvider === 'github') {
-      await parkActiveStore(env, 'github');
-      await restoreStore(env, 'd1');
-    }
-    await env.DB.prepare(
-      `INSERT OR REPLACE INTO instance_storage_config (id, provider, repo, branch, token, updated_at)
-       VALUES ('__instance__', 'd1', ?, ?, ?, ?)`
-    ).bind(prev?.repo || null, prev?.branch || null, await encryptSecret(env, prev?.token || null), Date.now()).run();
-    const n = await env.DB.prepare(
-      'SELECT (SELECT COUNT(*) FROM links) a, (SELECT COUNT(*) FROM personal_links) b'
-    ).first();
-    return Response.json({
-      success: true, provider: 'd1', switched_from: wasProvider,
-      live_links: (n?.a || 0) + (n?.b || 0),
-    }, { headers: corsHeaders });
-  }
-
-  const repo = String(body.repo || prev?.repo || '').trim();
-  const branch = String(body.branch || prev?.branch || 'main').trim() || 'main';
-  const token = String(body.token || '').trim() || prev?.token || '';
-  if (!repo || !/^[^/\s]+\/[^/\s]+$/.test(repo)) {
-    return Response.json({ success: false, error: 'repo must look like owner/repo' }, { status: 400, headers: corsHeaders });
-  }
-  if (!token) {
-    return Response.json({ success: false, error: 'A GitHub token is required the first time' }, { status: 400, headers: corsHeaders });
-  }
-  // Never store credentials we have not proven work.
-  const check = await new GitHubStore({ repo, branch, token }).verify();
-  if (!check.ok) {
-    return Response.json({ success: false, error: `GitHub check failed: ${check.error}` }, { status: 400, headers: corsHeaders });
-  }
-  await env.DB.prepare(
-    `INSERT OR REPLACE INTO instance_storage_config (id, provider, repo, branch, token, updated_at)
-     VALUES ('__instance__', 'github', ?, ?, ?, ?)`
-  ).bind(repo, branch, await encryptSecret(env, token), Date.now()).run();
-
-  // Park the Cloudflare store so it survives untouched, then let the live
-  // tables become the GitHub mirror. No merging happens here — the two stores
-  // stay independent until an explicit sync.
-  if (wasProvider !== 'github') {
-    await parkActiveStore(env, 'd1');
-    await restoreStore(env, 'github');
-    try {
-      await env.DB.prepare('DELETE FROM storage_sync').run();
-    } catch (_) {}
-  }
-
+  // PostgreSQL-only mode
+  const engine = selfHostedEngine(env);
   return Response.json({
-    success: true, provider: 'github', repo: check.repo, private: check.private,
-    token_encrypted: !!(await storageCryptoKey(env)),
-    switched_from: wasProvider,
-    note: wasProvider !== 'github'
-      ? 'Cloudflare links parked and untouched. Use Sync to reconcile the two stores.'
-      : undefined,
+    success: true,
+    provider: 'postgres',
+    runtime: isSelfHosted(env) ? 'selfhost' : 'cloudflare',
+    github_available: false,
+    postgres_available: true,
+    store_label: `${engine} (PostgreSQL)`,
+    db_engine: engine,
+    repo: '',
+    branch: '',
+    has_token: false,
+    token_encrypted: false,
   }, { headers: corsHeaders });
 }
 
-/**
- * Reconcile one scope between D1 and GitHub, keeping the union of both.
- *
- * A one-way push is not safe in either direction:
- *  - overwriting GitHub with D1 destroys links added or hand-written on GitHub;
- *  - letting a GitHub read replace D1 destroys links captured while the
- *    instance was running on the D1 provider.
- * Merging on canonical URL keeps everything. GitHub wins only when both stores
- * contain the same URL because it is the declared source of truth.
- */
-async function mergeScope(env, store, scope, key) {
-  const folder = folderFor(scope, key);
-  const provider = (await getStorageConfig(env))?.provider || 'd1';
-  let ghLinks;
-  try {
-    ghLinks = (await readAll(store, folder)).links;
-  } catch (err) {
-    return { ok: false, error: err.message };
+async function handleSaveStorageConfig(request, env, corsHeaders) {
+  // Single backend — no switching. Keep endpoint for compatibility but reject other providers.
+  const body = await request.json().catch(() => ({}));
+  const provider = String(body.provider || 'postgres').toLowerCase();
+  if (provider !== 'postgres' && provider !== 'local' && provider !== 'postgresql') {
+    return Response.json({ success: false, error: 'Only PostgreSQL is supported (D1/GitHub removed). Set DATABASE_URL.' }, { status: 400, headers: corsHeaders });
   }
-
-  // Whichever store is live sits in the live tables; the other sits in parking.
-  const liveLinks = await cachedLinksFor(env, scope, key);
-  const parkedD1 = provider === 'github' ? await parkedLinksFor(env, 'd1', scope, key) : liveLinks;
-  const cloudflareLinks = provider === 'github' ? parkedD1 : liveLinks;
-
-  const keyOf = (l) => {
-    try { return canonicalUrlForHash(l.url || ''); } catch (_) { return String(l.url_hash || l.url || ''); }
-  };
-
-  // Union both stores, de-duplicated on canonical URL. Query parameters remain
-  // meaningful, so two pages under one path are not silently collapsed.
-  const union = new Map();
-  for (const l of cloudflareLinks) union.set(keyOf(l), l);
-  let addedToGitHub = 0;
-  for (const l of ghLinks) {
-    const k = keyOf(l);
-    if (!union.has(k)) union.set(k, l);
-  }
-  const ghKeys = new Set(ghLinks.map(keyOf));
-  const cfKeys = new Set(cloudflareLinks.map(keyOf));
-  for (const k of union.keys()) if (!ghKeys.has(k)) addedToGitHub++;
-  const addedToCloudflare = [...union.keys()].filter(k => !cfKeys.has(k)).length;
-
-  const all = [...union.values()].sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
-
-  // Push the union to GitHub.
-  const res = await rewriteAll(store, folder, all, {
-    heading: storageHeadingFor(scope, key),
-    message: `athena: sync ${folder}`,
-  });
-  if (!res.ok) return { ok: false, error: res.error };
-
-  // ...and into the Cloudflare store, wherever it currently lives.
-  if (provider === 'github') {
-    await replaceParkedLinks(env, 'd1', scope, key, all);
-    await replaceCachedLinks(env, scope, key, all); // live mirror = GitHub
-  } else {
-    await replaceCachedLinks(env, scope, key, all); // live = Cloudflare store
-  }
-  await markCacheTrusted(env, scope, key);
-
-  return {
-    ok: true, total: all.length,
-    github_before: ghLinks.length, cloudflare_before: cloudflareLinks.length,
-    added_to_github: addedToGitHub, added_to_cloudflare: addedToCloudflare,
-    files: res.files,
-  };
+  return Response.json({ success: true, provider: 'postgres', engine: selfHostedEngine(env) }, { headers: corsHeaders });
 }
 
-/** Replace one scope's rows inside the parking area for an inactive store. */
-async function replaceParkedLinks(env, storeName, scope, key, links) {
-  await ensureParkingTables(env);
-  if (scope === 'personal') {
-    await env.DB.prepare('DELETE FROM parked_personal_links WHERE store = ? AND user_id = ?')
-      .bind(storeName, key).run();
-    for (const l of links) {
-      try {
-        await env.DB.prepare(
-          `INSERT INTO parked_personal_links (store, ${PERSONAL_COLS})
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        ).bind(
-          storeName, l.id, key, l.url, l.url_hash || generateUrlHash(l.url), l.title || '',
-          l.notes || '', JSON.stringify(l.tags || []), l.created_at || Date.now(),
-          l.image_url || null, l.site_name || null
-        ).run();
-      } catch (_) {}
-    }
-    return;
-  }
-  await env.DB.prepare('DELETE FROM parked_links WHERE store = ? AND community_id = ?')
-    .bind(storeName, key).run();
-  for (const l of links) {
-    try {
-      await env.DB.prepare(
-        `INSERT INTO parked_links (store, ${LINK_COLS})
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).bind(
-        storeName, l.id, key, l.url, l.url_hash || generateUrlHash(l.url), l.title || '',
-        l.notes || '', JSON.stringify(l.tags || []), l.added_by_name || 'athena',
-        l.added_by_user_id || null, l.added_by_provider || null, l.added_by_name || null,
-        l.upvotes || 0, l.downvotes || 0, l.created_at || Date.now(),
-        l.image_url || null, l.site_name || null
-      ).run();
-    } catch (_) {}
-  }
-}
-
-/** Merge every scope. Used by the sync button and on switching to GitHub. */
-async function mergeAllScopes(env, store, godUserId) {
-  const detail = [];
-  let total = 0;
-
-  const p = await mergeScope(env, store, 'personal', godUserId);
-  if (!p.ok) return { ok: false, error: p.error };
-  if (p.total) { detail.push({ scope: 'personal', ...p }); total += p.total; }
-
-  const { results: comms } = await env.DB.prepare('SELECT id FROM communities').all();
-  for (const c of (comms || [])) {
-    const r = await mergeScope(env, store, 'community', c.id);
-    if (!r.ok) return { ok: false, error: r.error };
-    if (r.total) { detail.push({ scope: c.id, ...r }); total += r.total; }
-  }
-  return { ok: true, total, detail };
-}
-
-/** Reconcile D1 and GitHub in both directions. */
-async function handleStorageSync(user, env, corsHeaders) {
-  if (isSelfHosted(env)) {
-    return Response.json({
-      success: false,
-      error: 'Nothing to sync — self-hosted mode stores links locally. Use the Telegram/Drive backups.',
-      code: 'SELFHOST_LOCAL_ONLY',
-    }, { status: 400, headers: corsHeaders });
-  }
-  // Sync is a cross-store operation, so it must work from EITHER mode — not
-  // only while GitHub happens to be the active provider.
-  const cfg = await getStorageConfig(env);
-  if (!cfg?.repo || !cfg?.token) {
-    return Response.json(
-      { success: false, error: 'Set a GitHub repo and token first (Settings → Storage backend)' },
-      { status: 400, headers: corsHeaders }
-    );
-  }
-  const store = new GitHubStore({ repo: cfg.repo, branch: cfg.branch || 'main', token: cfg.token });
-  if (!store.valid) {
-    return Response.json({ success: false, error: 'GitHub credentials are incomplete' }, { status: 400, headers: corsHeaders });
-  }
-  const merged = await mergeAllScopes(env, store, user.id);
-  if (!merged.ok) {
-    return Response.json({ success: false, error: merged.error }, { status: 502, headers: corsHeaders });
-  }
-  return Response.json({ success: true, pushed: merged.total, detail: merged.detail }, { headers: corsHeaders });
+// GitHub/D1 sync removed — PostgreSQL only. Stubs kept for call sites.
+// eslint-disable-next-line no-unused-vars
+async function mergeScope(_env, _store, _scope, _key) { return { ok: true, total: 0 }; }
+// eslint-disable-next-line no-unused-vars
+async function replaceParkedLinks(_env, _storeName, _scope, _key, _links) { return; }
+// eslint-disable-next-line no-unused-vars
+async function mergeAllScopes(_env, _store, _godUserId) { return { ok: true, total: 0, detail: [] }; }
+async function handleStorageSync(_user, _env, corsHeaders) {
+  return Response.json({ success: false, error: 'Sync removed — PostgreSQL is the only store (D1/GitHub deprecated). Use backups.', code: 'POSTGRES_ONLY' }, { status: 400, headers: corsHeaders });
 }
 
 function cleanApiBase(baseUrl) {
@@ -7269,36 +6862,12 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
             `INSERT INTO uploaded_documents (id, scope, user_id, filename, content, uploaded_by, created_at)
              VALUES (?, 'personal', ?, ?, ?, ?, ?)`
           ).bind(id, athenaUser.id, filename, content, athenaUser.id, now).run();
-          // Also save to GitHub if configured
-          const storeCfg = await getStorageConfig(env);
-          if (storeCfg?.provider === 'github' && storeCfg?.token && storeCfg?.repo) {
-            try {
-              const store = new GitHubStore({ repo: storeCfg.repo, branch: storeCfg.branch || 'main', token: storeCfg.token });
-              const safeId = id.replace(/[^a-z0-9_]/g, '');
-              const safeFilename = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
-              const ghPath = `documents/personal/${athenaUser.id}/${safeId}--${safeFilename}`;
-              await store.writeFile(ghPath, content, { message: `athena: upload ${filename} via bot` });
-              await env.DB.prepare('UPDATE uploaded_documents SET github_path = ? WHERE id = ?').bind(ghPath, id).run();
-            } catch (_) {}
-          }
           await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Saved to personal brain: ${codeHtml(filename)}`, forumThreadId);
         } else {
           await env.DB.prepare(
             `INSERT INTO uploaded_documents (id, scope, community_id, filename, content, uploaded_by, created_at)
              VALUES (?, 'community', ?, ?, ?, ?, ?)`
           ).bind(id, docCommunityId, filename, content, athenaUser.id, now).run();
-          // Also save to GitHub if configured
-          const storeCfg = await getStorageConfig(env);
-          if (storeCfg?.provider === 'github' && storeCfg?.token && storeCfg?.repo) {
-            try {
-              const store = new GitHubStore({ repo: storeCfg.repo, branch: storeCfg.branch || 'main', token: storeCfg.token });
-              const safeId = id.replace(/[^a-z0-9_]/g, '');
-              const safeFilename = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
-              const ghPath = `documents/communities/${docCommunityId}/${safeId}--${safeFilename}`;
-              await store.writeFile(ghPath, content, { message: `athena: upload ${filename} via bot` });
-              await env.DB.prepare('UPDATE uploaded_documents SET github_path = ? WHERE id = ?').bind(ghPath, id).run();
-            } catch (_) {}
-          }
           const communityName = binding?.group_name || docCommunityId;
           await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Saved to community brain (${escHtml(communityName)}): ${codeHtml(filename)}`, forumThreadId);
         }
@@ -8730,68 +8299,9 @@ Rules:
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
-  // ---- /sync — sync between D1 and GitHub (GOD only) ----
+  // ---- /sync — removed (PostgreSQL only). Keep command as stub for compat.
   if (cmd === '/sync') {
-    if (!isGod) {
-      await sendTelegramFormatted(token, chatId, `${boldHtml('🔒 GOD rank only')}\n/sync syncs links between D1 and GitHub (Cloudflare) or shows backup status (self-hosted).`, forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-    if (!athenaUser) {
-      await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} first.`, forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-    if (isSelfHosted(env)) {
-      const engine = selfHostedEngine(env);
-      await sendTelegramFormatted(token, chatId, [
-        boldHtml('ℹ️ Self-Hosted Mode'),
-        '',
-        `${boldHtml('Engine:')} ${codeHtml(engine)}`,
-        `${boldHtml('Runtime:')} Node.js`,
-        '',
-        'Your data lives in your own database.',
-        'No GitHub sync needed — use /backup for Telegram/Drive backups.',
-        '',
-        italicHtml('Website → Settings → Storage for backup options.')
-      ].join('\n'), forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-    const cfg = await getStorageConfig(env);
-    if (!cfg?.repo || !cfg?.token) {
-      await sendTelegramFormatted(token, chatId, [
-        boldHtml('⚠️ No GitHub repo configured'),
-        '',
-        'Sync requires a GitHub repo + token.',
-        'Website → Settings → Storage → set repo + token first.',
-        '',
-        italicHtml('Current storage: Cloudflare D1 only')
-      ].join('\n'), forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-    const provider = cfg?.provider || 'd1';
-    await sendTelegramFormatted(token, chatId, `${boldHtml('🔄 Syncing')} D1 ↔ GitHub…`, forumThreadId);
-    try {
-      const store = new GitHubStore({ repo: cfg.repo, branch: cfg.branch || 'main', token: cfg.token });
-      if (!store.valid) throw new Error('GitHub credentials incomplete');
-      const merged = await mergeAllScopes(env, store, athenaUser.id);
-      if (!merged.ok) throw new Error(merged.error);
-      const lines = [
-        boldHtml('✅ Sync Complete'),
-        '',
-        `${boldHtml('Direction:')} ${codeHtml('D1 ↔ GitHub')} (bidirectional)`,
-        `${boldHtml('Pushed:')} ${codeHtml(String(merged.total))} link(s)`,
-        merged.detail ? `${boldHtml('Detail:')} ${escHtml(merged.detail)}` : null,
-        '',
-        'D1 and GitHub are now in sync.',
-        '',
-        `${boldHtml('Active:')} ${codeHtml(provider === 'github' ? 'GitHub (source of truth)' : 'D1')}`,
-        `${boldHtml('Mirror:')} ${codeHtml(provider === 'github' ? 'D1 (cache)' : 'GitHub (backup)')}`,
-        '',
-        italicHtml('Website → Settings → Storage to switch active backend.')
-      ].filter(Boolean);
-      await sendTelegramFormatted(token, chatId, lines.join('\n'), forumThreadId);
-    } catch (err) {
-      await sendTelegramFormatted(token, chatId, `${boldHtml('❌ Sync failed:')} ${escHtml(err.message)}`, forumThreadId);
-    }
+    await sendTelegramFormatted(token, chatId, `${boldHtml('ℹ️ Sync removed')} — PostgreSQL is the only store (D1/GitHub deprecated). Use ${codeHtml('/backup')} on self-host or ${codeHtml('pg_dump')}.`, forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
