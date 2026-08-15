@@ -201,12 +201,17 @@ export async function handleAthenaSearch({ query, scope = 'community', limit = 8
     if (!isMember) throw Object.assign(new Error('not a member of community'), { code: 403 });
   }
   if (!pool) {
-    // API-proxy fallback (no DATABASE_URL, e.g., laptop)
+    // API-proxy fallback (no DATABASE_URL, e.g., laptop) — return url/title/tags for links
     const q = new URLSearchParams({ q: String(query), scope, limit: String(lim) });
     if (scope === 'community' && communityId) q.set('community_id', String(communityId));
     const data = await apiFetch(instance, token, `/api/links/search?${q}`);
     const links = data.links || data.results || [];
-    return links.slice(0, lim).map((r, i) => ({ doc_id: r.id, chunk_idx: i, para_idx: 1, content: r.notes || r.title || r.url || '', cite: `[#${r.id}]` }));
+    return links.slice(0, lim).map((r, i) => ({
+      doc_id: r.id, chunk_idx: i, para_idx: 1,
+      url: r.url || null, title: r.title || '', tags: r.tags || [], notes: r.notes || '',
+      content: [r.title, r.url, r.notes].filter(Boolean).join('\n'),
+      cite: `[#${r.id}]`,
+    }));
   }
   const where = buildWhere(scope, me, communityId);
   await ensureOnce(pool);
@@ -260,8 +265,8 @@ export async function handleAthenaGetChunk({ doc_id, para_idx, scope = 'communit
     const data = await apiFetch(instance, token, `/api/links/search?${q}`);
     const hit = (data.links || []).find((r) => String(r.id) === String(doc_id) || String(r.url).includes(String(doc_id)));
     if (!hit) return null;
-    // no para_idx split via API, return first chunk as para 1
-    return { doc_id: String(doc_id), para_idx: Number(para_idx), content: hit.notes || hit.title || '', chunk_idx: 0, page: 1 };
+    // no para_idx split via API, return first chunk as para 1 with url
+    return { doc_id: String(doc_id), para_idx: Number(para_idx), content: [hit.title, hit.url, hit.notes].filter(Boolean).join('\n'), url: hit.url || null, title: hit.title || '', chunk_idx: 0, page: 1 };
   }
   const where = buildWhere(s, me, communityId, 2);
   await ensureOnce(pool);
@@ -287,7 +292,7 @@ export async function handleAthenaGetDoc({ doc_id, scope = 'community' }, pool, 
     const data = await apiFetch(instance, token, `/api/links/search?${q}`);
     const hit = (data.links || []).find((r) => String(r.id) === String(doc_id));
     if (!hit) return null;
-    return { doc_id: String(doc_id), chunks: [{ doc_id, chunk_idx: 0, para_idx: 1, content: hit.notes || hit.title || '' }], total: 1 };
+    return { doc_id: String(doc_id), url: hit.url || null, title: hit.title || '', chunks: [{ doc_id, chunk_idx: 0, para_idx: 1, content: [hit.title, hit.url, hit.notes].filter(Boolean).join('\n'), url: hit.url || null }], total: 1 };
   }
   const where = buildWhere(s, me, communityId, 1);
   await ensureOnce(pool);
@@ -313,7 +318,7 @@ export async function handleAthenaList({ scope = 'community', limit = 20 } = {},
     if (s === 'community' && communityId) q.set('community_id', String(communityId));
     const data = await apiFetch(instance, token, `/api/links?${q}`);
     const links = data.links || [];
-    return links.slice(0, lim).map((r) => ({ doc_id: r.id, chunks: 1, created_at: r.created_at }));
+    return links.slice(0, lim).map((r) => ({ doc_id: r.id, url: r.url || null, title: r.title || '', chunks: 1, created_at: r.created_at }));
   }
   const where = buildWhere(s, me, communityId);
   await ensureOnce(pool);
