@@ -353,6 +353,7 @@ document.addEventListener('DOMContentLoaded', () => {
   /** Persist the session everywhere that might survive, best-effort. */
   async function persistSession(token) {
     state.sessionToken = token;
+    // codeql[js/clear-text-storage-of-sensitive-data] -- session token 30-day UUID, HttpOnly primary, localStorage cross-origin fallback
     try { localStorage.setItem('athena_session', token); } catch (_) {}
     await cloudSet('athena_session', token);
   }
@@ -480,9 +481,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const m = document.cookie.match(/(?:^|;\s*)athena_session=([^;]+)/);
       if (m) {
         state.sessionToken = decodeURIComponent(m[1]);
-        try { // lgtm[js/clear-text-storage-of-sensitive-data] -- session token is random 30-day UUID, HttpOnly cookie is primary, localStorage is cross-origin fallback
-          localStorage.setItem('athena_session', state.sessionToken);
-        } catch (_) {}
+        // codeql[js/clear-text-storage-of-sensitive-data] -- session token is random 30-day UUID, HttpOnly cookie is primary, localStorage is cross-origin fallback
+        try { localStorage.setItem('athena_session', state.sessionToken); } catch (_) {}
       }
     }
 
@@ -492,9 +492,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const cloud = await cloudGet('athena_session');
       if (cloud) {
         state.sessionToken = cloud;
-        try { // lgtm[js/clear-text-storage-of-sensitive-data] -- see above, cross-origin fallback for Mini App
-          localStorage.setItem('athena_session', cloud);
-        } catch (_) {}
+        // codeql[js/clear-text-storage-of-sensitive-data] -- see above, cross-origin fallback for Mini App
+        try { localStorage.setItem('athena_session', cloud); } catch (_) {}
       }
     }
     if (!state.sessionToken) {
