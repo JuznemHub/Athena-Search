@@ -33,11 +33,11 @@ export async function launchAdvanced(state, io = {}, _theme) {
   await writeFile(join(dir, 'opencode.json'), JSON.stringify(cfg, null, 2));
   // /athena command: toggle Athena strict mode — plain opencode by default, /athena toggles to athena-first
   const { mkdir } = await import('node:fs/promises');
-  await mkdir(join(dir, 'command'), { recursive: true });
-  await writeFile(
-    join(dir, 'command', 'athena.md'),
-    `---\ndescription: Toggle Athena strict mode — /athena alone toggles, /athena <query> searches Athena first\n---\n\n$ARGUMENTS\n\nIf $ARGUMENTS is empty or whitespace, toggle Athena strict mode for this session: check if athena strict mode is ON (you were told to use athena_search first), if ON then turn it OFF and say "Athena strict mode OFF — back to default opencode (use /athena <query> for one-shot or /athena to toggle ON again)"; if OFF then turn it ON and say "Athena strict mode ON — will use athena_search first before any outside search (use /athena again to toggle OFF)".\n\nIf $ARGUMENTS is not empty, strictly fetch from Athena first for that query: call athena_search (personal then community, limit 10) for $ARGUMENTS and cite [#doc_id], use athena_get_chunk with para_idx/line_number for verbatim lines. Never answer from training data when athena has hits. Query: $ARGUMENTS\n`
-  );
+  const athenaCmd = `---\ndescription: Toggle Athena strict mode — /athena alone toggles, /athena <query> searches Athena first\n---\n\n$ARGUMENTS\n\nIf $ARGUMENTS is empty or whitespace, toggle Athena strict mode for this session: check if athena strict mode is ON (you were told to use athena_search first), if ON then turn it OFF and say "Athena strict mode OFF — back to default opencode (use /athena <query> for one-shot or /athena to toggle ON again)"; if OFF then turn it ON and say "Athena strict mode ON — will use athena_search first before any outside search (use /athena again to toggle OFF)".\n\nIf $ARGUMENTS is not empty, strictly fetch from Athena first for that query: call athena_search (personal then community, limit 10) for $ARGUMENTS and cite [#doc_id], use athena_get_chunk with para_idx/line_number for verbatim lines. Never answer from training data when athena has hits. Query: $ARGUMENTS\n`;
+  for (const cmdDir of [join(dir, 'command'), join(dir, 'commands'), join(dir, '.opencode', 'commands')]) {
+    await mkdir(cmdDir, { recursive: true });
+    await writeFile(join(cmdDir, 'athena.md'), athenaCmd);
+  }
   return new Promise((resolve) => {
     let settled = false;
     // opencode [project] defaults to TUI; dir is the project with opencode.json
