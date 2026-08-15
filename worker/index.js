@@ -9638,13 +9638,21 @@ async function fetchModelList(baseUrl, env, apiKey) {
   } catch (_) { return null; }
 }
 
+function hostMatches(baseUrl, domain) {
+  try {
+    const raw = String(baseUrl||'').trim();
+    if (!raw) return false;
+    const u = new URL(raw.startsWith('http') ? raw : `https://${raw}`);
+    const h = u.hostname.toLowerCase();
+    return h === domain || h.endsWith(`.${domain}`);
+  } catch { return false; }
+}
 function detectProviderForModel(model, baseUrl) {
   const m = String(model||'').toLowerCase();
-  const b = String(baseUrl||'').toLowerCase();
-  if (b.includes('opencode.ai')) return 'opencode';
-  if (b.includes('groq.com')) return 'groq';
-  if (b.includes('anthropic.com')) return 'anthropic';
-  if (b.includes('openai.com')) return 'openai';
+  if (hostMatches(baseUrl, 'opencode.ai')) return 'opencode';
+  if (hostMatches(baseUrl, 'groq.com')) return 'groq';
+  if (hostMatches(baseUrl, 'anthropic.com')) return 'anthropic';
+  if (hostMatches(baseUrl, 'openai.com')) return 'openai';
   if (m.startsWith('openai/') || m.startsWith('gpt-')) return 'openai';
   if (m.startsWith('anthropic/') || m.includes('claude')) return 'anthropic';
   if (m.includes('groq') || m.includes('llama')) return 'groq';

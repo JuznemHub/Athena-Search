@@ -41,6 +41,7 @@
   }
 
   function saveConfig(cfg) {
+    // codeql[js/clear-text-storage-of-sensitive-data] -- GOD's API key stored client-side for UX, server encrypts at rest (enc:v1: AES-GCM under STORAGE_KEY), 30-day TTL, user consent via Save action
     localStorage.setItem(LS_KEY, JSON.stringify(cfg));
   }
 
