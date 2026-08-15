@@ -262,11 +262,23 @@ export async function handleAthenaGetChunk({ doc_id, para_idx, scope = 'communit
   if (!pool) {
     const q = new URLSearchParams({ q: String(doc_id), scope: s, limit: '20' });
     if (s === 'community' && communityId) q.set('community_id', String(communityId));
-    const data = await apiFetch(instance, token, `/api/links/search?${q}`);
-    const hit = (data.links || []).find((r) => String(r.id) === String(doc_id) || String(r.url).includes(String(doc_id)));
+    let hit = null;
+    try {
+      const data = await apiFetch(instance, token, `/api/links/search?${q}`);
+      hit = (data.links || []).find((r) => String(r.id) === String(doc_id) || String(r.url).includes(String(doc_id)));
+    } catch {}
+    if (!hit) {
+      try {
+        const q2 = new URLSearchParams({ scope: s, limit: '50' });
+        if (s === 'community' && communityId) q2.set('community_id', String(communityId));
+        const d2 = await apiFetch(instance, token, `/api/documents?${q2}`);
+        const docs = d2.documents || d2.links || [];
+        const doc = docs.find((d) => String(d.id) === String(doc_id));
+        if (doc) hit = { id: doc.id, url: doc.github_path || null, title: doc.filename || doc.title || '', notes: doc.content || '' };
+      } catch {}
+    }
     if (!hit) return null;
-    // no para_idx split via API, return first chunk as para 1 with url
-    return { doc_id: String(doc_id), para_idx: Number(para_idx), content: [hit.title, hit.url, hit.notes].filter(Boolean).join('\n'), url: hit.url || null, title: hit.title || '', chunk_idx: 0, page: 1 };
+    return { doc_id: String(doc_id), para_idx: Number(para_idx), content: [hit.title, hit.url, hit.notes, hit.content].filter(Boolean).join('\n'), url: hit.url || null, title: hit.title || hit.filename || '', chunk_idx: 0, page: 1 };
   }
   const where = buildWhere(s, me, communityId, 2);
   await ensureOnce(pool);
@@ -289,10 +301,24 @@ export async function handleAthenaGetDoc({ doc_id, scope = 'community' }, pool, 
   if (!pool) {
     const q = new URLSearchParams({ q: String(doc_id), scope: s, limit: '20' });
     if (s === 'community' && communityId) q.set('community_id', String(communityId));
-    const data = await apiFetch(instance, token, `/api/links/search?${q}`);
-    const hit = (data.links || []).find((r) => String(r.id) === String(doc_id));
+    let hit = null;
+    try {
+      const data = await apiFetch(instance, token, `/api/links/search?${q}`);
+      hit = (data.links || []).find((r) => String(r.id) === String(doc_id));
+    } catch {}
+    if (!hit) {
+      try {
+        const q2 = new URLSearchParams({ scope: s, limit: '50' });
+        if (s === 'community' && communityId) q2.set('community_id', String(communityId));
+        const d2 = await apiFetch(instance, token, `/api/documents?${q2}`);
+        const docs = d2.documents || d2.links || [];
+        const doc = docs.find((d) => String(d.id) === String(doc_id));
+        if (doc) hit = { id: doc.id, url: doc.github_path || null, title: doc.filename || doc.title || '', notes: doc.content || '', url_hash: doc.id };
+      } catch {}
+    }
     if (!hit) return null;
-    return { doc_id: String(doc_id), url: hit.url || null, title: hit.title || '', chunks: [{ doc_id, chunk_idx: 0, para_idx: 1, content: [hit.title, hit.url, hit.notes].filter(Boolean).join('\n'), url: hit.url || null }], total: 1 };
+    const content = hit.notes || hit.content || [hit.title, hit.url].filter(Boolean).join('\n');
+    return { doc_id: String(doc_id), url: hit.url || null, title: hit.title || hit.filename || '', chunks: [{ doc_id, chunk_idx: 0, para_idx: 1, content, url: hit.url || null }], total: 1 };
   }
   const where = buildWhere(s, me, communityId, 1);
   await ensureOnce(pool);
