@@ -62,6 +62,7 @@ export function keyStream(stdin = process.stdin) {
           break;
         }
         if (c === '\x03') { pending = pending.slice(1); finish({ name: 'ctrl-c' }); continue; }
+        if (c === '\t' || c === '\x09') { pending = pending.slice(1); finish({ name: 'tab' }); continue; }
         if (c === '\r' || c === '\n') { pending = pending.slice(1); finish({ name: 'enter' }); continue; }
         if (c === '\x7f' || c === '\x08') { pending = pending.slice(1); finish({ name: 'backspace' }); continue; }
         if (/[0-9]/.test(c)) { pending = pending.slice(1); finish({ name: 'digit', value: Number(c) }); continue; }

@@ -3203,6 +3203,21 @@ async function ensureDocumentsTable(env) {
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_documents_community ON uploaded_documents(scope, community_id, created_at)').run();
 }
 
+export async function ensureChunksTable(env) {
+  await env.DB.prepare('CREATE EXTENSION IF NOT EXISTS vector').run().catch(() => {});
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS document_chunks (
+      id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, scope TEXT NOT NULL, scope_key TEXT NOT NULL,
+      chunk_idx INTEGER NOT NULL, page INTEGER, para_idx INTEGER, content TEXT NOT NULL,
+      token_count INTEGER, embedding VECTOR(1536), tsv TSVECTOR, created_at BIGINT NOT NULL
+    )`
+  ).run();
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_doc ON document_chunks(doc_id, chunk_idx)').run().catch(() => {});
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_scope ON document_chunks(scope, scope_key, para_idx)').run().catch(() => {});
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON document_chunks USING ivfflat (embedding vector_l2_ops)').run().catch(() => {});
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON document_chunks USING gin(tsv)').run().catch(() => {});
+}
+
 function documentFolder(scope, key) {
   return scope === 'personal' ? `documents/personal/${key}` : `documents/communities/${key}`;
 }
