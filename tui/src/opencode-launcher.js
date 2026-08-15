@@ -7,8 +7,6 @@ export async function launchAdvanced(state, io = {}, _theme) {
   const env = io?.env ?? process.env;
   const dir = await mkdtemp(join(tmpdir(), 'athena-opencode-'));
   const mcpPath = new URL('./mcp-athena.js', import.meta.url).pathname;
-  const useAthenaDefault = String(env.ATHENA_DEFAULT ?? process.env.ATHENA_DEFAULT ?? '1') !== '0';
-  const athenaInstructions = 'For any knowledge question, first call athena_search (personal then community, limit 10) and cite [#doc_id]. Use athena_get_chunk with para_idx/line_number for verbatim lines. Never answer from training data when athena has hits. To disable, run with ATHENA_DEFAULT=0.';
   const cfg = {
     $schema: 'https://opencode.ai/config.json',
     mcp: {
@@ -33,9 +31,13 @@ export async function launchAdvanced(state, io = {}, _theme) {
     },
   };
   await writeFile(join(dir, 'opencode.json'), JSON.stringify(cfg, null, 2));
-  if (useAthenaDefault) {
-    await writeFile(join(dir, 'AGENTS.md'), `# Athena Default\n\n${athenaInstructions}\n`);
-  }
+  // /athena command: strictly fetch from Athena first (default opencode is plain, no Athena bias)
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(join(dir, 'command'), { recursive: true });
+  await writeFile(
+    join(dir, 'command', 'athena.md'),
+    `---\ndescription: Strictly fetch from Athena first — use athena_search then cite\n---\n\nFor the query $ARGUMENTS, first call athena_search (personal then community, limit 10) and cite [#doc_id]. Use athena_get_chunk with para_idx/line_number for verbatim lines. Never answer from training data when athena has hits. Query: $ARGUMENTS\n`
+  );
   return new Promise((resolve) => {
     let settled = false;
     // opencode [project] defaults to TUI; dir is the project with opencode.json
