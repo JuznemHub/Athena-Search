@@ -21,7 +21,6 @@ export async function launchAdvanced(state, io = {}, _theme) {
       },
     },
   };
-  // also expose `mcp` key for opencode variants that use `mcp` instead of `mcpServers`
   cfg.mcp = cfg.mcpServers;
   await writeFile(join(dir, 'opencode.json'), JSON.stringify(cfg, null, 2));
   return new Promise((resolve) => {
@@ -45,12 +44,27 @@ export async function launchAdvanced(state, io = {}, _theme) {
   });
 }
 
+let _availableCache = null;
+let _availableExpires = 0;
+
 export function isOpencodeAvailable() {
+  const now = Date.now();
+  if (_availableCache !== null && now < _availableExpires) return _availableCache;
   try {
-    const r = spawnSync('opencode', ['--version'], { stdio: 'ignore' });
-    if (r.error) return false;
-    return r.status === 0;
+    const r = spawnSync('opencode', ['--version'], { stdio: 'ignore', timeout: 2000 });
+    if (r.error) {
+      _availableCache = false;
+    } else {
+      _availableCache = r.status === 0;
+    }
   } catch {
-    return false;
+    _availableCache = false;
   }
+  _availableExpires = now + 30_000;
+  return _availableCache;
+}
+
+export function __resetAvailableCacheForTests() {
+  _availableCache = null;
+  _availableExpires = 0;
 }

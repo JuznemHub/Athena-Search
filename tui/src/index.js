@@ -276,7 +276,7 @@ async function pickDumpTarget() {
     ],
     width: columns(),
   });
-  if (pick === null) return null;
+  if (pick === null || pick === 'tab') return null;
   return pick === 1 ? 'personal' : 'community';
 }
 
@@ -525,7 +525,7 @@ async function mainMenu() {
     center(theme.dim(`server  ${state.instance || 'not connected'}${state.provider ? ` · ${state.provider}` : ''}`), columns()),
     '',
   ];
-  const pick = await menu(io, theme, { title: 'ATHENA SEARCH', items, width: columns(), header: head, label: 'actions' });
+  const pick = await menu(io, theme, { title: 'ATHENA SEARCH', items, width: columns(), header: head, label: 'actions', allowTab: true });
   if (pick === null) return false;
   if (pick === 'tab') return stepAdvanced();
   const fns = [stepLogin, stepConnectInstance, stepJoinCommunity, stepScan, stepDump, stepAdvanced, stepStatus, ...(state.token ? [stepLogout] : []), () => false];

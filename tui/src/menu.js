@@ -7,8 +7,9 @@ import { HOME, ERASE_EOL, ERASE_DOWN, box, center } from './screen.js';
  * Returns the chosen index, or null when aborted (escape/ctrl-c/q).
  * `header` (pre-centered lines) replaces the plain title; `label` sits on
  * the box's top edge (binthere uses 'actions').
+ * `allowTab` enables Tab → 'tab' return, only for main menu (H7 fix).
  */
-export async function menu(io, theme, { title = '', items, width, header = null, label = '' }) {
+export async function menu(io, theme, { title = '', items, width, header = null, label = '', allowTab = false }) {
   const stream = await io.keys();
   let cursor = 0;
   let done = false;
@@ -28,7 +29,8 @@ export async function menu(io, theme, { title = '', items, width, header = null,
     const first = Math.max(0, Math.min(cursor - maxH + 1, items.length - maxH));
     const frame = lines.slice(first, first + maxH);
     for (const l of box(frame, theme, { label }).map((l) => center(l, width))) io.stderr(l + '\n');
-    for (const l of box([msg === '' ? '↑↓ move · ↵ select · 1-9 jump · Tab advanced · q quit' : msg], theme).map((l) => center(l, width))) io.stderr(l + '\n');
+    const hint = allowTab ? '↑↓ move · ↵ select · 1-9 jump · Tab advanced · q quit' : '↑↓ move · ↵ select · 1-9 jump · q quit';
+    for (const l of box([msg === '' ? hint : msg], theme).map((l) => center(l, width))) io.stderr(l + '\n');
   };
 
   draw();
@@ -41,7 +43,7 @@ export async function menu(io, theme, { title = '', items, width, header = null,
       else if (key.name === 'digit' && key.value >= 1 && key.value <= items.length) {
         cursor = key.value - 1; draw(); done = true;
       }
-      else if (key.name === 'tab') { stream.close(); return 'tab'; }
+      else if (key.name === 'tab' && allowTab) { stream.close(); return 'tab'; }
       else if (key.name === 'escape' || key.name === 'ctrl-c' || (key.name === 'char' && key.value === 'q')) {
         stream.close(); return null;
       }
