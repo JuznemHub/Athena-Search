@@ -160,11 +160,7 @@ let _pool = null;
 let _poolConnStr = null;
 export async function getPool() {
   const connStr = process.env.DATABASE_URL;
-  if (!connStr) {
-    const e = new Error('DATABASE_URL not configured - Postgres required');
-    e.code = 503;
-    throw e;
-  }
+  if (!connStr) return null; // API-proxy fallback when no direct DB (e.g., laptop with no DATABASE_URL)
   if (_pool && _poolConnStr === connStr) return _pool;
   if (_pool) {
     try { await _pool.end(); } catch {}
@@ -175,6 +171,16 @@ export async function getPool() {
   _poolConnStr = connStr;
   _pool.on('error', () => {});
   return _pool;
+}
+// API-proxy helpers for when DATABASE_URL is not set (laptop → https://athena.juznem.eu.org)
+async function apiFetch(instance, token, path, opts = {}) {
+  const url = `${String(instance).replace(/\/+$/, '')}${path}`;
+  const res = await fetch(url, { ...opts, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(opts.headers || {}) } });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw Object.assign(new Error(`${res.status} ${txt}`.trim()), { code: res.status });
+  }
+  return res.json().catch(() => ({}));
 }
 export async function __closePoolForTests() {
   if (_pool) {
@@ -194,6 +200,14 @@ export async function handleAthenaSearch({ query, scope = 'community', limit = 8
     if (isBanned) throw Object.assign(new Error('banned from community'), { code: 403 });
     if (!isMember) throw Object.assign(new Error('not a member of community'), { code: 403 });
   }
+  if (!pool) {
+    // API-proxy fallback (no DATABASE_URL, e.g., laptop)
+    const q = new URLSearchParams({ q: String(query), scope, limit: String(lim) });
+    if (scope === 'community' && communityId) q.set('community_id', String(communityId));
+    const data = await apiFetch(instance, token, `/api/links/search?${q}`);
+    const links = data.links || data.results || [];
+    return links.slice(0, lim).map((r, i) => ({ doc_id: r.id, chunk_idx: i, para_idx: 1, content: r.notes || r.title || r.url || '', cite: `[#${r.id}]` }));
+  }
   const where = buildWhere(scope, me, communityId);
   await ensureOnce(pool);
   const { rows } = await pool.query(
@@ -211,6 +225,12 @@ export async function handleAthenaDump({ content, filename, scope = 'community' 
   if (s === 'community' && communityId) {
     if (isBanned) throw Object.assign(new Error('banned from community'), { code: 403 });
     if (!isMember) throw Object.assign(new Error('not a member of community'), { code: 403 });
+  }
+  if (!pool) {
+    // API-proxy fallback
+    const body = s === 'personal' ? { filename, content, scope: 'personal' } : { filename, content, scope: 'community', community_id: communityId };
+    const data = await apiFetch(instance, token, '/api/documents', { method: 'POST', body: JSON.stringify(body) });
+    return { id: data.document?.id || filename, chunks: 1, via: 'api' };
   }
   const where = buildWhere(s, me, communityId);
   await ensureOnce(pool);
@@ -234,6 +254,15 @@ export async function handleAthenaGetChunk({ doc_id, para_idx, scope = 'communit
     if (isBanned) throw Object.assign(new Error('banned from community'), { code: 403 });
     if (!isMember) throw Object.assign(new Error('not a member of community'), { code: 403 });
   }
+  if (!pool) {
+    const q = new URLSearchParams({ q: String(doc_id), scope: s, limit: '20' });
+    if (s === 'community' && communityId) q.set('community_id', String(communityId));
+    const data = await apiFetch(instance, token, `/api/links/search?${q}`);
+    const hit = (data.links || []).find((r) => String(r.id) === String(doc_id) || String(r.url).includes(String(doc_id)));
+    if (!hit) return null;
+    // no para_idx split via API, return first chunk as para 1
+    return { doc_id: String(doc_id), para_idx: Number(para_idx), content: hit.notes || hit.title || '', chunk_idx: 0, page: 1 };
+  }
   const where = buildWhere(s, me, communityId, 2);
   await ensureOnce(pool);
   const { rows } = await pool.query(
@@ -251,6 +280,14 @@ export async function handleAthenaGetDoc({ doc_id, scope = 'community' }, pool, 
   if (s === 'community' && communityId) {
     if (isBanned) throw Object.assign(new Error('banned from community'), { code: 403 });
     if (!isMember) throw Object.assign(new Error('not a member of community'), { code: 403 });
+  }
+  if (!pool) {
+    const q = new URLSearchParams({ q: String(doc_id), scope: s, limit: '20' });
+    if (s === 'community' && communityId) q.set('community_id', String(communityId));
+    const data = await apiFetch(instance, token, `/api/links/search?${q}`);
+    const hit = (data.links || []).find((r) => String(r.id) === String(doc_id));
+    if (!hit) return null;
+    return { doc_id: String(doc_id), chunks: [{ doc_id, chunk_idx: 0, para_idx: 1, content: hit.notes || hit.title || '' }], total: 1 };
   }
   const where = buildWhere(s, me, communityId, 1);
   await ensureOnce(pool);
@@ -270,6 +307,13 @@ export async function handleAthenaList({ scope = 'community', limit = 20 } = {},
   if (s === 'community' && communityId) {
     if (isBanned) throw Object.assign(new Error('banned from community'), { code: 403 });
     if (!isMember) throw Object.assign(new Error('not a member of community'), { code: 403 });
+  }
+  if (!pool) {
+    const q = new URLSearchParams({ scope: s, limit: String(lim) });
+    if (s === 'community' && communityId) q.set('community_id', String(communityId));
+    const data = await apiFetch(instance, token, `/api/links?${q}`);
+    const links = data.links || [];
+    return links.slice(0, lim).map((r) => ({ doc_id: r.id, chunks: 1, created_at: r.created_at }));
   }
   const where = buildWhere(s, me, communityId);
   await ensureOnce(pool);
@@ -295,7 +339,7 @@ async function _handleToolsCall(req) {
   const instance = process.env.ATHENA_INSTANCE;
   const communityId = process.env.ATHENA_COMMUNITY_ID;
   const pool = await getPool();
-  await ensureOnce(pool);
+  if (pool) await ensureOnce(pool);
   switch (req.params.name) {
     case 'athena_search': {
       const result = await handleAthenaSearch(args, pool, token, instance, communityId);
