@@ -8,11 +8,13 @@ export async function launchAdvanced(state, io = {}, _theme) {
   const dir = await mkdtemp(join(tmpdir(), 'athena-opencode-'));
   const mcpPath = new URL('./mcp-athena.js', import.meta.url).pathname;
   const cfg = {
-    mcpServers: {
+    $schema: 'https://opencode.ai/config.json',
+    mcp: {
       athena: {
-        command: 'node',
-        args: [mcpPath],
-        env: {
+        type: 'local',
+        command: ['node', mcpPath],
+        enabled: true,
+        environment: {
           ATHENA_INSTANCE: state.instance ?? '',
           ATHENA_TOKEN: state.token ?? '',
           ATHENA_COMMUNITY_ID: state.community_id ?? '',
@@ -21,11 +23,11 @@ export async function launchAdvanced(state, io = {}, _theme) {
       },
     },
   };
-  cfg.mcp = cfg.mcpServers;
   await writeFile(join(dir, 'opencode.json'), JSON.stringify(cfg, null, 2));
   return new Promise((resolve) => {
     let settled = false;
-    const child = spawn('opencode', ['--config', dir], { stdio: 'inherit', env });
+    // opencode [project] defaults to TUI; dir is the project with opencode.json
+    const child = spawn('opencode', [dir], { stdio: 'inherit', env });
     child.on('error', (e) => {
       if (settled) return;
       settled = true;
