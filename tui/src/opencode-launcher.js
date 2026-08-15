@@ -14,6 +14,13 @@ export async function launchAdvanced(state, io = {}, _theme) {
         type: 'local',
         command: ['node', mcpPath],
         enabled: true,
+        env: {
+          ATHENA_INSTANCE: state.instance ?? '',
+          ATHENA_TOKEN: state.token ?? '',
+          ATHENA_COMMUNITY_ID: state.community_id ?? '',
+          DATABASE_URL: env.DATABASE_URL ?? process.env.DATABASE_URL ?? '',
+        },
+        // keep environment for compat with older opencode
         environment: {
           ATHENA_INSTANCE: state.instance ?? '',
           ATHENA_TOKEN: state.token ?? '',
