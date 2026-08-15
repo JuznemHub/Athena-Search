@@ -177,9 +177,8 @@ async function stepLogin() {
     const account = me.user;
     state.name = account?.username || account?.first_name || 'user';
     state.rank = rankOf(account);
-    // Backend is chosen on the website (PostgreSQL / GitHub / D1) — mirror it
-    // here so the TUI always reports where a dump will actually land.
-    if (cfg?.provider) state.provider = STORAGE_LABELS[cfg.provider] || cfg.provider;
+    // PostgreSQL only — keep compat for legacy d1/github responses
+    if (cfg?.provider) state.provider = STORAGE_LABELS[cfg.provider] || 'PostgreSQL';
     saveConfig(state);
     return true;
   } catch (e) {
@@ -378,8 +377,8 @@ async function stepDump() {
   if (preflightWarning) stderr(`\n${theme.danger(preflightWarning)}\n`);
   if (similarCount) stderr(theme.dim(`${similarCount} new candidate(s) have similar existing titles; they will still be uploaded.\n`));
 
-  // Preferred path: one request for the whole batch (worker writes D1 and the
-  // GitHub folder in a single commit). Older instances without the batch
+  // Preferred path: one request for the whole batch (PostgreSQL only).
+  // Older instances without the batch
   // endpoint fall back to per-link POSTs.
   let batchSkipped = false;
   let batchError = null;

@@ -8239,62 +8239,21 @@ Rules:
 
   // ---- /db — show storage backend (all ranks) ----
   if (cmd === '/db') {
-    const cfg = await getStorageConfig(env);
-    const provider = cfg?.provider || 'd1';
-    const selfHosted = isSelfHosted(env);
     const scope = binding?.scope || (binding?.community_id ? 'community' : 'personal');
     const lines = [
       boldHtml('🗄 Storage Backend'),
       '',
+      `${boldHtml('Engine:')} ${codeHtml(selfHostedEngine(env))}`,
+      `${boldHtml('Active:')} ${codeHtml('postgres')} (PostgreSQL)`,
+      `${boldHtml('Runtime:')} ${isSelfHosted(env) ? 'Node.js' : 'Cloudflare Workers'}`,
+      `${boldHtml('MCP:')} ${codeHtml('postgres-mcp')} — ${italicHtml('use same DATABASE_URL as memory')}`,
+      '',
+      `${boldHtml('Your dump mode:')} ${codeHtml(scope)}`,
     ];
-    // Read from instance_storage_config to show the selected provider
-    if (provider === 'local') {
-      lines.push(
-        `${boldHtml('Engine:')} ${codeHtml(selfHostedEngine(env))}`,
-        `${boldHtml('Active:')} ${codeHtml('local')} (source of truth)`,
-        `${boldHtml('Mode:')} self-hosted (${selfHostedEngine(env)})`,
-        `${boldHtml('Runtime:')} Node.js`,
-      );
-    } else if (provider === 'github') {
-      lines.push(
-        `${boldHtml('Engine:')} ${codeHtml('GitHub Markdown')}`,
-        `${boldHtml('Active:')} ${codeHtml('github')} (source of truth)`,
-        `${boldHtml('Runtime:')} Cloudflare Workers`,
-      );
-      if (cfg?.repo) {
-        lines.push(`${boldHtml('Repo:')} ${codeHtml(cfg.repo + '@' + (cfg.branch || 'main'))}`);
-      }
-      lines.push(
-        `${boldHtml('Reads:')} from GitHub (cached in D1 for speed)`,
-        `${boldHtml('Writes:')} to GitHub + D1 cache`,
-      );
-    } else {
-      lines.push(
-        `${boldHtml('Engine:')} ${codeHtml('Cloudflare D1')}`,
-        `${boldHtml('Active:')} ${codeHtml('d1')} (source of truth)`,
-        `${boldHtml('Runtime:')} Cloudflare Workers`,
-      );
-      if (cfg?.repo) {
-        lines.push(
-          `${boldHtml('GitHub:')} ${codeHtml(cfg.repo + '@' + (cfg.branch || 'main'))} (configured, inactive)`,
-          '',
-          italicHtml('GitHub is not used until you switch. /sync pushes D1 → GitHub.'),
-        );
-      } else {
-        lines.push('', italicHtml('No GitHub configured. D1 is the only store.'));
-      }
-    }
-    lines.push('', `${boldHtml('Your dump mode:')} ${codeHtml(scope)}`);
     if (binding?.community_id) {
       lines.push(`${boldHtml('Community:')} ${escHtml(binding.group_name || binding.community_id)}`);
     }
-    if (selfHosted) {
-      lines.push('', `${codeHtml('/backup')} ${italicHtml('for instant Telegram/Drive backup')}`);
-    } else if (cfg?.repo) {
-      lines.push('', `${codeHtml('/sync')} ${italicHtml('to sync D1 ↔ GitHub (GOD only)')}`);
-    } else {
-      lines.push('', italicHtml('No GitHub configured. /sync unavailable.'));
-    }
+    lines.push('', `${codeHtml('/backup')} ${italicHtml('for Telegram/Drive backup (self-host)')}`);
     await sendTelegramFormatted(token, chatId, lines.join('\n'), forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
