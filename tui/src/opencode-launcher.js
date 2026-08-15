@@ -7,8 +7,10 @@ export async function launchAdvanced(state, io = {}, _theme) {
   const env = io?.env ?? process.env;
   const dir = await mkdtemp(join(tmpdir(), 'athena-opencode-'));
   const mcpPath = new URL('./mcp-athena.js', import.meta.url).pathname;
+  const useAthenaDefault = String(env.ATHENA_DEFAULT ?? process.env.ATHENA_DEFAULT ?? '1') !== '0';
   const cfg = {
     $schema: 'https://opencode.ai/config.json',
+    ...(useAthenaDefault ? { instructions: 'For any knowledge question, first call athena_search (personal then community, limit 10) and cite [#doc_id]. Use athena_get_chunk with para_idx/line_number for verbatim lines. Never answer from training data when athena has hits.' } : {}),
     mcp: {
       athena: {
         type: 'local',
