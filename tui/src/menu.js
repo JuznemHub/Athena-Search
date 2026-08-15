@@ -28,7 +28,7 @@ export async function menu(io, theme, { title = '', items, width, header = null,
     const first = Math.max(0, Math.min(cursor - maxH + 1, items.length - maxH));
     const frame = lines.slice(first, first + maxH);
     for (const l of box(frame, theme, { label }).map((l) => center(l, width))) io.stderr(l + '\n');
-    for (const l of box([msg === '' ? '↑↓ move · ↵ select · 1-9 jump · q quit' : msg], theme).map((l) => center(l, width))) io.stderr(l + '\n');
+    for (const l of box([msg === '' ? '↑↓ move · ↵ select · 1-9 jump · Tab advanced · q quit' : msg], theme).map((l) => center(l, width))) io.stderr(l + '\n');
   };
 
   draw();
@@ -41,6 +41,7 @@ export async function menu(io, theme, { title = '', items, width, header = null,
       else if (key.name === 'digit' && key.value >= 1 && key.value <= items.length) {
         cursor = key.value - 1; draw(); done = true;
       }
+      else if (key.name === 'tab') { stream.close(); return 'tab'; }
       else if (key.name === 'escape' || key.name === 'ctrl-c' || (key.name === 'char' && key.value === 'q')) {
         stream.close(); return null;
       }

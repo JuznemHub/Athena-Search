@@ -14,6 +14,7 @@ import { makeClient, ApiError, STORAGE_LABELS, rankOf } from './api.js';
 import { detectBookmarks, loadBookmarks, dedupe, scanDiagnose, filterSynthetic } from './browsers.js';
 import { loadConfig, saveConfig } from './config.js';
 import { parseSessionToken } from './session.js';
+import { launchAdvanced, isOpencodeAvailable } from './opencode-launcher.js';
 
 const theme = makeTheme();
 const stderr = (s) => process.stderr.write(s);
@@ -485,6 +486,19 @@ async function stepLogout() {
   return true;
 }
 
+async function stepAdvanced() {
+  const res = await launchAdvanced(state, io, theme);
+  if (res?.error) {
+    stderr(theme.danger(`Advanced mode failed: ${res.error}\n`));
+    stderr(theme.dim('Install opencode: npm i -g opencode  (https://github.com/anomalyco/opencode)\n'));
+    stderr(center(theme.dim('Press ↵ to continue'), columns()) + '\n');
+    const keys = await keyStream();
+    await keys.next();
+    keys.close();
+  }
+  return true;
+}
+
 async function mainMenu() {
   let s = null;
   try { s = await statusBox(); } catch { /* offline */ }
@@ -499,6 +513,7 @@ async function mainMenu() {
     { label: 'Join community', hint: state.community_name || 'not joined' },
     { label: 'Scan bookmarks', hint: state.scanned ? `${state.scanned.count} found` : 'not scanned' },
     { label: 'Dump bookmarks', hint: state.last_dump ? `${state.last_dump.added} last time` : '' },
+    { label: 'Advanced (opencode)', hint: isOpencodeAvailable() ? 'any AI via opencode' : 'install opencode' },
     { label: 'Status', hint: '' },
     ...(state.token ? [{ label: 'Logout', hint: '' }] : []),
     { label: 'Quit', hint: '' },
@@ -512,7 +527,8 @@ async function mainMenu() {
   ];
   const pick = await menu(io, theme, { title: 'ATHENA SEARCH', items, width: columns(), header: head, label: 'actions' });
   if (pick === null) return false;
-  const fns = [stepLogin, stepConnectInstance, stepJoinCommunity, stepScan, stepDump, stepStatus, ...(state.token ? [stepLogout] : []), () => false];
+  if (pick === 'tab') return stepAdvanced();
+  const fns = [stepLogin, stepConnectInstance, stepJoinCommunity, stepScan, stepDump, stepAdvanced, stepStatus, ...(state.token ? [stepLogout] : []), () => false];
   return fns[pick]();
 }
 
