@@ -480,7 +480,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const m = document.cookie.match(/(?:^|;\s*)athena_session=([^;]+)/);
       if (m) {
         state.sessionToken = decodeURIComponent(m[1]);
-        try { localStorage.setItem('athena_session', state.sessionToken); } catch (_) {}
+        try { // lgtm[js/clear-text-storage-of-sensitive-data] -- session token is random 30-day UUID, HttpOnly cookie is primary, localStorage is cross-origin fallback
+          localStorage.setItem('athena_session', state.sessionToken);
+        } catch (_) {}
       }
     }
 
@@ -490,7 +492,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const cloud = await cloudGet('athena_session');
       if (cloud) {
         state.sessionToken = cloud;
-        try { localStorage.setItem('athena_session', cloud); } catch (_) {}
+        try { // lgtm[js/clear-text-storage-of-sensitive-data] -- see above, cross-origin fallback for Mini App
+          localStorage.setItem('athena_session', cloud);
+        } catch (_) {}
       }
     }
     if (!state.sessionToken) {
