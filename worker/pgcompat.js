@@ -31,6 +31,7 @@ export const PRIMARY_KEYS = {
   personal_links: ['id'],
   batch_uploads: ['id'],
   uploaded_documents: ['id'],
+  document_chunks: ['id'],
   oauth_states: ['state'],
   telegram_bots: ['bot_token'],
   telegram_pending: ['id'],
