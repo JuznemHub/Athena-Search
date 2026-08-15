@@ -119,14 +119,11 @@ document.addEventListener('DOMContentLoaded', () => {
   const aiSources = $('aiSources');
   const storageDesc = $('storageDesc');
   const storageProvider = $('storageProvider');
-  const githubFields = $('githubFields');
-  const githubRepo = $('githubRepo');
-  const githubBranch = $('githubBranch');
-  const githubToken = $('githubToken');
+  const storageStatus = $('storageStatus');
   const saveStorageBtn = $('saveStorageBtn');
   const syncStorageBtn = $('syncStorageBtn');
-  const storageStatus = $('storageStatus');
   const storageGodBadge = $('storageGodBadge');
+  // eslint-disable-next-line no-unused-vars
   const storageSettingsBody = $('storageSettingsBody');
   const userName = $('userName');
   const userEmail = $('userEmail');
@@ -1956,73 +1953,27 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  /** Storage backend panel (GOD writes, everyone can see which backend is live). */
-  function updateStorageSyncLabel(provider) {
-    if (!syncStorageBtn) return;
-    if (provider === 'github') {
-      syncStorageBtn.textContent = 'Sync GitHub with D1 mirror';
-      syncStorageBtn.title = 'Merge GitHub and D1 in both directions, keeping personal and community scopes separate';
-    } else {
-      syncStorageBtn.textContent = 'Push existing links to GitHub';
-      syncStorageBtn.title = 'Merge D1 and GitHub in both directions, keeping personal and community scopes separate';
-    }
-  }
+  /** Storage backend panel — PostgreSQL only. */
+  // eslint-disable-next-line no-unused-vars
+  function updateStorageSyncLabel(_provider) { return; }
 
   async function loadStorageForm() {
     const god = canEditAiConfig();
     storageGodBadge?.classList.toggle('hidden', !god);
-    if (storageSettingsBody) {
-      storageSettingsBody.classList.toggle('ui-locked', !god);
-      storageSettingsBody.querySelectorAll('input, select, button').forEach(el => { el.disabled = !god; });
-    }
     try {
       const { res, data } = await api('/api/storage/config');
       if (!res.ok) return;
-      const provider = data.provider || 'd1';
-      const postgresAvailable = data.postgres_available || false;
-
-      // Always show all available storage options - let GOD choose
+      const _provider = data.provider || 'postgres';
       if (storageProvider) {
-        let options = '';
-        if (postgresAvailable) {
-          options += `<option value="local">Local Database (${escapeHtml(data.db_engine || 'PostgreSQL')})</option>`;
-        }
-        options += `<option value="d1">Cloudflare D1</option>`;
-        options += `<option value="github">GitHub Markdown</option>`;
-        storageProvider.innerHTML = options;
-        storageProvider.value = provider;
-        storageProvider.disabled = !god;
+        storageProvider.innerHTML = `<option value="postgres" selected>PostgreSQL — ${escapeHtml(data.db_engine || 'PostgreSQL')}</option>`;
+        storageProvider.value = 'postgres';
+        storageProvider.disabled = true;
       }
-
-      // Show/hide GitHub fields based on provider
-      githubFields?.classList.toggle('hidden', provider !== 'github');
-      if (githubRepo && data.repo && !githubRepo.value) githubRepo.value = data.repo;
-      if (githubBranch && data.branch && !githubBranch.value) githubBranch.value = data.branch;
-
-      // Update status display
       if (storageStatus) {
-        if (provider === 'github') {
-          const files = data.file_count != null ? ` · ${data.file_count} file(s)` : '';
-          const n = data.link_count != null ? ` · ${data.link_count} link(s)` : '';
-          storageStatus.innerHTML = data.has_token
-            ? `<span style="color:var(--success-color)">GitHub: ${escapeHtml(data.repo || '')}@${escapeHtml(data.branch || 'main')}${files}${n}</span>`
-            : '<span style="color:var(--danger-color)">GitHub selected but no token saved</span>';
-        } else if (provider === 'local') {
-          storageStatus.innerHTML = `<span style="color:var(--success-color)">${escapeHtml(data.db_engine || 'Local Database')} (self-hosted)</span>`;
-        } else {
-          storageStatus.innerHTML = '<span style="color:var(--text-muted)">Cloudflare D1 (default)</span>';
-        }
+        storageStatus.innerHTML = `<span style="color:var(--success-color)">${escapeHtml(data.db_engine || 'PostgreSQL')} — PostgreSQL only (D1/GitHub removed)</span>`;
       }
-
-      // Update description
       if (storageDesc) {
-        if (provider === 'github') {
-          storageDesc.textContent = 'Links live as Markdown in your repo. GitHub is the source of truth; D1 only caches for fast search.';
-        } else if (provider === 'local') {
-          storageDesc.textContent = `Links live in your own ${data.db_engine || 'database'}. Backups are sent to Telegram (and Drive if configured).`;
-        } else {
-          storageDesc.textContent = 'Links live in Cloudflare D1. Switch to GitHub to own them as Markdown.';
-        }
+        storageDesc.textContent = `PostgreSQL — the only store. MCP memory uses the same DB via postgres-mcp (DATABASE_URL).`;
       }
     } catch (_) { /* offline / not logged in */ }
   }
@@ -2587,47 +2538,12 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
 
-    storageProvider?.addEventListener('change', () => {
-      githubFields?.classList.toggle('hidden', storageProvider.value !== 'github');
-      updateStorageSyncLabel(storageProvider.value);
-    });
-
+    // Storage is PostgreSQL-only — sync/save kept as no-ops for compat.
     saveStorageBtn?.addEventListener('click', async () => {
-      if (!canEditAiConfig()) { showToast('GOD rank only', true); return; }
-      const provider = storageProvider?.value || 'd1';
-      const body = { provider };
-      if (provider === 'github') {
-        body.repo = (githubRepo?.value || '').trim();
-        body.branch = (githubBranch?.value || '').trim() || 'main';
-        const tok = (githubToken?.value || '').trim();
-        if (tok) body.token = tok;
-        if (!body.repo) { showToast('Repository is required (owner/repo)', true); return; }
-      }
-      if (storageStatus) storageStatus.textContent = 'Verifying…';
-      try {
-        const { res, data } = await api('/api/storage/config', { method: 'POST', body: JSON.stringify(body) });
-        if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
-        if (githubToken) githubToken.value = '';
-        showToast('Storage settings saved');
-        await loadStorageForm();
-      } catch (err) {
-        if (storageStatus) storageStatus.innerHTML = `<span style="color:var(--danger-color)">${escapeHtml(err.message)}</span>`;
-        showToast(err.message, true);
-      }
+      showToast('PostgreSQL is the only store — no switch needed. Set DATABASE_URL on server.', true);
     });
-
     syncStorageBtn?.addEventListener('click', async () => {
-      if (!canEditAiConfig()) { showToast('GOD rank only', true); return; }
-      if (storageStatus) storageStatus.textContent = 'Syncing D1 and GitHub…';
-      try {
-        const { res, data } = await api('/api/storage/sync', { method: 'POST', body: JSON.stringify({}) });
-        if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
-        showToast(`Synced ${data.pushed || 0} link(s) across D1 and GitHub`);
-        await loadStorageForm();
-      } catch (err) {
-        if (storageStatus) storageStatus.innerHTML = `<span style="color:var(--danger-color)">${escapeHtml(err.message)}</span>`;
-        showToast(err.message, true);
-      }
+      showToast('Sync removed — PostgreSQL only (D1/GitHub deprecated)', true);
     });
 
     logoutBtn.addEventListener('click', async () => {

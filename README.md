@@ -17,7 +17,7 @@ One bar: search, dump, and AI answers from your markdown brain.
 - **Search** with fuzzy matching across titles, URLs, notes, and tags — tolerant of typos and partial matches, with server-side search for large brains.
 - **Ask** questions with RAG over your links and documents. Supports OpenAI, Anthropic, Groq, OpenRouter, and OpenCode Zen, with streaming answers and cited sources.
 - **Share** a brain with a Telegram group in community mode, with voting, reporting, and rank-based permissions — or keep it private in personal mode.
-- **Store** your data wherever you like: Cloudflare D1, Markdown files in your own GitHub repo, or self-hosted PostgreSQL.
+- **Store** your data in self-hosted PostgreSQL — the only backend (D1/GitHub removed). MCP memory uses the same DB via `postgres-mcp`.
 - **Log in** with Telegram (OAuth or Mini App) or Discord. Sessions last 30 days.
 
 ---
@@ -37,23 +37,22 @@ Four themes — **Dark**, **Light**, **Material** (MD3 surfaces, no blur), and *
 
 ## Install
 
-### A. Cloudflare — quick start, free tier, zero infrastructure
+### A. Cloudflare Worker — static frontend (optional)
+
+The Worker now serves only the frontend + API proxy; storage is PostgreSQL. Set `DATABASE_URL` as a Worker secret/binding and deploy:
 
 ```bash
 git clone https://github.com/JuznemHub/Athena-Search.git
 cd Athena-Search/worker
-
-# Edit wrangler.toml: account_id, the D1 database_id, and the [vars] values
 npx wrangler secret put TELEGRAM_CLIENT_SECRET
 npx wrangler secret put TELEGRAM_BOT_TOKEN
 npx wrangler secret put DISCORD_CLIENT_SECRET
-npx wrangler secret put STORAGE_KEY          # only if you plan to use GitHub storage
+npx wrangler secret put STORAGE_KEY
+npx wrangler secret put DATABASE_URL
 npx wrangler deploy
 ```
 
-Non-secret values — `account_id`, the D1 `database_id`, and the client and owner IDs under `[vars]` — are edited straight into `wrangler.toml`; static assets are served from `public/` by the same config. `worker/ENV.example` is a reference for what to fill in, and a `worker/.env` copy of it only feeds local `wrangler dev`: `npx wrangler deploy` never reads it, so anything not in `wrangler.toml` or set with `wrangler secret put` will be missing in production.
-
-### B. Self-hosted PostgreSQL — production, full control
+### B. Self-hosted PostgreSQL — production, recommended
 
 Requires Node.js 22+ and PostgreSQL 14+.
 
@@ -121,7 +120,7 @@ If another block catches requests first, disable the distro's default site (`/et
 
 Set `ATHENA_FRONTEND_URL` on your server to wherever OAuth should send the browser after login — it has to be a URL your users can actually reach, serving this same UI. Then in Settings → Backend, enter your server URL and click "Set backend for everyone". The choice is stored per-instance, so every visitor uses the same backend.
 
-Storage backend comes from `ATHENA_RUNTIME`, not the frontend URL. A self-hosted server always uses PostgreSQL.
+Storage is always PostgreSQL regardless of frontend URL. Set `DATABASE_URL` on both Worker and self-host.
 
 ---
 
@@ -202,27 +201,17 @@ In a group, everything goes to the community brain. In DMs, the mode decides whe
 
 ## Storage
 
+PostgreSQL is the only backend. D1 and GitHub Markdown were removed — they added parking/sync complexity (`storage.js` 600L, `storeAddLink` 409/422 retries, 500 GitHub writes/hour) and block MCP memory + paragraph-level RAG.
+
 | Backend | How it works | When to use |
 |---------|-------------|-------------|
-| **Cloudflare D1** | Reads and writes go straight to D1 (SQLite). | Quick start, free, zero config |
-| **GitHub Markdown** | Links live as .md files in your repo; D1 is a transparent read cache. | Data ownership, version history |
-| **PostgreSQL** | Your own database. | Production, self-hosted |
+| **PostgreSQL** | Single source of truth. Any agent can use it as memory via `postgres-mcp` (`DATABASE_URL`). | All deployments |
 
-With GitHub active, it is the source of truth: reads come from GitHub (cached to D1), writes go to both. With D1 active, GitHub is untouched until you sync.
-
-**Setting up GitHub storage**: set `STORAGE_KEY` first — `npx wrangler secret put STORAGE_KEY` on Cloudflare, or the `STORAGE_KEY` line in `.env` when self-hosted. It encrypts the PAT at rest (AES-GCM, stored with an `enc:v1:` prefix under `env.STORAGE_KEY`); leave it unset and the token is written to the database in plaintext as a fallback. Rotating or losing the key makes an already-saved token unreadable, so you re-enter it.
-
-Then create a repo (say `yourname/athena-brain`), generate a fine-grained PAT scoped to just that repo with **Contents: Read and write**, and go to Settings → Storage → GitHub to enter the repo, branch, and token. Save to verify the connection.
-
-**Syncing** merges both stores in either direction, whichever backend is active — via Settings → Storage → "Push existing links to GitHub", or `/sync` in the bot (GOD only). The merge is a union on URL hash, so nothing is dropped from either side; when the same URL exists in both, the D1 record is the one kept, and its title, notes, and tags overwrite the GitHub copy.
+Set `DATABASE_URL=postgresql://athena:pass@localhost:5432/athena` on both Worker (`wrangler secret put DATABASE_URL`) and self-host `.env`. No Storage → GitHub UI; `Settings → Storage` shows `PostgreSQL` read-only. Use Postgres backups (`/backup` → Telegram/Drive on self-host, or `pg_dump`) — `/sync` is removed.
 
 ```text
-brain/
-  personal/user123/link1.md
-  communities/c_abc123/link3.md
-documents/
-  personal/user123/doc-id--filename.md
-  communities/c_abc123/doc-id--filename.md
+PostgreSQL tables: links, personal_links, uploaded_documents, link_votes, ...
+MCP: npx @modelcontextprotocol/server-postgres $DATABASE_URL  →  any agent (Hermes / Claude / OpenCode) as memory
 ```
 
 ---
@@ -301,7 +290,7 @@ Sending or forwarding any supported text file saves it to the active scope.
 | `/community_verify` | Link group to community |
 | `/community_delete <id>` | Wipe community + all data |
 | `/clear_db <id>` | Wipe links only, keep members |
-| `/sync` | Sync D1 ↔ GitHub |
+| `/sync` | Removed — PostgreSQL only (returns `POSTGRES_ONLY`) |
 | `/backup` | Trigger backup (self-hosted) |
 | `/setlogchannel <id\|off>` | Set log channel for notifications |
 
@@ -353,8 +342,8 @@ Sending or forwarding any supported text file saves it to the active scope.
 | GET | `/api/notifications` | List notifications |
 | POST | `/api/ai/chat` | AI chat proxy (streaming) |
 | GET, POST | `/api/ai/config` | Read config status, save config (GOD) |
-| GET, POST | `/api/storage/config` | Read backend info, save config (GOD) |
-| POST | `/api/storage/sync` | Sync D1 ↔ GitHub (GOD) |
+| GET, POST | `/api/storage/config` | Read backend info — always `postgres` (compat) |
+| POST | `/api/storage/sync` | Removed — returns `POSTGRES_ONLY` |
 
 </details>
 
@@ -373,13 +362,13 @@ athena/
 │       └── lib/         # ai.js (RAG), search.js (fuzzy), dedupe.js (URLs)
 │
 ├── worker/              # Cloudflare Worker — API + bot + static
-│   ├── index.js         # All API routes, auth, Telegram webhook
-│   ├── storage.js       # GitHub store (read/write/list)
+│   ├── index.js         # All API routes, auth, Telegram webhook (PostgreSQL only)
+│   ├── storage.js       # Legacy GitHub store (retained on disk, not imported)
 │   ├── pgcompat.js      # SQLite → Postgres SQL translator
 │   ├── schema.sql       # Database schema
-│   └── wrangler.toml    # Cloudflare config
+│   └── wrangler.toml    # Cloudflare config (D1 binding removed)
 │
-└── server/              # Self-hosted wrapper
+└── server/              # Self-hosted wrapper (PostgreSQL)
     ├── index.js         # Node HTTP → Worker adapter
     ├── pgdb.js          # D1-compatible Postgres driver
     ├── assets.js        # Static file server
@@ -387,12 +376,13 @@ athena/
     └── restore.js       # Backup restore tool
 ```
 
-Requests always land on the Worker or the Node server, which reads and writes the active store and proxies AI calls out to your provider:
+Requests always land on the Worker or the Node server, which reads and writes PostgreSQL and proxies AI calls:
 
 ```text
-Browser/Telegram → Worker or Node server → D1 | GitHub (+D1 cache) | PostgreSQL
+Browser/Telegram → Worker or Node server → PostgreSQL
                               ↓
                         AI Proxy → OpenAI/Anthropic/etc
+Any agent (Hermes/Claude) → postgres-mcp → same PostgreSQL (as memory)
 ```
 
 ---

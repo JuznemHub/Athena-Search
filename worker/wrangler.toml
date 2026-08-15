@@ -11,11 +11,9 @@ not_found_handling = "single-page-application"
 # API must hit Worker before static assets / CDN cache
 run_worker_first = ["/api/*"]
 
-[[d1_databases]]
-binding = "DB"
-database_name = "athena-db"
-database_id = "YOUR_D1_DATABASE_ID"
-
+# Storage: PostgreSQL only (D1 removed). For Cloudflare Workers, set DATABASE_URL secret
+# and ensure Worker has a Postgres-compatible binding (e.g. via service binding or env.DB shim).
+# Legacy [[d1_databases]] removed — see server/pgdb.js for Node Postgres adapter.
 # Secrets: TELEGRAM_CLIENT_SECRET, TELEGRAM_BOT_TOKEN (webhook only), DISCORD_CLIENT_SECRET
 [vars]
 DISCORD_CLIENT_ID = "YOUR_DISCORD_CLIENT_ID"

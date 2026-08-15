@@ -95,11 +95,12 @@ export function makeClient(instanceUrl, token) {
 }
 
 export const STORAGE_LABELS = {
-  d1: 'Cloudflare D1',
-  github: 'GitHub Storage',
-  'github-storage': 'GitHub Storage',
   postgres: 'PostgreSQL',
   local: 'PostgreSQL',
+  // legacy keys kept for compat — all resolve to Postgres now
+  d1: 'PostgreSQL',
+  github: 'PostgreSQL',
+  'github-storage': 'PostgreSQL',
 };
 
 export function rankOf(me) {

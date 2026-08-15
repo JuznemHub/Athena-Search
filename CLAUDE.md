@@ -51,17 +51,11 @@ New table using `INSERT OR REPLACE` → add it to `PRIMARY_KEYS` in `worker/pgco
 
 `worker/schema.sql` applies at startup; roughly half the tables are instead created lazily by `ensure*Table(env)` at the top of each handler (~98 call sites). New columns arrive the same way, inline `ALTER TABLE … ADD COLUMN` (pgcompat makes it idempotent). No migration runner, no version table.
 
-### Storage: parking, not scoping
+### Storage: PostgreSQL only
 
-D1 / GitHub Markdown / Postgres. Live `links` and `personal_links` always hold the *active* store; switching provider parks current rows into `parked_links` / `parked_personal_links` tagged by store name and restores the other set (`parkActiveStore` / `restoreStore`). Read paths stay provider-unaware.
+PostgreSQL is the only backend (D1/GitHub removed). `worker/storage.js` (GitHubStore) retained on disk but not imported; `ensureFresh`/`parkActiveStore`/`restoreStore`/`githubStoreFor` are no-ops. `instance_storage_config` now always returns `provider: 'postgres'`; `handleStorageSync` returns `POSTGRES_ONLY`. Any agent can use the same DB as memory via `postgres-mcp` (`DATABASE_URL`). Backups via `server/backup.js` (Telegram/Drive) or `pg_dump`.
 
-GitHub active → Markdown is source of truth, D1 is cache:
-
-- `ensureFresh(env, scope, key)` revalidates before reads — one listing, skipped inside `LISTING_TTL_MS` (15s), per-file parse cache keyed by git sha in `storage_file_cache`
-- Writes hit GitHub first, then cache
-- GitHub unreachable → serve stale cache, never wipe
-
-GitHub PAT is AES-GCM encrypted at rest (`enc:v1:` prefix) under `env.STORAGE_KEY`; unset → plaintext fallback.
+`STORAGE_KEY` still encrypts `user_ai_config.api_key` at rest (`enc:v1:` AES-GCM) — unrelated to storage provider.
 
 ### Auth and ranks
 
