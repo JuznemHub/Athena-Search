@@ -1,13 +1,32 @@
 {
   "name": "athena-tui",
-  "version": "1.0.17",
+  "version": "1.0.24",
   "description": "Terminal UI for Athena Search — dump your browser bookmarks into your Athena brain from the command line.",
   "type": "module",
   "main": "src/index.js",
-  "engines": { "node": ">=22.5" },
-  "bin": { "athena-tui": "src/index.js" },
-  "files": ["src", "README.md"],
-  "keywords": ["athena", "athena-search", "bookmarks", "telegram", "cli", "tui", "second-brain"],
+  "engines": {
+    "node": ">=22.5"
+  },
+  "bin": {
+    "athena-tui": "src/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "pg": "^8.22.0"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "keywords": [
+    "athena",
+    "athena-search",
+    "bookmarks",
+    "telegram",
+    "cli",
+    "tui",
+    "second-brain"
+  ],
   "license": "CC-BY-NC-4.0",
   "repository": {
     "type": "git",
