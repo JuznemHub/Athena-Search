@@ -121,3 +121,12 @@ npm test   # smoke tests (mock API + fixture bookmarks) then full TTY e2e
 The e2e runs the real TUI in a pseudo-TTY (`script`) against a mock Athena
 API with a fake Chrome profile and asserts the full join → scan → dump → quit
 journey.
+
+## Advanced (opencode)
+
+Press `Tab` or choose `Advanced (opencode)` → full opencode TUI with `athena` MCP.
+
+- Any AI via `~/.config/opencode` (not website `user_ai_config`).
+- Ranks enforced: `personal` GOD-only, `community` member-only.
+- Paragraph search: `what is paragraph 5 of story.pdf` → `athena_get_chunk` with `para_idx`.
+Requires `opencode` (`npm i -g opencode`) + `DATABASE_URL` + `pgvector`.
