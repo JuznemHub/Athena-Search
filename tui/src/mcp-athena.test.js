@@ -21,3 +21,11 @@ describe('chunkText', () => {
     assert.equal(out[1].para_idx, 2);
   });
 });
+
+describe('handleAthenaSearch', () => {
+  it('athena_search blocks personal for non-GOD', async () => {
+    const fakePool = { query: async () => ({ rows: [] }) };
+    const handler = await import('./mcp-athena.js');
+    await assert.rejects(() => handler.handleAthenaSearch({query:'hi', scope:'personal'}, fakePool, 'tok', 'https://ex'), /GOD only/);
+  });
+});
