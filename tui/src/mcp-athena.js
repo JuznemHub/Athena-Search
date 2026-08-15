@@ -27,7 +27,7 @@ export async function checkRank(token, instance, scope, communityId) {
   let entry = _rankCache.get(cacheKey);
   if (!entry || entry.expires < now) {
     const meRes = await fetch(`${normInstance}/api/auth/me`, {
-      method: 'POST',
+      method: 'GET',
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!meRes.ok) {
