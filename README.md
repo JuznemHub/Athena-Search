@@ -3,7 +3,7 @@
 One bar: search, dump, and AI answers from your markdown brain.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.47-blueviolet?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-1.0.48-blueviolet?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/license_CC_BY--NC_4.0-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/telegram-bot-blue?style=flat-square&logo=telegram" alt="telegram">
   <img src="https://img.shields.io/badge/discord-login-5865F2?style=flat-square&logo=discord" alt="discord">
@@ -275,7 +275,7 @@ If you set `TELEGRAM_WEBHOOK_SECRET`, pass the same value as `secret_token`. If 
 | `/community_join <id>` | Join a community |
 | `/community_list [id]` | List your communities, or one community's details |
 
-Sending or forwarding any supported text file — or a document (.pdf, .docx, .pptx, .xlsx, .odt, .rtf, .epub, …) on self-hosted instances — saves it to the active scope; documents are converted to Markdown on ingest.
+Sending or forwarding any supported text file — or a document (.pdf, .docx, .pptx, .xlsx, .odt, .rtf, .epub, …) on self-hosted instances — saves it to the active scope; documents are converted to Markdown on ingest. Channels linked with /channel_link are indexed in real time: every new post's links and files land in the community brain automatically (bot must be the channel admin; run /channel_link as community owner/GOD).
 
 **Staff** (admin, owner, GOD)
 
@@ -299,6 +299,9 @@ Sending or forwarding any supported text file — or a document (.pdf, .docx, .p
 | `/sync` | Removed — PostgreSQL only (returns `POSTGRES_ONLY`) |
 | `/backup` | Trigger backup (self-hosted) |
 | `/setlogchannel <id\|off>` | Set log channel for notifications |
+| `/channel_link <community_id> <channel_id>` | Auto-index a channel's new posts (bot must be channel admin) |
+| `/channel_unlink <channel_id>` | Stop indexing a channel |
+| `/index` | Indexing status + backfill info |
 
 **GOD only**
 
