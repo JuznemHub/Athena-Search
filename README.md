@@ -228,6 +228,42 @@ PostgreSQL tables: links, personal_links, uploaded_documents, link_votes, ...
 MCP: npx @modelcontextprotocol/server-postgres $DATABASE_URL  →  any agent (Hermes / Claude / OpenCode) as memory
 ```
 
+## MCP — Use your brain as memory for any agent
+
+Your `PostgreSQL` *is* the MCP memory — any harness that speaks MCP can `search`/`dump` it.
+
+**TUI Advanced (already wired):** `Tab` → `Advanced (opencode)` opens `opencode` with `athena` MCP (`tui/src/mcp-athena.js` rank-aware `GOD`/`community` + `para_idx` `600tok`). Default is plain `opencode`, `/athena <query>` strictly fetches `athena_search` then `cite`, `/athena` alone toggles strict mode.
+
+**Any CLI harness — 1 env var:**
+
+```bash
+export DATABASE_URL=postgresql://athena:pass@YOUR_VPS:5432/athena
+# or tunnel: ssh -N -L 5432:localhost:5432 you@vps
+
+# Claude Code
+claude mcp add athena -- npx @modelcontextprotocol/server-postgres $DATABASE_URL
+claude  # then: /mcp → athena → athena_search
+
+# OpenCode (global)
+opencode mcp add athena -- npx @modelcontextprotocol/server-postgres $DATABASE_URL
+opencode  # TUI → /
+
+# Cursor / Windsurf / Continue — add to their mcp.json:
+{
+  "mcpServers": {
+    "athena": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://athena:pass@YOUR_VPS:5432/athena"]
+    }
+  }
+}
+
+# Or via TUI's rank-aware wrapper (recommended, enforces GOD personal + community bans):
+# use tui/src/mcp-athena.js as local MCP with ATHENA_INSTANCE/TOKEN
+```
+
+`B` mode fallback: if `DATABASE_URL` is not set (e.g., laptop without tunnel), `mcp-athena.js` proxies to `https://athena.juznem.eu.org/api/*` with your `ATHENA_INSTANCE`/`TOKEN` — no direct DB needed.
+
 ---
 
 ## Scraping
@@ -415,6 +451,34 @@ Browser/Telegram → Worker or Node server → PostgreSQL
                         AI Proxy → OpenAI/Anthropic/etc
 Any agent (Hermes/Claude) → postgres-mcp → same PostgreSQL (as memory)
 ```
+
+---
+
+## Roadmap
+
+- [ ] **1. Improve AI features on website** — better RAG chunking (`para_idx` → `line_number` `5MB` `anydoc` `document_chunks`), streaming `cite` chips, `steroid` `line` mode, Telegram `mdToTelegramHtml` rich text parity.
+- [ ] **2. Community skills for Athena** — `tui` `/athena-study` (deep cross-linked notes), `/athena-ingest` (dedupe), `athena-researcher` subagent, `AGENTS.md` conventions for `docs`/`links` research.
+- [ ] **3. Plugin ecosystem** — adapters for `Reddit`, `X/Twitter`, `Notion`, `GitHub`, etc. via `mcp`/`postgres-mcp` + `tui/src/mcp-athena.js` rank-aware wrapper; `opencode` `command` `plugins` as prior art.
+- [ ] **4. RSS support** — `RSS` `pubsub` real-time indexing including changes (`/channel_link` already does polling, add `rss` `cron` + `delta` `hash` for edits/deletes).
+- [ ] **5. Credits** — see below.
+- [ ] **6. Extensions** — browser `Web Clipper` `md` (Obsidian) + `Chrome`/`Firefox` `mv3` quick-dump, `VS Code` `mcp` sidebar.
+- [ ] **7. Android app** — `React Native`/`Expo` wrapper for `athena.juznem.eu.org` `PWA` + `Telegram Mini App` parity, `biometric` `session` store.
+- [ ] **8. Update website UI more** — `feat/ui-polish` `1.0.51` modal/skeletons/streaming/dropzone shipped, next: `search` `line` highlights, `graph view` `qmd` `lazy`.
+
+## Credits
+
+Built by [@JuznemHub](https://github.com/JuznemHub) — student, tight budget, with help from friends. Tools: [OpenCode](https://opencode.ai) (agent + TUI `Advanced` `opencode` `mcp`), [ChatGPT](https://chatgpt.com/), [Claude](https://claude.ai/). Thanks to [Firecrawl](https://firecrawl.dev) `anydoc` `Rust` `14/14` `4.4ms`, [tamnd/kage](https://github.com/tamnd/kage) `headless Chrome`, `pgvector`/`postgres`, `gramjs` `telegram`.
+
+Inspired by [Aaron Swartz](https://en.wikipedia.org/wiki/Aaron_Swartz) — long live.
+
+## Extensions
+
+- **Browser:** `Web Clipper` `md` + `mv3` `quick-dump` button → `POST /api/links` with `Authorization: Bearer` `athena_session`.
+- **VS Code:** `mcp.json` `athena` `postgres-mcp` `DATABASE_URL` → `Copilot`/`Cursor` `athena_search`.
+
+## Android App
+
+`PWA` already installable (`https://athena.juznem.eu.org` → `Add to Home Screen`), `Mini App` `Telegram` `WebApp` `CloudStorage` login already works. Native `Android` (`Expo` `eas build`) is on the roadmap for `push` `notifications` + `offline` `queue`.
 
 ---
 
