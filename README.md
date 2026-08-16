@@ -3,7 +3,7 @@
 One bar: search, dump, and AI answers from your markdown brain.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.49-blueviolet?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-1.0.50-blueviolet?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/license_CC_BY--NC_4.0-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/telegram-bot-blue?style=flat-square&logo=telegram" alt="telegram">
   <img src="https://img.shields.io/badge/discord-login-5865F2?style=flat-square&logo=discord" alt="discord">
@@ -221,6 +221,12 @@ MCP: npx @modelcontextprotocol/server-postgres $DATABASE_URL  →  any agent (He
 ```
 
 ---
+
+## Scraping
+
+Every saved link (website, bot, channel, backfill) is scraped for title, description, and readable content, which feeds AI tagging and search. Static HTML covers most sites; Reddit/Gists/forges have dedicated extractors.
+
+**JS-rendered pages (self-host, optional)** — client-side-rendered sites return an empty shell to a plain fetch. Install [kage](https://github.com/tamnd/kage) (plus Chrome/Chromium) on the server and set `KAGE_BIN` in `.env` (e.g. `KAGE_BIN=/usr/local/bin/kage`); when a static scrape comes back thin, Athena renders the page headless via kage and re-extracts. Off by default; a missing binary is detected once and skipped for 10 minutes.
 
 ## AI
 

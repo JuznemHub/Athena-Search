@@ -53,6 +53,8 @@ const ALLOWED_ENV = [
   'DISCORD_CLIENT_ID', 'DISCORD_CLIENT_SECRET',
   'BACKUP_TELEGRAM_TOKEN', 'BACKUP_TELEGRAM_CHAT_ID', 'GDRIVE_CLIENT_ID',
   'OAUTH_RELAY_BACKEND',
+  // Optional headless-Chrome scraper (kage) for JS-rendered pages
+  'KAGE_BIN',
 ];
 const allowedEnv = {};
 for (const k of ALLOWED_ENV) {
