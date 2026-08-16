@@ -1,19 +1,31 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkRank, chunkText, clampLimit, clearRankCache, buildWhere, __resetChunksEnsuredForTests } from './mcp-athena.js';
+import { checkRank, chunkText, clampLimit, clearRankCache, buildWhere, invalidateRankCache, requireCommunityTarget, __resetChunksEnsuredForTests } from './mcp-athena.js';
 
 let mockUser = { is_god: false, id: 'u1' };
 let mockCommunities = [];
 let fetchCalls = [];
+let mockStatus = null; // when set, every fetch responds with this status
+let mockSearchLinks = [];
+let mockDocuments = [];
 
 global.fetch = async (url, _opts) => {
   fetchCalls.push(String(url));
   const u = String(url);
+  if (mockStatus !== null) {
+    return { ok: false, status: mockStatus, json: async () => ({}), text: async () => '' };
+  }
   if (u.includes('/api/auth/me')) {
     return { ok: true, json: async () => ({ user: mockUser }), text: async () => JSON.stringify({ user: mockUser }) };
   }
   if (u.includes('/api/communities')) {
     return { ok: true, json: async () => ({ communities: mockCommunities }), text: async () => JSON.stringify({ communities: mockCommunities }) };
+  }
+  if (u.includes('/api/links/search')) {
+    return { ok: true, json: async () => ({ links: mockSearchLinks }), text: async () => '' };
+  }
+  if (u.includes('/api/documents')) {
+    return { ok: true, json: async () => ({ documents: mockDocuments }), text: async () => '' };
   }
   return { ok: true, json: async () => ({}), text: async () => '' };
 };
@@ -152,5 +164,92 @@ describe('handleAthenaGetChunk rank gate', () => {
     const fakePool = { query: async () => ({ rows: [] }) };
     const handler = await import('./mcp-athena.js');
     await assert.rejects(() => handler.handleAthenaGetChunk({ doc_id: 'd1', para_idx: 1, scope: 'community' }, fakePool, 'tok-nomem', 'https://ex', 'c1'), /member/);
+  });
+});
+
+describe('rank cache invalidation on server 401/403', () => {
+  beforeEach(() => {
+    clearRankCache();
+    mockStatus = null;
+    mockUser = { is_god: false, id: 'u1' };
+    mockCommunities = [{ id: 'c1', rank: 'member' }];
+    fetchCalls = [];
+  });
+  it('a 403 from any API call drops the cached rank for that token', async () => {
+    const handler = await import('./mcp-athena.js');
+    mockUser = { is_god: true, id: 'god1' };
+    await checkRank('tok-inv', 'https://ex.com', 'community', 'c1'); // primes cache
+    fetchCalls = [];
+    mockStatus = 403;
+    // community scope without community_id via proxy path would hit the guard
+    // first, so use a community call whose underlying /api/links/search 403s
+    await assert.rejects(() => handler.handleAthenaSearch({ query: 'x', scope: 'community' }, null, 'tok-inv', 'https://ex.com', 'c1'), /403/);
+    mockStatus = null;
+    // cache was invalidated: the next rank check must re-fetch auth/me
+    fetchCalls = [];
+    await checkRank('tok-inv', 'https://ex.com', 'community', 'c1');
+    assert.equal(fetchCalls.filter((u) => u.includes('/api/auth/me')).length, 1);
+  });
+  it('invalidateRankCache is a no-op for empty inputs', () => {
+    assert.doesNotThrow(() => invalidateRankCache('', ''));
+    assert.doesNotThrow(() => invalidateRankCache(null, null));
+  });
+});
+
+describe('requireCommunityTarget (proxy-mode membership gap)', () => {
+  beforeEach(() => { clearRankCache(); mockStatus = null; });
+  it('rejects community scope without communityId before any request', async () => {
+    assert.throws(() => requireCommunityTarget('community', ''), /community_id required/);
+    assert.throws(() => requireCommunityTarget('community', null), /community_id required/);
+    assert.doesNotThrow(() => requireCommunityTarget('personal', ''));
+    assert.doesNotThrow(() => requireCommunityTarget('community', 'c1'));
+  });
+  it('proxy-mode handlers reject community scope with no ATHENA_COMMUNITY_ID', async () => {
+    const handler = await import('./mcp-athena.js');
+    mockUser = { is_god: false, id: 'u1' };
+    mockCommunities = [{ id: 'c1', rank: 'member' }];
+    fetchCalls = [];
+    await assert.rejects(
+      () => handler.handleAthenaSearch({ query: 'x', scope: 'community' }, null, 'tok-g1', 'https://ex.com', undefined),
+      /ATHENA_COMMUNITY_ID/
+    );
+    await assert.rejects(
+      () => handler.handleAthenaDump({ content: 'x', filename: 'f.md', scope: 'community' }, null, 'tok-g1', 'https://ex.com', undefined),
+      /ATHENA_COMMUNITY_ID/
+    );
+    // no request fired past checkRank's own auth/me + communities calls
+    assert.ok(!fetchCalls.some((u) => u.includes('/api/links') || u.includes('/api/documents')));
+  });
+});
+
+describe('proxy fallback exact doc_id matching', () => {
+  beforeEach(() => {
+    clearRankCache();
+    mockStatus = null;
+    mockUser = { is_god: false, id: 'u1' };
+    mockCommunities = [{ id: 'c1', rank: 'member' }];
+    mockSearchLinks = [];
+    mockDocuments = [];
+    fetchCalls = [];
+  });
+  it('prefers exact id over url-substring and labels substring hits approximate', async () => {
+    const handler = await import('./mcp-athena.js');
+    mockSearchLinks = [
+      { id: 'link_9', url: 'https://example.com/docs/guide', title: 'Guide', notes: '' },
+      { id: 'link_1', url: 'https://example.com/docs/guide-part-2', title: 'Guide 2', notes: '' },
+    ];
+    const exact = await handler.handleAthenaGetChunk({ doc_id: 'link_1', para_idx: 1, scope: 'community' }, null, 'tok-e1', 'https://ex.com', 'c1');
+    assert.equal(exact.approximate, undefined);
+    const approx = await handler.handleAthenaGetChunk({ doc_id: 'example.com/docs/guide', para_idx: 1, scope: 'community' }, null, 'tok-e1', 'https://ex.com', 'c1');
+    assert.equal(approx.approximate, true);
+    assert.equal(approx.doc_id, 'example.com/docs/guide');
+  });
+  it('matches dumped documents by filename as doc_id', async () => {
+    const handler = await import('./mcp-athena.js');
+    mockSearchLinks = [];
+    mockDocuments = [{ id: 'doc_abc', filename: 'notes.md', content: 'body text' }];
+    const hit = await handler.handleAthenaGetDoc({ doc_id: 'notes.md', scope: 'community' }, null, 'tok-e2', 'https://ex.com', 'c1');
+    assert.equal(hit.doc_id, 'notes.md');
+    assert.ok(hit.chunks[0].content.includes('body text'));
   });
 });

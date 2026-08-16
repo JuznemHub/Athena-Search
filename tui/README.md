@@ -130,3 +130,22 @@ Press `Tab` or choose `Advanced (opencode)` → full opencode TUI with `athena` 
 - Ranks enforced: `personal` GOD-only, `community` member-only.
 - Paragraph search: `what is paragraph 5 of story.pdf` → `athena_get_chunk` with `para_idx`.
 Requires `opencode` (`npm i -g opencode`) + `DATABASE_URL` + `pgvector`.
+
+### Session commands
+
+Each session ships with commands, conventions (`AGENTS.md`), and an
+`athena-researcher` subagent that pulls documents in parallel:
+
+- `/athena` — toggle strict mode (athena_search before any outside search);
+  `/athena <query>` — one-shot strict lookup.
+- `/athena-study <topic>` — deep study from your brain: searches both scopes,
+  reads the full documents, and compiles cross-linked study notes (key
+  concepts, verbatim passages, connections between docs, open questions) with
+  `[#doc_id]` citations — instead of the usual 1–2 line answer.
+- `/athena-ingest <content | file path | instruction>` — ingests into the
+  brain: dedupe check against `athena_list`, verbatim content, tagged metadata
+  header, hyphenated filename, then verifies with a search.
+
+Rank gates apply to every tool call; a server 401/403 drops the cached rank
+immediately, and community scope without a joined community is rejected before
+any request leaves your machine.

@@ -173,6 +173,8 @@ Prefer a longer name? [`athenasearch-tui`](https://www.npmjs.com/package/athenas
 
 Detects Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Arc, and Firefox bookmarks automatically.
 
+Advanced mode (`Tab`) opens opencode wired to your brain via the `athena` MCP server, with `/athena` strict mode, `/athena-study <topic>` (deep cross-linked study notes from your documents, with citations), `/athena-ingest` (dedupe-checked ingestion), and an `athena-researcher` subagent.
+
 Full docs in [`tui/README.md`](tui/README.md).
 
 ---
