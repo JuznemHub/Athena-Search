@@ -6840,7 +6840,7 @@ async function editTelegramMessage(token, chatId, messageId, text, replyMarkup, 
     chat_id: chatId,
     message_id: messageId,
     // editMessageText is single-message only — prefer full text when short, else truncate cleanly
-    text: chunkTelegramText(text, TG_MSG_MAX)[0] || String(text).slice(0, TG_MSG_MAX),
+    text: (parseMode === 'HTML' ? chunkTelegramHtml(text) : chunkTelegramText(text, TG_MSG_MAX))[0] || String(text).slice(0, TG_MSG_MAX),
     disable_web_page_preview: true
   };
   if (parseMode) payload.parse_mode = parseMode;
@@ -9088,13 +9088,9 @@ Rules:
           }
         }
 
-       // Convert markdown-style links to Telegram HTML: [text](url) → <a href="url">text</a>
-       const aiHtml = escHtml(content || '(empty)')
-         .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2">$1</a>')
-         .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
-         .replace(/`([^`]+)`/g, '<code>$1</code>')
-         .replace(/\[#(\d+)\]/g, '<b>[#$1]</b>')
-         .replace(/\[(\d+)\]/g, '<b>[$1]</b>');
+       // Rich text: full markdown → Telegram HTML (headers, lists, quotes,
+       // code blocks, tables, bold/italic/strike, links, citations)
+       const aiHtml = mdToTelegramHtml(content || '(empty)');
        let msg = `${boldHtml('🧠 AI Answer')}\n\n${aiHtml}`;
 
        // Find cited sources in the answer (e.g., [#1], [#2])
@@ -9142,7 +9138,13 @@ Rules:
          if (allSources.length) msg += `\n\n${boldHtml('📚 Sources:')}\n${allSources.join('\n')}`;
        }
 
-        await editTelegramMessage(token, chatId, thinkMsgId, msg, null, forumThreadId);
+        // editMessageText is single-message — long answers continue in
+        // follow-up messages instead of being silently truncated
+        const parts = chunkTelegramHtml(msg);
+        await editTelegramMessage(token, chatId, thinkMsgId, parts[0] || msg, null, forumThreadId);
+        for (let pi = 1; pi < parts.length; pi++) {
+          await sendTelegramFormatted(token, chatId, parts[pi], forumThreadId);
+        }
       } catch (err) {
         await editTelegramMessage(token, chatId, thinkMsgId, `${boldHtml('❌ AI failed:')} ${escHtml(err.message)}`, null, forumThreadId);
       }
@@ -9588,7 +9590,7 @@ Rules:
 async function sendTelegramMessage(token, chatId, text, threadId = null, parseMode = null) {
   if (!token) return { ok: false, error: 'No bot token' };
   try {
-    const parts = chunkTelegramText(text, TG_MSG_MAX);
+    const parts = parseMode === 'HTML' ? chunkTelegramHtml(text) : chunkTelegramText(text, TG_MSG_MAX);
     if (!parts.length) return { ok: true };
     let last = { ok: true };
     for (let i = 0; i < parts.length; i++) {
@@ -9620,7 +9622,7 @@ async function sendTelegramMessageWithKeyboard(token, chatId, text, replyMarkup,
   if (!token) return { ok: false, error: 'No bot token' };
   try {
     // Keyboard only on first chunk if we must split
-    const parts = chunkTelegramText(text, TG_MSG_MAX);
+    const parts = parseMode === 'HTML' ? chunkTelegramHtml(text) : chunkTelegramText(text, TG_MSG_MAX);
     if (!parts.length) return { ok: true };
     for (let i = 0; i < parts.length; i++) {
       const payload = {
@@ -9651,6 +9653,106 @@ function boldHtml(str) { return `<b>${escHtml(str)}</b>`; }
 function codeHtml(str) { return `<code>${escHtml(str)}</code>`; }
 function linkHtml(url, text) { return `<a href="${escHtml(url)}">${escHtml(text || url)}</a>`; }
 function italicHtml(str) { return `<i>${escHtml(str)}</i>`; }
+
+/** Inline markdown → Telegram HTML. Input must already be HTML-escaped. */
+function mdInlineTelegram(line) {
+  // Protect inline code from every other rule first
+  const codes = [];
+  let s = line.replace(/`([^`\n]+)`/g, (_, body) => `\u0000IC${codes.push(`<code>${body}</code>`) - 1}\u0000`);
+  s = s
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>')
+    .replace(/\*\*\*([^*\n]+)\*\*\*/g, '<b><i>$1</i></b>')
+    .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
+    .replace(/__([^_\n]+)__/g, '<b>$1</b>')
+    .replace(/(^|[^*\w])\*([^*\n]+)\*(?![\w*])/g, '$1<i>$2</i>')
+    .replace(/(^|[^\w_])_([^_\n]+)_(?![\w_])/g, '$1<i>$2</i>')
+    .replace(/~~([^~\n]+)~~/g, '<s>$1</s>')
+    .replace(/\[#(\d+)\]/g, '<b>[#$1]</b>')
+    .replace(/\[(\d+)\]/g, '<b>[$1]</b>');
+  return s.replace(/\u0000IC(\d+)\u0000/g, (_, i) => codes[Number(i)]);
+}
+
+/** Markdown (chat-model output) → Telegram HTML rich text. */
+function mdToTelegramHtml(md) {
+  const src = String(md || '').replace(/\r\n?/g, '\n');
+  const blocks = [];
+  const keep = (html) => `\u0000BLK${blocks.push(html) - 1}\u0000`;
+
+  // Fenced code blocks first — their contents must not see any other rule
+  let text = src.replace(/```[^\n]*\n?[\s\S]*?(?:```|$)/g, (m) => {
+    const body = m.replace(/^```[^\n]*\n?/, '').replace(/\n?```$/, '');
+    return keep(`<pre><code>${escHtml(body)}</code></pre>`);
+  });
+  // Pipe tables (header | --- | --- | rows) render as monospace blocks
+  text = text.replace(/^[^\n]*\|[^\n]*\n\|?[\s:|-]*-[\s:|-]*\n(?:[^\n]*\|[^\n]*(?:\n|$))*/gm, (m) => {
+    const rows = m.trim().split('\n');
+    return keep(`<pre>${escHtml(rows.join('\n'))}</pre>`);
+  });
+
+  const out = [];
+  let quote = [];
+  const flushQuote = () => {
+    if (!quote.length) return;
+    out.push(`<blockquote>${mdInlineTelegram(quote.join('\n'))}</blockquote>`);
+    quote = [];
+  };
+  for (const raw of text.split('\n')) {
+    const line = escHtml(raw);
+    const qm = line.match(/^\s*&gt;\s?(.*)$/);
+    if (qm) { quote.push(qm[1]); continue; }
+    flushQuote();
+    const hm = line.match(/^#{1,6}\s+(.*)$/);
+    if (hm) { out.push(`<b>${mdInlineTelegram(hm[1])}</b>`); continue; }
+    if (/^\s*([-*_])\s*(?:\1\s*){2,}$/.test(line)) { out.push('───────────'); continue; }
+    const bm = line.match(/^\s*[-*•]\s+(.*)$/);
+    if (bm) { out.push(`• ${mdInlineTelegram(bm[1])}`); continue; }
+    out.push(mdInlineTelegram(line));
+  }
+  flushQuote();
+  return out.join('\n').replace(/\u0000BLK(\d+)\u0000/g, (_, i) => blocks[Number(i)]);
+}
+
+/** Telegram's HTML subset — the only tags whose pairing we track when chunking. */
+const TG_STYLE_TAGS = new Set(['b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike', 'del', 'code', 'pre', 'a', 'blockquote', 'spoiler', 'tg-spoiler']);
+
+/**
+ * Split HTML for Telegram's 4096 limit without producing invalid markup:
+ * cuts never land inside a tag, and any tag still open at the cut is closed
+ * for this chunk and reopened (with its full attributes, e.g. <a href>) in
+ * the next one.
+ */
+function chunkTelegramHtml(text, maxLen = TG_MSG_MAX) {
+  const s = String(text || '');
+  if (s.length <= maxLen) return s ? [s] : [];
+  const chunks = [];
+  let rest = s;
+  while (rest.length > maxLen) {
+    let cut = rest.lastIndexOf('\n', maxLen);
+    if (cut < Math.floor(maxLen * 0.5)) cut = rest.lastIndexOf(' ', maxLen);
+    if (cut < Math.floor(maxLen * 0.4)) cut = maxLen;
+    const lastLt = rest.lastIndexOf('<', cut);
+    const lastGt = rest.lastIndexOf('>', cut);
+    if (lastLt > lastGt) cut = lastGt >= 0 ? lastGt + 1 : rest.indexOf('>', cut) + 1;
+    const head = rest.slice(0, cut);
+    const open = [];
+    const tagRe = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)((?:\s[^<>]*)?)>/g;
+    let m;
+    while ((m = tagRe.exec(head)) !== null) {
+      const name = m[2].toLowerCase();
+      if (!TG_STYLE_TAGS.has(name)) continue;
+      if (m[1] === '/') {
+        const idx = open.map((o) => o.name).lastIndexOf(name);
+        if (idx !== -1) open.splice(idx, 1);
+      } else {
+        open.push({ name, full: m[0] });
+      }
+    }
+    chunks.push(head.trimEnd() + open.slice().reverse().map((o) => `</${o.name}>`).join(''));
+    rest = open.map((o) => o.full).join('') + rest.slice(cut).replace(/^\n+/, '');
+  }
+  if (rest.trim()) chunks.push(rest);
+  return chunks;
+}
 
 function canonicalUrlForHash(rawUrl) {
   const parsed = new URL(rawUrl);
