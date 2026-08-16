@@ -52,6 +52,8 @@ npx wrangler secret put DATABASE_URL
 npx wrangler deploy
 ```
 
+> **Document conversion limitation:** the Worker runtime cannot run the [anydoc](https://github.com/firecrawl/anydoc) converter, so binary document uploads (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.odt`, `.rtf`, `.epub`, …) are rejected here with a "self-host only" error. Text and code file uploads are unaffected. To accept documents, run the self-hosted server (below) — either standalone, or behind the Cloudflare frontend in ["Cloudflare frontend, self-hosted backend"](#cloudflare-frontend-self-hosted-backend) mode, where file uploads go straight from the browser to your server and conversion runs there.
+
 ### B. Self-hosted PostgreSQL — production, recommended
 
 Requires Node.js 22+ and PostgreSQL 14+.
@@ -121,6 +123,8 @@ If another block catches requests first, disable the distro's default site (`/et
 Set `ATHENA_FRONTEND_URL` on your server to wherever OAuth should send the browser after login — it has to be a URL your users can actually reach, serving this same UI. Then in Settings → Backend, enter your server URL and click "Set backend for everyone". The choice is stored per-instance, so every visitor uses the same backend.
 
 Storage is always PostgreSQL regardless of frontend URL. Set `DATABASE_URL` on both Worker and self-host.
+
+In this mode the browser talks to your server directly, so binary document uploads (.pdf, .docx, …) work — conversion runs on the Node backend, not the Worker.
 
 ---
 
