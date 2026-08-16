@@ -483,3 +483,16 @@ body.results-active .search-wrapper { align-items: stretch; }
   .upload-status { flex-basis: 100%; }
   .accent-swatches { grid-template-columns: repeat(6, 1fr); gap: 6px; }
 }
+
+/* AI settings: model picker + error log */
+.model-list {
+  max-height: 260px; overflow-y: auto; border: 1px solid var(--hairline, rgba(255,255,255,0.08));
+  border-radius: 10px; background: var(--surface-2, rgba(255,255,255,0.03)); margin-top: 6px;
+}
+.model-item {
+  padding: 7px 10px; font-size: 0.85em; border-bottom: 1px solid var(--hairline, rgba(255,255,255,0.05));
+  cursor: pointer; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;
+}
+.model-item:last-child { border-bottom: none; }
+.model-item:hover, .model-item:focus { background: var(--accent-surface, rgba(255,255,255,0.06)); outline: none; }
+.model-item .model-id { font-family: var(--font-mono, ui-monospace, monospace); word-break: break-all; }

@@ -29,8 +29,8 @@
       }
     })();
   </script>
-<link rel="stylesheet" href="./src/style.css?v=1.0.46">
-<link rel="stylesheet" href="./src/themes.css?v=1.0.46">
+<link rel="stylesheet" href="./src/style.css?v=1.0.47">
+<link rel="stylesheet" href="./src/themes.css?v=1.0.47">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -274,7 +274,14 @@
         </div>
         <div class="form-group">
           <label for="aiModel">Model</label>
-          <input type="text" id="aiModel" placeholder="deepseek-v4-flash">
+          <div style="display:flex;gap:8px;">
+            <input type="text" id="aiModel" placeholder="deepseek-v4-flash" style="flex:1;">
+            <button type="button" id="aiLoadModelsBtn" class="btn btn-secondary" title="Fetch the model list from the provider (GOD)">Models…</button>
+          </div>
+          <div id="aiModelPicker" class="hidden" style="margin-top:8px;">
+            <input type="text" id="aiModelFilter" placeholder="Filter models…" style="width:100%;">
+            <div id="aiModelList" class="model-list" role="listbox" aria-label="Provider models"></div>
+          </div>
         </div>
         <div id="aiFreeBadge" class="status-msg" style="font-size:0.85em;min-height:1.2em;"></div>
         <p class="section-desc">OpenCode Zen free models work via Zen / Go presets — just set model to any free id (e.g. <code>deepseek-v4-flash</code>).</p>
@@ -294,11 +301,21 @@
             <input type="checkbox" id="steroidModeToggle">
             <span>Steroid mode — no search/AI limits, only provider context window</span>
           </label>
-          <p class="section-desc">Off = throttled (default). On = unlimited.</p>
+          <p class="section-desc" id="steroidCapsDesc">Off = throttled (default). On = unlimited.</p>
         </div>
         <button id="saveAiConfigBtn" class="btn btn-primary btn-block">Save AI config</button>
         <button id="clearAiConfigBtn" class="btn btn-secondary btn-block mt-2">Clear key</button>
         <div id="aiConfigStatus" class="status-msg mt-2"></div>
+        <div id="aiErrorPanel" class="hidden" style="margin-top:12px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;">
+            <strong style="font-size:0.9em;">Recent AI errors <span id="aiErrorCount" class="status-msg"></span></strong>
+            <span>
+              <button type="button" id="aiErrorsRefreshBtn" class="btn btn-secondary" style="padding:2px 8px;font-size:0.8em;">Refresh</button>
+              <button type="button" id="aiErrorsClearBtn" class="btn btn-secondary" style="padding:2px 8px;font-size:0.8em;">Clear</button>
+            </span>
+          </div>
+          <div id="aiErrorList" class="model-list" style="margin-top:6px;"></div>
+        </div>
         </div>
       </div>
 
@@ -339,9 +356,9 @@
     </div>
   </aside>
 
-  <script src="./src/lib/dedupe.js?v=1.0.46"></script>
-  <script src="./src/lib/search.js?v=1.0.46"></script>
-  <script src="./src/lib/ai.js?v=1.0.46"></script>
-  <script src="./src/main.js?v=1.0.46"></script>
+  <script src="./src/lib/dedupe.js?v=1.0.47"></script>
+  <script src="./src/lib/search.js?v=1.0.47"></script>
+  <script src="./src/lib/ai.js?v=1.0.47"></script>
+  <script src="./src/main.js?v=1.0.47"></script>
 </body>
 </html>
