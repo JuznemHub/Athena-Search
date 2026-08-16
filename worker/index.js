@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.47',
+          version: '1.0.48',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -2682,6 +2682,27 @@ async function verifyTelegramBotToken(token, expectedUsername) {
   };
 }
 
+// Command menu registered with setMyCommands — what users see in Telegram's
+// "/" autocomplete. Staff-only commands stay out of everyone's menu on
+// purpose; /help lists them per rank.
+const TELEGRAM_COMMAND_MENU = [
+  { command: 'start', description: 'Welcome / status' },
+  { command: 'help', description: 'Help menu' },
+  { command: 'search', description: 'Search the active brain' },
+  { command: 'ai', description: 'Ask AI over your brain' },
+  { command: 'personal', description: 'Dump → personal brain (GOD)' },
+  { command: 'community', description: 'Dump → community brain' },
+  { command: 'mode', description: 'Show / switch dump mode' },
+  { command: 'id', description: 'Chat / user / topic ids' },
+  { command: 'rank', description: 'Your ranks' },
+  { command: 'community_join', description: 'Join a community' },
+  { command: 'community_list', description: 'Your communities' },
+  { command: 'edit', description: 'Edit title/notes of a link' },
+  { command: 'delete', description: 'Delete a saved link' },
+  { command: 'dumpall', description: 'Multi-link posts: save all' },
+  { command: 'dumpsmart', description: 'Multi-link: primary only' },
+];
+
 async function ensureTelegramWebhook(token, workerOrigin, env) {
   const hook = `${workerOrigin.replace(/\/$/, '')}/api/telegram-webhook`;
   const payload = {
@@ -2691,6 +2712,13 @@ async function ensureTelegramWebhook(token, workerOrigin, env) {
   const secret = env ? await webhookSecret(env) : null;
   if (secret) payload.secret_token = secret;
   const data = await telegramApi(token, 'setWebhook', payload);
+  // Register the command menu so "/" autocomplete works in Telegram's UI.
+  // Fire-and-forget: a failure here never breaks the webhook itself.
+  if (data.ok) {
+    try {
+      await telegramApi(token, 'setMyCommands', { commands: TELEGRAM_COMMAND_MENU });
+    } catch (_) {}
+  }
   return { ok: !!data.ok, description: data.description || '', url: hook, signed: !!secret, raw: data };
 }
 
@@ -6652,6 +6680,14 @@ function helpTextForSection(section) {
       '  then reply YES_DELETE_<token> to confirm',
       '',
       'File uploads: send .md/.txt/.json/.py etc in group → community brain',
+      'Documents: .pdf/.docx/.pptx/.xlsx/.odt/.rtf/.epub convert to Markdown on self-host',
+      '',
+      'Auto-indexing',
+      '/channel_link <community_id> <channel_id> — channel posts → community brain',
+      '  (bot must be channel admin; owner/GOD runs this)',
+      '/channel_unlink <channel_id> — stop indexing a channel',
+      '/index — indexing status · history backfill needs /index_start',
+      '',
       'GOD: /personal · /clear_personal_db · /sync · /backup · /db · website bot + AI credentials',
       '/setlogchannel <id|off> — set log channel for login/join notifications',
       '/restart — restart Athena service (GOD only)'
@@ -6887,6 +6923,117 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
   return new Response('OK', { status: 200, headers: corsHeaders });
 }
 
+/**
+ * Channel posts: index new links + documents in real time when the channel is
+ * linked to a community via /channel_link. No user gates — the authorization
+ * is the link itself (owner/GOD ran /channel_link, which verified server-side
+ * that this bot is an admin of the channel). Bots cannot reply in channels,
+ * so everything here is silent; failures go to the error console.
+ */
+async function indexChannelPost(msg, binding, token, env) {
+  if (!binding?.community_id) return;
+  // Anonymous source — commands typed in a channel are never executed.
+  if (String(msg.text || '').trim().startsWith('/')) return;
+  const communityId = binding.community_id;
+  const channelTitle = msg.sender_chat?.title || msg.chat?.title || 'channel';
+  const text = (msg.text || msg.caption || '').trim();
+  await ensureDocumentsTable(env);
+
+  // Documents first (pdf/docx/md/json/… — same allowlists + conversion as uploads)
+  const doc = msg.document;
+  if (doc && doc.file_id) {
+    try {
+      const filename = doc.file_name || 'document.txt';
+      const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+      if (DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) {
+        const fileInfo = await telegramApi(token, 'getFile', { file_id: doc.file_id });
+        if (fileInfo?.ok && fileInfo.result?.file_path) {
+          const fileRes = await fetch(`https://api.telegram.org/file/bot${token}/${fileInfo.result.file_path}`);
+          if (fileRes.ok) {
+            let valid;
+            if (CONVERTIBLE_EXTENSIONS.has(ext)) {
+              const arr = new Uint8Array(await fileRes.arrayBuffer());
+              let bin = '';
+              for (let i = 0; i < arr.length; i += 0x8000) bin += String.fromCharCode(...arr.subarray(i, i + 0x8000));
+              const converted = await convertDocumentToMarkdown(env, ext, btoa(bin));
+              valid = converted.error ? null : validateDocumentText('community', filename, converted.markdown);
+            } else {
+              valid = validateDocumentInput({ scope: 'community', filename, content: await fileRes.text() });
+            }
+            if (valid && !valid.error) {
+              const id = 'doc_ch_' + Date.now().toString(36) + '_' + randomToken().slice(0, 4);
+              await env.DB.prepare(
+                `INSERT INTO uploaded_documents (id, scope, community_id, filename, content, uploaded_by, created_at)
+                 VALUES (?, 'community', ?, ?, ?, ?, ?)`
+              ).bind(id, communityId, valid.filename, valid.content, `channel:${msg.chat.id}`, Date.now()).run();
+            } else if (valid?.error) {
+              console.warn(`channel doc skipped (${channelTitle}): ${valid.error}`);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error('channel doc index failed', e?.message || e);
+    }
+  }
+
+  // Links — mirrors saveCommunityUrlDirect's insert path minus user gates
+  const urls = extractUrlsFromTelegramMessage(msg, { includeReply: false });
+  const uniqueUrls = [...new Set(urls)];
+  let saved = 0;
+  for (const rawUrl of uniqueUrls) {
+    try {
+      if (await findExistingLink(env, 'links', 'community_id', communityId, rawUrl)) continue;
+      const meta = await enrichLinkFields(env, rawUrl, { title: '', notes: '' });
+      const urlHash = generateUrlHash(rawUrl);
+      const id = 'ch_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+      await ensureLinkMetaColumns(env);
+      try {
+        await env.DB.prepare(
+          `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
+            added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at, image_url, site_name)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'telegram', ?, 0, 0, ?, ?, ?)`
+        ).bind(
+          id, communityId, rawUrl, urlHash, meta.title, meta.notes || '',
+          JSON.stringify(['telegram', 'channel']), channelTitle, channelTitle,
+          Date.now(), meta.image_url || null, meta.site_name || null
+        ).run();
+      } catch (error) {
+        if (isUniqueConstraintError(error)) continue;
+        if (!isMissingLinkMetaColumnError(error)) throw error;
+        await env.DB.prepare(
+          'INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        ).bind(id, communityId, rawUrl, urlHash, meta.title, meta.notes || '', JSON.stringify(['telegram', 'channel']), channelTitle, Date.now()).run();
+      }
+      saved++;
+      // tagging: post #hashtags win, else AI describe (same as group dumps)
+      const userTags = normalizeTagList(extractHashtags(text || ''));
+      let finalTags = null;
+      let finalTitle = meta.title;
+      let finalNotes = meta.notes || '';
+      if (userTags.length) {
+        finalTags = [...new Set([...['telegram', 'channel'], ...userTags])];
+      } else {
+        const vocab = await recentTagsForScope(env, 'community', communityId);
+        const ai = await aiDescribeAndTag(env, rawUrl, meta, vocab);
+        if (ai) {
+          finalTitle = ai.title || meta.title;
+          finalNotes = ai.description || meta.notes || '';
+          finalTags = ai.tags?.length ? [...new Set([...['telegram', 'channel'], ...ai.tags])] : ['telegram', 'channel'];
+        }
+      }
+      if (finalTags) {
+        await ensureSearchColumns(env);
+        await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
+          .bind(finalTitle, JSON.stringify(finalTags), finalNotes, id).run().catch(() => {});
+      }
+    } catch (e) {
+      console.error(`channel link index failed (${rawUrl})`, e?.message || e);
+    }
+  }
+  if (saved) console.log(`channel ${channelTitle}: indexed ${saved} link(s)`);
+}
+
 async function handleTelegramWebhook(update, env, corsHeaders) {
   await ensureBotBindingColumns(env);
   await ensureCommunityMembersColumns(env);
@@ -6987,6 +7134,13 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
 
   let binding = await findTelegramBinding(env, chatId, tgUserId);
   let token = (await tokenForBindingAsync(binding, env)) || env.TELEGRAM_BOT_TOKEN;
+  // Channel posts have no sender identity: real-time indexing only, and only
+  // for channels linked to a community via /channel_link. Bots cannot reply
+  // in channels, so this path is silent by necessity.
+  if (String(msg.chat?.type || '') === 'channel') {
+    await indexChannelPost(msg, binding, token, env);
+    return new Response('OK', { status: 200, headers: corsHeaders });
+  }
   let athenaUser = await resolveAthenaUserFromTg(env, tgUserId);
   // Persist Bot API id whenever we see a logged-in Telegram user (needed for join + owner match)
   if (athenaUser?.id && tgUserId && isLikelyTelegramBotApiId(tgUserId)) {
@@ -7450,6 +7604,127 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await env.DB.prepare('UPDATE community_bots SET log_channel_id = ? WHERE id = ?').bind(cid, personalBot.id).run();
        await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Log channel set to: ${codeHtml(cid)}\nLogs now ONLY go to channel (no DM).`, forumThreadId);
      }
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /channel_link — index a channel's new posts into a community ----
+   // Owner/GOD only. The bot must already be an admin of the channel; the
+   // check runs server-side via this bot's own token, so a channel cannot be
+   // linked by anyone who merely knows its id.
+   if (cmd === '/channel_link' || cmd === '/channellink') {
+     if (!athenaUser) {
+       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const communityIdArg = (parts[1] || '').trim();
+     const channelIdArg = (parts[2] || '').trim() || (msg.reply_to_message?.sender_chat?.id ? String(msg.reply_to_message.sender_chat.id) : '');
+     if (!communityIdArg || !channelIdArg) {
+       await sendTelegramFormatted(token, chatId, [
+         `${boldHtml('📢 Link a channel for auto-indexing')}`,
+         '',
+         `Usage: ${codeHtml('/channel_link <community_id> <channel_id>')}`,
+         `Or: forward a channel post here, reply to it with ${codeHtml('/channel_link <community_id>')}`,
+         '',
+         'Requires: community owner/GOD, and this bot added as ADMIN of the channel.',
+         'New channel posts (links + pdf/docx/md/json/… files) are indexed in real time.',
+         `Channel ID: forward a channel post to ${linkHtml('https://t.me/userinfobot', '@userinfobot')}`,
+         `Unlink: ${codeHtml('/channel_unlink <channel_id>')}`
+       ].join('\n'), forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!(await ensureOwnerOrAdmin(communityIdArg, athenaUser.id, env)) && !isGod) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const community = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityIdArg).first();
+     if (!community) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(communityIdArg)} not found.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const cid = channelIdArg.startsWith('-') ? channelIdArg : `-100${channelIdArg.replace(/^-100/, '')}`;
+     if (!/^-\d+$/.test(cid)) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Invalid channel ID (use -100…).`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     // Validate: channel exists, bot is admin — with THIS bot's token.
+     const me = await telegramApi(token, 'getMe', {});
+     const botId = me?.result?.id;
+     const chk = await telegramApi(token, 'getChat', { chat_id: cid });
+     if (!chk?.ok || chk?.result?.type !== 'channel') {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} ${codeHtml(cid)} is not a reachable channel for this bot — add the bot as ADMIN first.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const member = botId ? await telegramApi(token, 'getChatMember', { chat_id: cid, user_id: botId }) : null;
+     const botStatus = member?.result?.status || '';
+     if (!['administrator', 'creator'].includes(botStatus)) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} This bot is not an admin of that channel (status: ${escHtml(botStatus || 'unknown')}). Promote it and retry.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await ensureBotBindingColumns(env);
+     const channelTitle = chk.result.title || cid;
+     const existingBinding = await env.DB.prepare(
+       `SELECT id, community_id FROM community_bots WHERE platform = 'telegram' AND group_id = ?`
+     ).bind(cid).first();
+     if (existingBinding) {
+       await env.DB.prepare('UPDATE community_bots SET community_id = ?, group_name = ? WHERE id = ?')
+         .bind(communityIdArg, channelTitle, existingBinding.id).run();
+     } else {
+       const id = 'cb_' + Date.now().toString(36) + '_' + randomToken().slice(0, 6);
+       await env.DB.prepare(
+         `INSERT INTO community_bots (id, community_id, platform, bot_username, group_id, group_name, created_by, created_at, scope, user_id, bot_token)
+          VALUES (?, ?, 'telegram', ?, ?, ?, ?, ?, 'community', NULL, NULL)`
+       ).bind(id, communityIdArg, me?.result?.username || null, cid, channelTitle, athenaUser.id, Date.now()).run();
+     }
+     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Channel ${boldHtml(escHtml(channelTitle))} linked to ${boldHtml(escHtml(community.name || communityIdArg))}.\nNew posts (links + documents) are indexed in real time.\nHistory backfill: ${codeHtml('/index')}`, forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   if (cmd === '/channel_unlink') {
+     if (!athenaUser) {
+       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const cid = (parts[1] || '').trim();
+     if (!cid) {
+       await sendTelegramFormatted(token, chatId, `Usage: ${codeHtml('/channel_unlink <channel_id>')}`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const row = await env.DB.prepare(
+       `SELECT id, community_id FROM community_bots WHERE platform = 'telegram' AND group_id = ? AND community_id IS NOT NULL`
+     ).bind(cid).first();
+     if (!row) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No linked channel with ID ${codeHtml(cid)}.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!(await ensureOwnerOrAdmin(row.community_id, athenaUser.id, env)) && !isGod) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await env.DB.prepare('DELETE FROM community_bots WHERE id = ?').bind(row.id).run();
+     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Channel ${codeHtml(cid)} unlinked — new posts are no longer indexed.`, forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /index — indexing status + backfill pointer ----
+   if (cmd === '/index') {
+     const linked = binding?.community_id ? await env.DB.prepare(
+       `SELECT group_id, group_name FROM community_bots WHERE platform = 'telegram' AND community_id = ? AND group_id LIKE '-100%'`
+     ).bind(binding.community_id).all() : { results: [] };
+     const chanLines = (linked.results || []).map((r) => `• ${escHtml(r.group_name || '')} (${codeHtml(r.group_id)})`);
+     const isGroup = String(msg.chat?.type || '').includes('group') || chatId.startsWith('-');
+     await sendTelegramFormatted(token, chatId, [
+       `${boldHtml('🗂 Indexing')}`,
+       '',
+       `${boldHtml('Real time (automatic)')}`,
+       isGroup ? '• This group: every posted link and file is saved as it arrives.' : '• Linked groups: every posted link and file is saved as it arrives.',
+       chanLines.length ? `• Linked channels:\n${chanLines.join('\n')}` : '• Channels: none linked yet — /channel_link <community_id> <channel_id>',
+       '',
+       `${boldHtml('History backfill')}`,
+       'Telegram bots cannot read old messages. Backfilling a group/channel history needs a user session string:',
+       `${codeHtml('/index_start')} — start (self-hosted, GOD/owner)`,
+       `${codeHtml('/index_status')} — progress`,
+       `${codeHtml('/index_stop')} — cancel + delete session`
+     ].join('\n'), forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
