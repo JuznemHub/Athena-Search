@@ -466,19 +466,7 @@ Any agent (Hermes/Claude) → postgres-mcp → same PostgreSQL (as memory)
 - [ ] **8. Update website UI more** — `feat/ui-polish` `1.0.51` modal/skeletons/streaming/dropzone shipped, next: `search` `line` highlights, `graph view` `qmd` `lazy`.
 
 ## Credits
-
-Built by [@JuznemHub](https://github.com/JuznemHub) — student, tight budget, with help from friends. Tools: [OpenCode](https://opencode.ai) (agent + TUI `Advanced` `opencode` `mcp`), [ChatGPT](https://chatgpt.com/), [Claude](https://claude.ai/). Thanks to [Firecrawl](https://firecrawl.dev) `anydoc` `Rust` `14/14` `4.4ms`, [tamnd/kage](https://github.com/tamnd/kage) `headless Chrome`, `pgvector`/`postgres`, `gramjs` `telegram`.
-
-Inspired by [Aaron Swartz](https://en.wikipedia.org/wiki/Aaron_Swartz) — long live.
-
-## Extensions
-
-- **Browser:** `Web Clipper` `md` + `mv3` `quick-dump` button → `POST /api/links` with `Authorization: Bearer` `athena_session`.
-- **VS Code:** `mcp.json` `athena` `postgres-mcp` `DATABASE_URL` → `Copilot`/`Cursor` `athena_search`.
-
-## Android App
-
-`PWA` already installable (`https://athena.juznem.eu.org` → `Add to Home Screen`), `Mini App` `Telegram` `WebApp` `CloudStorage` login already works. Native `Android` (`Expo` `eas build`) is on the roadmap for `push` `notifications` + `offline` `queue`.
+Tools: [OpenCode](https://opencode.ai) (agent + TUI `Advanced` `opencode` `mcp`), [Firecrawl](https://firecrawl.dev) `anydoc` `Rust` `14/14` `4.4ms`, [tamnd/kage](https://github.com/tamnd/kage) `headless Chrome`, `pgvector`/`postgres`, `gramjs` `telegram`.
 
 ---
 
