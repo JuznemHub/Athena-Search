@@ -191,6 +191,46 @@ document.addEventListener('DOMContentLoaded', () => {
     appRoot.classList.remove('hidden');
   }
 
+  // --- Modal: replaces native confirm() with a themed, focus-trapped dialog ---
+  function showModal({ title = 'Confirm', message = '', confirmText = 'Confirm', cancelText = 'Cancel', danger = false }) {
+    return new Promise((resolve) => {
+      const prevActive = document.activeElement;
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.innerHTML = `
+        <div class="modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
+          <h3 class="modal-title">${escapeHtml(title)}</h3>
+          <p class="modal-message">${message}</p>
+          <div class="modal-actions">
+            <button type="button" class="btn btn-secondary" data-modal-cancel>${escapeHtml(cancelText)}</button>
+            <button type="button" class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-modal-ok>${escapeHtml(confirmText)}</button>
+          </div>
+        </div>`;
+      const done = (v) => {
+        overlay.remove();
+        document.removeEventListener('keydown', onKey);
+        if (prevActive && prevActive.focus) prevActive.focus();
+        resolve(v);
+      };
+      const onKey = (e) => {
+        if (e.key === 'Escape') done(false);
+        if (e.key === 'Tab') {
+          const focusables = overlay.querySelectorAll('button');
+          if (!focusables.length) return;
+          e.preventDefault();
+          const i = [...focusables].indexOf(document.activeElement);
+          focusables[(i + (e.shiftKey ? -1 : 1) + focusables.length) % focusables.length].focus();
+        }
+      };
+      overlay.querySelector('[data-modal-cancel]').addEventListener('click', () => done(false));
+      overlay.querySelector('[data-modal-ok]').addEventListener('click', () => done(true));
+      overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) done(false); });
+      document.addEventListener('keydown', onKey);
+      document.body.appendChild(overlay);
+      overlay.querySelector(danger ? '[data-modal-ok]' : '[data-modal-cancel]').focus();
+    });
+  }
+
   function showToast(message, isWarning = false) {
     toast.textContent = message;
     toast.style.borderColor = isWarning ? 'var(--warning-color)' : 'var(--border-highlight)';
@@ -828,7 +868,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (deleteAllBtn) {
       deleteAllBtn.addEventListener('click', async () => {
-        if (!confirm('Delete all notifications?')) return;
+        if (!(await showModal({ title: 'Delete all notifications', message: 'Clear every notification?', confirmText: 'Delete all', danger: true }))) return;
         await api('/api/notifications', {
           method: 'POST',
           body: JSON.stringify({ action: 'delete_all' })
@@ -840,7 +880,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     notifList.querySelectorAll('.notif-del-link').forEach(btn => {
       btn.addEventListener('click', async () => {
-        if (!confirm('Delete this reported link from the community brain?')) return;
+        if (!(await showModal({ title: 'Delete reported link', message: 'Remove this link from the community brain?', confirmText: 'Delete', danger: true }))) return;
         await api('/api/notifications', {
           method: 'POST',
           body: JSON.stringify({ id: btn.dataset.id, action: 'delete_link' })
@@ -1056,16 +1096,31 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  const DOCUMENT_MAX_BYTES = 512 * 1024;
+  const DOCUMENT_MAX_BYTES = 5 * 1024 * 1024;
   const DOCUMENT_EXTENSIONS = new Set([
     'md', 'markdown', 'txt', 'py', 'js', 'ts', 'jsx', 'tsx', 'sh', 'bash', 'zsh', 'fish',
     'css', 'html', 'htm', 'json', 'yaml', 'yml', 'toml', 'xml', 'csv', 'sql', 'go', 'rs',
     'java', 'c', 'h', 'cpp', 'hpp', 'cs', 'rb', 'php', 'swift', 'kt', 'kts', 'lua', 'r',
     'dart', 'vue', 'svelte', 'ini', 'cfg', 'conf', 'env', 'log'
   ]);
+  // Binary formats the server converts to Markdown via anydoc before storing.
+  // They go up as raw bytes (content_base64), so no text checks apply here.
+  const CONVERTIBLE_EXTENSIONS = new Set([
+    'pdf', 'doc', 'docx', 'docm', 'ppt', 'pps', 'pot', 'pptx', 'pptm', 'ppsx', 'ppsm',
+    'xls', 'xlsx', 'xlsm', 'xlsb', 'odt', 'ods', 'odp', 'rtf', 'epub'
+  ]);
+  const CONVERT_SOURCE_MAX_BYTES = 20 * 1024 * 1024;
+
+  function fileExtension(name) {
+    return name.includes('.') ? name.split('.').pop().toLowerCase() : '';
+  }
 
   function validateDocumentFile(file, content) {
-    const ext = file.name.includes('.') ? file.name.split('.').pop().toLowerCase() : '';
+    const ext = fileExtension(file.name);
+    if (CONVERTIBLE_EXTENSIONS.has(ext)) {
+      if (file.size > CONVERT_SOURCE_MAX_BYTES) return 'larger than 20 MiB';
+      return '';
+    }
     if (!DOCUMENT_EXTENSIONS.has(ext)) return 'unsupported file type';
     if (file.size > DOCUMENT_MAX_BYTES) return 'larger than 512 KiB';
     if (content.includes('\0')) return 'appears to be binary';
@@ -1093,11 +1148,21 @@ document.addEventListener('DOMContentLoaded', () => {
           continue;
         }
         let content;
-        try { content = await file.text(); } catch (_) {
+        let contentBase64;
+        try {
+          if (CONVERTIBLE_EXTENSIONS.has(fileExtension(file.name))) {
+            const buf = new Uint8Array(await file.arrayBuffer());
+            let bin = '';
+            for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+            contentBase64 = btoa(bin);
+          } else {
+            content = await file.text();
+          }
+        } catch (_) {
           rejected.push(`${file.name}: could not read`);
           continue;
         }
-        const invalid = validateDocumentFile(file, content);
+        const invalid = validateDocumentFile(file, content || '');
         if (invalid) {
           rejected.push(`${file.name}: ${invalid}`);
           continue;
@@ -1106,9 +1171,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const payload = {
           filename: file.name,
           mime_type: file.type || 'text/plain',
-          content,
           scope: state.scope
         };
+        if (contentBase64 !== undefined) payload.content_base64 = contentBase64;
+        else payload.content = content;
         if (state.scope === 'community') payload.community_id = state.activeCommunity;
         try {
           const { res, data } = await api('/api/documents', { method: 'POST', body: JSON.stringify(payload) });
@@ -1728,9 +1794,28 @@ document.addEventListener('DOMContentLoaded', () => {
     // Show local matches immediately so typing stays responsive, then replace
     // them with the server's answer, which searches the WHOLE store rather than
     // just the slice of links this browser happens to have loaded.
-    renderGoogleResults(filterLinks(corpus(), q), q);
+    const localMatches = filterLinks(corpus(), q);
+    renderGoogleResults(localMatches, q);
+    let skeletonTimer = null;
+    if (!localMatches.length) {
+      // Big brains: this browser holds a slice, the server holds everything —
+      // show shimmer cards instead of a premature "no results".
+      skeletonTimer = setTimeout(() => {
+        if (skSeq !== searchSeq) return;
+        emptyState.classList.add('hidden');
+        resultsMeta.classList.add('hidden');
+        resultsList.innerHTML = Array.from({ length: 3 }).map(() => `
+          <article class="g-result g-result-skeleton" aria-hidden="true">
+            <div class="skeleton sk-cite"></div>
+            <div class="skeleton sk-title"></div>
+            <div class="skeleton sk-line"></div>
+            <div class="skeleton sk-line sk-short"></div>
+          </article>`).join('');
+      }, 120);
+    }
 
     const seq = ++searchSeq;
+    const skSeq = seq;
     try {
       const params = new URLSearchParams({ q, scope: state.scope });
       if (state.scope === 'community') {
@@ -1740,6 +1825,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const { res, data } = await api(`/api/links/search?${params.toString()}`);
       if (seq !== searchSeq) return;              // a newer query already ran
       if (searchInput.value.trim() !== q) return; // input moved on
+      if (skeletonTimer) clearTimeout(skeletonTimer);
       if (res.ok && data.success && Array.isArray(data.links)) {
         const documents = filterLinks(corpus().filter(item => item.isDocument), q);
         renderGoogleResults([...data.links.map(normalizeLink), ...documents], q, data.total);
@@ -1752,6 +1838,8 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     } catch (_) {
       // Offline or denied — the local results already on screen stand.
+      if (skeletonTimer) clearTimeout(skeletonTimer);
+      if (!resultsList.children.length || resultsList.querySelector('.g-result-skeleton')) renderGoogleResults([], q);
     }
   }
 
@@ -1849,7 +1937,7 @@ document.addEventListener('DOMContentLoaded', () => {
         q, corpus(),
         (_delta, full) => {
           const el = aiAnswerText.querySelector('.chat-msg:last-child .chat-answer-content');
-          if (el) el.textContent = full;
+          if (el) { el.textContent = full; el.classList.add('streaming'); }
         },
         state.conversationHistory,
         (_chunk, fullThinking) => {
@@ -1884,7 +1972,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const errDiv = document.createElement('div');
         errDiv.className = 'ai-error-banner';
         errDiv.style.cssText = 'margin:8px 0;padding:8px 12px;background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.35);border-radius:8px;color:var(--danger-color);font-size:0.85em';
-        errDiv.textContent = `AI provider error: ${result.error}`;
+        const d = result.errorDetails;
+        const detail = d ? ` (HTTP ${d.status || '?'}${d.model ? ` · ${d.model}` : ''})` : '';
+        errDiv.textContent = `AI provider error${detail}: ${result.error}`;
         aiAnswerText.appendChild(errDiv);
       }
 
@@ -2048,6 +2138,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const { data: sData } = await api('/api/ai/steroid');
         steroidToggle.checked = !!sData.steroid;
         window.__athenaSteroid = !!sData.steroid;
+        renderSteroidCaps(!!sData.steroid, sData.caps);
       } catch (_) {
         try {
           const { data: inst } = await api('/api/instance/config');
@@ -2057,7 +2148,18 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       steroidToggle.disabled = !canEditAiConfig();
     }
+    loadAiErrors(false);
     updateAiFreeBadge();
+  }
+
+  function renderSteroidCaps(on, caps) {
+    const el = $('steroidCapsDesc');
+    if (!el) return;
+    if (!caps) { el.textContent = on ? 'On = unlimited.' : 'Off = throttled (default).'; return; }
+    const fmt = (v, unit) => v == null ? `no ${unit} cap` : `${v} ${unit}`;
+    el.textContent = on
+      ? `On: ${fmt(caps.retrieval_limit, 'item retrieval cap')}, full RAG context, enrichment ${caps.enrich_concurrency}× parallel.`
+      : `Off (default): retrieval capped at ${caps.retrieval_limit}, top ${caps.rag_slice} into the prompt, enrichment 1 at a time.`;
   }
 
   function applyAiPreset(name) {
@@ -2097,6 +2199,100 @@ document.addEventListener('DOMContentLoaded', () => {
       badge.innerHTML = parts.join(' · ') || '';
     } catch (_) {
       badge.textContent = '';
+    }
+  }
+
+  // --- GOD: provider model catalog + recent AI error log ---
+  let aiModelCatalog = null;
+
+  async function loadAiModels() {
+    if (!canEditAiConfig()) return showToast('Model picker is GOD only', true);
+    const list = $('aiModelList');
+    const picker = $('aiModelPicker');
+    if (!picker) return;
+    if (picker.classList.contains('hidden')) {
+      picker.classList.remove('hidden');
+    } else if (aiModelCatalog) {
+      picker.classList.add('hidden');
+      return;
+    }
+    if (aiModelCatalog) return renderModelList($('aiModelFilter')?.value || '');
+    if (list) list.innerHTML = '<div class="model-item status-msg">Loading models…</div>';
+    try {
+      // Candidate (unsaved) base+key from the form, if both present — the
+      // server refuses mixed pairs, so send them together or neither.
+      const base = $('aiBaseUrl')?.value.trim() || '';
+      const key = $('aiApiKey')?.value.trim() || '';
+      const qs = new URLSearchParams();
+      if (base && key) { qs.set('base', base); qs.set('key', key); }
+      const { res, data } = await api(`/api/ai/models${qs.toString() ? `?${qs}` : ''}`);
+      if (!res.ok || data.success === false) {
+        if (list) list.innerHTML = `<div class="model-item" style="color:var(--danger-color)">${escapeHtml(data.error || `HTTP ${res.status}`)}</div>`;
+        return;
+      }
+      aiModelCatalog = data.models || [];
+      renderModelList($('aiModelFilter')?.value || '');
+    } catch (err) {
+      if (list) list.innerHTML = `<div class="model-item" style="color:var(--danger-color)">${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  function renderModelList(filterText) {
+    const list = $('aiModelList');
+    if (!list || !aiModelCatalog) return;
+    const f = (filterText || '').toLowerCase();
+    const items = aiModelCatalog.filter((m) => !f || m.id.toLowerCase().includes(f) || (m.name || '').toLowerCase().includes(f));
+    if (!items.length) {
+      list.innerHTML = '<div class="model-item status-msg">No models match.</div>';
+      return;
+    }
+    list.innerHTML = items.slice(0, 200).map((m) => {
+      const ctx = m.context_length ? ` · ${(m.context_length / 1000).toFixed(0)}k ctx` : '';
+      let price = '';
+      if (m.pricing) {
+        const parts = [];
+        if (m.pricing.prompt != null) parts.push(`$${Number(m.pricing.prompt).toFixed(2)}/M in`);
+        if (m.pricing.completion != null) parts.push(`$${Number(m.pricing.completion).toFixed(2)}/M out`);
+        if (parts.length) price = ` · ${parts.join(' · ')}`;
+      }
+      const cls = m.free ? 'model-item model-free' : 'model-item';
+      const tag = m.free ? '<span style="color:var(--success-color);font-weight:600;">FREE</span> ' : '';
+      return `<div class="${cls}" role="option" tabindex="0" data-model="${escapeHtml(m.id)}">${tag}<span class="model-id">${escapeHtml(m.id)}</span><span class="status-msg">${ctx}${price}</span></div>`;
+    }).join('');
+    list.querySelectorAll('.model-item[data-model]').forEach((el) => {
+      const pick = () => {
+        const model = $('aiModel');
+        if (model) { model.value = el.dataset.model; updateAiFreeBadge(); }
+      };
+      el.addEventListener('click', pick);
+      el.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); pick(); } });
+    });
+  }
+
+  async function loadAiErrors(showPanel) {
+    const panel = $('aiErrorPanel');
+    if (!panel) return;
+    if (!canEditAiConfig()) { panel.classList.add('hidden'); return; }
+    if (showPanel) panel.classList.remove('hidden');
+    const list = $('aiErrorList');
+    try {
+      const { data } = await api('/api/ai/errors');
+      const errors = data.errors || [];
+      const count = $('aiErrorCount');
+      if (count) count.textContent = errors.length ? `(${errors.length})` : '';
+      if (!errors.length) {
+        if (list) list.innerHTML = '<div class="model-item status-msg">No recent errors — in-memory log clears on restart.</div>';
+        return;
+      }
+      if (list) {
+        list.innerHTML = errors.slice(0, 20).map((e) => {
+          const t = new Date(e.time).toLocaleTimeString();
+          const st = e.status ? `HTTP ${e.status}` : '';
+          return `<div class="model-item"><span class="status-msg">${escapeHtml(t)} · ${escapeHtml(e.source)} · ${escapeHtml(e.model || '')} ${escapeHtml(st)}</span><br>${escapeHtml(e.message || '')}</div>`;
+        }).join('');
+      }
+    } catch (_) {
+      if (list) list.innerHTML = '<div class="model-item status-msg">Could not load error log.</div>';
     }
   }
 
@@ -2377,8 +2573,8 @@ document.addEventListener('DOMContentLoaded', () => {
           showToast('Wipe personal is GOD only', true);
           return;
         }
-        if (!confirm('Wipe ALL your personal data on this instance?\n\nThis cannot be undone.')) return;
-        if (!confirm('Final confirmation: delete personal links, AI config, and end all sessions?')) return;
+        if (!(await showModal({ title: 'Wipe personal data', message: 'Delete ALL your personal data on this instance? This cannot be undone.', confirmText: 'Continue', danger: true }))) return;
+        if (!(await showModal({ title: 'Final confirmation', message: 'Delete personal links, AI config, and end all sessions?', confirmText: 'Wipe everything', danger: true }))) return;
         try {
           const { res, data } = await api('/api/account/wipe', {
             method: 'POST',
@@ -2416,6 +2612,26 @@ document.addEventListener('DOMContentLoaded', () => {
 
     uploadFileBtn.addEventListener('click', () => documentFileInput.click());
     documentFileInput.addEventListener('change', () => uploadDocuments([...documentFileInput.files]));
+    // Drag-and-drop upload onto the whole search area while in dump mode
+    const dropZone = searchBarBox;
+    if (dropZone) {
+      ['dragenter', 'dragover'].forEach((evName) => {
+        dropZone.addEventListener(evName, (e) => {
+          if (state.mode !== 'dump') return;
+          e.preventDefault();
+          dropZone.classList.add('dropzone-active');
+        });
+      });
+      ['dragleave', 'drop'].forEach((evName) => {
+        dropZone.addEventListener(evName, (e) => {
+          if (state.mode !== 'dump') return;
+          e.preventDefault();
+          if (evName === 'dragleave' && dropZone.contains(e.relatedTarget)) return;
+          dropZone.classList.remove('dropzone-active');
+          if (evName === 'drop' && e.dataTransfer?.files?.length) uploadDocuments([...e.dataTransfer.files]);
+        });
+      });
+    }
 
     if (notifBellBtn) {
       notifBellBtn.addEventListener('click', async () => {
@@ -2622,6 +2838,17 @@ document.addEventListener('DOMContentLoaded', () => {
       aiModelEl.addEventListener('change', updateAiFreeBadge);
       aiModelEl.addEventListener('input', () => { clearTimeout(window._freeBadgeTimer); window._freeBadgeTimer = setTimeout(updateAiFreeBadge, 700); });
     }
+    const aiLoadModelsBtn = $('aiLoadModelsBtn');
+    if (aiLoadModelsBtn) aiLoadModelsBtn.addEventListener('click', loadAiModels);
+    const aiModelFilter = $('aiModelFilter');
+    if (aiModelFilter) aiModelFilter.addEventListener('input', () => renderModelList(aiModelFilter.value));
+    const aiErrorsRefreshBtn = $('aiErrorsRefreshBtn');
+    if (aiErrorsRefreshBtn) aiErrorsRefreshBtn.addEventListener('click', () => loadAiErrors(true));
+    const aiErrorsClearBtn = $('aiErrorsClearBtn');
+    if (aiErrorsClearBtn) aiErrorsClearBtn.addEventListener('click', async () => {
+      try { await api('/api/ai/errors', { method: 'DELETE' }); } catch (_) {}
+      loadAiErrors(true);
+    });
     if (saveAiConfigBtn) {
       saveAiConfigBtn.addEventListener('click', async () => {
         if (!canEditAiConfig()) { showToast('AI credentials: GOD rank only', true); return; }

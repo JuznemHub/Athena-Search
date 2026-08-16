@@ -3,7 +3,7 @@
 One bar: search, dump, and AI answers from your markdown brain.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.45-blueviolet?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-1.0.53-blueviolet?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/license_CC_BY--NC_4.0-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/telegram-bot-blue?style=flat-square&logo=telegram" alt="telegram">
   <img src="https://img.shields.io/badge/discord-login-5865F2?style=flat-square&logo=discord" alt="discord">
@@ -13,11 +13,11 @@ One bar: search, dump, and AI answers from your markdown brain.
 
 ## Features
 
-- **Save** links from the web UI or the Telegram bot. Upload text files (.md, .py, .json, .sql, and 30+ more, 512 KB each).
+- **Save** links from the web UI or the Telegram bot. Upload text files (.md, .py, .json, .sql, and 30+ more, 512 KB each), plus documents (.pdf, .docx, .pptx, .xlsx, .odt, .rtf, .epub, …, up to 20 MB) — converted to Markdown on ingest via [anydoc](https://github.com/firecrawl/anydoc), self-hosted instances only.
 - **Search** with fuzzy matching across titles, URLs, notes, and tags — tolerant of typos and partial matches, with server-side search for large brains.
 - **Ask** questions with RAG over your links and documents. Supports OpenAI, Anthropic, Groq, OpenRouter, and OpenCode Zen, with streaming answers and cited sources.
 - **Share** a brain with a Telegram group in community mode, with voting, reporting, and rank-based permissions — or keep it private in personal mode.
-- **Store** your data in self-hosted PostgreSQL — the only backend (D1/GitHub removed). MCP memory uses the same DB via `postgres-mcp`.
+- **Store** your data in self-hosted PostgreSQL. MCP memory uses the same DB via `postgres-mcp`.
 - **Log in** with Telegram (OAuth or Mini App) or Discord. Sessions last 30 days.
 
 ---
@@ -52,6 +52,8 @@ npx wrangler secret put DATABASE_URL
 npx wrangler deploy
 ```
 
+> **Document conversion limitation:** the Worker runtime cannot run the [anydoc](https://github.com/firecrawl/anydoc) converter, so binary document uploads (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.odt`, `.rtf`, `.epub`, …) are rejected here with a "self-host only" error. Text and code file uploads are unaffected. To accept documents, run the self-hosted server (below) — either standalone, or behind the Cloudflare frontend in ["Cloudflare frontend, self-hosted backend"](#cloudflare-frontend-self-hosted-backend) mode, where file uploads go straight from the browser to your server and conversion runs there.
+
 ### B. Self-hosted PostgreSQL — production, recommended
 
 Requires Node.js 22+ and PostgreSQL 14+.
@@ -63,6 +65,14 @@ cd Athena-Search
 npm install
 cp .env.example .env     # see server/.env.example for the annotated reference
 node server/index.js
+```
+
+Optional add-ons (both self-host only, both degrade gracefully when absent):
+
+```bash
+npm install telegram   # enables /index_start history backfill (gramjs)
+# kage + Chrome/Chromium on the server + KAGE_BIN in .env
+#   → headless-rendered scraping for JS-only sites (see "Scraping")
 ```
 
 ```bash
@@ -122,6 +132,8 @@ Set `ATHENA_FRONTEND_URL` on your server to wherever OAuth should send the brows
 
 Storage is always PostgreSQL regardless of frontend URL. Set `DATABASE_URL` on both Worker and self-host.
 
+In this mode the browser talks to your server directly, so binary document uploads (.pdf, .docx, …) work — conversion runs on the Node backend, not the Worker.
+
 ---
 
 ## Terminal UI (athena-tui)
@@ -168,6 +180,8 @@ Prefer a longer name? [`athenasearch-tui`](https://www.npmjs.com/package/athenas
 5. **5** Dump bookmarks — GODs pick *personal* or *community* brain; others dump to their community
 
 Detects Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Arc, and Firefox bookmarks automatically.
+
+Advanced mode (`Tab`) opens opencode wired to your brain via the `athena` MCP server, with `/athena` strict mode, `/athena-study <topic>` (deep cross-linked study notes from your documents, with citations), `/athena-ingest` (dedupe-checked ingestion), and an `athena-researcher` subagent.
 
 Full docs in [`tui/README.md`](tui/README.md).
 
@@ -216,9 +230,21 @@ MCP: npx @modelcontextprotocol/server-postgres $DATABASE_URL  →  any agent (He
 
 ---
 
+## Scraping
+
+Every saved link (website, bot, channel, backfill) is scraped for title, description, and readable content, which feeds AI tagging and search. Static HTML covers most sites; Reddit/Gists/forges have dedicated extractors.
+
+**JS-rendered pages (self-host, optional)** — client-side-rendered sites return an empty shell to a plain fetch. Install [kage](https://github.com/tamnd/kage) (plus Chrome/Chromium) on the server and set `KAGE_BIN` in `.env` (e.g. `KAGE_BIN=/usr/local/bin/kage`); when a static scrape comes back thin, Athena renders the page headless via kage and re-extracts. Off by default; a missing binary is detected once and skipped for 10 minutes.
+
 ## AI
 
 As GOD, go to Settings → AI assistant, pick a provider, and enter the base URL, model, and API key. Saving syncs the config to the server, so the website and the bot's `/ai` share one set of credentials.
+
+**Models… button** — fetches the provider's full catalog (`GET /api/ai/models`) with free/paid classification, pricing, and context length. Works against the saved config, or against a base URL + key you are testing before saving. Free models are badged `FREE` so cost-free setups are one click.
+
+**Recent AI errors** — the panel under Save lists the last 50 upstream failures (time, source, model, HTTP status, message) from the chat proxy, bot `/ai`, and link enrichment. In-memory: it clears on restart. Use it to answer "why did my answers fall back to local mode".
+
+**Steroid mode** — the toggle now shows exactly what it changes: off = retrieval capped at 300 items, top 8 into the prompt, enrichment one link at a time; on = no retrieval cap, full RAG context, 4× parallel enrichment — bounded only by the provider's context window.
 
 | Provider | Base URL | Model example |
 |----------|----------|---------------|
@@ -269,7 +295,7 @@ If you set `TELEGRAM_WEBHOOK_SECRET`, pass the same value as `secret_token`. If 
 | `/community_join <id>` | Join a community |
 | `/community_list [id]` | List your communities, or one community's details |
 
-Sending or forwarding any supported text file saves it to the active scope.
+Sending or forwarding any supported text file — or a document (.pdf, .docx, .pptx, .xlsx, .odt, .rtf, .epub, …) on self-hosted instances — saves it to the active scope; documents are converted to Markdown on ingest. Channels linked with /channel_link are indexed in real time: every new post's links and files land in the community brain automatically (bot must be the channel admin; run /channel_link as community owner/GOD).
 
 **Staff** (admin, owner, GOD)
 
@@ -293,6 +319,11 @@ Sending or forwarding any supported text file saves it to the active scope.
 | `/sync` | Removed — PostgreSQL only (returns `POSTGRES_ONLY`) |
 | `/backup` | Trigger backup (self-hosted) |
 | `/setlogchannel <id\|off>` | Set log channel for notifications |
+| `/channel_link <community_id> <channel_id>` | Auto-index a channel's new posts (bot must be channel admin) |
+| `/channel_unlink <channel_id>` | Stop indexing a channel |
+| `/index` | Indexing status + backfill info |
+| `/index_start <community_id> <chat_id> <api_id> <api_hash> <session_string>` | Backfill a group/channel's history (self-host, DM only; session encrypted at rest, deleted when done; requires `npm install telegram` on the server) |
+| `/index_status` / `/index_stop` | Backfill progress / cancel + delete session |
 
 **GOD only**
 

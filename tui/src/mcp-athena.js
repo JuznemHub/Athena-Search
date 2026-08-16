@@ -7,6 +7,21 @@ export function clearRankCache() {
   _rankCache.clear();
 }
 
+// A 401/403 from the server outranks our cached rank snapshot — drop it so the
+// next call re-fetches (bans/kicks/demotions apply immediately, no 60s window).
+export function invalidateRankCache(instance, token) {
+  const base = String(instance || '').replace(/\/+$/, '');
+  if (base && token) _rankCache.delete(`${base}::${token}`);
+}
+
+// Community scope needs a concrete community in every mode — without this the
+// API-proxy path would fire requests with no local membership check at all.
+export function requireCommunityTarget(scope, communityId) {
+  if (scope === 'community' && !communityId) {
+    throw Object.assign(new Error('community_id required for community scope (set ATHENA_COMMUNITY_ID)'), { code: 400 });
+  }
+}
+
 export function clampLimit(limit) {
   let n = Number(limit);
   if (!Number.isFinite(n) || !Number.isInteger(n)) n = 8;
@@ -174,9 +189,11 @@ export async function getPool() {
 }
 // API-proxy helpers for when DATABASE_URL is not set (laptop → https://athena.juznem.eu.org)
 async function apiFetch(instance, token, path, opts = {}) {
-  const url = `${String(instance).replace(/\/+$/, '')}${path}`;
+  const base = String(instance).replace(/\/+$/, '');
+  const url = `${base}${path}`;
   const res = await fetch(url, { ...opts, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(opts.headers || {}) } });
   if (!res.ok) {
+    if (res.status === 401 || res.status === 403) invalidateRankCache(base, token);
     const txt = await res.text().catch(() => '');
     throw Object.assign(new Error(`${res.status} ${txt}`.trim()), { code: res.status });
   }
@@ -193,6 +210,7 @@ export async function __closePoolForTests() {
 
 export async function handleAthenaSearch({ query, scope = 'community', limit = 8 }, pool, token, instance, communityId) {
   if (!query || typeof query !== 'string' || !query.trim()) throw Object.assign(new Error('query required'), { code: 400 });
+  requireCommunityTarget(scope, communityId);
   const lim = clampLimit(limit);
   const { isGod, isMember, isBanned, me } = await checkRank(token, instance, scope, communityId);
   if (scope === 'personal' && !isGod) throw Object.assign(new Error('personal brain is GOD only'), { code: 403 });
@@ -225,6 +243,7 @@ export async function handleAthenaSearch({ query, scope = 'community', limit = 8
 export async function handleAthenaDump({ content, filename, scope = 'community' }, pool, token, instance, communityId) {
   if (!content || !filename) throw Object.assign(new Error('content and filename required'), { code: 400 });
   const s = scope === 'personal' ? 'personal' : 'community';
+  requireCommunityTarget(s, communityId);
   const { isGod, isMember, isBanned, me } = await checkRank(token, instance, s, communityId);
   if (s === 'personal' && !isGod) throw Object.assign(new Error('GOD only'), { code: 403 });
   if (s === 'community' && communityId) {
@@ -253,6 +272,7 @@ export async function handleAthenaDump({ content, filename, scope = 'community' 
 export async function handleAthenaGetChunk({ doc_id, para_idx, scope = 'community' }, pool, token, instance, communityId) {
   if (!doc_id) throw Object.assign(new Error('doc_id required'), { code: 400 });
   const s = scope === 'personal' ? 'personal' : 'community';
+  requireCommunityTarget(s, communityId);
   const { isGod, isMember, isBanned, me } = await checkRank(token, instance, s, communityId);
   if (s === 'personal' && !isGod) throw Object.assign(new Error('personal brain is GOD only'), { code: 403 });
   if (s === 'community' && communityId) {
@@ -263,9 +283,17 @@ export async function handleAthenaGetChunk({ doc_id, para_idx, scope = 'communit
     const q = new URLSearchParams({ q: String(doc_id), scope: s, limit: '20' });
     if (s === 'community' && communityId) q.set('community_id', String(communityId));
     let hit = null;
+    let approximate = false;
     try {
       const data = await apiFetch(instance, token, `/api/links/search?${q}`);
-      hit = (data.links || []).find((r) => String(r.id) === String(doc_id) || String(r.url).includes(String(doc_id)));
+      const links = data.links || [];
+      // Exact id first; URL-substring can silently return a different doc, so
+      // it only fires as a labeled approximation when no exact hit exists.
+      hit = links.find((r) => String(r.id) === String(doc_id)) || null;
+      if (!hit) {
+        hit = links.find((r) => String(r.url).includes(String(doc_id))) || null;
+        approximate = !!hit;
+      }
     } catch {}
     if (!hit) {
       try {
@@ -273,12 +301,13 @@ export async function handleAthenaGetChunk({ doc_id, para_idx, scope = 'communit
         if (s === 'community' && communityId) q2.set('community_id', String(communityId));
         const d2 = await apiFetch(instance, token, `/api/documents?${q2}`);
         const docs = d2.documents || d2.links || [];
-        const doc = docs.find((d) => String(d.id) === String(doc_id));
+        // athena_dump stores the filename as doc_id in DB mode, so match it too
+        const doc = docs.find((d) => String(d.id) === String(doc_id) || String(d.filename) === String(doc_id));
         if (doc) hit = { id: doc.id, url: doc.github_path || null, title: doc.filename || doc.title || '', notes: doc.content || '' };
       } catch {}
     }
     if (!hit) return null;
-    return { doc_id: String(doc_id), para_idx: Number(para_idx), content: [hit.title, hit.url, hit.notes, hit.content].filter(Boolean).join('\n'), url: hit.url || null, title: hit.title || hit.filename || '', chunk_idx: 0, page: 1 };
+    return { doc_id: String(doc_id), para_idx: Number(para_idx), content: [hit.title, hit.url, hit.notes, hit.content].filter(Boolean).join('\n'), url: hit.url || null, title: hit.title || hit.filename || '', chunk_idx: 0, page: 1, ...(approximate ? { approximate: true } : {}) };
   }
   const where = buildWhere(s, me, communityId, 2);
   await ensureOnce(pool);
@@ -292,6 +321,7 @@ export async function handleAthenaGetChunk({ doc_id, para_idx, scope = 'communit
 export async function handleAthenaGetDoc({ doc_id, scope = 'community' }, pool, token, instance, communityId) {
   if (!doc_id) throw Object.assign(new Error('doc_id required'), { code: 400 });
   const s = scope === 'personal' ? 'personal' : 'community';
+  requireCommunityTarget(s, communityId);
   const { isGod, isMember, isBanned, me } = await checkRank(token, instance, s, communityId);
   if (s === 'personal' && !isGod) throw Object.assign(new Error('personal brain is GOD only'), { code: 403 });
   if (s === 'community' && communityId) {
@@ -312,7 +342,7 @@ export async function handleAthenaGetDoc({ doc_id, scope = 'community' }, pool, 
         if (s === 'community' && communityId) q2.set('community_id', String(communityId));
         const d2 = await apiFetch(instance, token, `/api/documents?${q2}`);
         const docs = d2.documents || d2.links || [];
-        const doc = docs.find((d) => String(d.id) === String(doc_id));
+        const doc = docs.find((d) => String(d.id) === String(doc_id) || String(d.filename) === String(doc_id));
         if (doc) hit = { id: doc.id, url: doc.github_path || null, title: doc.filename || doc.title || '', notes: doc.content || '', url_hash: doc.id };
       } catch {}
     }
@@ -332,6 +362,7 @@ export async function handleAthenaGetDoc({ doc_id, scope = 'community' }, pool, 
 
 export async function handleAthenaList({ scope = 'community', limit = 20 } = {}, pool, token, instance, communityId) {
   const s = scope === 'personal' ? 'personal' : 'community';
+  requireCommunityTarget(s, communityId);
   const lim = clampLimit(limit);
   const { isGod, isMember, isBanned, me } = await checkRank(token, instance, s, communityId);
   if (s === 'personal' && !isGod) throw Object.assign(new Error('personal brain is GOD only'), { code: 403 });
