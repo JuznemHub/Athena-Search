@@ -1910,7 +1910,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const errDiv = document.createElement('div');
         errDiv.className = 'ai-error-banner';
         errDiv.style.cssText = 'margin:8px 0;padding:8px 12px;background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.35);border-radius:8px;color:var(--danger-color);font-size:0.85em';
-        errDiv.textContent = `AI provider error: ${result.error}`;
+        const d = result.errorDetails;
+        const detail = d ? ` (HTTP ${d.status || '?'}${d.model ? ` · ${d.model}` : ''})` : '';
+        errDiv.textContent = `AI provider error${detail}: ${result.error}`;
         aiAnswerText.appendChild(errDiv);
       }
 
@@ -2074,6 +2076,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const { data: sData } = await api('/api/ai/steroid');
         steroidToggle.checked = !!sData.steroid;
         window.__athenaSteroid = !!sData.steroid;
+        renderSteroidCaps(!!sData.steroid, sData.caps);
       } catch (_) {
         try {
           const { data: inst } = await api('/api/instance/config');
@@ -2083,7 +2086,18 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       steroidToggle.disabled = !canEditAiConfig();
     }
+    loadAiErrors(false);
     updateAiFreeBadge();
+  }
+
+  function renderSteroidCaps(on, caps) {
+    const el = $('steroidCapsDesc');
+    if (!el) return;
+    if (!caps) { el.textContent = on ? 'On = unlimited.' : 'Off = throttled (default).'; return; }
+    const fmt = (v, unit) => v == null ? `no ${unit} cap` : `${v} ${unit}`;
+    el.textContent = on
+      ? `On: ${fmt(caps.retrieval_limit, 'item retrieval cap')}, full RAG context, enrichment ${caps.enrich_concurrency}× parallel.`
+      : `Off (default): retrieval capped at ${caps.retrieval_limit}, top ${caps.rag_slice} into the prompt, enrichment 1 at a time.`;
   }
 
   function applyAiPreset(name) {
@@ -2123,6 +2137,94 @@ document.addEventListener('DOMContentLoaded', () => {
       badge.innerHTML = parts.join(' · ') || '';
     } catch (_) {
       badge.textContent = '';
+    }
+  }
+
+  // --- GOD: provider model catalog + recent AI error log ---
+  let aiModelCatalog = null;
+
+  async function loadAiModels() {
+    if (!canEditAiConfig()) return showToast('Model picker is GOD only', true);
+    const list = $('aiModelList');
+    const picker = $('aiModelPicker');
+    if (!picker) return;
+    if (picker.classList.contains('hidden')) {
+      picker.classList.remove('hidden');
+    } else if (aiModelCatalog) {
+      picker.classList.add('hidden');
+      return;
+    }
+    if (aiModelCatalog) return renderModelList($('aiModelFilter')?.value || '');
+    if (list) list.innerHTML = '<div class="model-item status-msg">Loading models…</div>';
+    try {
+      // Candidate (unsaved) base+key from the form, if both present — the
+      // server refuses mixed pairs, so send them together or neither.
+      const base = $('aiBaseUrl')?.value.trim() || '';
+      const key = $('aiApiKey')?.value.trim() || '';
+      const qs = new URLSearchParams();
+      if (base && key) { qs.set('base', base); qs.set('key', key); }
+      const { res, data } = await api(`/api/ai/models${qs.toString() ? `?${qs}` : ''}`);
+      if (!res.ok || data.success === false) {
+        if (list) list.innerHTML = `<div class="model-item" style="color:var(--danger-color)">${escapeHtml(data.error || `HTTP ${res.status}`)}</div>`;
+        return;
+      }
+      aiModelCatalog = data.models || [];
+      renderModelList($('aiModelFilter')?.value || '');
+    } catch (err) {
+      if (list) list.innerHTML = `<div class="model-item" style="color:var(--danger-color)">${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  function renderModelList(filterText) {
+    const list = $('aiModelList');
+    if (!list || !aiModelCatalog) return;
+    const f = (filterText || '').toLowerCase();
+    const items = aiModelCatalog.filter((m) => !f || m.id.toLowerCase().includes(f) || (m.name || '').toLowerCase().includes(f));
+    if (!items.length) {
+      list.innerHTML = '<div class="model-item status-msg">No models match.</div>';
+      return;
+    }
+    list.innerHTML = items.slice(0, 200).map((m) => {
+      const ctx = m.context_length ? ` · ${(m.context_length / 1000).toFixed(0)}k ctx` : '';
+      const price = m.pricing && m.pricing.prompt != null ? ` · $${Number(m.pricing.prompt).toFixed(2)}/M in` : '';
+      const cls = m.free ? 'model-item model-free' : 'model-item';
+      const tag = m.free ? '<span style="color:var(--success-color);font-weight:600;">FREE</span> ' : '';
+      return `<div class="${cls}" role="option" tabindex="0" data-model="${escapeHtml(m.id)}">${tag}<span class="model-id">${escapeHtml(m.id)}</span><span class="status-msg">${ctx}${price}</span></div>`;
+    }).join('');
+    list.querySelectorAll('.model-item[data-model]').forEach((el) => {
+      const pick = () => {
+        const model = $('aiModel');
+        if (model) { model.value = el.dataset.model; updateAiFreeBadge(); }
+      };
+      el.addEventListener('click', pick);
+      el.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); pick(); } });
+    });
+  }
+
+  async function loadAiErrors(showPanel) {
+    const panel = $('aiErrorPanel');
+    if (!panel) return;
+    if (!canEditAiConfig()) { panel.classList.add('hidden'); return; }
+    if (showPanel) panel.classList.remove('hidden');
+    const list = $('aiErrorList');
+    try {
+      const { data } = await api('/api/ai/errors');
+      const errors = data.errors || [];
+      const count = $('aiErrorCount');
+      if (count) count.textContent = errors.length ? `(${errors.length})` : '';
+      if (!errors.length) {
+        if (list) list.innerHTML = '<div class="model-item status-msg">No recent errors — in-memory log clears on restart.</div>';
+        return;
+      }
+      if (list) {
+        list.innerHTML = errors.slice(0, 20).map((e) => {
+          const t = new Date(e.time).toLocaleTimeString();
+          const st = e.status ? `HTTP ${e.status}` : '';
+          return `<div class="model-item"><span class="status-msg">${escapeHtml(t)} · ${escapeHtml(e.source)} · ${escapeHtml(e.model || '')} ${escapeHtml(st)}</span><br>${escapeHtml(e.message || '')}</div>`;
+        }).join('');
+      }
+    } catch (_) {
+      if (list) list.innerHTML = '<div class="model-item status-msg">Could not load error log.</div>';
     }
   }
 
@@ -2648,6 +2750,17 @@ document.addEventListener('DOMContentLoaded', () => {
       aiModelEl.addEventListener('change', updateAiFreeBadge);
       aiModelEl.addEventListener('input', () => { clearTimeout(window._freeBadgeTimer); window._freeBadgeTimer = setTimeout(updateAiFreeBadge, 700); });
     }
+    const aiLoadModelsBtn = $('aiLoadModelsBtn');
+    if (aiLoadModelsBtn) aiLoadModelsBtn.addEventListener('click', loadAiModels);
+    const aiModelFilter = $('aiModelFilter');
+    if (aiModelFilter) aiModelFilter.addEventListener('input', () => renderModelList(aiModelFilter.value));
+    const aiErrorsRefreshBtn = $('aiErrorsRefreshBtn');
+    if (aiErrorsRefreshBtn) aiErrorsRefreshBtn.addEventListener('click', () => loadAiErrors(true));
+    const aiErrorsClearBtn = $('aiErrorsClearBtn');
+    if (aiErrorsClearBtn) aiErrorsClearBtn.addEventListener('click', async () => {
+      try { await api('/api/ai/errors', { method: 'DELETE' }); } catch (_) {}
+      loadAiErrors(true);
+    });
     if (saveAiConfigBtn) {
       saveAiConfigBtn.addEventListener('click', async () => {
         if (!canEditAiConfig()) { showToast('AI credentials: GOD rank only', true); return; }

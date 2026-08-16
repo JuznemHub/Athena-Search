@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.46',
+          version: '1.0.47',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -368,7 +368,9 @@ export default {
       if (pathname === '/api/ai/steroid') {
         if (request.method === 'GET') {
           const enabled = await getSteroidMode(env);
-          return Response.json({ success: true, steroid: enabled }, { headers: corsHeaders });
+          return Response.json({ success: true, steroid: enabled, caps: enabled
+            ? { retrieval_limit: null, rag_slice: null, enrich_concurrency: 4, enrich_throttle_ms: 0 }
+            : { retrieval_limit: 300, rag_slice: 8, enrich_concurrency: 1, enrich_throttle_ms: 900 } }, { headers: corsHeaders });
         }
         if (!(await isInstanceOwnerUserAsync(user, env))) {
           return deny(corsHeaders, 'Steroid mode is GOD only', 'GOD_ONLY');
@@ -395,6 +397,68 @@ export default {
         const free = await isFreeTierModel(model, baseUrl, env, body.apiKey || body.api_key || '');
         const limits = providerLimitInfo(baseUrl, model, free);
         return Response.json({ success: true, free, model, baseUrl, limits, provider: detectProviderForModel(model, baseUrl) }, { headers: corsHeaders });
+      }
+
+      // Model catalog for the settings picker: GOD-only, works against the
+      // saved instance config or a candidate base+key pair being tested
+      // before saving. Lists every model the endpoint exposes with free/paid
+      // classification (OpenRouter pricing included).
+      if (pathname === '/api/ai/models' && request.method === 'GET') {
+        if (!user) {
+          return Response.json({ success: false, error: 'Login required', code: 'AUTH_REQUIRED' }, { status: 401, headers: corsHeaders });
+        }
+        if (!(await isInstanceOwnerUserAsync(user, env))) {
+          return deny(corsHeaders, 'Model catalog is GOD rank only', 'GOD_ONLY');
+        }
+        const qBase = String(url.searchParams.get('base') || '').trim();
+        const qKey = String(url.searchParams.get('key') || '').trim();
+        const inst = await getInstanceAiConfig(env);
+        // Testing an unsaved endpoint requires the paired set — mixing a
+        // caller's base with the stored key would ship the secret elsewhere.
+        if ((qBase || qKey) && !(qBase && qKey)) {
+          return deny(corsHeaders, 'Provide both base and key to test an unsaved endpoint', 'MODELS_OVERRIDE_INCOMPLETE');
+        }
+        const baseUrl = cleanApiBase(qBase || inst?.base_url || '');
+        const apiKey = (qKey || inst?.api_key || '').trim();
+        if (!baseUrl) return Response.json({ success: false, error: 'No base URL configured' }, { status: 400, headers: corsHeaders });
+        const cacheKey = `models:${baseUrl}`;
+        const cached = AI_MODEL_LIST_CACHE.get(cacheKey);
+        if (cached && cached.expires > Date.now()) {
+          return Response.json({ success: true, baseUrl, models: cached.list, cached: true }, { headers: corsHeaders });
+        }
+        const raw = await fetchModelList(baseUrl, env, apiKey) || [];
+        const models = raw.map((e) => {
+          const id = String(e.id || e.model || '').trim();
+          if (!id) return null;
+          const p = e.pricing || e.cost || {};
+          const pricing = {
+            prompt: p.prompt != null ? Number(p.prompt) : null,
+            completion: p.completion != null ? Number(p.completion) : null,
+          };
+          return {
+            id,
+            name: String(e.name || id),
+            free: isModelFreeEntry(e),
+            context_length: Number(e.context_length || e.top_provider?.context_length || 0) || null,
+            ...(pricing.prompt != null || pricing.completion != null ? { pricing } : {}),
+          };
+        }).filter(Boolean).sort((a, b) => (a.free === b.free ? a.id.localeCompare(b.id) : (a.free ? -1 : 1)));
+        if (models.length) AI_MODEL_LIST_CACHE.set(cacheKey, { list: models, expires: Date.now() + 5 * 60_000 });
+        return Response.json({ success: true, baseUrl, models, provider: detectProviderForModel('', baseUrl) }, { headers: corsHeaders });
+      }
+
+      // Recent upstream AI failures (in-memory ring buffer, newest first).
+      if (pathname === '/api/ai/errors') {
+        if (!(await isInstanceOwnerUserAsync(user, env))) {
+          return deny(corsHeaders, 'AI error log is GOD rank only', 'GOD_ONLY');
+        }
+        if (request.method === 'GET') {
+          return Response.json({ success: true, errors: AI_ERROR_LOG }, { headers: corsHeaders });
+        }
+        if (request.method === 'DELETE') {
+          AI_ERROR_LOG.length = 0;
+          return Response.json({ success: true, cleared: true }, { headers: corsHeaders });
+        }
       }
 
       // Storage backend — readable by all ranks, writable by GOD only
@@ -4462,6 +4526,134 @@ function normalizeModelId(model, baseUrl) {
 /** Time-to-first-byte budget for the upstream model call; a cold model is slow. */
 const AI_PROXY_TIMEOUT_MS = 30_000;
 
+// Recent upstream AI failures, newest first. In-memory: a restart clears it,
+// which matches its purpose — "what just broke" for the GOD settings panel.
+const AI_ERROR_LOG = [];
+const AI_ERROR_LOG_MAX = 50;
+// Provider model catalogs served to the settings picker, 5 min per base.
+const AI_MODEL_LIST_CACHE = new Map();
+function recordAiError({ provider, model, status, endpoint, message, source }) {
+  try {
+    AI_ERROR_LOG.unshift({
+      time: Date.now(),
+      provider: String(provider || detectProviderForModel(model, endpoint) || 'unknown'),
+      model: String(model || ''),
+      status: status == null ? null : Number(status),
+      endpoint: String(endpoint || ''),
+      message: String(message || '').slice(0, 300),
+      source: String(source || 'proxy'),
+    });
+    if (AI_ERROR_LOG.length > AI_ERROR_LOG_MAX) AI_ERROR_LOG.length = AI_ERROR_LOG_MAX;
+  } catch (_) {}
+}
+
+/**
+ * One shared non-streaming chat call for every AI consumer (bot /ai,
+ * enrichment helpers): SSRF-checked endpoint, model fallback chain,
+ * Retry-After honored, errors normalized AND recorded in the error log.
+ * Returns { content, model, endpoint }. Throws an Error carrying
+ * .status/.endpoint/.model on failure.
+ */
+async function callAiChatShared(env, { baseUrl, apiKey, mode, model, system, user: userMsg, maxTokens = 3000, temperature = 0.2, source = 'bot' }) {
+  const base = cleanApiBase(baseUrl || '');
+  const key = String(apiKey || '').trim();
+  const m = normalizeModelId(model, base);
+  const aiMode = (mode || 'openai').toLowerCase();
+  if (!base || !key || !m) {
+    const e = new Error('AI credentials incomplete');
+    e.status = 400;
+    throw e;
+  }
+  let endpoint;
+  try {
+    const u = new URL(base.startsWith('http') ? base : `https://${base}`);
+    if (u.protocol !== 'https:') throw new Error('Only HTTPS API bases allowed');
+    if (!(await isSafeExternalUrl(u, env))) throw new Error('API base must be a public HTTPS host');
+    endpoint = resolveChatEndpoint(base, aiMode, m);
+    if (!endpoint) throw new Error('Could not resolve chat endpoint');
+    const ep = new URL(endpoint);
+    if (ep.protocol !== 'https:' || !(await isSafeExternalUrl(ep, env))) throw new Error('API base must be a public HTTPS host');
+  } catch (err) {
+    recordAiError({ model: m, endpoint: base, message: err?.message || String(err), source });
+    const e = new Error(err?.message || 'Invalid AI base URL');
+    e.status = 400;
+    throw e;
+  }
+
+  const tryModels = [m, ...(await getFallbackChain(base, env, key, m))];
+  let lastErr = null;
+  for (let mi = 0; mi < tryModels.length; mi++) {
+    const curModel = tryModels[mi];
+    const curEndpoint = resolveChatEndpoint(base, aiMode, curModel);
+    try {
+      let res;
+      if (aiMode === 'anthropic') {
+        res = await fetchWithTimeout(curEndpoint, {
+          method: 'POST', env, redirect: 'error',
+          headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+          body: JSON.stringify({ model: curModel, max_tokens: maxTokens, system: system || undefined, messages: [{ role: 'user', content: userMsg }] })
+        }, AI_PROXY_TIMEOUT_MS);
+      } else if (curEndpoint.endsWith('/responses')) {
+        res = await fetchWithTimeout(curEndpoint, {
+          method: 'POST', env, redirect: 'error',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+          body: JSON.stringify({ model: curModel, input: system ? `${system}\n\n${userMsg}` : userMsg })
+        }, AI_PROXY_TIMEOUT_MS);
+      } else {
+        res = await fetchWithTimeout(curEndpoint, {
+          method: 'POST', env, redirect: 'error',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+          body: JSON.stringify({ model: curModel, messages: [{ role: 'system', content: system || '' }, { role: 'user', content: userMsg }], temperature, max_tokens: maxTokens })
+        }, AI_PROXY_TIMEOUT_MS);
+      }
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        const retryable = res.status === 429 || res.status === 503 || res.status === 401 || res.status === 402;
+        const retryAfter = parseInt(res.headers.get('retry-after') || res.headers.get('Retry-After') || '0', 10);
+        if (retryable && mi < tryModels.length - 1) {
+          const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 400 * (mi + 1);
+          await new Promise((r) => setTimeout(r, Math.min(waitMs, 15_000)));
+          continue;
+        }
+        let data = {};
+        try { data = JSON.parse(text); } catch (_) { data = { raw: text.slice(0, 300) }; }
+        const msg = data.error?.message || data.message || (typeof data.error === 'string' ? data.error : null) || (/^\s*</.test(text) ? `Provider returned HTML (HTTP ${res.status}) — check base URL` : text.slice(0, 200) || res.statusText);
+        recordAiError({ model: curModel, status: res.status, endpoint: curEndpoint, message: msg, source });
+        const e = new Error(msg);
+        e.status = res.status; e.endpoint = curEndpoint; e.model = curModel;
+        throw e;
+      }
+      const data = await res.json().catch(() => ({}));
+      let content = '';
+      if (aiMode === 'anthropic') {
+        content = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+      } else if (curEndpoint.endsWith('/responses')) {
+        content = data.output_text || (Array.isArray(data.output) ? data.output.map((o) => Array.isArray(o.content) ? o.content.map((c) => c.text || '').join('') : '').join('\n') : '') || data.choices?.[0]?.message?.content || '';
+      } else {
+        content = data.choices?.[0]?.message?.content || '';
+      }
+      if (!content) {
+        recordAiError({ model: curModel, status: 200, endpoint: curEndpoint, message: 'Empty response from model', source });
+        const e = new Error('Empty response from model');
+        e.status = 502; e.endpoint = curEndpoint; e.model = curModel;
+        throw e;
+      }
+      return { content, model: curModel, endpoint: curEndpoint };
+    } catch (err) {
+      if (err?.status) throw err; // already normalized + recorded above
+      lastErr = err;
+      if (mi < tryModels.length - 1) { await new Promise((r) => setTimeout(r, 300 * (mi + 1))); continue; }
+      recordAiError({ model: curModel, endpoint: curEndpoint, message: err?.message || String(err), source });
+      const e = new Error(err?.message || 'All AI models failed');
+      e.status = 502; e.endpoint = curEndpoint; e.model = curModel;
+      throw e;
+    }
+  }
+  const e = new Error(lastErr?.message || 'All AI models failed');
+  e.status = 502;
+  throw e;
+}
+
 async function handleAiChatProxy(request, user, env, corsHeaders) {
   if (!user) {
     return Response.json({ success: false, error: 'Login required', code: 'AUTH_REQUIRED' }, { status: 401, headers: corsHeaders });
@@ -4634,6 +4826,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
           }
         }
         // non-retryable or last try -> return error
+        recordAiError({ model: curModel, status: curRes.status, endpoint, message: msg, source: 'proxy' });
         return Response.json({
           success: false,
           error: msg,
@@ -8223,8 +8416,6 @@ Rules:
      const thinkMsgId = thinkMsg.message_id;
 
       const model = normalizeModelId(cfg.model, cfg.base_url);
-      const endpoint = resolveChatEndpoint(cfg.base_url, cfg.mode || 'openai', model);
-       const aiMode = (cfg.mode || 'openai').toLowerCase();
 
       try {
         let content = '';
@@ -8235,43 +8426,13 @@ Rules:
             : `${ctx.slice(0, contextLimit)}\n[content shortened for provider context]`;
           const systemPrompt = `${baseSystemPrompt}\n\nBRAIN has ${rows.length} saved item(s). Retrieved for this question:\n\n${context}`;
           try {
-            if (aiMode === 'anthropic') {
-              const res = await fetch(endpoint, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-api-key': cfg.api_key, 'anthropic-version': '2023-06-01' },
-                body: JSON.stringify({ model, max_tokens: 3000, system: systemPrompt, messages: [{ role: 'user', content: q }] })
-              });
-              if (!res.ok) {
-                const errText = await res.text().catch(() => '');
-                throw new Error(`HTTP ${res.status}: ${errText.slice(0, 200)}`);
-              }
-              const data = await res.json().catch(() => ({}));
-              content = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
-            } else if (endpoint.endsWith('/responses')) {
-              const res = await fetch(endpoint, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.api_key}` },
-                body: JSON.stringify({ model, input: `${systemPrompt}\n\n${q}`, stream: false })
-              });
-              if (!res.ok) {
-                const errText = await res.text().catch(() => '');
-                throw new Error(`HTTP ${res.status}: ${errText.slice(0, 200)}`);
-              }
-              const data = await res.json().catch(() => ({}));
-              content = data.output_text || data.output?.map(o => o.content?.map(c => c.text).join('')).join('\n') || data.choices?.[0]?.message?.content || '';
-            } else {
-              const res = await fetch(endpoint, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.api_key}` },
-                body: JSON.stringify({ model, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: q }], temperature: 0.2, max_tokens: 3000 })
-              });
-              if (!res.ok) {
-                const errText = await res.text().catch(() => '');
-                throw new Error(`HTTP ${res.status}: ${errText.slice(0, 200)}`);
-              }
-              const data = await res.json().catch(() => ({}));
-              content = data.choices?.[0]?.message?.content || data.choices?.[0]?.text || '';
-            }
+            // Same request path as the website proxy: SSRF-checked endpoint,
+            // model fallback chain, Retry-After, normalized + logged errors.
+            const out = await callAiChatShared(env, {
+              baseUrl: cfg.base_url, apiKey: cfg.api_key, mode: cfg.mode || 'openai', model,
+              system: systemPrompt, user: q, maxTokens: 3000, source: 'bot-ai',
+            });
+            content = out.content;
             break;
           } catch (err) {
             if (!isAiContextError(err) || !docs.length) throw err;
@@ -10006,6 +10167,7 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
         const retryAfter = parseInt(res.headers.get('retry-after')||res.headers.get('Retry-After')||'0',10);
         const waitMs = Number.isFinite(retryAfter) && retryAfter>0 ? retryAfter*1000 : 400*(mi+1);
         console.error(`AI link enrichment failed ${curModel} ${res.status}`, errorText.slice(0,180));
+        recordAiError({ model: curModel, status: res.status, endpoint, message: `link enrichment: ${errorText.slice(0, 200) || res.statusText}`, source: 'enrichment' });
         if (isRetryable && mi < tryModels.length-1) { await new Promise(r=>setTimeout(r, waitMs)); continue; }
         return null;
       }

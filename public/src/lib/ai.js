@@ -248,7 +248,9 @@ INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on 
     if (!res.ok && !ct.includes('text/event-stream')) {
       const data = await res.json().catch(() => ({}));
       const providerError = typeof data.error === 'string' ? data.error : data.error?.message;
-      throw new Error(providerError || `AI proxy failed (${res.status})`);
+      const err = new Error(providerError || `AI proxy failed (${res.status})`);
+      err.details = { status: data.status || res.status, model: data.model || '', endpoint: data.endpoint || '' };
+      throw err;
     }
     if (!res.ok) throw new Error(`AI proxy failed (${res.status})`);
     if (ct.includes('text/event-stream')) {
@@ -491,7 +493,7 @@ INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on 
       };
     } catch (err) {
       const local = answerLocal(q, docs, corpusSize);
-      return { ...local, mode: 'local', thinking: '', error: err.message || String(err) };
+      return { ...local, mode: 'local', thinking: '', error: err.message || String(err), errorDetails: err.details || null };
     }
   }
 
