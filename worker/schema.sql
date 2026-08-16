@@ -209,9 +209,8 @@ CREATE TABLE IF NOT EXISTS telegram_bots (
     FOREIGN KEY(community_id) REFERENCES communities(id)
 );
 
--- Document chunks for paragraph-level TUI Advanced search (pgvector + tsv hybrid)
-CREATE EXTENSION IF NOT EXISTS vector;
-
+-- Document chunks for paragraph-level TUI Advanced search (tsv + optional pgvector)
+-- pgvector is optional; server handles missing extension via TEXT fallback and try/catch on ivfflat
 CREATE TABLE IF NOT EXISTS document_chunks (
   id TEXT PRIMARY KEY,
   doc_id TEXT NOT NULL,
@@ -222,12 +221,11 @@ CREATE TABLE IF NOT EXISTS document_chunks (
   para_idx INTEGER,
   content TEXT NOT NULL,
   token_count INTEGER,
-  embedding VECTOR(1536),
+  embedding TEXT,
   tsv TSVECTOR,
   created_at BIGINT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_chunks_doc ON document_chunks(doc_id, chunk_idx);
 CREATE INDEX IF NOT EXISTS idx_chunks_scope ON document_chunks(scope, scope_key, para_idx);
-CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON document_chunks USING ivfflat (embedding vector_l2_ops);
 CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON document_chunks USING gin(tsv);
