@@ -106,6 +106,7 @@ body {
 
 /* Search bar */
 .search-bar-box {
+  position: relative;
   width: 100%; display: flex; align-items: center;
   background: var(--bg-card, rgba(18,20,29,0.7));
   border: 1px solid var(--border-color, rgba(255,255,255,0.1));
@@ -496,3 +497,107 @@ body.results-active .search-wrapper { align-items: stretch; }
 .model-item:last-child { border-bottom: none; }
 .model-item:hover, .model-item:focus { background: var(--accent-surface, rgba(255,255,255,0.06)); outline: none; }
 .model-item .model-id { font-family: var(--font-mono, ui-monospace, monospace); word-break: break-all; }
+
+/* ===== Polish layer (theme-token driven, works across all 4 themes) ===== */
+
+/* Consistent focus affordance for keyboard users */
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Card micro-interactions: one elevation step on hover, never jumpy */
+.g-result { transition: transform var(--dur-1, 0.18s) var(--ease, ease-out), box-shadow var(--dur-1, 0.18s) var(--ease, ease-out), border-color var(--dur-1, 0.18s) var(--ease, ease-out); }
+.g-result:hover { transform: translateY(-1px); box-shadow: var(--shadow-main, 0 8px 30px rgba(0,0,0,0.35)); }
+@media (prefers-reduced-motion: reduce) { .g-result:hover { transform: none; } }
+
+/* Skeleton shimmer — placeholder cards while the server searches */
+.skeleton {
+  position: relative; overflow: hidden; border-radius: 6px;
+  background: var(--surface-2, rgba(255,255,255,0.05)); height: 14px;
+}
+.skeleton::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, var(--hairline-strong, rgba(255,255,255,0.12)), transparent);
+  transform: translateX(-100%); animation: athena-shimmer 1.4s infinite;
+}
+@keyframes athena-shimmer { 100% { transform: translateX(100%); } }
+@media (prefers-reduced-motion: reduce) { .skeleton::after { animation: none; } }
+.g-result-skeleton { display: flex; flex-direction: column; gap: 12px; padding: 20px; pointer-events: none; }
+.sk-cite { width: 30%; height: 11px; }
+.sk-title { width: 70%; height: 18px; }
+.sk-line { width: 92%; }
+.sk-short { width: 55%; }
+
+/* AI answer streaming cursor */
+.chat-answer-content.streaming::after {
+  content: '▍'; margin-left: 2px; color: var(--accent);
+  animation: athena-blink 1s steps(2, start) infinite;
+}
+@keyframes athena-blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .chat-answer-content.streaming::after { animation: none; } }
+
+/* Thinking block: quieter, monospace, collapsed by default */
+.chat-msg details.thinking-block { border-left: 2px solid var(--hairline-strong, rgba(255,255,255,0.15)); padding-left: 10px; margin: 6px 0; }
+.chat-msg details.thinking-block summary { cursor: pointer; font-size: 0.8em; color: var(--text-muted, #8e95b0); user-select: none; }
+.thinking-content { font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.8em; color: var(--text-muted, #8e95b0); white-space: pre-wrap; margin-top: 6px; }
+
+/* AI source chips */
+#aiSources .ai-source-chip, .ai-sources a {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 240px;
+  padding: 4px 10px; border-radius: 999px; font-size: 0.78em;
+  background: var(--accent-surface, rgba(255,255,255,0.06));
+  border: 1px solid var(--accent-border, var(--hairline, rgba(255,255,255,0.1)));
+  color: var(--text, inherit); text-decoration: none;
+  transition: background var(--dur-1, 0.18s) var(--ease, ease-out), transform var(--dur-1, 0.18s) var(--ease, ease-out);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#aiSources .ai-source-chip:hover, .ai-sources a:hover { transform: translateY(-1px); background: var(--accent-soft, rgba(255,255,255,0.1)); }
+
+/* Dropzone: whole search bar accepts files in dump mode */
+.search-bar-box.dropzone-active {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow-main, 0 8px 30px rgba(0,0,0,0.35));
+}
+.search-bar-box.dropzone-active::after {
+  content: 'Drop files to upload'; position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent-surface, rgba(0,0,0,0.55)); color: var(--text, #fff);
+  font-weight: 600; border-radius: inherit; pointer-events: none; z-index: 5;
+}
+
+/* Modal */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 300;
+  background: rgba(0,0,0,0.55); backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+  animation: athena-fade-in 0.15s ease-out;
+}
+@keyframes athena-fade-in { from { opacity: 0; } }
+.modal {
+  width: min(420px, 92vw); border-radius: 14px; padding: 22px;
+  background: var(--drawer-bg, var(--surface, #1a1c26));
+  border: 1px solid var(--hairline-strong, rgba(255,255,255,0.14));
+  box-shadow: var(--shadow-main, 0 20px 60px rgba(0,0,0,0.5));
+}
+.modal-title { margin: 0 0 8px; font-size: 1.05rem; }
+.modal-message { margin: 0 0 18px; color: var(--text-dim, #b8bdd0); font-size: 0.92em; line-height: 1.5; white-space: pre-line; }
+.modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+.btn-danger {
+  background: linear-gradient(135deg, #d92b4b, #a02040); color: #fff; border: none;
+}
+.btn-danger:hover { filter: brightness(1.1); }
+
+/* Toast refinement */
+#toast { border-radius: 10px; box-shadow: var(--shadow-main, 0 10px 30px rgba(0,0,0,0.4)); animation: athena-toast-in 0.2s var(--ease, ease-out); }
+@keyframes athena-toast-in { from { opacity: 0; transform: translateY(8px); } }
+
+/* Empty state */
+.empty-state { text-align: center; padding: 48px 16px; color: var(--text-muted, #8e95b0); }
+.empty-state strong { color: var(--text-dim, #b8bdd0); }
+
+/* Smooth theme transitions, once, cheaply */
+body, .g-result, .side-drawer, .search-bar-box, .modal, #toast { transition: background-color 0.25s ease, border-color 0.25s ease, color 0.25s ease; }
+@media (prefers-reduced-motion: reduce) { body, .g-result, .side-drawer, .search-bar-box, .modal, #toast { transition: none; } }
