@@ -3,7 +3,7 @@
 One bar: search, dump, and AI answers from your markdown brain.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.45-blueviolet?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-1.0.46-blueviolet?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/license_CC_BY--NC_4.0-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/telegram-bot-blue?style=flat-square&logo=telegram" alt="telegram">
   <img src="https://img.shields.io/badge/discord-login-5865F2?style=flat-square&logo=discord" alt="discord">
@@ -13,7 +13,7 @@ One bar: search, dump, and AI answers from your markdown brain.
 
 ## Features
 
-- **Save** links from the web UI or the Telegram bot. Upload text files (.md, .py, .json, .sql, and 30+ more, 512 KB each).
+- **Save** links from the web UI or the Telegram bot. Upload text files (.md, .py, .json, .sql, and 30+ more, 512 KB each), plus documents (.pdf, .docx, .pptx, .xlsx, .odt, .rtf, .epub, …, up to 20 MB) — converted to Markdown on ingest via [anydoc](https://github.com/firecrawl/anydoc), self-hosted instances only.
 - **Search** with fuzzy matching across titles, URLs, notes, and tags — tolerant of typos and partial matches, with server-side search for large brains.
 - **Ask** questions with RAG over your links and documents. Supports OpenAI, Anthropic, Groq, OpenRouter, and OpenCode Zen, with streaming answers and cited sources.
 - **Share** a brain with a Telegram group in community mode, with voting, reporting, and rank-based permissions — or keep it private in personal mode.
@@ -269,7 +269,7 @@ If you set `TELEGRAM_WEBHOOK_SECRET`, pass the same value as `secret_token`. If 
 | `/community_join <id>` | Join a community |
 | `/community_list [id]` | List your communities, or one community's details |
 
-Sending or forwarding any supported text file saves it to the active scope.
+Sending or forwarding any supported text file — or a document (.pdf, .docx, .pptx, .xlsx, .odt, .rtf, .epub, …) on self-hosted instances — saves it to the active scope; documents are converted to Markdown on ingest.
 
 **Staff** (admin, owner, GOD)
 

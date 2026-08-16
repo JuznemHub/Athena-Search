@@ -1063,9 +1063,24 @@ document.addEventListener('DOMContentLoaded', () => {
     'java', 'c', 'h', 'cpp', 'hpp', 'cs', 'rb', 'php', 'swift', 'kt', 'kts', 'lua', 'r',
     'dart', 'vue', 'svelte', 'ini', 'cfg', 'conf', 'env', 'log'
   ]);
+  // Binary formats the server converts to Markdown via anydoc before storing.
+  // They go up as raw bytes (content_base64), so no text checks apply here.
+  const CONVERTIBLE_EXTENSIONS = new Set([
+    'pdf', 'doc', 'docx', 'docm', 'ppt', 'pps', 'pot', 'pptx', 'pptm', 'ppsx', 'ppsm',
+    'xls', 'xlsx', 'xlsm', 'xlsb', 'odt', 'ods', 'odp', 'rtf', 'epub'
+  ]);
+  const CONVERT_SOURCE_MAX_BYTES = 20 * 1024 * 1024;
+
+  function fileExtension(name) {
+    return name.includes('.') ? name.split('.').pop().toLowerCase() : '';
+  }
 
   function validateDocumentFile(file, content) {
-    const ext = file.name.includes('.') ? file.name.split('.').pop().toLowerCase() : '';
+    const ext = fileExtension(file.name);
+    if (CONVERTIBLE_EXTENSIONS.has(ext)) {
+      if (file.size > CONVERT_SOURCE_MAX_BYTES) return 'larger than 20 MiB';
+      return '';
+    }
     if (!DOCUMENT_EXTENSIONS.has(ext)) return 'unsupported file type';
     if (file.size > DOCUMENT_MAX_BYTES) return 'larger than 512 KiB';
     if (content.includes('\0')) return 'appears to be binary';
@@ -1093,11 +1108,21 @@ document.addEventListener('DOMContentLoaded', () => {
           continue;
         }
         let content;
-        try { content = await file.text(); } catch (_) {
+        let contentBase64;
+        try {
+          if (CONVERTIBLE_EXTENSIONS.has(fileExtension(file.name))) {
+            const buf = new Uint8Array(await file.arrayBuffer());
+            let bin = '';
+            for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+            contentBase64 = btoa(bin);
+          } else {
+            content = await file.text();
+          }
+        } catch (_) {
           rejected.push(`${file.name}: could not read`);
           continue;
         }
-        const invalid = validateDocumentFile(file, content);
+        const invalid = validateDocumentFile(file, content || '');
         if (invalid) {
           rejected.push(`${file.name}: ${invalid}`);
           continue;
@@ -1106,9 +1131,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const payload = {
           filename: file.name,
           mime_type: file.type || 'text/plain',
-          content,
           scope: state.scope
         };
+        if (contentBase64 !== undefined) payload.content_base64 = contentBase64;
+        else payload.content = content;
         if (state.scope === 'community') payload.community_id = state.activeCommunity;
         try {
           const { res, data } = await api('/api/documents', { method: 'POST', body: JSON.stringify(payload) });
