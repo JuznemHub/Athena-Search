@@ -3183,7 +3183,7 @@ function rankLinks(rows, query, limit = null) {
   return takeResults(scored.map(s => s.r), limit);
 }
 
-const DOCUMENT_MAX_BYTES = 512 * 1024;
+const DOCUMENT_MAX_BYTES = 5 * 1024 * 1024;
 const DOCUMENT_EXTENSIONS = new Set([
   'md', 'markdown', 'txt', 'py', 'js', 'ts', 'jsx', 'tsx', 'sh', 'bash', 'zsh', 'fish',
   'css', 'html', 'htm', 'json', 'yaml', 'yml', 'toml', 'xml', 'csv', 'sql', 'go', 'rs',
@@ -3249,13 +3249,30 @@ async function ensureDocumentsTable(env) {
 
 export async function ensureChunksTable(env) {
   await env.DB.prepare('CREATE EXTENSION IF NOT EXISTS vector').run().catch(() => {});
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS document_chunks (
-      id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, scope TEXT NOT NULL, scope_key TEXT NOT NULL,
-      chunk_idx INTEGER NOT NULL, page INTEGER, para_idx INTEGER, content TEXT NOT NULL,
-      token_count INTEGER, embedding VECTOR(1536), tsv TSVECTOR, created_at BIGINT NOT NULL
-    )`
-  ).run();
+  try {
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS document_chunks (
+        id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, scope TEXT NOT NULL, scope_key TEXT NOT NULL,
+        chunk_idx INTEGER NOT NULL, page INTEGER, para_idx INTEGER, content TEXT NOT NULL,
+        token_count INTEGER, embedding VECTOR(1536), tsv TSVECTOR, created_at BIGINT NOT NULL
+      )`
+    ).run();
+  } catch (e) {
+    const msg = String(e.message || '');
+    if (/vector/i.test(msg) || /type "vector" does not exist/i.test(msg)) {
+      await env.DB.prepare(
+        `CREATE TABLE IF NOT EXISTS document_chunks (
+          id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, scope TEXT NOT NULL, scope_key TEXT NOT NULL,
+          chunk_idx INTEGER NOT NULL, page INTEGER, para_idx INTEGER, content TEXT NOT NULL,
+          token_count INTEGER, embedding TEXT, tsv TSVECTOR, created_at BIGINT NOT NULL
+        )`
+      ).run().catch(() => {});
+      await env.DB.prepare('ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS embedding TEXT').run().catch(() => {});
+      await env.DB.prepare('ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS tsv TSVECTOR').run().catch(() => {});
+    } else {
+      throw e;
+    }
+  }
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_doc ON document_chunks(doc_id, chunk_idx)').run().catch(() => {});
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_scope ON document_chunks(scope, scope_key, para_idx)').run().catch(() => {});
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON document_chunks USING ivfflat (embedding vector_l2_ops)').run().catch(() => {});

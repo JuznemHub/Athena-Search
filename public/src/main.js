@@ -1056,7 +1056,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  const DOCUMENT_MAX_BYTES = 512 * 1024;
+  const DOCUMENT_MAX_BYTES = 5 * 1024 * 1024;
   const DOCUMENT_EXTENSIONS = new Set([
     'md', 'markdown', 'txt', 'py', 'js', 'ts', 'jsx', 'tsx', 'sh', 'bash', 'zsh', 'fish',
     'css', 'html', 'htm', 'json', 'yaml', 'yml', 'toml', 'xml', 'csv', 'sql', 'go', 'rs',
