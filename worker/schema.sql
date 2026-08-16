@@ -229,5 +229,7 @@ CREATE TABLE IF NOT EXISTS document_chunks (
 
 CREATE INDEX IF NOT EXISTS idx_chunks_doc ON document_chunks(doc_id, chunk_idx);
 CREATE INDEX IF NOT EXISTS idx_chunks_scope ON document_chunks(scope, scope_key, para_idx);
-CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON document_chunks USING ivfflat (embedding vector_l2_ops);
 CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON document_chunks USING gin(tsv);
+-- idx_chunks_embedding (ivfflat) is created in ensureChunksTable, which first
+-- upgrades a TEXT fallback column to VECTOR once the pgvector extension exists.
+-- Keeping it here crashes startup when the column is still TEXT.

@@ -3366,6 +3366,17 @@ export async function ensureChunksTable(env) {
       throw e;
     }
   }
+  // Self-heal: a TEXT fallback column (created before pgvector was installed)
+  // is upgraded to VECTOR once the extension exists, so the ivfflat index can build.
+  const embeddingType = await env.DB.prepare(
+    "SELECT data_type FROM information_schema.columns WHERE table_name = 'document_chunks' AND column_name = 'embedding'"
+  ).first('data_type').catch(() => null);
+  const hasVector = await env.DB.prepare(
+    "SELECT extname FROM pg_extension WHERE extname = 'vector'"
+  ).first('extname').catch(() => null);
+  if (embeddingType === 'text' && hasVector) {
+    await env.DB.prepare('ALTER TABLE document_chunks ALTER COLUMN embedding TYPE VECTOR(1536) USING NULL').run().catch(() => {});
+  }
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_doc ON document_chunks(doc_id, chunk_idx)').run().catch(() => {});
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_scope ON document_chunks(scope, scope_key, para_idx)').run().catch(() => {});
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON document_chunks USING ivfflat (embedding vector_l2_ops)').run().catch(() => {});

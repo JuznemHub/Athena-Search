@@ -155,6 +155,15 @@ export async function ensureChunksTable(pool) {
     }
   }
   try { await pool.query('ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS tsv TSVECTOR'); } catch {}
+  // Self-heal: a TEXT fallback column (created before pgvector was installed)
+  // is upgraded to VECTOR once the extension exists, so the ivfflat index can build.
+  try {
+    const col = await pool.query(`SELECT data_type FROM information_schema.columns WHERE table_name = 'document_chunks' AND column_name = 'embedding'`);
+    const ext = await pool.query(`SELECT extname FROM pg_extension WHERE extname = 'vector'`);
+    if (col.rows[0]?.data_type === 'text' && ext.rows.length > 0) {
+      await pool.query('ALTER TABLE document_chunks ALTER COLUMN embedding TYPE VECTOR(1536) USING NULL');
+    }
+  } catch {}
   await pool.query('CREATE INDEX IF NOT EXISTS idx_chunks_doc ON document_chunks(doc_id, chunk_idx)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_chunks_scope ON document_chunks(scope, scope_key, para_idx)');
   try { await pool.query('CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON document_chunks USING gin(tsv)'); } catch {}
