@@ -2248,7 +2248,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     list.innerHTML = items.slice(0, 200).map((m) => {
       const ctx = m.context_length ? ` · ${(m.context_length / 1000).toFixed(0)}k ctx` : '';
-      const price = m.pricing && m.pricing.prompt != null ? ` · $${Number(m.pricing.prompt).toFixed(2)}/M in` : '';
+      let price = '';
+      if (m.pricing) {
+        const parts = [];
+        if (m.pricing.prompt != null) parts.push(`$${Number(m.pricing.prompt).toFixed(2)}/M in`);
+        if (m.pricing.completion != null) parts.push(`$${Number(m.pricing.completion).toFixed(2)}/M out`);
+        if (parts.length) price = ` · ${parts.join(' · ')}`;
+      }
       const cls = m.free ? 'model-item model-free' : 'model-item';
       const tag = m.free ? '<span style="color:var(--success-color);font-weight:600;">FREE</span> ' : '';
       return `<div class="${cls}" role="option" tabindex="0" data-model="${escapeHtml(m.id)}">${tag}<span class="model-id">${escapeHtml(m.id)}</span><span class="status-msg">${ctx}${price}</span></div>`;
