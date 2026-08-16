@@ -236,6 +236,40 @@ Every saved link (website, bot, channel, backfill) is scraped for title, descrip
 
 **JS-rendered pages (self-host, optional)** — client-side-rendered sites return an empty shell to a plain fetch. Install [kage](https://github.com/tamnd/kage) (plus Chrome/Chromium) on the server and set `KAGE_BIN` in `.env` (e.g. `KAGE_BIN=/usr/local/bin/kage`); when a static scrape comes back thin, Athena renders the page headless via kage and re-extracts. Off by default; a missing binary is detected once and skipped for 10 minutes.
 
+## MCP: Use your brain as memory for any agent
+
+Your `PostgreSQL` *is* the MCP memory — any agent that speaks MCP can `search`/`dump` it.
+
+TUI Advanced (already wired): `Tab` → `Advanced (opencode)` opens `opencode` with `athena` MCP (`tui/src/mcp-athena.js` rank-aware `GOD`/`community` + `para_idx` `600tok`). Default is plain `opencode`, `/athena <query>` strictly fetches `athena_search` then `cite`, `/athena` alone toggles strict mode.
+
+Any CLI harness — 1 env var:
+```bash
+export DATABASE_URL=postgresql://athena:pass@YOUR_VPS:5432/athena
+# or tunnel: ssh -N -L 5432:localhost:5432 you@vps
+
+# Claude Code
+claude mcp add athena -- npx @modelcontextprotocol/server-postgres $DATABASE_URL
+claude  # then: /mcp → athena → athena_search
+
+# OpenCode (global)
+opencode mcp add athena -- npx @modelcontextprotocol/server-postgres $DATABASE_URL
+opencode  # TUI → /
+
+# Cursor / Windsurf / Continue — add to their mcp.json:
+{
+  "mcpServers": {
+    "athena": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://athena:pass@YOUR_VPS:5432/athena"]
+    }
+  }
+}
+
+# Or via TUI's rank-aware wrapper (recommended, enforces GOD personal + community bans):
+# use tui/src/mcp-athena.js as local MCP with ATHENA_INSTANCE/TOKEN
+
+B mode fallback: if `DATABASE_URL` is not set (e.g., laptop without tunnel), `mcp-athena.js` proxies to `https://athena.juznem.eu.org/api/*` with your `ATHENA_INSTANCE`/`TOKEN` — no direct DB needed.
+
 ## AI
 
 As GOD, go to Settings → AI assistant, pick a provider, and enter the base URL, model, and API key. Saving syncs the config to the server, so the website and the bot's `/ai` share one set of credentials.
@@ -430,7 +464,20 @@ Any agent (Hermes/Claude) → postgres-mcp → same PostgreSQL (as memory)
 >
 > Aaron Swartz's thoughts and ideas have deeply shaped who I am. Long live.
 
+## Roadmap
+
+- [ ] **1. Improve AI features on website** — better RAG chunking (`para_idx` → `line_number` `5MB` `anydoc` `document_chunks`), streaming `cite` chips, `steroid` `line` mode, Telegram `mdToTelegramHtml` rich text parity.
+- [ ] **2. Community skills for Athena** — `tui` `/athena-study` (deep cross-linked notes), `/athena-ingest` (dedupe), `athena-researcher` subagent, `AGENTS.md` conventions for `docs`/`links` research.
+- [ ] **3. Plugin ecosystem** — adapters for `Reddit`, `X/Twitter`, `Notion`, `GitHub`, etc. via `mcp`/`postgres-mcp` + `tui/src/mcp-athena.js` rank-aware wrapper; `opencode` `command` `plugins` as prior art.
+- [ ] **4. RSS support** — `RSS` `pubsub` real-time indexing including changes (`/channel_link` already does polling, add `rss` `cron` + `delta` `hash` for edits/deletes).
+- [ ] **5. Credits** — see below.
+- [ ] **6. Extensions** — browser `Web Clipper` `md` (Obsidian) + `Chrome`/`Firefox` `mv3` quick-dump, `VS Code` `mcp` sidebar.
+- [ ] **7. Android app** — `React Native`/`Expo` wrapper for `athena.juznem.eu.org` `PWA` + `Telegram Mini App` parity, `biometric` `session` store.
+- [ ] **8. Update website UI more** — `feat/ui-polish` `1.0.51` modal/skeletons/streaming/dropzone shipped, next: `search` `line` highlights, `graph view` `qmd` `lazy`.
+
 ---
+
+## License
 
 ## License
 
