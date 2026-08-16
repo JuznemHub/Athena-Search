@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.45',
+          version: '1.0.46',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -3190,6 +3190,50 @@ const DOCUMENT_EXTENSIONS = new Set([
   'java', 'c', 'h', 'cpp', 'hpp', 'cs', 'rb', 'php', 'swift', 'kt', 'kts', 'lua', 'r',
   'dart', 'vue', 'svelte', 'ini', 'cfg', 'conf', 'env', 'log',
 ]);
+// Binary formats anydoc converts to Markdown before ingestion. The native
+// bindings need the libuv thread pool, so conversion runs on the self-host
+// Node runtime only; the Cloudflare Worker path gets a clear error instead.
+const CONVERTIBLE_EXTENSIONS = new Set([
+  'pdf', 'doc', 'docx', 'docm', 'ppt', 'pps', 'pot', 'pptx', 'pptm', 'ppsx', 'ppsm',
+  'xls', 'xlsx', 'xlsm', 'xlsb', 'odt', 'ods', 'odp', 'rtf', 'epub',
+]);
+const CONVERT_SOURCE_MAX_BYTES = 20 * 1024 * 1024;
+
+const ANYDOC_ERROR_MESSAGES = {
+  unsupported: 'format not recognized, or an image-only/scanned PDF without a text layer',
+  malformed: 'file is structurally unusable — no content could be extracted',
+  encrypted: 'file is encrypted or password-protected',
+  resourceLimit: 'file crossed a conversion safety limit (decompression, nesting, node count)',
+  missingPart: 'a part required for meaningful output is absent',
+  io: 'file could not be read',
+};
+
+let anydocModule = null;
+async function convertDocumentToMarkdown(env, ext, base64) {
+  if (!isSelfHosted(env)) {
+    return { error: 'Binary formats (pdf, docx, xlsx, …) need the self-hosted server — the Cloudflare Worker cannot run the converter' };
+  }
+  let bytes;
+  try {
+    const bin = atob(base64);
+    bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  } catch (_) {
+    return { error: 'content_base64 is not valid base64' };
+  }
+  if (bytes.length > CONVERT_SOURCE_MAX_BYTES) return { error: 'Document exceeds 20 MiB before conversion' };
+  try {
+    // Non-literal specifier so bundlers never try to resolve the native module.
+    const spec = '@firecrawl/anydoc';
+    anydocModule ||= await import(spec);
+    const markdown = await anydocModule.toMarkdownBytes(bytes, ext);
+    if (!markdown || !markdown.trim()) return { error: 'No text content found in document' };
+    return { markdown };
+  } catch (err) {
+    const reason = ANYDOC_ERROR_MESSAGES[err && err.code];
+    return { error: reason ? `Conversion failed: ${reason}` : `Conversion failed: ${(err && err.message) || 'unknown error'}` };
+  }
+}
 
 async function ensureDocumentsTable(env) {
   await env.DB.prepare(
@@ -3222,6 +3266,17 @@ function documentFolder(scope, key) {
   return scope === 'personal' ? `documents/personal/${key}` : `documents/communities/${key}`;
 }
 
+function validateDocumentText(scope, filename, content) {
+  if (typeof content !== 'string') return { error: 'content must be UTF-8 text' };
+  const encoded = new TextEncoder().encode(content);
+  if (/\x00/.test(content) || new TextDecoder().decode(encoded) !== content) return { error: 'content must be valid UTF-8 text' };
+  const bytes = encoded.length;
+  if (bytes > DOCUMENT_MAX_BYTES) return { error: 'Document exceeds 512 KiB' };
+  const controls = (content.match(/[\x01-\x08\x0B\x0C\x0E-\x1F\x7F]/g) || []).length;
+  if (controls / Math.max(content.length, 1) > 0.01) return { error: 'Binary or control-heavy content is not allowed' };
+  return { scope, filename, content, bytes };
+}
+
 function validateDocumentInput(body) {
   const scope = String(body.scope || '').toLowerCase();
   const filename = String(body.filename || '').normalize('NFC').trim();
@@ -3230,16 +3285,14 @@ function validateDocumentInput(body) {
     return { error: 'Invalid filename' };
   }
   const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+  if (CONVERTIBLE_EXTENSIONS.has(ext)) {
+    if (typeof body.content_base64 !== 'string' || !body.content_base64) {
+      return { error: 'content_base64 (raw file bytes) required for this format' };
+    }
+    return { scope, filename, ext, convertible: true, contentBase64: body.content_base64 };
+  }
   if (!DOCUMENT_EXTENSIONS.has(ext)) return { error: 'File extension is not allowed' };
-  if (typeof body.content !== 'string') return { error: 'content must be UTF-8 text' };
-  const content = body.content;
-  const encoded = new TextEncoder().encode(content);
-  if (/\x00/.test(content) || new TextDecoder().decode(encoded) !== content) return { error: 'content must be valid UTF-8 text' };
-  const bytes = encoded.length;
-  if (bytes > DOCUMENT_MAX_BYTES) return { error: 'Document exceeds 512 KiB' };
-  const controls = (content.match(/[\x01-\x08\x0B\x0C\x0E-\x1F\x7F]/g) || []).length;
-  if (controls / Math.max(content.length, 1) > 0.01) return { error: 'Binary or control-heavy content is not allowed' };
-  return { scope, filename, content, bytes };
+  return validateDocumentText(scope, filename, body.content);
 }
 
 function documentAsLink(row) {
@@ -3284,8 +3337,14 @@ async function handleGetDocuments(url, user, env, corsHeaders) {
 async function handlePostDocument(request, user, env, corsHeaders) {
   const body = await request.json().catch(() => null);
   if (!body) return Response.json({ success: false, error: 'Invalid JSON' }, { status: 400, headers: corsHeaders });
-  const doc = validateDocumentInput(body);
+  let doc = validateDocumentInput(body);
   if (doc.error) return Response.json({ success: false, error: doc.error }, { status: 400, headers: corsHeaders });
+  if (doc.convertible) {
+    const converted = await convertDocumentToMarkdown(env, doc.ext, doc.contentBase64);
+    if (converted.error) return Response.json({ success: false, error: converted.error }, { status: 400, headers: corsHeaders });
+    doc = validateDocumentText(doc.scope, doc.filename, converted.markdown);
+    if (doc.error) return Response.json({ success: false, error: `${doc.error} (after conversion to Markdown)` }, { status: 400, headers: corsHeaders });
+  }
   const communityId = doc.scope === 'community' ? String(body.community_id || '') : null;
   const gate = await documentScopeGate(doc.scope, communityId, user, env, corsHeaders);
   if (gate) return gate;
@@ -6815,7 +6874,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   if (doc && doc.file_id && athenaUser) {
     let filename = doc.file_name || 'document.txt';
     const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
-    if (DOCUMENT_EXTENSIONS.has(ext)) {
+    if (DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) {
       const isGroup = String(msg.chat?.type || '').includes('group') || chatId.startsWith('-');
       // Determine scope: in groups always community, in DMs use binding mode
       let docScope = 'community';
@@ -6861,8 +6920,23 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         const fileUrl = `https://api.telegram.org/file/bot${botToken}/${fileInfo.result.file_path}`;
         const fileRes = await fetch(fileUrl);
         if (!fileRes.ok) throw new Error(`Download failed: ${fileRes.status}`);
-        // Same validator as the API path — byte-accurate size cap, filename and UTF-8 checks
-        const valid = validateDocumentInput({ scope: docScope, filename, content: await fileRes.text() });
+        // Same validators as the API path — byte-accurate size cap, filename and
+        // UTF-8 checks. Binary formats convert to Markdown first (self-host
+        // only); text formats are validated inline as before.
+        let valid;
+        if (CONVERTIBLE_EXTENSIONS.has(ext)) {
+          const arr = new Uint8Array(await fileRes.arrayBuffer());
+          let bin = '';
+          for (let i = 0; i < arr.length; i += 0x8000) bin += String.fromCharCode(...arr.subarray(i, i + 0x8000));
+          const converted = await convertDocumentToMarkdown(env, ext, btoa(bin));
+          if (converted.error) {
+            await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} ${escHtml(converted.error)}`, forumThreadId);
+            return new Response('OK', { status: 200, headers: corsHeaders });
+          }
+          valid = validateDocumentText(docScope, filename, converted.markdown);
+        } else {
+          valid = validateDocumentInput({ scope: docScope, filename, content: await fileRes.text() });
+        }
         if (valid.error) {
           await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} ${escHtml(valid.error)}`, forumThreadId);
           return new Response('OK', { status: 200, headers: corsHeaders });
