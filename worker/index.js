@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.45',
+          version: '1.0.53',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -368,7 +368,9 @@ export default {
       if (pathname === '/api/ai/steroid') {
         if (request.method === 'GET') {
           const enabled = await getSteroidMode(env);
-          return Response.json({ success: true, steroid: enabled }, { headers: corsHeaders });
+          return Response.json({ success: true, steroid: enabled, caps: enabled
+            ? { retrieval_limit: null, rag_slice: null, enrich_concurrency: 4, enrich_throttle_ms: 0 }
+            : { retrieval_limit: 300, rag_slice: 8, enrich_concurrency: 1, enrich_throttle_ms: 900 } }, { headers: corsHeaders });
         }
         if (!(await isInstanceOwnerUserAsync(user, env))) {
           return deny(corsHeaders, 'Steroid mode is GOD only', 'GOD_ONLY');
@@ -395,6 +397,69 @@ export default {
         const free = await isFreeTierModel(model, baseUrl, env, body.apiKey || body.api_key || '');
         const limits = providerLimitInfo(baseUrl, model, free);
         return Response.json({ success: true, free, model, baseUrl, limits, provider: detectProviderForModel(model, baseUrl) }, { headers: corsHeaders });
+      }
+
+      // Model catalog for the settings picker: GOD-only, works against the
+      // saved instance config or a candidate base+key pair being tested
+      // before saving. Lists every model the endpoint exposes with free/paid
+      // classification (OpenRouter pricing included).
+      if (pathname === '/api/ai/models' && request.method === 'GET') {
+        if (!user) {
+          return Response.json({ success: false, error: 'Login required', code: 'AUTH_REQUIRED' }, { status: 401, headers: corsHeaders });
+        }
+        if (!(await isInstanceOwnerUserAsync(user, env))) {
+          return deny(corsHeaders, 'Model catalog is GOD rank only', 'GOD_ONLY');
+        }
+        const qBase = String(url.searchParams.get('base') || '').trim();
+        const qKey = String(url.searchParams.get('key') || '').trim();
+        const inst = await getInstanceAiConfig(env);
+        // Testing an unsaved endpoint requires the paired set — mixing a
+        // caller's base with the stored key would ship the secret elsewhere.
+        if ((qBase || qKey) && !(qBase && qKey)) {
+          return deny(corsHeaders, 'Provide both base and key to test an unsaved endpoint', 'MODELS_OVERRIDE_INCOMPLETE');
+        }
+        const baseUrl = cleanApiBase(qBase || inst?.base_url || '');
+        const apiKey = (qKey || inst?.api_key || '').trim();
+        if (!baseUrl) return Response.json({ success: false, error: 'No base URL configured' }, { status: 400, headers: corsHeaders });
+        const cacheKey = `models:${baseUrl}`;
+        const cached = AI_MODEL_LIST_CACHE.get(cacheKey);
+        if (cached && cached.expires > Date.now()) {
+          return Response.json({ success: true, baseUrl, models: cached.list, cached: true }, { headers: corsHeaders });
+        }
+        const raw = await fetchModelList(baseUrl, env, apiKey) || [];
+        const models = raw.map((e) => {
+          const id = String(e.id || e.model || '').trim();
+          if (!id) return null;
+          const p = e.pricing || e.cost || {};
+          // providers use either pair: openai-style prompt/completion or
+          // models.dev-style input/output ($/1M tokens)
+          const inPrice = p.prompt != null ? Number(p.prompt) : (p.input != null ? Number(p.input) : null);
+          const outPrice = p.completion != null ? Number(p.completion) : (p.output != null ? Number(p.output) : null);
+          const pricing = { prompt: inPrice, completion: outPrice };
+          return {
+            id,
+            name: String(e.name || id),
+            free: isModelFreeEntry(e),
+            context_length: Number(e.context_length || e.top_provider?.context_length || e.limit?.context || 0) || null,
+            ...(pricing.prompt != null || pricing.completion != null ? { pricing } : {}),
+          };
+        }).filter(Boolean).sort((a, b) => (a.free === b.free ? a.id.localeCompare(b.id) : (a.free ? -1 : 1)));
+        if (models.length) AI_MODEL_LIST_CACHE.set(cacheKey, { list: models, expires: Date.now() + 5 * 60_000 });
+        return Response.json({ success: true, baseUrl, models, provider: detectProviderForModel('', baseUrl) }, { headers: corsHeaders });
+      }
+
+      // Recent upstream AI failures (in-memory ring buffer, newest first).
+      if (pathname === '/api/ai/errors') {
+        if (!(await isInstanceOwnerUserAsync(user, env))) {
+          return deny(corsHeaders, 'AI error log is GOD rank only', 'GOD_ONLY');
+        }
+        if (request.method === 'GET') {
+          return Response.json({ success: true, errors: AI_ERROR_LOG }, { headers: corsHeaders });
+        }
+        if (request.method === 'DELETE') {
+          AI_ERROR_LOG.length = 0;
+          return Response.json({ success: true, cleared: true }, { headers: corsHeaders });
+        }
       }
 
       // Storage backend — readable by all ranks, writable by GOD only
@@ -2618,6 +2683,27 @@ async function verifyTelegramBotToken(token, expectedUsername) {
   };
 }
 
+// Command menu registered with setMyCommands — what users see in Telegram's
+// "/" autocomplete. Staff-only commands stay out of everyone's menu on
+// purpose; /help lists them per rank.
+const TELEGRAM_COMMAND_MENU = [
+  { command: 'start', description: 'Welcome / status' },
+  { command: 'help', description: 'Help menu' },
+  { command: 'search', description: 'Search the active brain' },
+  { command: 'ai', description: 'Ask AI over your brain' },
+  { command: 'personal', description: 'Dump → personal brain (GOD)' },
+  { command: 'community', description: 'Dump → community brain' },
+  { command: 'mode', description: 'Show / switch dump mode' },
+  { command: 'id', description: 'Chat / user / topic ids' },
+  { command: 'rank', description: 'Your ranks' },
+  { command: 'community_join', description: 'Join a community' },
+  { command: 'community_list', description: 'Your communities' },
+  { command: 'edit', description: 'Edit title/notes of a link' },
+  { command: 'delete', description: 'Delete a saved link' },
+  { command: 'dumpall', description: 'Multi-link posts: save all' },
+  { command: 'dumpsmart', description: 'Multi-link: primary only' },
+];
+
 async function ensureTelegramWebhook(token, workerOrigin, env) {
   const hook = `${workerOrigin.replace(/\/$/, '')}/api/telegram-webhook`;
   const payload = {
@@ -2627,6 +2713,13 @@ async function ensureTelegramWebhook(token, workerOrigin, env) {
   const secret = env ? await webhookSecret(env) : null;
   if (secret) payload.secret_token = secret;
   const data = await telegramApi(token, 'setWebhook', payload);
+  // Register the command menu so "/" autocomplete works in Telegram's UI.
+  // Fire-and-forget: a failure here never breaks the webhook itself.
+  if (data.ok) {
+    try {
+      await telegramApi(token, 'setMyCommands', { commands: TELEGRAM_COMMAND_MENU });
+    } catch (_) {}
+  }
   return { ok: !!data.ok, description: data.description || '', url: hook, signed: !!secret, raw: data };
 }
 
@@ -3183,13 +3276,57 @@ function rankLinks(rows, query, limit = null) {
   return takeResults(scored.map(s => s.r), limit);
 }
 
-const DOCUMENT_MAX_BYTES = 512 * 1024;
+const DOCUMENT_MAX_BYTES = 5 * 1024 * 1024;
 const DOCUMENT_EXTENSIONS = new Set([
   'md', 'markdown', 'txt', 'py', 'js', 'ts', 'jsx', 'tsx', 'sh', 'bash', 'zsh', 'fish',
   'css', 'html', 'htm', 'json', 'yaml', 'yml', 'toml', 'xml', 'csv', 'sql', 'go', 'rs',
   'java', 'c', 'h', 'cpp', 'hpp', 'cs', 'rb', 'php', 'swift', 'kt', 'kts', 'lua', 'r',
   'dart', 'vue', 'svelte', 'ini', 'cfg', 'conf', 'env', 'log',
 ]);
+// Binary formats anydoc converts to Markdown before ingestion. The native
+// bindings need the libuv thread pool, so conversion runs on the self-host
+// Node runtime only; the Cloudflare Worker path gets a clear error instead.
+const CONVERTIBLE_EXTENSIONS = new Set([
+  'pdf', 'doc', 'docx', 'docm', 'ppt', 'pps', 'pot', 'pptx', 'pptm', 'ppsx', 'ppsm',
+  'xls', 'xlsx', 'xlsm', 'xlsb', 'odt', 'ods', 'odp', 'rtf', 'epub',
+]);
+const CONVERT_SOURCE_MAX_BYTES = 20 * 1024 * 1024;
+
+const ANYDOC_ERROR_MESSAGES = {
+  unsupported: 'format not recognized, or an image-only/scanned PDF without a text layer',
+  malformed: 'file is structurally unusable — no content could be extracted',
+  encrypted: 'file is encrypted or password-protected',
+  resourceLimit: 'file crossed a conversion safety limit (decompression, nesting, node count)',
+  missingPart: 'a part required for meaningful output is absent',
+  io: 'file could not be read',
+};
+
+let anydocModule = null;
+async function convertDocumentToMarkdown(env, ext, base64) {
+  if (!isSelfHosted(env)) {
+    return { error: 'Binary formats (pdf, docx, xlsx, …) need the self-hosted server — the Cloudflare Worker cannot run the converter' };
+  }
+  let bytes;
+  try {
+    const bin = atob(base64);
+    bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  } catch (_) {
+    return { error: 'content_base64 is not valid base64' };
+  }
+  if (bytes.length > CONVERT_SOURCE_MAX_BYTES) return { error: 'Document exceeds 20 MiB before conversion' };
+  try {
+    // Non-literal specifier so bundlers never try to resolve the native module.
+    const spec = '@firecrawl/anydoc';
+    anydocModule ||= await import(spec);
+    const markdown = await anydocModule.toMarkdownBytes(bytes, ext);
+    if (!markdown || !markdown.trim()) return { error: 'No text content found in document' };
+    return { markdown };
+  } catch (err) {
+    const reason = ANYDOC_ERROR_MESSAGES[err && err.code];
+    return { error: reason ? `Conversion failed: ${reason}` : `Conversion failed: ${(err && err.message) || 'unknown error'}` };
+  }
+}
 
 async function ensureDocumentsTable(env) {
   await env.DB.prepare(
@@ -3205,13 +3342,30 @@ async function ensureDocumentsTable(env) {
 
 export async function ensureChunksTable(env) {
   await env.DB.prepare('CREATE EXTENSION IF NOT EXISTS vector').run().catch(() => {});
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS document_chunks (
-      id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, scope TEXT NOT NULL, scope_key TEXT NOT NULL,
-      chunk_idx INTEGER NOT NULL, page INTEGER, para_idx INTEGER, content TEXT NOT NULL,
-      token_count INTEGER, embedding VECTOR(1536), tsv TSVECTOR, created_at BIGINT NOT NULL
-    )`
-  ).run();
+  try {
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS document_chunks (
+        id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, scope TEXT NOT NULL, scope_key TEXT NOT NULL,
+        chunk_idx INTEGER NOT NULL, page INTEGER, para_idx INTEGER, content TEXT NOT NULL,
+        token_count INTEGER, embedding VECTOR(1536), tsv TSVECTOR, created_at BIGINT NOT NULL
+      )`
+    ).run();
+  } catch (e) {
+    const msg = String(e.message || '');
+    if (/vector/i.test(msg) || /type "vector" does not exist/i.test(msg)) {
+      await env.DB.prepare(
+        `CREATE TABLE IF NOT EXISTS document_chunks (
+          id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, scope TEXT NOT NULL, scope_key TEXT NOT NULL,
+          chunk_idx INTEGER NOT NULL, page INTEGER, para_idx INTEGER, content TEXT NOT NULL,
+          token_count INTEGER, embedding TEXT, tsv TSVECTOR, created_at BIGINT NOT NULL
+        )`
+      ).run().catch(() => {});
+      await env.DB.prepare('ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS embedding TEXT').run().catch(() => {});
+      await env.DB.prepare('ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS tsv TSVECTOR').run().catch(() => {});
+    } else {
+      throw e;
+    }
+  }
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_doc ON document_chunks(doc_id, chunk_idx)').run().catch(() => {});
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_scope ON document_chunks(scope, scope_key, para_idx)').run().catch(() => {});
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON document_chunks USING ivfflat (embedding vector_l2_ops)').run().catch(() => {});
@@ -3222,6 +3376,17 @@ function documentFolder(scope, key) {
   return scope === 'personal' ? `documents/personal/${key}` : `documents/communities/${key}`;
 }
 
+function validateDocumentText(scope, filename, content) {
+  if (typeof content !== 'string') return { error: 'content must be UTF-8 text' };
+  const encoded = new TextEncoder().encode(content);
+  if (/\x00/.test(content) || new TextDecoder().decode(encoded) !== content) return { error: 'content must be valid UTF-8 text' };
+  const bytes = encoded.length;
+  if (bytes > DOCUMENT_MAX_BYTES) return { error: 'Document exceeds 512 KiB' };
+  const controls = (content.match(/[\x01-\x08\x0B\x0C\x0E-\x1F\x7F]/g) || []).length;
+  if (controls / Math.max(content.length, 1) > 0.01) return { error: 'Binary or control-heavy content is not allowed' };
+  return { scope, filename, content, bytes };
+}
+
 function validateDocumentInput(body) {
   const scope = String(body.scope || '').toLowerCase();
   const filename = String(body.filename || '').normalize('NFC').trim();
@@ -3230,16 +3395,14 @@ function validateDocumentInput(body) {
     return { error: 'Invalid filename' };
   }
   const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+  if (CONVERTIBLE_EXTENSIONS.has(ext)) {
+    if (typeof body.content_base64 !== 'string' || !body.content_base64) {
+      return { error: 'content_base64 (raw file bytes) required for this format' };
+    }
+    return { scope, filename, ext, convertible: true, contentBase64: body.content_base64 };
+  }
   if (!DOCUMENT_EXTENSIONS.has(ext)) return { error: 'File extension is not allowed' };
-  if (typeof body.content !== 'string') return { error: 'content must be UTF-8 text' };
-  const content = body.content;
-  const encoded = new TextEncoder().encode(content);
-  if (/\x00/.test(content) || new TextDecoder().decode(encoded) !== content) return { error: 'content must be valid UTF-8 text' };
-  const bytes = encoded.length;
-  if (bytes > DOCUMENT_MAX_BYTES) return { error: 'Document exceeds 512 KiB' };
-  const controls = (content.match(/[\x01-\x08\x0B\x0C\x0E-\x1F\x7F]/g) || []).length;
-  if (controls / Math.max(content.length, 1) > 0.01) return { error: 'Binary or control-heavy content is not allowed' };
-  return { scope, filename, content, bytes };
+  return validateDocumentText(scope, filename, body.content);
 }
 
 function documentAsLink(row) {
@@ -3284,8 +3447,14 @@ async function handleGetDocuments(url, user, env, corsHeaders) {
 async function handlePostDocument(request, user, env, corsHeaders) {
   const body = await request.json().catch(() => null);
   if (!body) return Response.json({ success: false, error: 'Invalid JSON' }, { status: 400, headers: corsHeaders });
-  const doc = validateDocumentInput(body);
+  let doc = validateDocumentInput(body);
   if (doc.error) return Response.json({ success: false, error: doc.error }, { status: 400, headers: corsHeaders });
+  if (doc.convertible) {
+    const converted = await convertDocumentToMarkdown(env, doc.ext, doc.contentBase64);
+    if (converted.error) return Response.json({ success: false, error: converted.error }, { status: 400, headers: corsHeaders });
+    doc = validateDocumentText(doc.scope, doc.filename, converted.markdown);
+    if (doc.error) return Response.json({ success: false, error: `${doc.error} (after conversion to Markdown)` }, { status: 400, headers: corsHeaders });
+  }
   const communityId = doc.scope === 'community' ? String(body.community_id || '') : null;
   const gate = await documentScopeGate(doc.scope, communityId, user, env, corsHeaders);
   if (gate) return gate;
@@ -4386,6 +4555,134 @@ function normalizeModelId(model, baseUrl) {
 /** Time-to-first-byte budget for the upstream model call; a cold model is slow. */
 const AI_PROXY_TIMEOUT_MS = 30_000;
 
+// Recent upstream AI failures, newest first. In-memory: a restart clears it,
+// which matches its purpose — "what just broke" for the GOD settings panel.
+const AI_ERROR_LOG = [];
+const AI_ERROR_LOG_MAX = 50;
+// Provider model catalogs served to the settings picker, 5 min per base.
+const AI_MODEL_LIST_CACHE = new Map();
+function recordAiError({ provider, model, status, endpoint, message, source }) {
+  try {
+    AI_ERROR_LOG.unshift({
+      time: Date.now(),
+      provider: String(provider || detectProviderForModel(model, endpoint) || 'unknown'),
+      model: String(model || ''),
+      status: status == null ? null : Number(status),
+      endpoint: String(endpoint || ''),
+      message: String(message || '').slice(0, 300),
+      source: String(source || 'proxy'),
+    });
+    if (AI_ERROR_LOG.length > AI_ERROR_LOG_MAX) AI_ERROR_LOG.length = AI_ERROR_LOG_MAX;
+  } catch (_) {}
+}
+
+/**
+ * One shared non-streaming chat call for every AI consumer (bot /ai,
+ * enrichment helpers): SSRF-checked endpoint, model fallback chain,
+ * Retry-After honored, errors normalized AND recorded in the error log.
+ * Returns { content, model, endpoint }. Throws an Error carrying
+ * .status/.endpoint/.model on failure.
+ */
+async function callAiChatShared(env, { baseUrl, apiKey, mode, model, system, user: userMsg, maxTokens = 3000, temperature = 0.2, source = 'bot' }) {
+  const base = cleanApiBase(baseUrl || '');
+  const key = String(apiKey || '').trim();
+  const m = normalizeModelId(model, base);
+  const aiMode = (mode || 'openai').toLowerCase();
+  if (!base || !key || !m) {
+    const e = new Error('AI credentials incomplete');
+    e.status = 400;
+    throw e;
+  }
+  let endpoint;
+  try {
+    const u = new URL(base.startsWith('http') ? base : `https://${base}`);
+    if (u.protocol !== 'https:') throw new Error('Only HTTPS API bases allowed');
+    if (!(await isSafeExternalUrl(u, env))) throw new Error('API base must be a public HTTPS host');
+    endpoint = resolveChatEndpoint(base, aiMode, m);
+    if (!endpoint) throw new Error('Could not resolve chat endpoint');
+    const ep = new URL(endpoint);
+    if (ep.protocol !== 'https:' || !(await isSafeExternalUrl(ep, env))) throw new Error('API base must be a public HTTPS host');
+  } catch (err) {
+    recordAiError({ model: m, endpoint: base, message: err?.message || String(err), source });
+    const e = new Error(err?.message || 'Invalid AI base URL');
+    e.status = 400;
+    throw e;
+  }
+
+  const tryModels = [m, ...(await getFallbackChain(base, env, key, m))];
+  let lastErr = null;
+  for (let mi = 0; mi < tryModels.length; mi++) {
+    const curModel = tryModels[mi];
+    const curEndpoint = resolveChatEndpoint(base, aiMode, curModel);
+    try {
+      let res;
+      if (aiMode === 'anthropic') {
+        res = await fetchWithTimeout(curEndpoint, {
+          method: 'POST', env, redirect: 'error',
+          headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+          body: JSON.stringify({ model: curModel, max_tokens: maxTokens, system: system || undefined, messages: [{ role: 'user', content: userMsg }] })
+        }, AI_PROXY_TIMEOUT_MS);
+      } else if (curEndpoint.endsWith('/responses')) {
+        res = await fetchWithTimeout(curEndpoint, {
+          method: 'POST', env, redirect: 'error',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+          body: JSON.stringify({ model: curModel, input: system ? `${system}\n\n${userMsg}` : userMsg })
+        }, AI_PROXY_TIMEOUT_MS);
+      } else {
+        res = await fetchWithTimeout(curEndpoint, {
+          method: 'POST', env, redirect: 'error',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+          body: JSON.stringify({ model: curModel, messages: [{ role: 'system', content: system || '' }, { role: 'user', content: userMsg }], temperature, max_tokens: maxTokens })
+        }, AI_PROXY_TIMEOUT_MS);
+      }
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        const retryable = res.status === 429 || res.status === 503 || res.status === 401 || res.status === 402;
+        const retryAfter = parseInt(res.headers.get('retry-after') || res.headers.get('Retry-After') || '0', 10);
+        if (retryable && mi < tryModels.length - 1) {
+          const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 400 * (mi + 1);
+          await new Promise((r) => setTimeout(r, Math.min(waitMs, 15_000)));
+          continue;
+        }
+        let data = {};
+        try { data = JSON.parse(text); } catch (_) { data = { raw: text.slice(0, 300) }; }
+        const msg = data.error?.message || data.message || (typeof data.error === 'string' ? data.error : null) || (/^\s*</.test(text) ? `Provider returned HTML (HTTP ${res.status}) — check base URL` : text.slice(0, 200) || res.statusText);
+        recordAiError({ model: curModel, status: res.status, endpoint: curEndpoint, message: msg, source });
+        const e = new Error(msg);
+        e.status = res.status; e.endpoint = curEndpoint; e.model = curModel;
+        throw e;
+      }
+      const data = await res.json().catch(() => ({}));
+      let content = '';
+      if (aiMode === 'anthropic') {
+        content = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+      } else if (curEndpoint.endsWith('/responses')) {
+        content = data.output_text || (Array.isArray(data.output) ? data.output.map((o) => Array.isArray(o.content) ? o.content.map((c) => c.text || '').join('') : '').join('\n') : '') || data.choices?.[0]?.message?.content || '';
+      } else {
+        content = data.choices?.[0]?.message?.content || '';
+      }
+      if (!content) {
+        recordAiError({ model: curModel, status: 200, endpoint: curEndpoint, message: 'Empty response from model', source });
+        const e = new Error('Empty response from model');
+        e.status = 502; e.endpoint = curEndpoint; e.model = curModel;
+        throw e;
+      }
+      return { content, model: curModel, endpoint: curEndpoint };
+    } catch (err) {
+      if (err?.status) throw err; // already normalized + recorded above
+      lastErr = err;
+      if (mi < tryModels.length - 1) { await new Promise((r) => setTimeout(r, 300 * (mi + 1))); continue; }
+      recordAiError({ model: curModel, endpoint: curEndpoint, message: err?.message || String(err), source });
+      const e = new Error(err?.message || 'All AI models failed');
+      e.status = 502; e.endpoint = curEndpoint; e.model = curModel;
+      throw e;
+    }
+  }
+  const e = new Error(lastErr?.message || 'All AI models failed');
+  e.status = 502;
+  throw e;
+}
+
 async function handleAiChatProxy(request, user, env, corsHeaders) {
   if (!user) {
     return Response.json({ success: false, error: 'Login required', code: 'AUTH_REQUIRED' }, { status: 401, headers: corsHeaders });
@@ -4459,13 +4756,23 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
   }
 
   try {
-  // hermes-like fallback: try primary then live free models on 429/503/401
+  // hermes-like fallback: try primary then live free models on 429/503/401/402
   const tryModels = [model, ...(await getFallbackChain(baseUrl, env, apiKey, model))];
   let upstreamRes = null;
   let usedModel = model;
   let lastErrText = '';
+  let upstreamIsPlainJson = false;
   for (let mi=0; mi<tryModels.length; mi++) {
     const curModel = tryModels[mi];
+    // The Telegram bot path (/ai) sends plain JSON and is the proven transport
+    // for every supported provider; streaming is a website nicety. When the
+    // streamed attempt fails fast — provider refuses stream:true, or an
+    // SSE-hostile reverse proxy in front of the server — retry the same model
+    // without stream and synthesize SSE from the JSON answer below. Timeouts
+    // are not retried: a second 30s wait helps nobody.
+    const streamAttempts = wantStream ? [true, false] : [false];
+    for (let ai=0; ai<streamAttempts.length; ai++) {
+      const doStream = streamAttempts[ai];
     try {
       const maxTok = Math.min(parseInt(body.max_tokens, 10) || 500, 8192);
       let curRes;
@@ -4489,7 +4796,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
             max_tokens: maxTok,
             system: system || undefined,
             messages: messages || [{ role: 'user', content: userMsg }],
-            stream: true
+            ...(doStream ? { stream: true } : {})
           })
         }, AI_PROXY_TIMEOUT_MS);
       } else if (endpoint.endsWith('/responses')) {
@@ -4527,7 +4834,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
             messages: msgs,
             temperature: body.temperature ?? 0.2,
             max_tokens: maxTok,
-            stream: true
+            ...(doStream ? { stream: true } : {})
           })
         }, AI_PROXY_TIMEOUT_MS);
       }
@@ -4537,10 +4844,16 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
         const isRetryable = curRes.status===429 || curRes.status===503 || curRes.status===401 || curRes.status===402;
         const retryAfter = parseInt(curRes.headers.get('retry-after')||curRes.headers.get('Retry-After')||'0',10);
         const waitMs = Number.isFinite(retryAfter) && retryAfter>0 ? retryAfter*1000 : 400*(mi+1);
+        // A streamed attempt the provider refused earns one plain-JSON retry
+        // on the same model before burning a fallback-model slot.
+        if (doStream && ai < streamAttempts.length-1) {
+          lastErrText = `stream refused (HTTP ${curRes.status})`;
+          continue;
+        }
         if (isRetryable && mi < tryModels.length-1) {
           console.warn(`AI chat fallback ${curModel} ${curRes.status} retryAfter ${retryAfter}s -> next`);
           await new Promise(r=>setTimeout(r, waitMs));
-          continue;
+          break;
         }
         let data = {};
         try { data = JSON.parse(text); } catch (_) { data = { raw: text.slice(0, 500) }; }
@@ -4558,6 +4871,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
           }
         }
         // non-retryable or last try -> return error
+        recordAiError({ model: curModel, status: curRes.status, endpoint, message: msg, source: 'proxy' });
         return Response.json({
           success: false,
           error: msg,
@@ -4569,15 +4883,51 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
       // success -> keep this response for streaming
       upstreamRes = curRes;
       usedModel = curModel;
+      upstreamIsPlainJson = !doStream;
       break;
     } catch (e) {
       lastErrText = e?.message || String(e);
-      if (mi < tryModels.length-1) { await new Promise(r=>setTimeout(r, 300*(mi+1))); continue; }
+      const timedOut = e?.name === 'AbortError';
+      if (!timedOut && doStream && ai < streamAttempts.length-1) { continue; }
+      if (mi < tryModels.length-1) { await new Promise(r=>setTimeout(r, 300*(mi+1))); break; }
       throw e;
     }
+    }
+    if (upstreamRes) break;
   }
   if (!upstreamRes || !upstreamRes.ok) {
     return Response.json({ success: false, error: lastErrText || 'All AI models failed', model: usedModel, endpoint }, { status: 502, headers: corsHeaders });
+  }
+
+  // A streaming client whose request had to fall back to plain JSON (the bot's
+  // proven transport, or a provider that ignored stream:true) still gets SSE:
+  // synthesize the stream from the JSON answer.
+  if (wantStream && !endpoint.endsWith('/responses') &&
+      (upstreamIsPlainJson || (upstreamRes.headers.get('content-type') || '').includes('application/json'))) {
+    const data = await upstreamRes.json().catch(() => ({}));
+    let jsonContent = '';
+    let jsonThinking = '';
+    if (mode === 'anthropic') {
+      jsonContent = (data.content || []).filter(b => b.type === 'text').map(b => b.text || '').join('\n');
+    } else {
+      const m0 = data.choices?.[0]?.message || {};
+      jsonContent = m0.content || data.choices?.[0]?.text || '';
+      jsonThinking = m0.reasoning_content || '';
+    }
+    const encoder = new TextEncoder();
+    const events = [];
+    if (jsonThinking) events.push({ thinking: jsonThinking });
+    const chunk = 40;
+    for (let i = 0; i < jsonContent.length; i += chunk) {
+      events.push({ delta: jsonContent.slice(i, i + chunk) });
+    }
+    return new Response(new ReadableStream({
+      start(controller) {
+        for (const ev of events) controller.enqueue(encoder.encode(`data: ${JSON.stringify(ev)}\n\n`));
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        controller.close();
+      }
+    }), { headers: { ...corsHeaders, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' } });
   }
 
       if (endpoint.endsWith('/responses')) {
@@ -6272,8 +6622,10 @@ function helpMenuKeyboard() {
   return {
     inline_keyboard: [[
       { text: '🌐 Global', callback_data: 'help:global' },
-      { text: '👤 Personal', callback_data: 'help:personal' },
-      { text: '👥 Community', callback_data: 'help:community' }
+      { text: '👤 Personal', callback_data: 'help:personal' }
+    ], [
+      { text: '👥 Community', callback_data: 'help:community' },
+      { text: '📡 Channels', callback_data: 'help:channels' }
     ]]
   };
 }
@@ -6284,8 +6636,10 @@ function helpBackKeyboard() {
       { text: '« Help menu', callback_data: 'help:menu' }
     ], [
       { text: '🌐 Global', callback_data: 'help:global' },
-      { text: '👤 Personal', callback_data: 'help:personal' },
-      { text: '👥 Community', callback_data: 'help:community' }
+      { text: '👤 Personal', callback_data: 'help:personal' }
+    ], [
+      { text: '👥 Community', callback_data: 'help:community' },
+      { text: '📡 Channels', callback_data: 'help:channels' }
     ]]
   };
 }
@@ -6293,114 +6647,158 @@ function helpBackKeyboard() {
 function helpTextForSection(section) {
   if (section === 'global') {
     return [
-      '🌐 Global',
+      `${boldHtml('🌐 Global')} ${italicHtml('— quick start & ranks')}`,
       '',
-      '/start — welcome / status',
-      '/help — this menu',
-      '/id — chat id · your user id · topic id',
-      '/rank — your ranks across communities (incl. banned)',
+      `${boldHtml('Commands')}`,
+      `${codeHtml('/start')} — welcome & status`,
+      `${codeHtml('/help')} — this menu`,
+      `${codeHtml('/id')} — chat id · your user id · topic id`,
+      `${codeHtml('/rank')} — your ranks across communities ${italicHtml('(incl. banned)')}`,
       '',
-      'Ranks',
-      'GOD — instance host (TG_OWNER_IDS): personal, bot settings, AI credentials',
-      'owner — community creator (/community_verify)',
-      'admin — promoted with /admin',
-      'member — after login + join TG group + /community_join',
-      'banned — left/kicked from that community\'s TG group (other communities OK)',
+      `${boldHtml('Ranks')}`,
+      `• ${boldHtml('GOD')} — instance host ${codeHtml('TG_OWNER_IDS')} — personal, bot settings, AI credentials`,
+      `• ${boldHtml('owner')} — community creator ${codeHtml('/community_verify')}`,
+      `• ${boldHtml('admin')} — promoted with ${codeHtml('/admin')}`,
+      `• ${boldHtml('member')} — ${italicHtml('login + join TG group +')} ${codeHtml('/community_join')}`,
+      `• ${boldHtml('banned')} — left/kicked from that community's TG group ${italicHtml('(other communities OK)')}`,
       '',
-      'Tip: open a forum topic and /id shows topic id for /topic.'
+      `${italicHtml('Tip:')} open a forum topic and ${codeHtml('/id')} shows ${codeHtml('topic id')} for ${codeHtml('/topic')}.`,
     ].join('\n');
   }
   if (section === 'personal') {
     return [
-      '👤 Personal (GOD rank only)',
+      `${boldHtml('👤 Personal')} ${italicHtml('(GOD rank only)')}`,
       '',
-      'Mode (dual dump target)',
-      '/personal — dump → your personal brain',
-      '/community — dump → community brain (DM or group)',
-      '/mode — show current dump mode',
-      '/mode personal | community — switch',
+      `${boldHtml('Mode')} ${italicHtml('— dual dump target')}`,
+      `${codeHtml('/personal')} — dump → ${boldHtml('your personal brain')}`,
+      `${codeHtml('/community')} — dump → ${boldHtml('community brain')} ${italicHtml('(DM or group)')}`,
+      `${codeHtml('/mode')} — show current dump mode`,
+      `${codeHtml('/mode personal | community')} — switch`,
       '',
-      'In bot DM after /community: paste URLs → community DB',
-      'In bot DM after /personal: paste URLs → personal DB',
+      `${italicHtml('In bot DM after')} ${codeHtml('/community')}: ${italicHtml('paste URLs → community DB')}`,
+      `${italicHtml('In bot DM after')} ${codeHtml('/personal')}: ${italicHtml('paste URLs → personal DB')}`,
       '',
-      'Links',
-      'Paste a URL (or forward) in the active mode',
-      '/search <query> — search active brain',
-      '/ai <question> — AI over brain (all ranks community; personal GOD-only)',
-      '/delete <url> — delete (or add if missing); or reply /delete',
-      '/edit <url or title words> | notes: New description',
-      '/edit <url> | title: New Title | notes: New notes',
-      'Reply to a saved link: /edit | title: New Title',
+      `${boldHtml('Links')}`,
+      `• Paste a URL ${italicHtml('(or forward)')} in the active mode`,
+      `• ${codeHtml('/search <query>')} — search active brain`,
+      `• ${codeHtml('/ai <question>')} — AI over brain ${italicHtml('(all ranks community; personal GOD-only)')}`,
+      `• ${codeHtml('/delete <url>')} — delete ${italicHtml('(or add if missing)')} — or reply ${codeHtml('/delete')}`,
+      `• ${codeHtml('/edit <url or title words> | notes: New description')}`,
+      `• ${codeHtml('/edit <url> | title: New Title | notes: New notes')}`,
+      `• ${italicHtml('Reply to a saved link:')} ${codeHtml('/edit | title: New Title')}`,
       '',
-      'Multi-link posts',
-      '/dumpall on — save every URL',
-      '/dumpall off — SMART primary only (default)',
-      '/dumpall — show multi-link mode',
-      '/dumpsmart — same as /dumpall off',
+      `${boldHtml('Multi-link posts')}`,
+      `• ${codeHtml('/dumpall on')} — save every URL`,
+      `• ${codeHtml('/dumpall off')} — ${boldHtml('SMART primary only')} ${italicHtml('(default)')}`,
+      `• ${codeHtml('/dumpall')} — show multi-link mode`,
+      `• ${codeHtml('/dumpsmart')} — same as ${codeHtml('/dumpall off')}`,
       '',
-      '/clear_personal_db — wipe your personal links (GOD)',
+      `${codeHtml('/clear_personal_db')} — wipe your personal links ${italicHtml('(GOD)')}`,
       '',
-      'Setup: website Settings → Bot (GOD: token + DM /id).'
+      `${italicHtml('Setup:')} website ${boldHtml('Settings → Bot')} ${italicHtml('(GOD: token + DM')} ${codeHtml('/id')}${italicHtml(')')}.`,
     ].join('\n');
   }
   if (section === 'community') {
     return [
-      '👥 Community',
+      `${boldHtml('👥 Community')}`,
       '',
-      'Setup',
-      '/community_verify — link this group (creates community; you = owner)',
-      '/community — switch dump → community brain',
-      '/personal — switch dump → personal brain (GOD)',
-      '/mode — show dump mode · /mode personal|community',
+      `${boldHtml('Setup')}`,
+      `• ${codeHtml('/community_verify')} — link this group ${italicHtml('(creates community; you = owner)')}`,
+      `• ${codeHtml('/community')} — switch dump → ${boldHtml('community brain')}`,
+      `• ${codeHtml('/personal')} — switch dump → ${boldHtml('personal brain')} ${italicHtml('(GOD)')}`,
+      `• ${codeHtml('/mode')} — show dump mode · ${codeHtml('/mode personal|community')}`,
       '',
-      'Members (login + in TG group + join)',
-      '1) Join the Telegram group',
-      '2) Login on website (same Telegram)',
-      '3) /community_join <id>',
-      'Paste URL in group/topic to dump',
-      '/community_list — name | id',
-      '/community_list <id|name> — details',
-      '/search <query> · /ai <question> · /rank',
-      'Leave/kick/ban from group → site+bot access revoked until rejoin + /community_join',
+      `${boldHtml('Members')} ${italicHtml('(login + in TG group + join)')}`,
+      `  ${codeHtml('1)')} Join the Telegram group`,
+      `  ${codeHtml('2)')} Login on website ${italicHtml('(same Telegram)')}`,
+      `  ${codeHtml('3)')} ${codeHtml('/community_join <id>')}`,
+      `• Paste URL in group/topic to dump`,
+      `• ${codeHtml('/community_list')} — name | id`,
+      `• ${codeHtml('/community_list <id|name>')} — details`,
+      `• ${codeHtml('/search <query>')} · ${codeHtml('/ai <question>')} · ${codeHtml('/rank')}`,
+      `${italicHtml('Leave/kick/ban from group → site+bot access revoked until rejoin +')} ${codeHtml('/community_join')}`,
       '',
-      'Admin + owner',
-      '/delete <url> · reply /delete — remove link (staff)',
-      '/edit <url|title> | notes: … — edit link',
-      '  Reply: /edit | title: … or notes: …',
-      '/topic <id> — lock bot to that forum topic only',
-      '/topic off — whole group · /topic — show lock',
-      '/topic here — lock to current topic',
-      '/dumpall on|off · /dumpsmart — multi-link mode',
-      '/kick <@user|id> — remove community access (can rejoin); reply /kick',
-      '/clear <@user|id> — same as /kick',
-      '  Admin: members only · Owner/GOD: members+admins',
+      `${boldHtml('Admin + owner')}`,
+      `• ${codeHtml('/delete <url>')} · reply ${codeHtml('/delete')} — remove link ${italicHtml('(staff)')}`,
+      `• ${codeHtml('/edit <url|title> | notes: …')} — edit link`,
+      `  ${italicHtml('Reply:')} ${codeHtml('/edit | title: … or notes: …')}`,
+      `• ${codeHtml('/topic <id>')} — lock bot to that forum topic only`,
+      `• ${codeHtml('/topic off')} — whole group · ${codeHtml('/topic')} — show lock`,
+      `• ${codeHtml('/topic here')} — lock to current topic`,
+      `• ${codeHtml('/dumpall on|off')} · ${codeHtml('/dumpsmart')} — multi-link mode`,
+      `• ${codeHtml('/kick <@user|id>')} — remove community access ${italicHtml('(can rejoin)')} — reply ${codeHtml('/kick')}`,
+      `• ${codeHtml('/clear <@user|id>')} — same as ${codeHtml('/kick')}`,
+      `  ${italicHtml('Admin: members only · Owner/GOD: members+admins')}`,
       '',
-      'Owner only',
-      '/admin — reply to user → promote admin',
-      '/demote — reply or /demote <@user|id> → member',
-      '/clear_db <id> — wipe community links only (keep community)',
-      '/community_delete <id> — wipe community + all data',
-      '  then reply YES_DELETE_<token> to confirm',
+      `${boldHtml('Owner only')}`,
+      `• ${codeHtml('/admin')} — reply to user → promote admin`,
+      `• ${codeHtml('/demote')} — reply or ${codeHtml('/demote <@user|id>')} → member`,
+      `• ${codeHtml('/clear_db <id>')} — wipe community links only ${italicHtml('(keep community)')}`,
+      `• ${codeHtml('/community_delete <id>')} — wipe community + all data`,
+      `  ${italicHtml('then reply')} ${codeHtml('YES_DELETE_<token>')} ${italicHtml('to confirm')}`,
       '',
-      'File uploads: send .md/.txt/.json/.py etc in group → community brain',
-      'GOD: /personal · /clear_personal_db · /sync · /backup · /db · website bot + AI credentials',
-      '/setlogchannel <id|off> — set log channel for login/join notifications',
-      '/restart — restart Athena service (GOD only)'
+      `${boldHtml('File uploads:')} send ${codeHtml('.md/.txt/.json/.py')} etc in group → community brain`,
+      `${boldHtml('Documents:')} ${codeHtml('.pdf/.docx/.pptx/.xlsx/.odt/.rtf/.epub')} convert to Markdown on self-host ${italicHtml('(20 MiB source → 5 MiB md)')}`,
+      '',
+      `${italicHtml('Auto-indexing')} ${italicHtml('(see')} ${boldHtml('📡 Channels')} ${italicHtml('in')} ${codeHtml('/help')} ${italicHtml('for the full guide)')}`,
+      `• ${codeHtml('/channel_link <community_id> <channel_id>')} — channel posts → community brain`,
+      `  ${italicHtml('(bot must be channel admin; owner/GOD runs this)')}`,
+      `• ${codeHtml('/channel_unlink <channel_id>')} — stop indexing a channel`,
+      `• ${codeHtml('/index')} — indexing status · history backfill needs ${codeHtml('/index_start')}`,
+      '',
+      `${boldHtml('GOD:')} ${codeHtml('/personal')} · ${codeHtml('/clear_personal_db')} · ${codeHtml('/sync')} · ${codeHtml('/backup')} · ${codeHtml('/db')} · website bot + AI credentials`,
+      `• ${codeHtml('/setlogchannel <id|off>')} — set log channel for login/join notifications`,
+      `• ${codeHtml('/restart')} — restart Athena service ${italicHtml('(GOD only)')}`,
+    ].join('\n');
+  }
+  if (section === 'channels') {
+    return [
+      `${boldHtml('📡 Channels &amp; history indexing')}`,
+      '',
+      `${boldHtml('Index NEW channel posts')}`,
+      `${codeHtml('1)')} Add the bot to the channel as admin:`,
+      `   ${italicHtml('Channel → Manage Channel → Administrators → Add Bot')}`,
+      `${codeHtml('2)')} Link it to a community ${italicHtml('(owner/GOD, in the linked group or bot DM)')}:`,
+      `   ${codeHtml('/channel_link <community_id> <channel_id>')}`,
+      `   • ${italicHtml('channel_id: forward a channel post to')} ${codeHtml('@userinfobot')} ${italicHtml('(channel ids start with -100)')}`,
+      `   • ${italicHtml('or forward a channel post to the bot and reply to it:')} ${codeHtml('/channel_link <community_id>')}`,
+      `${codeHtml('3)')} Done — every new post's links and files land in that community brain.`,
+      '',
+      `${codeHtml('/index')} — indexing status`,
+      `${codeHtml('/channel_unlink <channel_id>')} — stop indexing a channel`,
+      '',
+      `${boldHtml('Backfill OLD history')} ${italicHtml('(userbot mode)')}`,
+      `${italicHtml('Bots cannot read old messages. Backfill logs in as YOUR account via a session string — self-host only, GOD/community owner, bot DM only.')}`,
+      '',
+      `${codeHtml('1)')} Get ${codeHtml('api_id + api_hash')}: ${linkHtml('https://my.telegram.org', 'my.telegram.org')} → ${boldHtml('API development tools')}`,
+      `${codeHtml('2)')} Generate a ${codeHtml('gramjs StringSession')} with a tool you trust. On the server:`,
+      `   ${codeHtml('npm install telegram')} ${italicHtml('(in the Athena repo)')}`,
+      `   ${codeHtml('node scripts/gen-session.js')} → prints the session string`,
+      `${codeHtml('3)')} In the bot DM ${italicHtml('(private chat — the string is a live account key)')}:`,
+      `   ${codeHtml('/index_start <community_id> <chat_id> <api_id> <api_hash> <session_string>')}`,
+      `   • ${codeHtml('chat_id')} — the group/channel to backfill ${italicHtml('(forward a post to')} ${codeHtml('@userinfobot')}${italicHtml(')')}`,
+      `${codeHtml('4)')} ${codeHtml('/index_status')} — progress · ${codeHtml('/index_stop')} — cancel + delete session`,
+      '',
+      `${italicHtml('The')} ${codeHtml('/index_start')} ${italicHtml('message self-deletes; the session is stored encrypted')} ${italicHtml('(needs')} ${codeHtml('STORAGE_KEY')}${italicHtml(') and deleted when the job finishes; stopped jobs resume.')}`,
+      `${boldHtml('⚠️ A session string grants full account access — revoke anytime in')} ${italicHtml('Telegram Settings → Devices → terminate session.')}`,
     ].join('\n');
   }
   return [
-    'Athena help',
+    `${boldHtml('Athena')} — ${italicHtml('second brain')}`,
     '',
-    'Pick a category:',
-    '🌐 Global — /start · /help · /id · /rank',
-    '👤 Personal — dual mode, dump, search, AI, edit… (GOD)',
-    '👥 Community — verify, join, list, admin, topic, clear…',
+    `${italicHtml('Tap a section:')}`,
+    `• ${boldHtml('🌐 Global')} — ${codeHtml('/start')} ${codeHtml('/help')} ${codeHtml('/id')} ${codeHtml('/rank')}`,
+    `• ${boldHtml('👤 Personal')} — dual mode, dump, search, AI ${italicHtml('(GOD)')}`,
+    `• ${boldHtml('👥 Community')} — verify, join, admins, topics`,
+    `• ${boldHtml('📡 Channels')} — index channels + backfill history`,
     '',
-    'Dual mode: /personal and /community switch where links go',
-    '(DM or group). Members dump in the linked group after join.',
+    `${boldHtml('Member quick start:')}`,
+    `${codeHtml('1)')} Join the community Telegram group`,
+    `${codeHtml('2)')} Login on the website with Telegram`,
+    `${codeHtml('3)')} ${codeHtml('/community_join id')} — in bot DM`,
+    `${codeHtml('4)')} Paste links → ${codeHtml('/search query')} · ${codeHtml('/ai question')}`,
     '',
-    'Member cmds: /start /help /id /rank /community_join /search /ai /community_list + dump',
-    'Other cmds → admin/owner/GOD only.'
+    `${italicHtml('Settings, AI keys and bot setup live on the website.')}`,
   ].join('\n');
 }
 
@@ -6439,7 +6837,7 @@ async function editTelegramMessage(token, chatId, messageId, text, replyMarkup, 
     chat_id: chatId,
     message_id: messageId,
     // editMessageText is single-message only — prefer full text when short, else truncate cleanly
-    text: chunkTelegramText(text, TG_MSG_MAX)[0] || String(text).slice(0, TG_MSG_MAX),
+    text: (parseMode === 'HTML' ? chunkTelegramHtml(text) : chunkTelegramText(text, TG_MSG_MAX))[0] || String(text).slice(0, TG_MSG_MAX),
     disable_web_page_preview: true
   };
   if (parseMode) payload.parse_mode = parseMode;
@@ -6467,10 +6865,10 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
   // ---- Help menu buttons ----
   if (data.startsWith('help:')) {
     await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id });
-    const section = data.slice(5); // menu | global | personal | community
+    const section = data.slice(5); // menu | global | personal | community | channels
     if (section === 'menu') {
       await editTelegramMessage(token, chatId, msgId, helpTextForSection('menu'), helpMenuKeyboard(), threadId, null);
-    } else if (section === 'global' || section === 'personal' || section === 'community') {
+    } else if (section === 'global' || section === 'personal' || section === 'community' || section === 'channels') {
       await editTelegramMessage(token, chatId, msgId, helpTextForSection(section), helpBackKeyboard(), threadId, null);
     }
     return new Response('OK', { status: 200, headers: corsHeaders });
@@ -6618,6 +7016,280 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
   return new Response('OK', { status: 200, headers: corsHeaders });
 }
 
+/**
+ * Channel posts: index new links + documents in real time when the channel is
+ * linked to a community via /channel_link. No user gates — the authorization
+ * is the link itself (owner/GOD ran /channel_link, which verified server-side
+ * that this bot is an admin of the channel). Bots cannot reply in channels,
+ * so everything here is silent; failures go to the error console.
+ */
+async function indexChannelPost(msg, binding, token, env) {
+  if (!binding?.community_id) return;
+  // Anonymous source — commands typed in a channel are never executed.
+  if (String(msg.text || '').trim().startsWith('/')) return;
+  const communityId = binding.community_id;
+  const channelTitle = msg.sender_chat?.title || msg.chat?.title || 'channel';
+  const text = (msg.text || msg.caption || '').trim();
+  await ensureDocumentsTable(env);
+
+  // Documents first (pdf/docx/md/json/… — same allowlists + conversion as uploads)
+  const doc = msg.document;
+  if (doc && doc.file_id) {
+    try {
+      const filename = doc.file_name || 'document.txt';
+      const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+      if (DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) {
+        const fileInfo = await telegramApi(token, 'getFile', { file_id: doc.file_id });
+        if (fileInfo?.ok && fileInfo.result?.file_path) {
+          const fileRes = await fetch(`https://api.telegram.org/file/bot${token}/${fileInfo.result.file_path}`);
+          if (fileRes.ok) {
+            const r = await saveIndexedDocument(env, communityId, filename, ext, new Uint8Array(await fileRes.arrayBuffer()), `channel:${msg.chat.id}`);
+            if (r && r.error) console.warn(`channel doc skipped (${channelTitle}): ${r.error}`);
+          }
+        }
+      }
+    } catch (e) {
+      console.error('channel doc index failed', e?.message || e);
+    }
+  }
+
+  const urls = extractUrlsFromTelegramMessage(msg, { includeReply: false });
+  const saved = await saveIndexedLinks(env, communityId, [...new Set(urls)], channelTitle, text, 'channel');
+  if (saved) console.log(`channel ${channelTitle}: indexed ${saved} link(s)`);
+}
+
+/** Shared by channel indexing and history backfill. Returns {error?} or {saved} or null on skip. */
+async function saveIndexedDocument(env, communityId, filename, ext, bytes, uploadedBy) {
+  if (!DOCUMENT_EXTENSIONS.has(ext) && !CONVERTIBLE_EXTENSIONS.has(ext)) return null;
+  let valid;
+  if (CONVERTIBLE_EXTENSIONS.has(ext)) {
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    const converted = await convertDocumentToMarkdown(env, ext, btoa(bin));
+    valid = converted.error ? { error: converted.error } : validateDocumentText('community', filename, converted.markdown);
+  } else {
+    valid = validateDocumentInput({ scope: 'community', filename, content: new TextDecoder().decode(bytes) });
+  }
+  if (valid?.error) return valid;
+  if (!valid || !valid.content) return null;
+  const id = 'doc_ix_' + Date.now().toString(36) + '_' + randomToken().slice(0, 4);
+  await ensureDocumentsTable(env);
+  await env.DB.prepare(
+    `INSERT INTO uploaded_documents (id, scope, community_id, filename, content, uploaded_by, created_at)
+     VALUES (?, 'community', ?, ?, ?, ?, ?)`
+  ).bind(id, communityId, valid.filename, valid.content, uploadedBy, Date.now()).run();
+  return { saved: id };
+}
+
+/** Shared insert path for indexed links (channel posts + history backfill). */
+async function saveIndexedLinks(env, communityId, urls, attributionName, postText, source /* 'channel'|'backfill' */) {
+  const baseTags = ['telegram', source === 'backfill' ? 'backfill' : 'channel'];
+  let saved = 0;
+  for (const rawUrl of urls) {
+    try {
+      if (await findExistingLink(env, 'links', 'community_id', communityId, rawUrl)) continue;
+      const meta = await enrichLinkFields(env, rawUrl, { title: '', notes: '' });
+      const urlHash = generateUrlHash(rawUrl);
+      const id = 'ix_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+      await ensureLinkMetaColumns(env);
+      try {
+        await env.DB.prepare(
+          `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
+            added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at, image_url, site_name)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'telegram', ?, 0, 0, ?, ?, ?)`
+        ).bind(
+          id, communityId, rawUrl, urlHash, meta.title, meta.notes || '',
+          JSON.stringify(baseTags), attributionName, attributionName,
+          Date.now(), meta.image_url || null, meta.site_name || null
+        ).run();
+      } catch (error) {
+        if (isUniqueConstraintError(error)) continue;
+        if (!isMissingLinkMetaColumnError(error)) throw error;
+        await env.DB.prepare(
+          'INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        ).bind(id, communityId, rawUrl, urlHash, meta.title, meta.notes || '', JSON.stringify(baseTags), attributionName, Date.now()).run();
+      }
+      saved++;
+      // tagging: post #hashtags win, else AI describe (same as group dumps)
+      const userTags = normalizeTagList(extractHashtags(postText || ''));
+      let finalTags = null;
+      let finalTitle = meta.title;
+      let finalNotes = meta.notes || '';
+      if (userTags.length) {
+        finalTags = [...new Set([...baseTags, ...userTags])];
+      } else {
+        const vocab = await recentTagsForScope(env, 'community', communityId);
+        const ai = await aiDescribeAndTag(env, rawUrl, meta, vocab);
+        if (ai) {
+          finalTitle = ai.title || meta.title;
+          finalNotes = ai.description || meta.notes || '';
+          finalTags = ai.tags?.length ? [...new Set([...baseTags, ...ai.tags])] : baseTags;
+        }
+      }
+      if (finalTags) {
+        await ensureSearchColumns(env);
+        await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
+          .bind(finalTitle, JSON.stringify(finalTags), finalNotes, id).run().catch(() => {});
+      }
+    } catch (e) {
+      console.error(`indexed link save failed (${rawUrl})`, e?.message || e);
+    }
+  }
+  return saved;
+}
+
+// ---- History backfill via a user session string (gramjs, self-host only) ----
+
+async function ensureIndexTables(env) {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS telegram_index_sessions (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL, community_id TEXT NOT NULL,
+      chat_id TEXT NOT NULL, api_id TEXT, api_hash_enc TEXT, session_enc TEXT NOT NULL,
+      created_at INTEGER NOT NULL`
+  ).run();
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS index_jobs (
+      id TEXT PRIMARY KEY, community_id TEXT NOT NULL, chat_id TEXT NOT NULL, user_id TEXT NOT NULL,
+      status TEXT NOT NULL, offset_id INTEGER NOT NULL DEFAULT 0,
+      processed INTEGER NOT NULL DEFAULT 0, saved_links INTEGER NOT NULL DEFAULT 0,
+      saved_docs INTEGER NOT NULL DEFAULT 0, progress_chat_id TEXT,
+      error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL`
+  ).run();
+}
+
+const INDEX_BATCH = 100;
+const INDEX_BATCH_DELAY_MS = 1500; // ~40 req/min ceiling — well under Telegram's flood limits
+const INDEX_MAX_MESSAGES = 50000;
+
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+/** URLs from a gramjs message: link entities + plain-text regex. */
+function urlsFromGramjsMessage(message) {
+  const out = new Set();
+  const text = String(message.text || message.message || '');
+  try {
+    for (const e of message.entities || []) {
+      if (e?.className === 'MessageEntityTextUrl' && e.url) out.add(e.url);
+    }
+  } catch (_) {}
+  for (const m of text.matchAll(/https?:\/\/[^\s<>"')\]]+/g)) out.add(m[0]);
+  return [...out];
+}
+
+/**
+ * Backfill one chat's history into a community using the stored user session.
+ * Pacing: INDEX_BATCH_DELAY_MS between getHistory pages plus per-media gaps;
+ * FloodWaitError sleeps the exact server-announced time (capped at 5 min).
+ * The cursor (offset_id) persists in index_jobs, so a stopped job resumes.
+ */
+async function runHistoryIndexJob(env, job, token) {
+  const log = (...a) => console.log(`[index ${job.id}]`, ...a);
+  const patch = async (fields) => {
+    const keys = Object.keys(fields);
+    const sets = keys.map((k) => `${k} = ?`).join(', ');
+    await env.DB.prepare(`UPDATE index_jobs SET ${sets}, updated_at = ? WHERE id = ?`)
+      .bind(...keys.map((k) => fields[k]), Date.now(), job.id).run().catch(() => {});
+  };
+  try {
+    const sess = await env.DB.prepare('SELECT * FROM telegram_index_sessions WHERE id = ?').bind(job.id).first();
+    if (!sess) { await patch({ status: 'error', error: 'session missing' }); return; }
+    let gramjs;
+    try {
+      // Non-literal specifier: bundlers must never try to resolve the native
+      // gramjs package — it is an optional, self-host-only dependency.
+      const spec = 'telegram';
+      gramjs = await import(spec);
+    } catch (_) {
+      await patch({ status: 'error', error: 'gramjs not installed (npm install telegram)' });
+      await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('❌')} History backfill needs the optional package. On the server: ${codeHtml('npm install telegram')}, then ${codeHtml('/index_start')} again.`).catch(() => {});
+      return;
+    }
+    const { TelegramClient } = gramjs;
+    const { StringSession } = gramjs.sessions;
+    const sessionString = await decryptBotToken(env, sess.session_enc); // same AES-GCM envelope as bot tokens
+    const apiHash = await decryptBotToken(env, sess.api_hash_enc);
+    if (!sessionString || !apiHash) { await patch({ status: 'error', error: 'session decrypt failed (STORAGE_KEY rotated?)' }); return; }
+    const client = new TelegramClient(new StringSession(sessionString), Number(sess.api_id) || 0, apiHash, { connectionRetries: 3 });
+    await client.connect();
+    let offsetId = job.offset_id || 0;
+    let processed = job.processed || 0;
+    let savedLinks = job.saved_links || 0;
+    let savedDocs = job.saved_docs || 0;
+    let lastProgress = 0;
+    await patch({ status: 'running', error: null });
+    log(`start chat=${job.chat_id} offset=${offsetId}`);
+    while (processed < INDEX_MAX_MESSAGES) {
+      const row = await env.DB.prepare('SELECT status FROM index_jobs WHERE id = ?').bind(job.id).first();
+      if (!row || row.status === 'stopping') { await patch({ status: 'stopped' }); log('stopped'); break; }
+      let messages;
+      try {
+        messages = await client.getMessages(job.chat_id, { limit: INDEX_BATCH, offsetId });
+      } catch (e) {
+        if (e && typeof e.seconds === 'number') { // FloodWaitError
+          log(`flood-wait ${e.seconds}s — sleeping`);
+          await patch({ error: `flood-wait ${e.seconds}s` });
+          await sleep(Math.min(e.seconds * 1000, 300_000));
+          continue;
+        }
+        throw e;
+      }
+      if (!messages || !messages.length) { await patch({ status: 'done' }); log('done (end of history)'); break; }
+      for (const message of messages) {
+        offsetId = Math.max(offsetId, Number(message.id || 0));
+        processed++;
+        const text = String(message.text || message.message || '');
+        if (text.startsWith('/')) continue;
+        const urls = urlsFromGramjsMessage(message);
+        if (urls.length) {
+          const saved = await saveIndexedLinks(env, job.community_id, urls, 'history backfill', text, 'backfill');
+          savedLinks += saved || 0;
+        }
+        const media = message.media;
+        if (media && media.className === 'MessageMediaDocument' && media.document) {
+          const docu = media.document;
+          const fnameAttr = (docu.attributes || []).find((a) => a.className === 'MessageAttributeFilename');
+          const filename = fnameAttr?.fileName || '';
+          const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+          // Positive allowlist: video/audio/archives (mkv, mp4, mp3, zip, …)
+          // never match DOCUMENT_EXTENSIONS/CONVERTIBLE_EXTENSIONS.
+          if (filename && (DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) && Number(docu.size || 0) <= CONVERT_SOURCE_MAX_BYTES) {
+            try {
+              const buf = await client.downloadMedia(message, {});
+              if (buf && buf.length) {
+                const r = await saveIndexedDocument(env, job.community_id, filename, ext, new Uint8Array(buf), `backfill:${job.chat_id}`);
+                if (r?.saved) savedDocs++;
+              }
+              await sleep(400);
+            } catch (e) {
+              if (e && typeof e.seconds === 'number') { await sleep(Math.min(e.seconds * 1000, 300_000)); }
+              else console.error('[index] media failed', e?.message || e);
+            }
+          }
+        }
+      }
+      await patch({ offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs });
+      if (processed - lastProgress >= 300) {
+        lastProgress = processed;
+        await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('🗂')} Backfill: ${processed} scanned · ${savedLinks} links · ${savedDocs} docs`).catch(() => {});
+      }
+      await sleep(INDEX_BATCH_DELAY_MS);
+    }
+    if (processed >= INDEX_MAX_MESSAGES) { await patch({ status: 'done', error: `capped at ${INDEX_MAX_MESSAGES} messages` }); log('capped'); }
+    const finalRow = await env.DB.prepare('SELECT status, saved_links, saved_docs FROM index_jobs WHERE id = ?').bind(job.id).first();
+    await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('✅')} Backfill ${finalRow?.status || 'done'}: ${processed} scanned · ${savedLinks} links · ${savedDocs} docs saved.`).catch(() => {});
+    // Session auto-delete when the job finishes cleanly — a stored user
+    // session is a live account key; it should not outlive its purpose.
+    if (finalRow?.status === 'done') {
+      await env.DB.prepare('DELETE FROM telegram_index_sessions WHERE id = ?').bind(job.id).run().catch(() => {});
+    }
+    try { await client.disconnect(); } catch (_) {}
+  } catch (e) {
+    console.error('[index] job failed', e?.message || e);
+    await patch({ status: 'error', error: String(e?.message || e).slice(0, 300) });
+    await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('❌')} Backfill failed: ${escHtml(String(e?.message || e).slice(0, 200))}`).catch(() => {});
+  }
+}
+
 async function handleTelegramWebhook(update, env, corsHeaders) {
   await ensureBotBindingColumns(env);
   await ensureCommunityMembersColumns(env);
@@ -6718,6 +7390,13 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
 
   let binding = await findTelegramBinding(env, chatId, tgUserId);
   let token = (await tokenForBindingAsync(binding, env)) || env.TELEGRAM_BOT_TOKEN;
+  // Channel posts have no sender identity: real-time indexing only, and only
+  // for channels linked to a community via /channel_link. Bots cannot reply
+  // in channels, so this path is silent by necessity.
+  if (String(msg.chat?.type || '') === 'channel') {
+    await indexChannelPost(msg, binding, token, env);
+    return new Response('OK', { status: 200, headers: corsHeaders });
+  }
   let athenaUser = await resolveAthenaUserFromTg(env, tgUserId);
   // Persist Bot API id whenever we see a logged-in Telegram user (needed for join + owner match)
   if (athenaUser?.id && tgUserId && isLikelyTelegramBotApiId(tgUserId)) {
@@ -6815,7 +7494,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   if (doc && doc.file_id && athenaUser) {
     let filename = doc.file_name || 'document.txt';
     const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
-    if (DOCUMENT_EXTENSIONS.has(ext)) {
+    if (DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) {
       const isGroup = String(msg.chat?.type || '').includes('group') || chatId.startsWith('-');
       // Determine scope: in groups always community, in DMs use binding mode
       let docScope = 'community';
@@ -6861,8 +7540,23 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         const fileUrl = `https://api.telegram.org/file/bot${botToken}/${fileInfo.result.file_path}`;
         const fileRes = await fetch(fileUrl);
         if (!fileRes.ok) throw new Error(`Download failed: ${fileRes.status}`);
-        // Same validator as the API path — byte-accurate size cap, filename and UTF-8 checks
-        const valid = validateDocumentInput({ scope: docScope, filename, content: await fileRes.text() });
+        // Same validators as the API path — byte-accurate size cap, filename and
+        // UTF-8 checks. Binary formats convert to Markdown first (self-host
+        // only); text formats are validated inline as before.
+        let valid;
+        if (CONVERTIBLE_EXTENSIONS.has(ext)) {
+          const arr = new Uint8Array(await fileRes.arrayBuffer());
+          let bin = '';
+          for (let i = 0; i < arr.length; i += 0x8000) bin += String.fromCharCode(...arr.subarray(i, i + 0x8000));
+          const converted = await convertDocumentToMarkdown(env, ext, btoa(bin));
+          if (converted.error) {
+            await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} ${escHtml(converted.error)}`, forumThreadId);
+            return new Response('OK', { status: 200, headers: corsHeaders });
+          }
+          valid = validateDocumentText(docScope, filename, converted.markdown);
+        } else {
+          valid = validateDocumentInput({ scope: docScope, filename, content: await fileRes.text() });
+        }
         if (valid.error) {
           await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} ${escHtml(valid.error)}`, forumThreadId);
           return new Response('OK', { status: 200, headers: corsHeaders });
@@ -7166,6 +7860,238 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await env.DB.prepare('UPDATE community_bots SET log_channel_id = ? WHERE id = ?').bind(cid, personalBot.id).run();
        await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Log channel set to: ${codeHtml(cid)}\nLogs now ONLY go to channel (no DM).`, forumThreadId);
      }
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /channel_link — index a channel's new posts into a community ----
+   // Owner/GOD only. The bot must already be an admin of the channel; the
+   // check runs server-side via this bot's own token, so a channel cannot be
+   // linked by anyone who merely knows its id.
+   if (cmd === '/channel_link' || cmd === '/channellink') {
+     if (!athenaUser) {
+       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const communityIdArg = (parts[1] || '').trim();
+     const channelIdArg = (parts[2] || '').trim() || (msg.reply_to_message?.sender_chat?.id ? String(msg.reply_to_message.sender_chat.id) : '');
+     if (!communityIdArg || !channelIdArg) {
+       await sendTelegramFormatted(token, chatId, [
+         `${boldHtml('📢 Link a channel for auto-indexing')}`,
+         '',
+         `Usage: ${codeHtml('/channel_link <community_id> <channel_id>')}`,
+         `Or: forward a channel post here, reply to it with ${codeHtml('/channel_link <community_id>')}`,
+         '',
+         'Requires: community owner/GOD, and this bot added as ADMIN of the channel.',
+         'New channel posts (links + pdf/docx/md/json/… files) are indexed in real time.',
+         `Channel ID: forward a channel post to ${linkHtml('https://t.me/userinfobot', '@userinfobot')}`,
+         `Unlink: ${codeHtml('/channel_unlink <channel_id>')}`
+       ].join('\n'), forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!(await ensureOwnerOrAdmin(communityIdArg, athenaUser.id, env)) && !isGod) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const community = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityIdArg).first();
+     if (!community) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(communityIdArg)} not found.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const cid = channelIdArg.startsWith('-') ? channelIdArg : `-100${channelIdArg.replace(/^-100/, '')}`;
+     if (!/^-\d+$/.test(cid)) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Invalid channel ID (use -100…).`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     // Validate: channel exists, bot is admin — with THIS bot's token.
+     const me = await telegramApi(token, 'getMe', {});
+     const botId = me?.result?.id;
+     const chk = await telegramApi(token, 'getChat', { chat_id: cid });
+     if (!chk?.ok || chk?.result?.type !== 'channel') {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} ${codeHtml(cid)} is not a reachable channel for this bot — add the bot as ADMIN first.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const member = botId ? await telegramApi(token, 'getChatMember', { chat_id: cid, user_id: botId }) : null;
+     const botStatus = member?.result?.status || '';
+     if (!['administrator', 'creator'].includes(botStatus)) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} This bot is not an admin of that channel (status: ${escHtml(botStatus || 'unknown')}). Promote it and retry.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await ensureBotBindingColumns(env);
+     const channelTitle = chk.result.title || cid;
+     const existingBinding = await env.DB.prepare(
+       `SELECT id, community_id FROM community_bots WHERE platform = 'telegram' AND group_id = ?`
+     ).bind(cid).first();
+     if (existingBinding) {
+       await env.DB.prepare('UPDATE community_bots SET community_id = ?, group_name = ? WHERE id = ?')
+         .bind(communityIdArg, channelTitle, existingBinding.id).run();
+     } else {
+       const id = 'cb_' + Date.now().toString(36) + '_' + randomToken().slice(0, 6);
+       await env.DB.prepare(
+         `INSERT INTO community_bots (id, community_id, platform, bot_username, group_id, group_name, created_by, created_at, scope, user_id, bot_token)
+          VALUES (?, ?, 'telegram', ?, ?, ?, ?, ?, 'community', NULL, NULL)`
+       ).bind(id, communityIdArg, me?.result?.username || null, cid, channelTitle, athenaUser.id, Date.now()).run();
+     }
+     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Channel ${boldHtml(escHtml(channelTitle))} linked to ${boldHtml(escHtml(community.name || communityIdArg))}.\nNew posts (links + documents) are indexed in real time.\nHistory backfill: ${codeHtml('/index')}`, forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   if (cmd === '/channel_unlink') {
+     if (!athenaUser) {
+       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const cid = (parts[1] || '').trim();
+     if (!cid) {
+       await sendTelegramFormatted(token, chatId, `Usage: ${codeHtml('/channel_unlink <channel_id>')}`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const row = await env.DB.prepare(
+       `SELECT id, community_id FROM community_bots WHERE platform = 'telegram' AND group_id = ? AND community_id IS NOT NULL`
+     ).bind(cid).first();
+     if (!row) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No linked channel with ID ${codeHtml(cid)}.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!(await ensureOwnerOrAdmin(row.community_id, athenaUser.id, env)) && !isGod) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await env.DB.prepare('DELETE FROM community_bots WHERE id = ?').bind(row.id).run();
+     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Channel ${codeHtml(cid)} unlinked — new posts are no longer indexed.`, forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /index — indexing status + backfill pointer ----
+   if (cmd === '/index') {
+     const linked = binding?.community_id ? await env.DB.prepare(
+       `SELECT group_id, group_name FROM community_bots WHERE platform = 'telegram' AND community_id = ? AND group_id LIKE '-100%'`
+     ).bind(binding.community_id).all() : { results: [] };
+     const chanLines = (linked.results || []).map((r) => `• ${escHtml(r.group_name || '')} (${codeHtml(r.group_id)})`);
+     const isGroup = String(msg.chat?.type || '').includes('group') || chatId.startsWith('-');
+     await sendTelegramFormatted(token, chatId, [
+       `${boldHtml('🗂 Indexing')}`,
+       '',
+       `${boldHtml('Real time (automatic)')}`,
+       isGroup ? '• This group: every posted link and file is saved as it arrives.' : '• Linked groups: every posted link and file is saved as it arrives.',
+       chanLines.length ? `• Linked channels:\n${chanLines.join('\n')}` : '• Channels: none linked yet — /channel_link <community_id> <channel_id>',
+       '',
+       `${boldHtml('History backfill')}`,
+       'Telegram bots cannot read old messages. Backfilling a group/channel history needs a user session string:',
+       `${codeHtml('/index_start')} — start (self-hosted, GOD/owner)`,
+       `${codeHtml('/index_status')} — progress`,
+       `${codeHtml('/index_stop')} — cancel + delete session`
+     ].join('\n'), forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /index_start — history backfill with a user session string ----
+   // Self-host only (gramjs is a native Node dependency), DM only (the
+   // session string is a live account key), GOD or community owner.
+   if (cmd === '/index_start' || cmd === '/indexstart') {
+     const dmOnly = !chatId.startsWith('-');
+     if (!isSelfHosted(env)) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} History backfill runs on the self-hosted server (it needs the optional gramjs package). This instance is on Cloudflare Workers.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!athenaUser) {
+       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!dmOnly) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Session strings are secrets — send ${codeHtml('/index_start')} in a private chat with the bot, never in a group.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const usage = [
+       `${boldHtml('🗂 History backfill')}`,
+       '',
+       `Usage (in bot DM): ${codeHtml('/index_start <community_id> <chat_id> <api_id> <api_hash> <session_string>')}`,
+       '',
+       `• chat_id — the group/channel to backfill (forward a post to ${linkHtml('https://t.me/userinfobot', '@userinfobot')}; channels are -100…)`,
+       '• api_id + api_hash — from my.telegram.org (the app the session belongs to)',
+       `• session_string — gramjs StringSession. On the server: ${codeHtml('npm install telegram')} then ${codeHtml('node scripts/gen-session.js')} (Athena repo) prints one interactively.`,
+       '',
+       'Pacing is built in (flood-wait honored, ~1.5s/page). The triggering message is deleted; the session is deleted when the job completes. Progress every 300 messages; stopped jobs resume from the cursor.',
+       `Full guide: /help → 📡 Channels · ${codeHtml('/index_status')} · ${codeHtml('/index_stop')}`
+     ].join('\n');
+     const communityIdArg = parts[1] || '';
+     const chatIdArg = parts[2] || '';
+     const apiIdArg = parts[3] || '';
+     const apiHashArg = parts[4] || '';
+     const sessionArg = parts.slice(5).join(' ');
+     if (!communityIdArg || !chatIdArg || !apiIdArg || !apiHashArg || !sessionArg) {
+       await sendTelegramFormatted(token, chatId, usage, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!(await ensureOwnerOrAdmin(communityIdArg, athenaUser.id, env)) && !isGod) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const community = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityIdArg).first();
+     if (!community) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(communityIdArg)} not found.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!/^[-\d@_\w]+$/.test(chatIdArg)) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Invalid chat_id.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     // Delete the triggering message — it contains a live session string.
+     await telegramApi(token, 'deleteMessage', { chat_id: chatId, message_id: msg.message_id }).catch(() => {});
+     await ensureIndexTables(env);
+     const jobId = 'ij_' + Date.now().toString(36) + '_' + randomToken().slice(0, 6);
+    const sessionEnc = await encryptSecret(env, sessionArg.trim());
+     const apiHashEnc = await encryptSecret(env, apiHashArg.trim());
+     // A session string is a live account key: storing it plaintext (the
+     // no-STORAGE_KEY fallback path) is not acceptable — refuse instead.
+     if (!String(sessionEnc).startsWith('enc:v1:') || !String(apiHashEnc).startsWith('enc:v1:')) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Server has no STORAGE_KEY — refusing to store the session string unencrypted. Set STORAGE_KEY and retry.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await env.DB.prepare(
+       `INSERT INTO telegram_index_sessions (id, user_id, community_id, chat_id, api_id, api_hash_enc, session_enc, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+     ).bind(jobId, athenaUser.id, communityIdArg, chatIdArg, apiIdArg.trim(), apiHashEnc, sessionEnc, Date.now()).run();
+     await env.DB.prepare(
+       `INSERT INTO index_jobs (id, community_id, chat_id, user_id, status, offset_id, progress_chat_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?)`
+     ).bind(jobId, communityIdArg, chatIdArg, athenaUser.id, chatId, Date.now(), Date.now()).run();
+     runInBackground(env, runHistoryIndexJob(env, { id: jobId, community_id: communityIdArg, chat_id: chatIdArg, offset_id: 0, processed: 0, saved_links: 0, saved_docs: 0, progress_chat_id: chatId }, token));
+     await sendTelegramFormatted(token, chatId, `${boldHtml('▶️')} Backfill started for ${codeHtml(chatIdArg)} → ${boldHtml(escHtml(community.name || communityIdArg))}.\nSession message deleted. I will report progress here. ${codeHtml('/index_stop')} to cancel.`, forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   if (cmd === '/index_status') {
+     await ensureIndexTables(env);
+     const { results } = await env.DB.prepare(
+       `SELECT j.* FROM index_jobs j WHERE j.user_id = ? ORDER BY j.updated_at DESC LIMIT 5`
+     ).bind(athenaUser?.id || tgUserId || '').all();
+     if (!results || !results.length) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No backfill jobs yet. ${codeHtml('/index_start')} to begin.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const lines = results.map((j) => `${j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'error' ? '❌' : '⏸'} ${codeHtml(j.chat_id)} — ${escHtml(j.status)}: ${j.processed || 0} scanned · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.error ? `\n   ${escHtml(j.error)}` : ''}`);
+     await sendTelegramFormatted(token, chatId, `${boldHtml('🗂 Backfill jobs')}\n\n${lines.join('\n\n')}`, forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   if (cmd === '/index_stop') {
+     if (!athenaUser) {
+       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await ensureIndexTables(env);
+     const { results } = await env.DB.prepare(
+       `SELECT id FROM index_jobs WHERE user_id = ? AND status IN ('queued','running')`
+     ).bind(athenaUser.id).all();
+     if (!results || !results.length) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No running backfill jobs.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     for (const j of results) {
+       await env.DB.prepare(`UPDATE index_jobs SET status = 'stopping', updated_at = ? WHERE id = ?`).bind(Date.now(), j.id).run();
+       await env.DB.prepare('DELETE FROM telegram_index_sessions WHERE id = ?').bind(j.id).run().catch(() => {});
+     }
+     await sendTelegramFormatted(token, chatId, `${boldHtml('⏹')} Stopping ${results.length} job(s) and deleting the stored session(s).`, forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
@@ -8132,8 +9058,6 @@ Rules:
      const thinkMsgId = thinkMsg.message_id;
 
       const model = normalizeModelId(cfg.model, cfg.base_url);
-      const endpoint = resolveChatEndpoint(cfg.base_url, cfg.mode || 'openai', model);
-       const aiMode = (cfg.mode || 'openai').toLowerCase();
 
       try {
         let content = '';
@@ -8144,43 +9068,13 @@ Rules:
             : `${ctx.slice(0, contextLimit)}\n[content shortened for provider context]`;
           const systemPrompt = `${baseSystemPrompt}\n\nBRAIN has ${rows.length} saved item(s). Retrieved for this question:\n\n${context}`;
           try {
-            if (aiMode === 'anthropic') {
-              const res = await fetch(endpoint, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-api-key': cfg.api_key, 'anthropic-version': '2023-06-01' },
-                body: JSON.stringify({ model, max_tokens: 3000, system: systemPrompt, messages: [{ role: 'user', content: q }] })
-              });
-              if (!res.ok) {
-                const errText = await res.text().catch(() => '');
-                throw new Error(`HTTP ${res.status}: ${errText.slice(0, 200)}`);
-              }
-              const data = await res.json().catch(() => ({}));
-              content = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
-            } else if (endpoint.endsWith('/responses')) {
-              const res = await fetch(endpoint, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.api_key}` },
-                body: JSON.stringify({ model, input: `${systemPrompt}\n\n${q}`, stream: false })
-              });
-              if (!res.ok) {
-                const errText = await res.text().catch(() => '');
-                throw new Error(`HTTP ${res.status}: ${errText.slice(0, 200)}`);
-              }
-              const data = await res.json().catch(() => ({}));
-              content = data.output_text || data.output?.map(o => o.content?.map(c => c.text).join('')).join('\n') || data.choices?.[0]?.message?.content || '';
-            } else {
-              const res = await fetch(endpoint, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.api_key}` },
-                body: JSON.stringify({ model, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: q }], temperature: 0.2, max_tokens: 3000 })
-              });
-              if (!res.ok) {
-                const errText = await res.text().catch(() => '');
-                throw new Error(`HTTP ${res.status}: ${errText.slice(0, 200)}`);
-              }
-              const data = await res.json().catch(() => ({}));
-              content = data.choices?.[0]?.message?.content || data.choices?.[0]?.text || '';
-            }
+            // Same request path as the website proxy: SSRF-checked endpoint,
+            // model fallback chain, Retry-After, normalized + logged errors.
+            const out = await callAiChatShared(env, {
+              baseUrl: cfg.base_url, apiKey: cfg.api_key, mode: cfg.mode || 'openai', model,
+              system: systemPrompt, user: q, maxTokens: 3000, source: 'bot-ai',
+            });
+            content = out.content;
             break;
           } catch (err) {
             if (!isAiContextError(err) || !docs.length) throw err;
@@ -8191,13 +9085,9 @@ Rules:
           }
         }
 
-       // Convert markdown-style links to Telegram HTML: [text](url) → <a href="url">text</a>
-       const aiHtml = escHtml(content || '(empty)')
-         .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2">$1</a>')
-         .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
-         .replace(/`([^`]+)`/g, '<code>$1</code>')
-         .replace(/\[#(\d+)\]/g, '<b>[#$1]</b>')
-         .replace(/\[(\d+)\]/g, '<b>[$1]</b>');
+       // Rich text: full markdown → Telegram HTML (headers, lists, quotes,
+       // code blocks, tables, bold/italic/strike, links, citations)
+       const aiHtml = mdToTelegramHtml(content || '(empty)');
        let msg = `${boldHtml('🧠 AI Answer')}\n\n${aiHtml}`;
 
        // Find cited sources in the answer (e.g., [#1], [#2])
@@ -8245,7 +9135,13 @@ Rules:
          if (allSources.length) msg += `\n\n${boldHtml('📚 Sources:')}\n${allSources.join('\n')}`;
        }
 
-        await editTelegramMessage(token, chatId, thinkMsgId, msg, null, forumThreadId);
+        // editMessageText is single-message — long answers continue in
+        // follow-up messages instead of being silently truncated
+        const parts = chunkTelegramHtml(msg);
+        await editTelegramMessage(token, chatId, thinkMsgId, parts[0] || msg, null, forumThreadId);
+        for (let pi = 1; pi < parts.length; pi++) {
+          await sendTelegramFormatted(token, chatId, parts[pi], forumThreadId);
+        }
       } catch (err) {
         await editTelegramMessage(token, chatId, thinkMsgId, `${boldHtml('❌ AI failed:')} ${escHtml(err.message)}`, null, forumThreadId);
       }
@@ -8691,7 +9587,7 @@ Rules:
 async function sendTelegramMessage(token, chatId, text, threadId = null, parseMode = null) {
   if (!token) return { ok: false, error: 'No bot token' };
   try {
-    const parts = chunkTelegramText(text, TG_MSG_MAX);
+    const parts = parseMode === 'HTML' ? chunkTelegramHtml(text) : chunkTelegramText(text, TG_MSG_MAX);
     if (!parts.length) return { ok: true };
     let last = { ok: true };
     for (let i = 0; i < parts.length; i++) {
@@ -8723,7 +9619,7 @@ async function sendTelegramMessageWithKeyboard(token, chatId, text, replyMarkup,
   if (!token) return { ok: false, error: 'No bot token' };
   try {
     // Keyboard only on first chunk if we must split
-    const parts = chunkTelegramText(text, TG_MSG_MAX);
+    const parts = parseMode === 'HTML' ? chunkTelegramHtml(text) : chunkTelegramText(text, TG_MSG_MAX);
     if (!parts.length) return { ok: true };
     for (let i = 0; i < parts.length; i++) {
       const payload = {
@@ -8754,6 +9650,106 @@ function boldHtml(str) { return `<b>${escHtml(str)}</b>`; }
 function codeHtml(str) { return `<code>${escHtml(str)}</code>`; }
 function linkHtml(url, text) { return `<a href="${escHtml(url)}">${escHtml(text || url)}</a>`; }
 function italicHtml(str) { return `<i>${escHtml(str)}</i>`; }
+
+/** Inline markdown → Telegram HTML. Input must already be HTML-escaped. */
+function mdInlineTelegram(line) {
+  // Protect inline code from every other rule first
+  const codes = [];
+  let s = line.replace(/`([^`\n]+)`/g, (_, body) => `\u0000IC${codes.push(`<code>${body}</code>`) - 1}\u0000`);
+  s = s
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>')
+    .replace(/\*\*\*([^*\n]+)\*\*\*/g, '<b><i>$1</i></b>')
+    .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
+    .replace(/__([^_\n]+)__/g, '<b>$1</b>')
+    .replace(/(^|[^*\w])\*([^*\n]+)\*(?![\w*])/g, '$1<i>$2</i>')
+    .replace(/(^|[^\w_])_([^_\n]+)_(?![\w_])/g, '$1<i>$2</i>')
+    .replace(/~~([^~\n]+)~~/g, '<s>$1</s>')
+    .replace(/\[#(\d+)\]/g, '<b>[#$1]</b>')
+    .replace(/\[(\d+)\]/g, '<b>[$1]</b>');
+  return s.replace(/\u0000IC(\d+)\u0000/g, (_, i) => codes[Number(i)]);
+}
+
+/** Markdown (chat-model output) → Telegram HTML rich text. */
+function mdToTelegramHtml(md) {
+  const src = String(md || '').replace(/\r\n?/g, '\n');
+  const blocks = [];
+  const keep = (html) => `\u0000BLK${blocks.push(html) - 1}\u0000`;
+
+  // Fenced code blocks first — their contents must not see any other rule
+  let text = src.replace(/```[^\n]*\n?[\s\S]*?(?:```|$)/g, (m) => {
+    const body = m.replace(/^```[^\n]*\n?/, '').replace(/\n?```$/, '');
+    return keep(`<pre><code>${escHtml(body)}</code></pre>`);
+  });
+  // Pipe tables (header | --- | --- | rows) render as monospace blocks
+  text = text.replace(/^[^\n]*\|[^\n]*\n\|?[\s:|-]*-[\s:|-]*\n(?:[^\n]*\|[^\n]*(?:\n|$))*/gm, (m) => {
+    const rows = m.trim().split('\n');
+    return keep(`<pre>${escHtml(rows.join('\n'))}</pre>`);
+  });
+
+  const out = [];
+  let quote = [];
+  const flushQuote = () => {
+    if (!quote.length) return;
+    out.push(`<blockquote>${mdInlineTelegram(quote.join('\n'))}</blockquote>`);
+    quote = [];
+  };
+  for (const raw of text.split('\n')) {
+    const line = escHtml(raw);
+    const qm = line.match(/^\s*&gt;\s?(.*)$/);
+    if (qm) { quote.push(qm[1]); continue; }
+    flushQuote();
+    const hm = line.match(/^#{1,6}\s+(.*)$/);
+    if (hm) { out.push(`<b>${mdInlineTelegram(hm[1])}</b>`); continue; }
+    if (/^\s*([-*_])\s*(?:\1\s*){2,}$/.test(line)) { out.push('───────────'); continue; }
+    const bm = line.match(/^\s*[-*•]\s+(.*)$/);
+    if (bm) { out.push(`• ${mdInlineTelegram(bm[1])}`); continue; }
+    out.push(mdInlineTelegram(line));
+  }
+  flushQuote();
+  return out.join('\n').replace(/\u0000BLK(\d+)\u0000/g, (_, i) => blocks[Number(i)]);
+}
+
+/** Telegram's HTML subset — the only tags whose pairing we track when chunking. */
+const TG_STYLE_TAGS = new Set(['b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike', 'del', 'code', 'pre', 'a', 'blockquote', 'spoiler', 'tg-spoiler']);
+
+/**
+ * Split HTML for Telegram's 4096 limit without producing invalid markup:
+ * cuts never land inside a tag, and any tag still open at the cut is closed
+ * for this chunk and reopened (with its full attributes, e.g. <a href>) in
+ * the next one.
+ */
+function chunkTelegramHtml(text, maxLen = TG_MSG_MAX) {
+  const s = String(text || '');
+  if (s.length <= maxLen) return s ? [s] : [];
+  const chunks = [];
+  let rest = s;
+  while (rest.length > maxLen) {
+    let cut = rest.lastIndexOf('\n', maxLen);
+    if (cut < Math.floor(maxLen * 0.5)) cut = rest.lastIndexOf(' ', maxLen);
+    if (cut < Math.floor(maxLen * 0.4)) cut = maxLen;
+    const lastLt = rest.lastIndexOf('<', cut);
+    const lastGt = rest.lastIndexOf('>', cut);
+    if (lastLt > lastGt) cut = lastGt >= 0 ? lastGt + 1 : rest.indexOf('>', cut) + 1;
+    const head = rest.slice(0, cut);
+    const open = [];
+    const tagRe = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)((?:\s[^<>]*)?)>/g;
+    let m;
+    while ((m = tagRe.exec(head)) !== null) {
+      const name = m[2].toLowerCase();
+      if (!TG_STYLE_TAGS.has(name)) continue;
+      if (m[1] === '/') {
+        const idx = open.map((o) => o.name).lastIndexOf(name);
+        if (idx !== -1) open.splice(idx, 1);
+      } else {
+        open.push({ name, full: m[0] });
+      }
+    }
+    chunks.push(head.trimEnd() + open.slice().reverse().map((o) => `</${o.name}>`).join(''));
+    rest = open.map((o) => o.full).join('') + rest.slice(cut).replace(/^\n+/, '');
+  }
+  if (rest.trim()) chunks.push(rest);
+  return chunks;
+}
 
 function canonicalUrlForHash(rawUrl) {
   const parsed = new URL(rawUrl);
@@ -9373,6 +10369,72 @@ async function scrapeGistMetadata(rawUrl, env) {
 /**
  * Scrape: forge APIs first; else prefer clean meta description over noisy body.
  */
+// --- kage fallback scraper (self-host only) --------------------------------
+// kage (github.com/tamnd/kage) mirrors a page with headless Chrome and every
+// script stripped — exactly what JS-rendered SPAs need. Enabled by setting
+// KAGE_BIN to the kage binary on a self-hosted server. A missing binary is
+// remembered for 10 minutes so each scrape does not pay a spawn cost.
+let _kageUnavailableUntil = 0;
+
+async function scrapeViaKage(rawUrl, env) {
+  if (!isSelfHosted(env)) return null;
+  if (Date.now() < _kageUnavailableUntil) return null;
+  const bin = String(env.KAGE_BIN || 'kage').trim();
+  if (!bin) return null;
+  let dir = null;
+  try {
+    const cpSpec = 'node:child_process';
+    const fsSpec = 'node:fs/promises';
+    const osSpec = 'node:os';
+    const pathSpec = 'node:path';
+    const { execFile } = await import(cpSpec);
+    const { mkdtemp, readFile, readdir } = await import(fsSpec);
+    const { tmpdir } = await import(osSpec);
+    const { join } = await import(pathSpec);
+    dir = await mkdtemp(join(tmpdir(), 'athena-kage-'));
+    await new Promise((resolve, reject) => {
+      execFile(bin, ['clone', rawUrl, '--max-pages', '1', '-o', dir], { timeout: 90_000 }, (err) => (err ? reject(err) : resolve()));
+    });
+    // The mirror lands in <dir>/<host>/…; pick the largest HTML file that is
+    // not a localized asset under _kage/.
+    const htmlFiles = [];
+    const walk = async (d) => {
+      for (const entry of await readdir(d, { withFileTypes: true })) {
+        const p = join(d, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name === '_kage') continue;
+          await walk(p);
+        } else if (/\.html?$/i.test(entry.name)) {
+          const buf = await readFile(p);
+          htmlFiles.push({ p, size: buf.length, buf });
+        }
+      }
+    };
+    await walk(dir);
+    if (!htmlFiles.length) return null;
+    htmlFiles.sort((a, b) => b.size - a.size);
+    const html = htmlFiles[0].buf.toString('utf8').slice(0, 400_000);
+    const title = cleanSiteTitle(
+      metaContent(html, ['og:title', 'twitter:title']) || (() => {
+        const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+        return m ? decodeHtmlEntities(m[1]) : '';
+      })(), '', '');
+    const description = cleanGenericSummary(metaContent(html, ['description', 'og:description', 'twitter:description']) || '');
+    let image = metaContent(html, ['og:image', 'twitter:image']) || '';
+    try { if (image && !/^https?:\/\//i.test(image)) image = new URL(image, rawUrl).href; } catch (_) { image = ''; }
+    const content = extractReadableContent(html);
+    if (!content && !description) return null;
+    return { title, description, content, image };
+  } catch (e) {
+    // ENOENT = kage not installed; back off so saves stay fast without it.
+    if (/ENOENT|not found|not executable/i.test(String(e?.message || e))) _kageUnavailableUntil = Date.now() + 10 * 60_000;
+    else console.warn('kage scrape failed', e?.message || e);
+    return null;
+  } finally {
+    if (dir) await import('node:fs/promises').then((m) => m.rm(dir, { recursive: true, force: true })).catch(() => {});
+  }
+}
+
 async function scrapeLinkMetadata(rawUrl, env) {
   const fallback = {
     title: titleFromUrl(rawUrl),
@@ -9401,6 +10463,7 @@ async function scrapeLinkMetadata(rawUrl, env) {
       };
     }
 
+    let kageFallbackUsed = false;
     const res = await fetchWithTimeout(rawUrl, {
       method: 'GET',
       redirect: 'follow',
@@ -9441,7 +10504,7 @@ async function scrapeLinkMetadata(rawUrl, env) {
     );
     const ogDesc = cleanGenericSummary(metaContent(html, ['og:description', 'twitter:description']) || '');
     const blurb = cleanGenericSummary(extractReadableBlurb(html));
-    const content = extractReadableContent(html);
+    let content = extractReadableContent(html);
 
     // Rank: prefer short clean meta over long body mashups
     let description = pickBestDescription([
@@ -9481,12 +10544,27 @@ async function scrapeLinkMetadata(rawUrl, env) {
     }
     description = cleanGenericSummary(description).slice(0, 2500);
 
+    // JS-rendered SPA fallback: when static HTML yielded almost nothing, the
+    // page likely renders client-side. If kage (headless-Chrome mirror) is
+    // configured on this server, render it for real and re-extract.
+    if ((!content || content.length < 400) && (!description || description.length < 80)) {
+      const kage = await scrapeViaKage(rawUrl, env);
+      if (kage) {
+        kageFallbackUsed = true;
+        if (kage.content && kage.content.length > content.length) content = kage.content;
+        if (kage.description && scoreDescriptionCandidate(kage.description) >= 40) description = kage.description;
+        if (!title || isWeakTitle(title, rawUrl)) title = kage.title || title;
+        if (!image && kage.image) image = kage.image;
+      }
+    }
+
     return {
       title: String(title || fallback.title).slice(0, 160),
       description,
       content,
       image: image.slice(0, 500),
-      siteName: (siteName || host || '').slice(0, 120)
+      siteName: (siteName || host || '').slice(0, 120),
+      viaKage: kageFallbackUsed || undefined
     };
   } catch (_) {
     return fallback;
@@ -9576,7 +10654,8 @@ const FREE_MODEL_LIST_TTL_MS = 60 * 60 * 1000;
 
 function isModelFreeEntry(entry) {
   const id = String(entry.id || entry.model || '');
-  if (id.endsWith(':free')) return true;
+  // OpenRouter free suffix is ":free"; OpenCode Zen free variants end in "-free".
+  if (/(^|:)free$/i.test(id) || /-free$/i.test(id)) return true;
   const p = entry.pricing || entry.cost || {};
   const vals = [p.prompt, p.completion, p.input, p.output, entry.input, entry.output];
   for (const v of vals) {
@@ -9606,36 +10685,55 @@ function providerLimitInfo(baseUrl, model, free) {
 async function fetchModelList(baseUrl, env, apiKey) {
   const root = cleanApiBase(baseUrl);
   if (!root) return null;
+  // The live /models endpoint is the source of truth for WHAT exists: zen and
+  // zen/go expose different catalogs, and third-party catalogs lag behind
+  // (removed models listed, new ones missing). Metadata (name, cost, context)
+  // comes from models.dev when available, matched by exact id — it never adds
+  // or keeps a model the endpoint no longer serves.
+  let live = null;
+  const url = `${root}/models`;
+  try {
+    if (await isSafeExternalUrl(new URL(url), env)) {
+      const headers = {};
+      if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+      const res = await fetchWithTimeout(url, { headers, env }, 5000);
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        const raw = Array.isArray(data?.data) ? data.data
+          : Array.isArray(data?.models) ? data.models
+          : Array.isArray(data) ? data : null;
+        if (raw) {
+          live = raw.map((e) => ({ id: String(e.id || e.model || '').trim() })).filter((e) => e.id);
+        }
+      }
+    }
+  } catch (_) {}
+  let meta = null;
   if (root.includes('opencode.ai')) {
     try {
-      const url = 'https://models.dev/api.json';
-      if (await isSafeExternalUrl(new URL(url), env)) {
-        const res = await fetchWithTimeout(url, { env }, 5000);
+      const devUrl = 'https://models.dev/api.json';
+      if (await isSafeExternalUrl(new URL(devUrl), env)) {
+        const res = await fetchWithTimeout(devUrl, { env }, 5000);
         if (res.ok) {
           const data = await res.json().catch(() => null);
-          const opencodeModels = data?.opencode?.models;
-          if (opencodeModels && typeof opencodeModels === 'object') {
-            const list = Object.entries(opencodeModels).map(([id, meta]) => ({ id, ...meta }));
-            if (list.length) return list;
-          }
+          const models = data?.opencode?.models;
+          if (models && typeof models === 'object') meta = models;
         }
       }
     } catch (_) {}
   }
-  const url = `${root}/models`;
-  try {
-    if (!(await isSafeExternalUrl(new URL(url), env))) return null;
-  } catch (_) { return null; }
-  const headers = {};
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-  try {
-    const res = await fetchWithTimeout(url, { headers, env }, 5000);
-    if (!res.ok) return null;
-    const data = await res.json().catch(() => null);
-    if (!data) return null;
-    const list = Array.isArray(data.data) ? data.data : Array.isArray(data.models) ? data.models : Array.isArray(data) ? data : [];
-    return list;
-  } catch (_) { return null; }
+  if (live && meta) {
+    return live.map((e) => {
+      const m = meta[e.id];
+      return m ? { ...e, name: m.name, cost: m.cost, limit: m.limit } : e;
+    });
+  }
+  if (live) return live;
+  if (meta) {
+    const list = Object.entries(meta).map(([id, m]) => ({ id, ...m }));
+    if (list.length) return list;
+  }
+  return null;
 }
 
 function hostMatches(baseUrl, domain) {
@@ -9915,6 +11013,7 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
         const retryAfter = parseInt(res.headers.get('retry-after')||res.headers.get('Retry-After')||'0',10);
         const waitMs = Number.isFinite(retryAfter) && retryAfter>0 ? retryAfter*1000 : 400*(mi+1);
         console.error(`AI link enrichment failed ${curModel} ${res.status}`, errorText.slice(0,180));
+        recordAiError({ model: curModel, status: res.status, endpoint, message: `link enrichment: ${errorText.slice(0, 200) || res.statusText}`, source: 'enrichment' });
         if (isRetryable && mi < tryModels.length-1) { await new Promise(r=>setTimeout(r, waitMs)); continue; }
         return null;
       }
@@ -9982,6 +11081,7 @@ function formatSavedLinkReply(kindLabel, title, rawUrl, ai, fallbackNotes = '') 
 }
 
 export {
+  scrapeViaKage,
   buildSearchBlob,
   cleanApiBase,
   expandServerSearchTerms,
