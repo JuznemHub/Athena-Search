@@ -9,8 +9,6 @@ One bar: search, dump, and AI answers from your markdown brain.
   <img src="https://img.shields.io/badge/discord-login-5865F2?style=flat-square&logo=discord" alt="discord">
 </p>
 
-![Athena web UI — search results with links and documents](docs/img/web-search.png)
-
 ---
 
 ## Features
@@ -19,7 +17,7 @@ One bar: search, dump, and AI answers from your markdown brain.
 - **Search** with fuzzy matching across titles, URLs, notes, and tags — tolerant of typos and partial matches, with server-side search for large brains.
 - **Ask** questions with RAG over your links and documents. Supports OpenAI, Anthropic, Groq, OpenRouter, and OpenCode Zen, with streaming answers and cited sources.
 - **Share** a brain with a Telegram group in community mode, with voting, reporting, and rank-based permissions — or keep it private in personal mode.
-- **Store** your data in self-hosted PostgreSQL — the only backend (D1/GitHub removed). MCP memory uses the same DB via `postgres-mcp`.
+- **Store** your data in self-hosted PostgreSQL. MCP memory uses the same DB via `postgres-mcp`.
 - **Log in** with Telegram (OAuth or Mini App) or Discord. Sessions last 30 days.
 
 ---
@@ -139,8 +137,6 @@ In this mode the browser talks to your server directly, so binary document uploa
 ---
 
 ## Terminal UI (athena-tui)
-
-![athena-tui — the menu is the whole app](docs/img/tui.png)
 
 Dump your browser bookmarks into your Athena brain straight from the terminal — no browser needed. Zero dependencies, Node >= 22.
 
