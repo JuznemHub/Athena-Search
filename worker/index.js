@@ -6867,9 +6867,9 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
     await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id });
     const section = data.slice(5); // menu | global | personal | community | channels
     if (section === 'menu') {
-      await editTelegramMessage(token, chatId, msgId, helpTextForSection('menu'), helpMenuKeyboard(), threadId, null);
+      await editTelegramMessage(token, chatId, msgId, helpTextForSection('menu'), helpMenuKeyboard(), threadId, 'HTML');
     } else if (section === 'global' || section === 'personal' || section === 'community' || section === 'channels') {
-      await editTelegramMessage(token, chatId, msgId, helpTextForSection(section), helpBackKeyboard(), threadId, null);
+      await editTelegramMessage(token, chatId, msgId, helpTextForSection(section), helpBackKeyboard(), threadId, 'HTML');
     }
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
@@ -8119,7 +8119,8 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       chatId,
       helpTextForSection('menu'),
       helpMenuKeyboard(),
-      forumThreadId
+      forumThreadId,
+      'HTML'
     );
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
