@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.49',
+          version: '1.0.50',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -10174,6 +10174,72 @@ async function scrapeGistMetadata(rawUrl, env) {
 /**
  * Scrape: forge APIs first; else prefer clean meta description over noisy body.
  */
+// --- kage fallback scraper (self-host only) --------------------------------
+// kage (github.com/tamnd/kage) mirrors a page with headless Chrome and every
+// script stripped — exactly what JS-rendered SPAs need. Enabled by setting
+// KAGE_BIN to the kage binary on a self-hosted server. A missing binary is
+// remembered for 10 minutes so each scrape does not pay a spawn cost.
+let _kageUnavailableUntil = 0;
+
+async function scrapeViaKage(rawUrl, env) {
+  if (!isSelfHosted(env)) return null;
+  if (Date.now() < _kageUnavailableUntil) return null;
+  const bin = String(env.KAGE_BIN || 'kage').trim();
+  if (!bin) return null;
+  let dir = null;
+  try {
+    const cpSpec = 'node:child_process';
+    const fsSpec = 'node:fs/promises';
+    const osSpec = 'node:os';
+    const pathSpec = 'node:path';
+    const { execFile } = await import(cpSpec);
+    const { mkdtemp, readFile, readdir } = await import(fsSpec);
+    const { tmpdir } = await import(osSpec);
+    const { join } = await import(pathSpec);
+    dir = await mkdtemp(join(tmpdir(), 'athena-kage-'));
+    await new Promise((resolve, reject) => {
+      execFile(bin, ['clone', rawUrl, '--max-pages', '1', '-o', dir], { timeout: 90_000 }, (err) => (err ? reject(err) : resolve()));
+    });
+    // The mirror lands in <dir>/<host>/…; pick the largest HTML file that is
+    // not a localized asset under _kage/.
+    const htmlFiles = [];
+    const walk = async (d) => {
+      for (const entry of await readdir(d, { withFileTypes: true })) {
+        const p = join(d, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name === '_kage') continue;
+          await walk(p);
+        } else if (/\.html?$/i.test(entry.name)) {
+          const buf = await readFile(p);
+          htmlFiles.push({ p, size: buf.length, buf });
+        }
+      }
+    };
+    await walk(dir);
+    if (!htmlFiles.length) return null;
+    htmlFiles.sort((a, b) => b.size - a.size);
+    const html = htmlFiles[0].buf.toString('utf8').slice(0, 400_000);
+    const title = cleanSiteTitle(
+      metaContent(html, ['og:title', 'twitter:title']) || (() => {
+        const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+        return m ? decodeHtmlEntities(m[1]) : '';
+      })(), '', '');
+    const description = cleanGenericSummary(metaContent(html, ['description', 'og:description', 'twitter:description']) || '');
+    let image = metaContent(html, ['og:image', 'twitter:image']) || '';
+    try { if (image && !/^https?:\/\//i.test(image)) image = new URL(image, rawUrl).href; } catch (_) { image = ''; }
+    const content = extractReadableContent(html);
+    if (!content && !description) return null;
+    return { title, description, content, image };
+  } catch (e) {
+    // ENOENT = kage not installed; back off so saves stay fast without it.
+    if (/ENOENT|not found|not executable/i.test(String(e?.message || e))) _kageUnavailableUntil = Date.now() + 10 * 60_000;
+    else console.warn('kage scrape failed', e?.message || e);
+    return null;
+  } finally {
+    if (dir) await import('node:fs/promises').then((m) => m.rm(dir, { recursive: true, force: true })).catch(() => {});
+  }
+}
+
 async function scrapeLinkMetadata(rawUrl, env) {
   const fallback = {
     title: titleFromUrl(rawUrl),
@@ -10202,6 +10268,7 @@ async function scrapeLinkMetadata(rawUrl, env) {
       };
     }
 
+    let kageFallbackUsed = false;
     const res = await fetchWithTimeout(rawUrl, {
       method: 'GET',
       redirect: 'follow',
@@ -10242,7 +10309,7 @@ async function scrapeLinkMetadata(rawUrl, env) {
     );
     const ogDesc = cleanGenericSummary(metaContent(html, ['og:description', 'twitter:description']) || '');
     const blurb = cleanGenericSummary(extractReadableBlurb(html));
-    const content = extractReadableContent(html);
+    let content = extractReadableContent(html);
 
     // Rank: prefer short clean meta over long body mashups
     let description = pickBestDescription([
@@ -10282,12 +10349,27 @@ async function scrapeLinkMetadata(rawUrl, env) {
     }
     description = cleanGenericSummary(description).slice(0, 2500);
 
+    // JS-rendered SPA fallback: when static HTML yielded almost nothing, the
+    // page likely renders client-side. If kage (headless-Chrome mirror) is
+    // configured on this server, render it for real and re-extract.
+    if ((!content || content.length < 400) && (!description || description.length < 80)) {
+      const kage = await scrapeViaKage(rawUrl, env);
+      if (kage) {
+        kageFallbackUsed = true;
+        if (kage.content && kage.content.length > content.length) content = kage.content;
+        if (kage.description && scoreDescriptionCandidate(kage.description) >= 40) description = kage.description;
+        if (!title || isWeakTitle(title, rawUrl)) title = kage.title || title;
+        if (!image && kage.image) image = kage.image;
+      }
+    }
+
     return {
       title: String(title || fallback.title).slice(0, 160),
       description,
       content,
       image: image.slice(0, 500),
-      siteName: (siteName || host || '').slice(0, 120)
+      siteName: (siteName || host || '').slice(0, 120),
+      viaKage: kageFallbackUsed || undefined
     };
   } catch (_) {
     return fallback;
@@ -10784,6 +10866,7 @@ function formatSavedLinkReply(kindLabel, title, rawUrl, ai, fallbackNotes = '') 
 }
 
 export {
+  scrapeViaKage,
   buildSearchBlob,
   cleanApiBase,
   expandServerSearchTerms,
