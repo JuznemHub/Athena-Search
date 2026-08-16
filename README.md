@@ -3,11 +3,13 @@
 One bar: search, dump, and AI answers from your markdown brain.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.51-blueviolet?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-1.0.52-blueviolet?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/license_CC_BY--NC_4.0-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/telegram-bot-blue?style=flat-square&logo=telegram" alt="telegram">
   <img src="https://img.shields.io/badge/discord-login-5865F2?style=flat-square&logo=discord" alt="discord">
 </p>
+
+![Athena web UI — search results with links and documents](docs/img/web-search.png)
 
 ---
 
@@ -65,6 +67,14 @@ cd Athena-Search
 npm install
 cp .env.example .env     # see server/.env.example for the annotated reference
 node server/index.js
+```
+
+Optional add-ons (both self-host only, both degrade gracefully when absent):
+
+```bash
+npm install telegram   # enables /index_start history backfill (gramjs)
+# kage + Chrome/Chromium on the server + KAGE_BIN in .env
+#   → headless-rendered scraping for JS-only sites (see "Scraping")
 ```
 
 ```bash
@@ -129,6 +139,8 @@ In this mode the browser talks to your server directly, so binary document uploa
 ---
 
 ## Terminal UI (athena-tui)
+
+![athena-tui — the menu is the whole app](docs/img/tui.png)
 
 Dump your browser bookmarks into your Athena brain straight from the terminal — no browser needed. Zero dependencies, Node >= 22.
 
@@ -231,6 +243,12 @@ Every saved link (website, bot, channel, backfill) is scraped for title, descrip
 ## AI
 
 As GOD, go to Settings → AI assistant, pick a provider, and enter the base URL, model, and API key. Saving syncs the config to the server, so the website and the bot's `/ai` share one set of credentials.
+
+**Models… button** — fetches the provider's full catalog (`GET /api/ai/models`) with free/paid classification, pricing, and context length. Works against the saved config, or against a base URL + key you are testing before saving. Free models are badged `FREE` so cost-free setups are one click.
+
+**Recent AI errors** — the panel under Save lists the last 50 upstream failures (time, source, model, HTTP status, message) from the chat proxy, bot `/ai`, and link enrichment. In-memory: it clears on restart. Use it to answer "why did my answers fall back to local mode".
+
+**Steroid mode** — the toggle now shows exactly what it changes: off = retrieval capped at 300 items, top 8 into the prompt, enrichment one link at a time; on = no retrieval cap, full RAG context, 4× parallel enrichment — bounded only by the provider's context window.
 
 | Provider | Base URL | Model example |
 |----------|----------|---------------|
