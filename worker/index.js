@@ -6650,19 +6650,19 @@ function helpTextForSection(section) {
       `${boldHtml('🌐 Global')} ${italicHtml('— quick start & ranks')}`,
       '',
       `${boldHtml('Commands')}`,
-      `${codeHtml('/start')} — welcome & status`,
-      `${codeHtml('/help')} — this menu`,
-      `${codeHtml('/id')} — chat id · your user id · topic id`,
-      `${codeHtml('/rank')} — your ranks across communities ${italicHtml('(incl. banned)')}`,
+      `/start — welcome & status`,
+      `/help — this menu`,
+      `/id — chat id · your user id · topic id`,
+      `/rank — your ranks across communities ${italicHtml('(incl. banned)')}`,
       '',
       `${boldHtml('Ranks')}`,
       `• ${boldHtml('GOD')} — instance host ${codeHtml('TG_OWNER_IDS')} — personal, bot settings, AI credentials`,
-      `• ${boldHtml('owner')} — community creator ${codeHtml('/community_verify')}`,
-      `• ${boldHtml('admin')} — promoted with ${codeHtml('/admin')}`,
-      `• ${boldHtml('member')} — ${italicHtml('login + join TG group +')} ${codeHtml('/community_join')}`,
+      `• ${boldHtml('owner')} — community creator /community_verify`,
+      `• ${boldHtml('admin')} — promoted with /admin`,
+      `• ${boldHtml('member')} — ${italicHtml('login + join TG group +')} /community_join`,
       `• ${boldHtml('banned')} — left/kicked from that community's TG group ${italicHtml('(other communities OK)')}`,
       '',
-      `${italicHtml('Tip:')} open a forum topic and ${codeHtml('/id')} shows ${codeHtml('topic id')} for ${codeHtml('/topic')}.`,
+      `${italicHtml('Tip:')} open a forum topic and /id shows topic id for /topic.`,
     ].join('\n');
   }
   if (section === 'personal') {
@@ -6670,32 +6670,32 @@ function helpTextForSection(section) {
       `${boldHtml('👤 Personal')} ${italicHtml('(GOD rank only)')}`,
       '',
       `${boldHtml('Mode')} ${italicHtml('— dual dump target')}`,
-      `${codeHtml('/personal')} — dump → ${boldHtml('your personal brain')}`,
-      `${codeHtml('/community')} — dump → ${boldHtml('community brain')} ${italicHtml('(DM or group)')}`,
-      `${codeHtml('/mode')} — show current dump mode`,
-      `${codeHtml('/mode personal | community')} — switch`,
+      `/personal — dump → ${boldHtml('your personal brain')}`,
+      `/community — dump → ${boldHtml('community brain')} ${italicHtml('(DM or group)')}`,
+      `/mode — show current dump mode`,
+      `/mode personal | community — switch`,
       '',
-      `${italicHtml('In bot DM after')} ${codeHtml('/community')}: ${italicHtml('paste URLs → community DB')}`,
-      `${italicHtml('In bot DM after')} ${codeHtml('/personal')}: ${italicHtml('paste URLs → personal DB')}`,
+      `${italicHtml('In bot DM after')} /community: ${italicHtml('paste URLs → community DB')}`,
+      `${italicHtml('In bot DM after')} /personal: ${italicHtml('paste URLs → personal DB')}`,
       '',
       `${boldHtml('Links')}`,
       `• Paste a URL ${italicHtml('(or forward)')} in the active mode`,
-      `• ${codeHtml('/search <query>')} — search active brain`,
-      `• ${codeHtml('/ai <question>')} — AI over brain ${italicHtml('(all ranks community; personal GOD-only)')}`,
-      `• ${codeHtml('/delete <url>')} — delete ${italicHtml('(or add if missing)')} — or reply ${codeHtml('/delete')}`,
-      `• ${codeHtml('/edit <url or title words> | notes: New description')}`,
-      `• ${codeHtml('/edit <url> | title: New Title | notes: New notes')}`,
-      `• ${italicHtml('Reply to a saved link:')} ${codeHtml('/edit | title: New Title')}`,
+      `• /search <query> — search active brain`,
+      `• /ai <question> — AI over brain ${italicHtml('(all ranks community; personal GOD-only)')}`,
+      `• /delete <url> — delete ${italicHtml('(or add if missing)')} — or reply /delete`,
+      `• /edit <url or title words> | notes: New description`,
+      `• /edit <url> | title: New Title | notes: New notes`,
+      `• ${italicHtml('Reply to a saved link:')} /edit | title: New Title`,
       '',
       `${boldHtml('Multi-link posts')}`,
-      `• ${codeHtml('/dumpall on')} — save every URL`,
-      `• ${codeHtml('/dumpall off')} — ${boldHtml('SMART primary only')} ${italicHtml('(default)')}`,
-      `• ${codeHtml('/dumpall')} — show multi-link mode`,
-      `• ${codeHtml('/dumpsmart')} — same as ${codeHtml('/dumpall off')}`,
+      `• /dumpall on — save every URL`,
+      `• /dumpall off — ${boldHtml('SMART primary only')} ${italicHtml('(default)')}`,
+      `• /dumpall — show multi-link mode`,
+      `• /dumpsmart — same as /dumpall off`,
       '',
-      `${codeHtml('/clear_personal_db')} — wipe your personal links ${italicHtml('(GOD)')}`,
+      `/clear_personal_db — wipe your personal links ${italicHtml('(GOD)')}`,
       '',
-      `${italicHtml('Setup:')} website ${boldHtml('Settings → Bot')} ${italicHtml('(GOD: token + DM')} ${codeHtml('/id')}${italicHtml(')')}.`,
+      `${italicHtml('Setup:')} website ${boldHtml('Settings → Bot')} ${italicHtml('(GOD: token + DM')} /id${italicHtml(')')}.`,
     ].join('\n');
   }
   if (section === 'community') {
@@ -6703,52 +6703,52 @@ function helpTextForSection(section) {
       `${boldHtml('👥 Community')}`,
       '',
       `${boldHtml('Setup')}`,
-      `• ${codeHtml('/community_verify')} — link this group ${italicHtml('(creates community; you = owner)')}`,
-      `• ${codeHtml('/community')} — switch dump → ${boldHtml('community brain')}`,
-      `• ${codeHtml('/personal')} — switch dump → ${boldHtml('personal brain')} ${italicHtml('(GOD)')}`,
-      `• ${codeHtml('/mode')} — show dump mode · ${codeHtml('/mode personal|community')}`,
+      `• /community_verify — link this group ${italicHtml('(creates community; you = owner)')}`,
+      `• /community — switch dump → ${boldHtml('community brain')}`,
+      `• /personal — switch dump → ${boldHtml('personal brain')} ${italicHtml('(GOD)')}`,
+      `• /mode — show dump mode · /mode personal|community`,
       '',
       `${boldHtml('Members')} ${italicHtml('(login + in TG group + join)')}`,
       `  ${codeHtml('1)')} Join the Telegram group`,
       `  ${codeHtml('2)')} Login on website ${italicHtml('(same Telegram)')}`,
-      `  ${codeHtml('3)')} ${codeHtml('/community_join <id>')}`,
+      `  ${codeHtml('3)')} /community_join <id>`,
       `• Paste URL in group/topic to dump`,
-      `• ${codeHtml('/community_list')} — name | id`,
-      `• ${codeHtml('/community_list <id|name>')} — details`,
-      `• ${codeHtml('/search <query>')} · ${codeHtml('/ai <question>')} · ${codeHtml('/rank')}`,
-      `${italicHtml('Leave/kick/ban from group → site+bot access revoked until rejoin +')} ${codeHtml('/community_join')}`,
+      `• /community_list — name | id`,
+      `• /community_list <id|name> — details`,
+      `• /search <query> · /ai <question> · /rank`,
+      `${italicHtml('Leave/kick/ban from group → site+bot access revoked until rejoin +')} /community_join`,
       '',
       `${boldHtml('Admin + owner')}`,
-      `• ${codeHtml('/delete <url>')} · reply ${codeHtml('/delete')} — remove link ${italicHtml('(staff)')}`,
-      `• ${codeHtml('/edit <url|title> | notes: …')} — edit link`,
-      `  ${italicHtml('Reply:')} ${codeHtml('/edit | title: … or notes: …')}`,
-      `• ${codeHtml('/topic <id>')} — lock bot to that forum topic only`,
-      `• ${codeHtml('/topic off')} — whole group · ${codeHtml('/topic')} — show lock`,
-      `• ${codeHtml('/topic here')} — lock to current topic`,
-      `• ${codeHtml('/dumpall on|off')} · ${codeHtml('/dumpsmart')} — multi-link mode`,
-      `• ${codeHtml('/kick <@user|id>')} — remove community access ${italicHtml('(can rejoin)')} — reply ${codeHtml('/kick')}`,
-      `• ${codeHtml('/clear <@user|id>')} — same as ${codeHtml('/kick')}`,
+      `• /delete <url> · reply /delete — remove link ${italicHtml('(staff)')}`,
+      `• /edit <url|title> | notes: … — edit link`,
+      `  ${italicHtml('Reply:')} /edit | title: … or notes: …`,
+      `• /topic <id> — lock bot to that forum topic only`,
+      `• /topic off — whole group · /topic — show lock`,
+      `• /topic here — lock to current topic`,
+      `• /dumpall on|off · /dumpsmart — multi-link mode`,
+      `• /kick <@user|id> — remove community access ${italicHtml('(can rejoin)')} — reply /kick`,
+      `• /clear <@user|id> — same as /kick`,
       `  ${italicHtml('Admin: members only · Owner/GOD: members+admins')}`,
       '',
       `${boldHtml('Owner only')}`,
-      `• ${codeHtml('/admin')} — reply to user → promote admin`,
-      `• ${codeHtml('/demote')} — reply or ${codeHtml('/demote <@user|id>')} → member`,
-      `• ${codeHtml('/clear_db <id>')} — wipe community links only ${italicHtml('(keep community)')}`,
-      `• ${codeHtml('/community_delete <id>')} — wipe community + all data`,
+      `• /admin — reply to user → promote admin`,
+      `• /demote — reply or /demote <@user|id> → member`,
+      `• /clear_db <id> — wipe community links only ${italicHtml('(keep community)')}`,
+      `• /community_delete <id> — wipe community + all data`,
       `  ${italicHtml('then reply')} ${codeHtml('YES_DELETE_<token>')} ${italicHtml('to confirm')}`,
       '',
       `${boldHtml('File uploads:')} send ${codeHtml('.md/.txt/.json/.py')} etc in group → community brain`,
       `${boldHtml('Documents:')} ${codeHtml('.pdf/.docx/.pptx/.xlsx/.odt/.rtf/.epub')} convert to Markdown on self-host ${italicHtml('(20 MiB source → 5 MiB md)')}`,
       '',
-      `${italicHtml('Auto-indexing')} ${italicHtml('(see')} ${boldHtml('📡 Channels')} ${italicHtml('in')} ${codeHtml('/help')} ${italicHtml('for the full guide)')}`,
-      `• ${codeHtml('/channel_link <community_id> <channel_id>')} — channel posts → community brain`,
+      `${italicHtml('Auto-indexing')} ${italicHtml('(see')} ${boldHtml('📡 Channels')} ${italicHtml('in')} /help ${italicHtml('for the full guide)')}`,
+      `• /channel_link <community_id> <channel_id> — channel posts → community brain`,
       `  ${italicHtml('(bot must be channel admin; owner/GOD runs this)')}`,
-      `• ${codeHtml('/channel_unlink <channel_id>')} — stop indexing a channel`,
-      `• ${codeHtml('/index')} — indexing status · history backfill needs ${codeHtml('/index_start')}`,
+      `• /channel_unlink <channel_id> — stop indexing a channel`,
+      `• /index — indexing status · history backfill needs /index_start`,
       '',
-      `${boldHtml('GOD:')} ${codeHtml('/personal')} · ${codeHtml('/clear_personal_db')} · ${codeHtml('/sync')} · ${codeHtml('/backup')} · ${codeHtml('/db')} · website bot + AI credentials`,
-      `• ${codeHtml('/setlogchannel <id|off>')} — set log channel for login/join notifications`,
-      `• ${codeHtml('/restart')} — restart Athena service ${italicHtml('(GOD only)')}`,
+      `${boldHtml('GOD:')} /personal · /clear_personal_db · /sync · /backup · /db · website bot + AI credentials`,
+      `• /setlogchannel <id|off> — set log channel for login/join notifications`,
+      `• /restart — restart Athena service ${italicHtml('(GOD only)')}`,
     ].join('\n');
   }
   if (section === 'channels') {
@@ -6759,13 +6759,13 @@ function helpTextForSection(section) {
       `${codeHtml('1)')} Add the bot to the channel as admin:`,
       `   ${italicHtml('Channel → Manage Channel → Administrators → Add Bot')}`,
       `${codeHtml('2)')} Link it to a community ${italicHtml('(owner/GOD, in the linked group or bot DM)')}:`,
-      `   ${codeHtml('/channel_link <community_id> <channel_id>')}`,
+      `   /channel_link <community_id> <channel_id>`,
       `   • ${italicHtml('channel_id: forward a channel post to')} ${codeHtml('@userinfobot')} ${italicHtml('(channel ids start with -100)')}`,
-      `   • ${italicHtml('or forward a channel post to the bot and reply to it:')} ${codeHtml('/channel_link <community_id>')}`,
+      `   • ${italicHtml('or forward a channel post to the bot and reply to it:')} /channel_link <community_id>`,
       `${codeHtml('3)')} Done — every new post's links and files land in that community brain.`,
       '',
-      `${codeHtml('/index')} — indexing status`,
-      `${codeHtml('/channel_unlink <channel_id>')} — stop indexing a channel`,
+      `/index — indexing status`,
+      `/channel_unlink <channel_id> — stop indexing a channel`,
       '',
       `${boldHtml('Backfill OLD history')} ${italicHtml('(userbot mode)')}`,
       `${italicHtml('Bots cannot read old messages. Backfill logs in as YOUR account via a session string — self-host only, GOD/community owner, bot DM only.')}`,
@@ -6775,11 +6775,11 @@ function helpTextForSection(section) {
       `   ${codeHtml('npm install telegram')} ${italicHtml('(in the Athena repo)')}`,
       `   ${codeHtml('node scripts/gen-session.js')} → prints the session string`,
       `${codeHtml('3)')} In the bot DM ${italicHtml('(private chat — the string is a live account key)')}:`,
-      `   ${codeHtml('/index_start <community_id> <chat_id> <api_id> <api_hash> <session_string>')}`,
+      `   /index_start <community_id> <chat_id> <api_id> <api_hash> <session_string>`,
       `   • ${codeHtml('chat_id')} — the group/channel to backfill ${italicHtml('(forward a post to')} ${codeHtml('@userinfobot')}${italicHtml(')')}`,
-      `${codeHtml('4)')} ${codeHtml('/index_status')} — progress · ${codeHtml('/index_stop')} — cancel + delete session`,
+      `${codeHtml('4)')} /index_status — progress · /index_stop — cancel + delete session`,
       '',
-      `${italicHtml('The')} ${codeHtml('/index_start')} ${italicHtml('message self-deletes; the session is stored encrypted')} ${italicHtml('(needs')} ${codeHtml('STORAGE_KEY')}${italicHtml(') and deleted when the job finishes; stopped jobs resume.')}`,
+      `${italicHtml('The')} /index_start ${italicHtml('message self-deletes; the session is stored encrypted')} ${italicHtml('(needs')} ${codeHtml('STORAGE_KEY')}${italicHtml(') and deleted when the job finishes; stopped jobs resume.')}`,
       `${boldHtml('⚠️ A session string grants full account access — revoke anytime in')} ${italicHtml('Telegram Settings → Devices → terminate session.')}`,
     ].join('\n');
   }
@@ -6787,7 +6787,7 @@ function helpTextForSection(section) {
     `${boldHtml('Athena')} — ${italicHtml('second brain')}`,
     '',
     `${italicHtml('Tap a section:')}`,
-    `• ${boldHtml('🌐 Global')} — ${codeHtml('/start')} ${codeHtml('/help')} ${codeHtml('/id')} ${codeHtml('/rank')}`,
+    `• ${boldHtml('🌐 Global')} — /start /help /id /rank`,
     `• ${boldHtml('👤 Personal')} — dual mode, dump, search, AI ${italicHtml('(GOD)')}`,
     `• ${boldHtml('👥 Community')} — verify, join, admins, topics`,
     `• ${boldHtml('📡 Channels')} — index channels + backfill history`,
@@ -6795,8 +6795,8 @@ function helpTextForSection(section) {
     `${boldHtml('Member quick start:')}`,
     `${codeHtml('1)')} Join the community Telegram group`,
     `${codeHtml('2)')} Login on the website with Telegram`,
-    `${codeHtml('3)')} ${codeHtml('/community_join id')} — in bot DM`,
-    `${codeHtml('4)')} Paste links → ${codeHtml('/search query')} · ${codeHtml('/ai question')}`,
+    `${codeHtml('3)')} /community_join id — in bot DM`,
+    `${codeHtml('4)')} Paste links → /search query · /ai question`,
     '',
     `${italicHtml('Settings, AI keys and bot setup live on the website.')}`,
   ].join('\n');
@@ -7201,7 +7201,7 @@ async function runHistoryIndexJob(env, job, token) {
       gramjs = await import(spec);
     } catch (_) {
       await patch({ status: 'error', error: 'gramjs not installed (npm install telegram)' });
-      await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('❌')} History backfill needs the optional package. On the server: ${codeHtml('npm install telegram')}, then ${codeHtml('/index_start')} again.`).catch(() => {});
+      await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('❌')} History backfill needs the optional package. On the server: ${codeHtml('npm install telegram')}, then /index_start again.`).catch(() => {});
       return;
     }
     const { TelegramClient } = gramjs;
@@ -7521,7 +7521,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         }
       }
       if (docScope === 'community' && !docCommunityId) {
-        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No community linked. ${codeHtml('/community_verify')} in a group or ${codeHtml('/community_join <id>')}.`, forumThreadId);
+        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No community linked. /community_verify in a group or /community_join <id>.`, forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
       // Community uploads are member+ only — a non-member in the group must not write to its brain
@@ -7878,13 +7878,13 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await sendTelegramFormatted(token, chatId, [
          `${boldHtml('📢 Link a channel for auto-indexing')}`,
          '',
-         `Usage: ${codeHtml('/channel_link <community_id> <channel_id>')}`,
-         `Or: forward a channel post here, reply to it with ${codeHtml('/channel_link <community_id>')}`,
+         `Usage: /channel_link <community_id> <channel_id>`,
+         `Or: forward a channel post here, reply to it with /channel_link <community_id>`,
          '',
          'Requires: community owner/GOD, and this bot added as ADMIN of the channel.',
          'New channel posts (links + pdf/docx/md/json/… files) are indexed in real time.',
          `Channel ID: forward a channel post to ${linkHtml('https://t.me/userinfobot', '@userinfobot')}`,
-         `Unlink: ${codeHtml('/channel_unlink <channel_id>')}`
+         `Unlink: /channel_unlink <channel_id>`
        ].join('\n'), forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
@@ -7931,7 +7931,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
           VALUES (?, ?, 'telegram', ?, ?, ?, ?, ?, 'community', NULL, NULL)`
        ).bind(id, communityIdArg, me?.result?.username || null, cid, channelTitle, athenaUser.id, Date.now()).run();
      }
-     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Channel ${boldHtml(escHtml(channelTitle))} linked to ${boldHtml(escHtml(community.name || communityIdArg))}.\nNew posts (links + documents) are indexed in real time.\nHistory backfill: ${codeHtml('/index')}`, forumThreadId);
+     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Channel ${boldHtml(escHtml(channelTitle))} linked to ${boldHtml(escHtml(community.name || communityIdArg))}.\nNew posts (links + documents) are indexed in real time.\nHistory backfill: /index`, forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
@@ -7942,7 +7942,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      }
      const cid = (parts[1] || '').trim();
      if (!cid) {
-       await sendTelegramFormatted(token, chatId, `Usage: ${codeHtml('/channel_unlink <channel_id>')}`, forumThreadId);
+       await sendTelegramFormatted(token, chatId, `Usage: /channel_unlink <channel_id>`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      const row = await env.DB.prepare(
@@ -7977,9 +7977,9 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        '',
        `${boldHtml('History backfill')}`,
        'Telegram bots cannot read old messages. Backfilling a group/channel history needs a user session string:',
-       `${codeHtml('/index_start')} — start (self-hosted, GOD/owner)`,
-       `${codeHtml('/index_status')} — progress`,
-       `${codeHtml('/index_stop')} — cancel + delete session`
+       `/index_start — start (self-hosted, GOD/owner)`,
+       `/index_status — progress`,
+       `/index_stop — cancel + delete session`
      ].join('\n'), forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
@@ -7998,20 +7998,20 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      if (!dmOnly) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Session strings are secrets — send ${codeHtml('/index_start')} in a private chat with the bot, never in a group.`, forumThreadId);
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Session strings are secrets — send /index_start in a private chat with the bot, never in a group.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      const usage = [
        `${boldHtml('🗂 History backfill')}`,
        '',
-       `Usage (in bot DM): ${codeHtml('/index_start <community_id> <chat_id> <api_id> <api_hash> <session_string>')}`,
+       `Usage (in bot DM): /index_start <community_id> <chat_id> <api_id> <api_hash> <session_string>`,
        '',
        `• chat_id — the group/channel to backfill (forward a post to ${linkHtml('https://t.me/userinfobot', '@userinfobot')}; channels are -100…)`,
        '• api_id + api_hash — from my.telegram.org (the app the session belongs to)',
        `• session_string — gramjs StringSession. On the server: ${codeHtml('npm install telegram')} then ${codeHtml('node scripts/gen-session.js')} (Athena repo) prints one interactively.`,
        '',
        'Pacing is built in (flood-wait honored, ~1.5s/page). The triggering message is deleted; the session is deleted when the job completes. Progress every 300 messages; stopped jobs resume from the cursor.',
-       `Full guide: /help → 📡 Channels · ${codeHtml('/index_status')} · ${codeHtml('/index_stop')}`
+       `Full guide: /help → 📡 Channels · /index_status · /index_stop`
      ].join('\n');
      const communityIdArg = parts[1] || '';
      const chatIdArg = parts[2] || '';
@@ -8056,7 +8056,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?)`
      ).bind(jobId, communityIdArg, chatIdArg, athenaUser.id, chatId, Date.now(), Date.now()).run();
      runInBackground(env, runHistoryIndexJob(env, { id: jobId, community_id: communityIdArg, chat_id: chatIdArg, offset_id: 0, processed: 0, saved_links: 0, saved_docs: 0, progress_chat_id: chatId }, token));
-     await sendTelegramFormatted(token, chatId, `${boldHtml('▶️')} Backfill started for ${codeHtml(chatIdArg)} → ${boldHtml(escHtml(community.name || communityIdArg))}.\nSession message deleted. I will report progress here. ${codeHtml('/index_stop')} to cancel.`, forumThreadId);
+     await sendTelegramFormatted(token, chatId, `${boldHtml('▶️')} Backfill started for ${codeHtml(chatIdArg)} → ${boldHtml(escHtml(community.name || communityIdArg))}.\nSession message deleted. I will report progress here. /index_stop to cancel.`, forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
@@ -8066,7 +8066,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        `SELECT j.* FROM index_jobs j WHERE j.user_id = ? ORDER BY j.updated_at DESC LIMIT 5`
      ).bind(athenaUser?.id || tgUserId || '').all();
      if (!results || !results.length) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No backfill jobs yet. ${codeHtml('/index_start')} to begin.`, forumThreadId);
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No backfill jobs yet. /index_start to begin.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      const lines = results.map((j) => `${j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'error' ? '❌' : '⏸'} ${codeHtml(j.chat_id)} — ${escHtml(j.status)}: ${j.processed || 0} scanned · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.error ? `\n   ${escHtml(j.error)}` : ''}`);
@@ -8379,7 +8379,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       const statuses = await listUserCommunityStatuses(env, athenaUser, tgUserId);
       if (!statuses.length) {
         await sendTelegramFormatted(token, chatId,
-          `${boldHtml('No communities yet.')}\nOwner: ${codeHtml('/community_verify')} in a group\nMember: ${codeHtml('/community_join <id>')}`, forumThreadId);
+          `${boldHtml('No communities yet.')}\nOwner: /community_verify in a group\nMember: /community_join <id>`, forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
       const rankIcons = { god: '👑', owner: '⭐', admin: '🛡', member: '👤', 'in-group': '👥', banned: '🚫' };
@@ -8388,7 +8388,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         return `${icon} ${escHtml(c.name)} | ${codeHtml(c.id)} | ${boldHtml(String(c.rank).toUpperCase())}`;
       });
       await sendTelegramFormatted(token, chatId,
-        `${boldHtml('📋 Your Communities')}\n\n${lines.join('\n')}\n\n${codeHtml('/community_list <id>')} for details\n${italicHtml('Ranks: GOD · owner · admin · member · in-group · banned')}`,
+        `${boldHtml('📋 Your Communities')}\n\n${lines.join('\n')}\n\n/community_list <id> for details\n${italicHtml('Ranks: GOD · owner · admin · member · in-group · banned')}`,
         forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
@@ -8966,7 +8966,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
    if (cmd === '/ai') {
      const q = rest || '';
      if (!q) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🧠 Usage:')} ${codeHtml('/ai your question about your brain')}\nExample: ${codeHtml('/ai how do I download youtube videos')}`, forumThreadId);
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🧠 Usage:')} /ai your question about your brain\nExample: /ai how do I download youtube videos`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      if (!athenaUser) {
@@ -8989,20 +8989,20 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      } else {
        const isDm = !String(chatId).startsWith('-');
        if (!isDm) {
-         await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Not linked. Bot owner: ${codeHtml('/community_verify')} in the group first.`, forumThreadId);
+         await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Not linked. Bot owner: /community_verify in the group first.`, forumThreadId);
          return new Response('OK', { status: 200, headers: corsHeaders });
        }
      }
      // Personal mode: GOD rank only
      if (scope === 'personal') {
        if (!isGod) {
-         await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Personal AI is GOD rank only. Use ${codeHtml('/ai')} in a community group, or ${codeHtml('/community_join')} to join one.`, forumThreadId);
+         await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Personal AI is GOD rank only. Use /ai in a community group, or /community_join to join one.`, forumThreadId);
          return new Response('OK', { status: 200, headers: corsHeaders });
        }
      } else {
        // Community mode: all ranks, with ban + membership checks
        if (!aiCommunityId) {
-         await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community not set. ${codeHtml('/community')} after linking community on website.`, forumThreadId);
+         await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community not set. /community after linking community on website.`, forumThreadId);
          return new Response('OK', { status: 200, headers: corsHeaders });
        }
        if (!isGod && await isBannedFromCommunity(env, aiCommunityId, athenaUser)) {
@@ -9164,14 +9164,14 @@ Rules:
     if (binding?.community_id) {
       lines.push(`${boldHtml('Community:')} ${escHtml(binding.group_name || binding.community_id)}`);
     }
-    lines.push('', `${codeHtml('/backup')} ${italicHtml('for Telegram/Drive backup (self-host)')}`);
+    lines.push('', `/backup ${italicHtml('for Telegram/Drive backup (self-host)')}`);
     await sendTelegramFormatted(token, chatId, lines.join('\n'), forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
   // ---- /sync — removed (PostgreSQL only). Keep command as stub for compat.
   if (cmd === '/sync') {
-    await sendTelegramFormatted(token, chatId, `${boldHtml('ℹ️ Sync removed')} — PostgreSQL is the only store (D1/GitHub deprecated). Use ${codeHtml('/backup')} on self-host or ${codeHtml('pg_dump')}.`, forumThreadId);
+    await sendTelegramFormatted(token, chatId, `${boldHtml('ℹ️ Sync removed')} — PostgreSQL is the only store (D1/GitHub deprecated). Use /backup on self-host or ${codeHtml('pg_dump')}.`, forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
