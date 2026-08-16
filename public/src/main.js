@@ -191,6 +191,46 @@ document.addEventListener('DOMContentLoaded', () => {
     appRoot.classList.remove('hidden');
   }
 
+  // --- Modal: replaces native confirm() with a themed, focus-trapped dialog ---
+  function showModal({ title = 'Confirm', message = '', confirmText = 'Confirm', cancelText = 'Cancel', danger = false }) {
+    return new Promise((resolve) => {
+      const prevActive = document.activeElement;
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.innerHTML = `
+        <div class="modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
+          <h3 class="modal-title">${escapeHtml(title)}</h3>
+          <p class="modal-message">${message}</p>
+          <div class="modal-actions">
+            <button type="button" class="btn btn-secondary" data-modal-cancel>${escapeHtml(cancelText)}</button>
+            <button type="button" class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-modal-ok>${escapeHtml(confirmText)}</button>
+          </div>
+        </div>`;
+      const done = (v) => {
+        overlay.remove();
+        document.removeEventListener('keydown', onKey);
+        if (prevActive && prevActive.focus) prevActive.focus();
+        resolve(v);
+      };
+      const onKey = (e) => {
+        if (e.key === 'Escape') done(false);
+        if (e.key === 'Tab') {
+          const focusables = overlay.querySelectorAll('button');
+          if (!focusables.length) return;
+          e.preventDefault();
+          const i = [...focusables].indexOf(document.activeElement);
+          focusables[(i + (e.shiftKey ? -1 : 1) + focusables.length) % focusables.length].focus();
+        }
+      };
+      overlay.querySelector('[data-modal-cancel]').addEventListener('click', () => done(false));
+      overlay.querySelector('[data-modal-ok]').addEventListener('click', () => done(true));
+      overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) done(false); });
+      document.addEventListener('keydown', onKey);
+      document.body.appendChild(overlay);
+      overlay.querySelector(danger ? '[data-modal-ok]' : '[data-modal-cancel]').focus();
+    });
+  }
+
   function showToast(message, isWarning = false) {
     toast.textContent = message;
     toast.style.borderColor = isWarning ? 'var(--warning-color)' : 'var(--border-highlight)';
@@ -828,7 +868,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (deleteAllBtn) {
       deleteAllBtn.addEventListener('click', async () => {
-        if (!confirm('Delete all notifications?')) return;
+        if (!(await showModal({ title: 'Delete all notifications', message: 'Clear every notification?', confirmText: 'Delete all', danger: true }))) return;
         await api('/api/notifications', {
           method: 'POST',
           body: JSON.stringify({ action: 'delete_all' })
@@ -840,7 +880,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     notifList.querySelectorAll('.notif-del-link').forEach(btn => {
       btn.addEventListener('click', async () => {
-        if (!confirm('Delete this reported link from the community brain?')) return;
+        if (!(await showModal({ title: 'Delete reported link', message: 'Remove this link from the community brain?', confirmText: 'Delete', danger: true }))) return;
         await api('/api/notifications', {
           method: 'POST',
           body: JSON.stringify({ id: btn.dataset.id, action: 'delete_link' })
@@ -1754,9 +1794,28 @@ document.addEventListener('DOMContentLoaded', () => {
     // Show local matches immediately so typing stays responsive, then replace
     // them with the server's answer, which searches the WHOLE store rather than
     // just the slice of links this browser happens to have loaded.
-    renderGoogleResults(filterLinks(corpus(), q), q);
+    const localMatches = filterLinks(corpus(), q);
+    renderGoogleResults(localMatches, q);
+    let skeletonTimer = null;
+    if (!localMatches.length) {
+      // Big brains: this browser holds a slice, the server holds everything —
+      // show shimmer cards instead of a premature "no results".
+      skeletonTimer = setTimeout(() => {
+        if (skSeq !== searchSeq) return;
+        emptyState.classList.add('hidden');
+        resultsMeta.classList.add('hidden');
+        resultsList.innerHTML = Array.from({ length: 3 }).map(() => `
+          <article class="g-result g-result-skeleton" aria-hidden="true">
+            <div class="skeleton sk-cite"></div>
+            <div class="skeleton sk-title"></div>
+            <div class="skeleton sk-line"></div>
+            <div class="skeleton sk-line sk-short"></div>
+          </article>`).join('');
+      }, 120);
+    }
 
     const seq = ++searchSeq;
+    const skSeq = seq;
     try {
       const params = new URLSearchParams({ q, scope: state.scope });
       if (state.scope === 'community') {
@@ -1766,6 +1825,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const { res, data } = await api(`/api/links/search?${params.toString()}`);
       if (seq !== searchSeq) return;              // a newer query already ran
       if (searchInput.value.trim() !== q) return; // input moved on
+      if (skeletonTimer) clearTimeout(skeletonTimer);
       if (res.ok && data.success && Array.isArray(data.links)) {
         const documents = filterLinks(corpus().filter(item => item.isDocument), q);
         renderGoogleResults([...data.links.map(normalizeLink), ...documents], q, data.total);
@@ -1778,6 +1838,8 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     } catch (_) {
       // Offline or denied — the local results already on screen stand.
+      if (skeletonTimer) clearTimeout(skeletonTimer);
+      if (!resultsList.children.length || resultsList.querySelector('.g-result-skeleton')) renderGoogleResults([], q);
     }
   }
 
@@ -1875,7 +1937,7 @@ document.addEventListener('DOMContentLoaded', () => {
         q, corpus(),
         (_delta, full) => {
           const el = aiAnswerText.querySelector('.chat-msg:last-child .chat-answer-content');
-          if (el) el.textContent = full;
+          if (el) { el.textContent = full; el.classList.add('streaming'); }
         },
         state.conversationHistory,
         (_chunk, fullThinking) => {
@@ -2505,8 +2567,8 @@ document.addEventListener('DOMContentLoaded', () => {
           showToast('Wipe personal is GOD only', true);
           return;
         }
-        if (!confirm('Wipe ALL your personal data on this instance?\n\nThis cannot be undone.')) return;
-        if (!confirm('Final confirmation: delete personal links, AI config, and end all sessions?')) return;
+        if (!(await showModal({ title: 'Wipe personal data', message: 'Delete ALL your personal data on this instance? This cannot be undone.', confirmText: 'Continue', danger: true }))) return;
+        if (!(await showModal({ title: 'Final confirmation', message: 'Delete personal links, AI config, and end all sessions?', confirmText: 'Wipe everything', danger: true }))) return;
         try {
           const { res, data } = await api('/api/account/wipe', {
             method: 'POST',
@@ -2544,6 +2606,26 @@ document.addEventListener('DOMContentLoaded', () => {
 
     uploadFileBtn.addEventListener('click', () => documentFileInput.click());
     documentFileInput.addEventListener('change', () => uploadDocuments([...documentFileInput.files]));
+    // Drag-and-drop upload onto the whole search area while in dump mode
+    const dropZone = searchBarBox;
+    if (dropZone) {
+      ['dragenter', 'dragover'].forEach((evName) => {
+        dropZone.addEventListener(evName, (e) => {
+          if (state.mode !== 'dump') return;
+          e.preventDefault();
+          dropZone.classList.add('dropzone-active');
+        });
+      });
+      ['dragleave', 'drop'].forEach((evName) => {
+        dropZone.addEventListener(evName, (e) => {
+          if (state.mode !== 'dump') return;
+          e.preventDefault();
+          if (evName === 'dragleave' && dropZone.contains(e.relatedTarget)) return;
+          dropZone.classList.remove('dropzone-active');
+          if (evName === 'drop' && e.dataTransfer?.files?.length) uploadDocuments([...e.dataTransfer.files]);
+        });
+      });
+    }
 
     if (notifBellBtn) {
       notifBellBtn.addEventListener('click', async () => {
