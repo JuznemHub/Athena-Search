@@ -3,7 +3,7 @@
 One bar: search, dump, and AI answers from your markdown brain.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.48-blueviolet?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-1.0.49-blueviolet?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/license_CC_BY--NC_4.0-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/telegram-bot-blue?style=flat-square&logo=telegram" alt="telegram">
   <img src="https://img.shields.io/badge/discord-login-5865F2?style=flat-square&logo=discord" alt="discord">
@@ -302,6 +302,8 @@ Sending or forwarding any supported text file — or a document (.pdf, .docx, .p
 | `/channel_link <community_id> <channel_id>` | Auto-index a channel's new posts (bot must be channel admin) |
 | `/channel_unlink <channel_id>` | Stop indexing a channel |
 | `/index` | Indexing status + backfill info |
+| `/index_start <community_id> <chat_id> <api_id> <api_hash> <session_string>` | Backfill a group/channel's history (self-host, DM only; session encrypted at rest, deleted when done; requires `npm install telegram` on the server) |
+| `/index_status` / `/index_stop` | Backfill progress / cancel + delete session |
 
 **GOD only**
 

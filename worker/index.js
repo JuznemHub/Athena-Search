@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.48',
+          version: '1.0.49',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -6950,25 +6950,8 @@ async function indexChannelPost(msg, binding, token, env) {
         if (fileInfo?.ok && fileInfo.result?.file_path) {
           const fileRes = await fetch(`https://api.telegram.org/file/bot${token}/${fileInfo.result.file_path}`);
           if (fileRes.ok) {
-            let valid;
-            if (CONVERTIBLE_EXTENSIONS.has(ext)) {
-              const arr = new Uint8Array(await fileRes.arrayBuffer());
-              let bin = '';
-              for (let i = 0; i < arr.length; i += 0x8000) bin += String.fromCharCode(...arr.subarray(i, i + 0x8000));
-              const converted = await convertDocumentToMarkdown(env, ext, btoa(bin));
-              valid = converted.error ? null : validateDocumentText('community', filename, converted.markdown);
-            } else {
-              valid = validateDocumentInput({ scope: 'community', filename, content: await fileRes.text() });
-            }
-            if (valid && !valid.error) {
-              const id = 'doc_ch_' + Date.now().toString(36) + '_' + randomToken().slice(0, 4);
-              await env.DB.prepare(
-                `INSERT INTO uploaded_documents (id, scope, community_id, filename, content, uploaded_by, created_at)
-                 VALUES (?, 'community', ?, ?, ?, ?, ?)`
-              ).bind(id, communityId, valid.filename, valid.content, `channel:${msg.chat.id}`, Date.now()).run();
-            } else if (valid?.error) {
-              console.warn(`channel doc skipped (${channelTitle}): ${valid.error}`);
-            }
+            const r = await saveIndexedDocument(env, communityId, filename, ext, new Uint8Array(await fileRes.arrayBuffer()), `channel:${msg.chat.id}`);
+            if (r && r.error) console.warn(`channel doc skipped (${channelTitle}): ${r.error}`);
           }
         }
       }
@@ -6977,16 +6960,44 @@ async function indexChannelPost(msg, binding, token, env) {
     }
   }
 
-  // Links — mirrors saveCommunityUrlDirect's insert path minus user gates
   const urls = extractUrlsFromTelegramMessage(msg, { includeReply: false });
-  const uniqueUrls = [...new Set(urls)];
+  const saved = await saveIndexedLinks(env, communityId, [...new Set(urls)], channelTitle, text, 'channel');
+  if (saved) console.log(`channel ${channelTitle}: indexed ${saved} link(s)`);
+}
+
+/** Shared by channel indexing and history backfill. Returns {error?} or {saved} or null on skip. */
+async function saveIndexedDocument(env, communityId, filename, ext, bytes, uploadedBy) {
+  if (!DOCUMENT_EXTENSIONS.has(ext) && !CONVERTIBLE_EXTENSIONS.has(ext)) return null;
+  let valid;
+  if (CONVERTIBLE_EXTENSIONS.has(ext)) {
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    const converted = await convertDocumentToMarkdown(env, ext, btoa(bin));
+    valid = converted.error ? { error: converted.error } : validateDocumentText('community', filename, converted.markdown);
+  } else {
+    valid = validateDocumentInput({ scope: 'community', filename, content: new TextDecoder().decode(bytes) });
+  }
+  if (valid?.error) return valid;
+  if (!valid || !valid.content) return null;
+  const id = 'doc_ix_' + Date.now().toString(36) + '_' + randomToken().slice(0, 4);
+  await ensureDocumentsTable(env);
+  await env.DB.prepare(
+    `INSERT INTO uploaded_documents (id, scope, community_id, filename, content, uploaded_by, created_at)
+     VALUES (?, 'community', ?, ?, ?, ?, ?)`
+  ).bind(id, communityId, valid.filename, valid.content, uploadedBy, Date.now()).run();
+  return { saved: id };
+}
+
+/** Shared insert path for indexed links (channel posts + history backfill). */
+async function saveIndexedLinks(env, communityId, urls, attributionName, postText, source /* 'channel'|'backfill' */) {
+  const baseTags = ['telegram', source === 'backfill' ? 'backfill' : 'channel'];
   let saved = 0;
-  for (const rawUrl of uniqueUrls) {
+  for (const rawUrl of urls) {
     try {
       if (await findExistingLink(env, 'links', 'community_id', communityId, rawUrl)) continue;
       const meta = await enrichLinkFields(env, rawUrl, { title: '', notes: '' });
       const urlHash = generateUrlHash(rawUrl);
-      const id = 'ch_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+      const id = 'ix_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
       await ensureLinkMetaColumns(env);
       try {
         await env.DB.prepare(
@@ -6995,7 +7006,7 @@ async function indexChannelPost(msg, binding, token, env) {
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'telegram', ?, 0, 0, ?, ?, ?)`
         ).bind(
           id, communityId, rawUrl, urlHash, meta.title, meta.notes || '',
-          JSON.stringify(['telegram', 'channel']), channelTitle, channelTitle,
+          JSON.stringify(baseTags), attributionName, attributionName,
           Date.now(), meta.image_url || null, meta.site_name || null
         ).run();
       } catch (error) {
@@ -7003,23 +7014,23 @@ async function indexChannelPost(msg, binding, token, env) {
         if (!isMissingLinkMetaColumnError(error)) throw error;
         await env.DB.prepare(
           'INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-        ).bind(id, communityId, rawUrl, urlHash, meta.title, meta.notes || '', JSON.stringify(['telegram', 'channel']), channelTitle, Date.now()).run();
+        ).bind(id, communityId, rawUrl, urlHash, meta.title, meta.notes || '', JSON.stringify(baseTags), attributionName, Date.now()).run();
       }
       saved++;
       // tagging: post #hashtags win, else AI describe (same as group dumps)
-      const userTags = normalizeTagList(extractHashtags(text || ''));
+      const userTags = normalizeTagList(extractHashtags(postText || ''));
       let finalTags = null;
       let finalTitle = meta.title;
       let finalNotes = meta.notes || '';
       if (userTags.length) {
-        finalTags = [...new Set([...['telegram', 'channel'], ...userTags])];
+        finalTags = [...new Set([...baseTags, ...userTags])];
       } else {
         const vocab = await recentTagsForScope(env, 'community', communityId);
         const ai = await aiDescribeAndTag(env, rawUrl, meta, vocab);
         if (ai) {
           finalTitle = ai.title || meta.title;
           finalNotes = ai.description || meta.notes || '';
-          finalTags = ai.tags?.length ? [...new Set([...['telegram', 'channel'], ...ai.tags])] : ['telegram', 'channel'];
+          finalTags = ai.tags?.length ? [...new Set([...baseTags, ...ai.tags])] : baseTags;
         }
       }
       if (finalTags) {
@@ -7028,10 +7039,162 @@ async function indexChannelPost(msg, binding, token, env) {
           .bind(finalTitle, JSON.stringify(finalTags), finalNotes, id).run().catch(() => {});
       }
     } catch (e) {
-      console.error(`channel link index failed (${rawUrl})`, e?.message || e);
+      console.error(`indexed link save failed (${rawUrl})`, e?.message || e);
     }
   }
-  if (saved) console.log(`channel ${channelTitle}: indexed ${saved} link(s)`);
+  return saved;
+}
+
+// ---- History backfill via a user session string (gramjs, self-host only) ----
+
+async function ensureIndexTables(env) {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS telegram_index_sessions (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL, community_id TEXT NOT NULL,
+      chat_id TEXT NOT NULL, api_id TEXT, api_hash_enc TEXT, session_enc TEXT NOT NULL,
+      created_at INTEGER NOT NULL`
+  ).run();
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS index_jobs (
+      id TEXT PRIMARY KEY, community_id TEXT NOT NULL, chat_id TEXT NOT NULL, user_id TEXT NOT NULL,
+      status TEXT NOT NULL, offset_id INTEGER NOT NULL DEFAULT 0,
+      processed INTEGER NOT NULL DEFAULT 0, saved_links INTEGER NOT NULL DEFAULT 0,
+      saved_docs INTEGER NOT NULL DEFAULT 0, progress_chat_id TEXT,
+      error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL`
+  ).run();
+}
+
+const INDEX_BATCH = 100;
+const INDEX_BATCH_DELAY_MS = 1500; // ~40 req/min ceiling — well under Telegram's flood limits
+const INDEX_MAX_MESSAGES = 50000;
+
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+/** URLs from a gramjs message: link entities + plain-text regex. */
+function urlsFromGramjsMessage(message) {
+  const out = new Set();
+  const text = String(message.text || message.message || '');
+  try {
+    for (const e of message.entities || []) {
+      if (e?.className === 'MessageEntityTextUrl' && e.url) out.add(e.url);
+    }
+  } catch (_) {}
+  for (const m of text.matchAll(/https?:\/\/[^\s<>"')\]]+/g)) out.add(m[0]);
+  return [...out];
+}
+
+/**
+ * Backfill one chat's history into a community using the stored user session.
+ * Pacing: INDEX_BATCH_DELAY_MS between getHistory pages plus per-media gaps;
+ * FloodWaitError sleeps the exact server-announced time (capped at 5 min).
+ * The cursor (offset_id) persists in index_jobs, so a stopped job resumes.
+ */
+async function runHistoryIndexJob(env, job, token) {
+  const log = (...a) => console.log(`[index ${job.id}]`, ...a);
+  const patch = async (fields) => {
+    const keys = Object.keys(fields);
+    const sets = keys.map((k) => `${k} = ?`).join(', ');
+    await env.DB.prepare(`UPDATE index_jobs SET ${sets}, updated_at = ? WHERE id = ?`)
+      .bind(...keys.map((k) => fields[k]), Date.now(), job.id).run().catch(() => {});
+  };
+  try {
+    const sess = await env.DB.prepare('SELECT * FROM telegram_index_sessions WHERE id = ?').bind(job.id).first();
+    if (!sess) { await patch({ status: 'error', error: 'session missing' }); return; }
+    let gramjs;
+    try {
+      // Non-literal specifier: bundlers must never try to resolve the native
+      // gramjs package — it is an optional, self-host-only dependency.
+      const spec = 'telegram';
+      gramjs = await import(spec);
+    } catch (_) {
+      await patch({ status: 'error', error: 'gramjs not installed (npm install telegram)' });
+      await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('❌')} History backfill needs the optional package. On the server: ${codeHtml('npm install telegram')}, then ${codeHtml('/index_start')} again.`).catch(() => {});
+      return;
+    }
+    const { TelegramClient } = gramjs;
+    const { StringSession } = gramjs.sessions;
+    const sessionString = await decryptBotToken(env, sess.session_enc); // same AES-GCM envelope as bot tokens
+    const apiHash = await decryptBotToken(env, sess.api_hash_enc);
+    if (!sessionString || !apiHash) { await patch({ status: 'error', error: 'session decrypt failed (STORAGE_KEY rotated?)' }); return; }
+    const client = new TelegramClient(new StringSession(sessionString), Number(sess.api_id) || 0, apiHash, { connectionRetries: 3 });
+    await client.connect();
+    let offsetId = job.offset_id || 0;
+    let processed = job.processed || 0;
+    let savedLinks = job.saved_links || 0;
+    let savedDocs = job.saved_docs || 0;
+    let lastProgress = 0;
+    await patch({ status: 'running', error: null });
+    log(`start chat=${job.chat_id} offset=${offsetId}`);
+    while (processed < INDEX_MAX_MESSAGES) {
+      const row = await env.DB.prepare('SELECT status FROM index_jobs WHERE id = ?').bind(job.id).first();
+      if (!row || row.status === 'stopping') { await patch({ status: 'stopped' }); log('stopped'); break; }
+      let messages;
+      try {
+        messages = await client.getMessages(job.chat_id, { limit: INDEX_BATCH, offsetId });
+      } catch (e) {
+        if (e && typeof e.seconds === 'number') { // FloodWaitError
+          log(`flood-wait ${e.seconds}s — sleeping`);
+          await patch({ error: `flood-wait ${e.seconds}s` });
+          await sleep(Math.min(e.seconds * 1000, 300_000));
+          continue;
+        }
+        throw e;
+      }
+      if (!messages || !messages.length) { await patch({ status: 'done' }); log('done (end of history)'); break; }
+      for (const message of messages) {
+        offsetId = Math.max(offsetId, Number(message.id || 0));
+        processed++;
+        const text = String(message.text || message.message || '');
+        if (text.startsWith('/')) continue;
+        const urls = urlsFromGramjsMessage(message);
+        if (urls.length) {
+          const saved = await saveIndexedLinks(env, job.community_id, urls, 'history backfill', text, 'backfill');
+          savedLinks += saved || 0;
+        }
+        const media = message.media;
+        if (media && media.className === 'MessageMediaDocument' && media.document) {
+          const docu = media.document;
+          const fnameAttr = (docu.attributes || []).find((a) => a.className === 'MessageAttributeFilename');
+          const filename = fnameAttr?.fileName || '';
+          const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+          // Positive allowlist: video/audio/archives (mkv, mp4, mp3, zip, …)
+          // never match DOCUMENT_EXTENSIONS/CONVERTIBLE_EXTENSIONS.
+          if (filename && (DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) && Number(docu.size || 0) <= CONVERT_SOURCE_MAX_BYTES) {
+            try {
+              const buf = await client.downloadMedia(message, {});
+              if (buf && buf.length) {
+                const r = await saveIndexedDocument(env, job.community_id, filename, ext, new Uint8Array(buf), `backfill:${job.chat_id}`);
+                if (r?.saved) savedDocs++;
+              }
+              await sleep(400);
+            } catch (e) {
+              if (e && typeof e.seconds === 'number') { await sleep(Math.min(e.seconds * 1000, 300_000)); }
+              else console.error('[index] media failed', e?.message || e);
+            }
+          }
+        }
+      }
+      await patch({ offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs });
+      if (processed - lastProgress >= 300) {
+        lastProgress = processed;
+        await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('🗂')} Backfill: ${processed} scanned · ${savedLinks} links · ${savedDocs} docs`).catch(() => {});
+      }
+      await sleep(INDEX_BATCH_DELAY_MS);
+    }
+    if (processed >= INDEX_MAX_MESSAGES) { await patch({ status: 'done', error: `capped at ${INDEX_MAX_MESSAGES} messages` }); log('capped'); }
+    const finalRow = await env.DB.prepare('SELECT status, saved_links, saved_docs FROM index_jobs WHERE id = ?').bind(job.id).first();
+    await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('✅')} Backfill ${finalRow?.status || 'done'}: ${processed} scanned · ${savedLinks} links · ${savedDocs} docs saved.`).catch(() => {});
+    // Session auto-delete when the job finishes cleanly — a stored user
+    // session is a live account key; it should not outlive its purpose.
+    if (finalRow?.status === 'done') {
+      await env.DB.prepare('DELETE FROM telegram_index_sessions WHERE id = ?').bind(job.id).run().catch(() => {});
+    }
+    try { await client.disconnect(); } catch (_) {}
+  } catch (e) {
+    console.error('[index] job failed', e?.message || e);
+    await patch({ status: 'error', error: String(e?.message || e).slice(0, 300) });
+    await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('❌')} Backfill failed: ${escHtml(String(e?.message || e).slice(0, 200))}`).catch(() => {});
+  }
 }
 
 async function handleTelegramWebhook(update, env, corsHeaders) {
@@ -7725,6 +7888,117 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        `${codeHtml('/index_status')} — progress`,
        `${codeHtml('/index_stop')} — cancel + delete session`
      ].join('\n'), forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /index_start — history backfill with a user session string ----
+   // Self-host only (gramjs is a native Node dependency), DM only (the
+   // session string is a live account key), GOD or community owner.
+   if (cmd === '/index_start' || cmd === '/indexstart') {
+     const dmOnly = !chatId.startsWith('-');
+     if (!isSelfHosted(env)) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} History backfill runs on the self-hosted server (it needs the optional gramjs package). This instance is on Cloudflare Workers.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!athenaUser) {
+       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!dmOnly) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Session strings are secrets — send ${codeHtml('/index_start')} in a private chat with the bot, never in a group.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const usage = [
+       `${boldHtml('🗂 History backfill')}`,
+       '',
+       `Usage (in bot DM): ${codeHtml('/index_start <community_id> <chat_id> <api_id> <api_hash> <session_string>')}`,
+       '',
+       `• chat_id — the group/channel to backfill (forward a post to ${linkHtml('https://t.me/userinfobot', '@userinfobot')}; channels are -100…)`,
+       '• api_id + api_hash — from my.telegram.org (the app the session belongs to)',
+       '• session_string — gramjs StringSession (export with any trusted session-string tool)',
+       '',
+       'Pacing is built in (flood-wait honored, ~1.5s/page). The triggering message is deleted; the session is deleted when the job completes. Progress every 300 messages; stopped jobs resume from the cursor.',
+       `${codeHtml('/index_status')} · ${codeHtml('/index_stop')}`
+     ].join('\n');
+     const communityIdArg = parts[1] || '';
+     const chatIdArg = parts[2] || '';
+     const apiIdArg = parts[3] || '';
+     const apiHashArg = parts[4] || '';
+     const sessionArg = parts.slice(5).join(' ');
+     if (!communityIdArg || !chatIdArg || !apiIdArg || !apiHashArg || !sessionArg) {
+       await sendTelegramFormatted(token, chatId, usage, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!(await ensureOwnerOrAdmin(communityIdArg, athenaUser.id, env)) && !isGod) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const community = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityIdArg).first();
+     if (!community) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(communityIdArg)} not found.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!/^[-\d@_\w]+$/.test(chatIdArg)) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Invalid chat_id.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     // Delete the triggering message — it contains a live session string.
+     await telegramApi(token, 'deleteMessage', { chat_id: chatId, message_id: msg.message_id }).catch(() => {});
+     await ensureIndexTables(env);
+     const jobId = 'ij_' + Date.now().toString(36) + '_' + randomToken().slice(0, 6);
+    const sessionEnc = await encryptSecret(env, sessionArg.trim());
+     const apiHashEnc = await encryptSecret(env, apiHashArg.trim());
+     // A session string is a live account key: storing it plaintext (the
+     // no-STORAGE_KEY fallback path) is not acceptable — refuse instead.
+     if (!String(sessionEnc).startsWith('enc:v1:') || !String(apiHashEnc).startsWith('enc:v1:')) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Server has no STORAGE_KEY — refusing to store the session string unencrypted. Set STORAGE_KEY and retry.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await env.DB.prepare(
+       `INSERT INTO telegram_index_sessions (id, user_id, community_id, chat_id, api_id, api_hash_enc, session_enc, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+     ).bind(jobId, athenaUser.id, communityIdArg, chatIdArg, apiIdArg.trim(), apiHashEnc, sessionEnc, Date.now()).run();
+     await env.DB.prepare(
+       `INSERT INTO index_jobs (id, community_id, chat_id, user_id, status, offset_id, progress_chat_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?)`
+     ).bind(jobId, communityIdArg, chatIdArg, athenaUser.id, chatId, Date.now(), Date.now()).run();
+     runInBackground(env, runHistoryIndexJob(env, { id: jobId, community_id: communityIdArg, chat_id: chatIdArg, offset_id: 0, processed: 0, saved_links: 0, saved_docs: 0, progress_chat_id: chatId }, token));
+     await sendTelegramFormatted(token, chatId, `${boldHtml('▶️')} Backfill started for ${codeHtml(chatIdArg)} → ${boldHtml(escHtml(community.name || communityIdArg))}.\nSession message deleted. I will report progress here. ${codeHtml('/index_stop')} to cancel.`, forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   if (cmd === '/index_status') {
+     await ensureIndexTables(env);
+     const { results } = await env.DB.prepare(
+       `SELECT j.* FROM index_jobs j WHERE j.user_id = ? ORDER BY j.updated_at DESC LIMIT 5`
+     ).bind(athenaUser?.id || tgUserId || '').all();
+     if (!results || !results.length) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No backfill jobs yet. ${codeHtml('/index_start')} to begin.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const lines = results.map((j) => `${j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'error' ? '❌' : '⏸'} ${codeHtml(j.chat_id)} — ${escHtml(j.status)}: ${j.processed || 0} scanned · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.error ? `\n   ${escHtml(j.error)}` : ''}`);
+     await sendTelegramFormatted(token, chatId, `${boldHtml('🗂 Backfill jobs')}\n\n${lines.join('\n\n')}`, forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   if (cmd === '/index_stop') {
+     if (!athenaUser) {
+       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await ensureIndexTables(env);
+     const { results } = await env.DB.prepare(
+       `SELECT id FROM index_jobs WHERE user_id = ? AND status IN ('queued','running')`
+     ).bind(athenaUser.id).all();
+     if (!results || !results.length) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No running backfill jobs.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     for (const j of results) {
+       await env.DB.prepare(`UPDATE index_jobs SET status = 'stopping', updated_at = ? WHERE id = ?`).bind(Date.now(), j.id).run();
+       await env.DB.prepare('DELETE FROM telegram_index_sessions WHERE id = ?').bind(j.id).run().catch(() => {});
+     }
+     await sendTelegramFormatted(token, chatId, `${boldHtml('⏹')} Stopping ${results.length} job(s) and deleting the stored session(s).`, forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
