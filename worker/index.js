@@ -127,7 +127,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.52',
+          version: '1.0.53',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -431,15 +431,16 @@ export default {
           const id = String(e.id || e.model || '').trim();
           if (!id) return null;
           const p = e.pricing || e.cost || {};
-          const pricing = {
-            prompt: p.prompt != null ? Number(p.prompt) : null,
-            completion: p.completion != null ? Number(p.completion) : null,
-          };
+          // providers use either pair: openai-style prompt/completion or
+          // models.dev-style input/output ($/1M tokens)
+          const inPrice = p.prompt != null ? Number(p.prompt) : (p.input != null ? Number(p.input) : null);
+          const outPrice = p.completion != null ? Number(p.completion) : (p.output != null ? Number(p.output) : null);
+          const pricing = { prompt: inPrice, completion: outPrice };
           return {
             id,
             name: String(e.name || id),
             free: isModelFreeEntry(e),
-            context_length: Number(e.context_length || e.top_provider?.context_length || 0) || null,
+            context_length: Number(e.context_length || e.top_provider?.context_length || e.limit?.context || 0) || null,
             ...(pricing.prompt != null || pricing.completion != null ? { pricing } : {}),
           };
         }).filter(Boolean).sort((a, b) => (a.free === b.free ? a.id.localeCompare(b.id) : (a.free ? -1 : 1)));
@@ -4755,13 +4756,23 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
   }
 
   try {
-  // hermes-like fallback: try primary then live free models on 429/503/401
+  // hermes-like fallback: try primary then live free models on 429/503/401/402
   const tryModels = [model, ...(await getFallbackChain(baseUrl, env, apiKey, model))];
   let upstreamRes = null;
   let usedModel = model;
   let lastErrText = '';
+  let upstreamIsPlainJson = false;
   for (let mi=0; mi<tryModels.length; mi++) {
     const curModel = tryModels[mi];
+    // The Telegram bot path (/ai) sends plain JSON and is the proven transport
+    // for every supported provider; streaming is a website nicety. When the
+    // streamed attempt fails fast — provider refuses stream:true, or an
+    // SSE-hostile reverse proxy in front of the server — retry the same model
+    // without stream and synthesize SSE from the JSON answer below. Timeouts
+    // are not retried: a second 30s wait helps nobody.
+    const streamAttempts = wantStream ? [true, false] : [false];
+    for (let ai=0; ai<streamAttempts.length; ai++) {
+      const doStream = streamAttempts[ai];
     try {
       const maxTok = Math.min(parseInt(body.max_tokens, 10) || 500, 8192);
       let curRes;
@@ -4785,7 +4796,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
             max_tokens: maxTok,
             system: system || undefined,
             messages: messages || [{ role: 'user', content: userMsg }],
-            stream: true
+            ...(doStream ? { stream: true } : {})
           })
         }, AI_PROXY_TIMEOUT_MS);
       } else if (endpoint.endsWith('/responses')) {
@@ -4823,7 +4834,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
             messages: msgs,
             temperature: body.temperature ?? 0.2,
             max_tokens: maxTok,
-            stream: true
+            ...(doStream ? { stream: true } : {})
           })
         }, AI_PROXY_TIMEOUT_MS);
       }
@@ -4833,10 +4844,16 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
         const isRetryable = curRes.status===429 || curRes.status===503 || curRes.status===401 || curRes.status===402;
         const retryAfter = parseInt(curRes.headers.get('retry-after')||curRes.headers.get('Retry-After')||'0',10);
         const waitMs = Number.isFinite(retryAfter) && retryAfter>0 ? retryAfter*1000 : 400*(mi+1);
+        // A streamed attempt the provider refused earns one plain-JSON retry
+        // on the same model before burning a fallback-model slot.
+        if (doStream && ai < streamAttempts.length-1) {
+          lastErrText = `stream refused (HTTP ${curRes.status})`;
+          continue;
+        }
         if (isRetryable && mi < tryModels.length-1) {
           console.warn(`AI chat fallback ${curModel} ${curRes.status} retryAfter ${retryAfter}s -> next`);
           await new Promise(r=>setTimeout(r, waitMs));
-          continue;
+          break;
         }
         let data = {};
         try { data = JSON.parse(text); } catch (_) { data = { raw: text.slice(0, 500) }; }
@@ -4866,15 +4883,51 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
       // success -> keep this response for streaming
       upstreamRes = curRes;
       usedModel = curModel;
+      upstreamIsPlainJson = !doStream;
       break;
     } catch (e) {
       lastErrText = e?.message || String(e);
-      if (mi < tryModels.length-1) { await new Promise(r=>setTimeout(r, 300*(mi+1))); continue; }
+      const timedOut = e?.name === 'AbortError';
+      if (!timedOut && doStream && ai < streamAttempts.length-1) { continue; }
+      if (mi < tryModels.length-1) { await new Promise(r=>setTimeout(r, 300*(mi+1))); break; }
       throw e;
     }
+    }
+    if (upstreamRes) break;
   }
   if (!upstreamRes || !upstreamRes.ok) {
     return Response.json({ success: false, error: lastErrText || 'All AI models failed', model: usedModel, endpoint }, { status: 502, headers: corsHeaders });
+  }
+
+  // A streaming client whose request had to fall back to plain JSON (the bot's
+  // proven transport, or a provider that ignored stream:true) still gets SSE:
+  // synthesize the stream from the JSON answer.
+  if (wantStream && !endpoint.endsWith('/responses') &&
+      (upstreamIsPlainJson || (upstreamRes.headers.get('content-type') || '').includes('application/json'))) {
+    const data = await upstreamRes.json().catch(() => ({}));
+    let jsonContent = '';
+    let jsonThinking = '';
+    if (mode === 'anthropic') {
+      jsonContent = (data.content || []).filter(b => b.type === 'text').map(b => b.text || '').join('\n');
+    } else {
+      const m0 = data.choices?.[0]?.message || {};
+      jsonContent = m0.content || data.choices?.[0]?.text || '';
+      jsonThinking = m0.reasoning_content || '';
+    }
+    const encoder = new TextEncoder();
+    const events = [];
+    if (jsonThinking) events.push({ thinking: jsonThinking });
+    const chunk = 40;
+    for (let i = 0; i < jsonContent.length; i += chunk) {
+      events.push({ delta: jsonContent.slice(i, i + chunk) });
+    }
+    return new Response(new ReadableStream({
+      start(controller) {
+        for (const ev of events) controller.enqueue(encoder.encode(`data: ${JSON.stringify(ev)}\n\n`));
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        controller.close();
+      }
+    }), { headers: { ...corsHeaders, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' } });
   }
 
       if (endpoint.endsWith('/responses')) {
@@ -6569,8 +6622,10 @@ function helpMenuKeyboard() {
   return {
     inline_keyboard: [[
       { text: '🌐 Global', callback_data: 'help:global' },
-      { text: '👤 Personal', callback_data: 'help:personal' },
-      { text: '👥 Community', callback_data: 'help:community' }
+      { text: '👤 Personal', callback_data: 'help:personal' }
+    ], [
+      { text: '👥 Community', callback_data: 'help:community' },
+      { text: '📡 Channels', callback_data: 'help:channels' }
     ]]
   };
 }
@@ -6581,8 +6636,10 @@ function helpBackKeyboard() {
       { text: '« Help menu', callback_data: 'help:menu' }
     ], [
       { text: '🌐 Global', callback_data: 'help:global' },
-      { text: '👤 Personal', callback_data: 'help:personal' },
-      { text: '👥 Community', callback_data: 'help:community' }
+      { text: '👤 Personal', callback_data: 'help:personal' }
+    ], [
+      { text: '👥 Community', callback_data: 'help:community' },
+      { text: '📡 Channels', callback_data: 'help:channels' }
     ]]
   };
 }
@@ -6682,10 +6739,10 @@ function helpTextForSection(section) {
       'File uploads: send .md/.txt/.json/.py etc in group → community brain',
       'Documents: .pdf/.docx/.pptx/.xlsx/.odt/.rtf/.epub convert to Markdown on self-host',
       '',
-      'Auto-indexing',
-      '/channel_link <community_id> <channel_id> — channel posts → community brain',
+      'Auto-indexing (see 📡 Channels in /help for the full guide)',
+      '/channel_link &lt;community_id&gt; &lt;channel_id&gt; — channel posts → community brain',
       '  (bot must be channel admin; owner/GOD runs this)',
-      '/channel_unlink <channel_id> — stop indexing a channel',
+      '/channel_unlink &lt;channel_id&gt; — stop indexing a channel',
       '/index — indexing status · history backfill needs /index_start',
       '',
       'GOD: /personal · /clear_personal_db · /sync · /backup · /db · website bot + AI credentials',
@@ -6693,19 +6750,58 @@ function helpTextForSection(section) {
       '/restart — restart Athena service (GOD only)'
     ].join('\n');
   }
+  if (section === 'channels') {
+    // Rendered with parse_mode HTML — placeholder angle brackets must be escaped.
+    return [
+      '📡 Channels &amp; history indexing',
+      '',
+      'Index NEW channel posts',
+      '1) Add the bot to the channel as admin:',
+      '   Channel → Manage Channel → Administrators → Add Bot',
+      '2) Link it to a community (owner/GOD, in the linked group or bot DM):',
+      '   /channel_link &lt;community_id&gt; &lt;channel_id&gt;',
+      '   • channel_id: forward a channel post to @userinfobot (channel ids start with -100)',
+      '   • or forward a channel post to the bot and reply to it: /channel_link &lt;community_id&gt;',
+      '3) Done — every new post\'s links and files land in that community brain.',
+      '',
+      '/index — indexing status',
+      '/channel_unlink &lt;channel_id&gt; — stop indexing a channel',
+      '',
+      'Backfill OLD history (userbot mode)',
+      'Bots cannot read old messages. Backfill logs in as YOUR account via a',
+      'session string — self-host only, GOD/community owner, bot DM only.',
+      '',
+      '1) Get api_id + api_hash: my.telegram.org → API development tools',
+      '2) Generate a gramjs StringSession with a tool you trust. On the server:',
+      '   npm install telegram   (in the Athena repo)',
+      '   node scripts/gen-session.js   → prints the session string',
+      '3) In the bot DM (private chat — the string is a live account key):',
+      '   /index_start &lt;community_id&gt; &lt;chat_id&gt; &lt;api_id&gt; &lt;api_hash&gt; &lt;session_string&gt;',
+      '   • chat_id — the group/channel to backfill (forward a post to @userinfobot)',
+      '4) /index_status — progress · /index_stop — cancel + delete session',
+      '',
+      'The /index_start message self-deletes; the session is stored encrypted',
+      '(needs STORAGE_KEY) and deleted when the job finishes; stopped jobs resume.',
+      '⚠️ A session string grants full account access — revoke anytime in',
+      'Telegram Settings → Devices → terminate session.'
+    ].join('\n');
+  }
   return [
-    'Athena help',
+    'Athena — second brain',
     '',
-    'Pick a category:',
-    '🌐 Global — /start · /help · /id · /rank',
-    '👤 Personal — dual mode, dump, search, AI, edit… (GOD)',
-    '👥 Community — verify, join, list, admin, topic, clear…',
+    'Tap a section:',
+    '🌐 Global — /start /help /id /rank',
+    '👤 Personal — dual mode, dump, search, AI (GOD)',
+    '👥 Community — verify, join, admins, topics',
+    '📡 Channels — index channels + backfill history',
     '',
-    'Dual mode: /personal and /community switch where links go',
-    '(DM or group). Members dump in the linked group after join.',
+    'Member quick start:',
+    '1) Join the community Telegram group',
+    '2) Login on the website with Telegram',
+    '3) /community_join id — in bot DM',
+    '4) Paste links → /search query · /ai question',
     '',
-    'Member cmds: /start /help /id /rank /community_join /search /ai /community_list + dump',
-    'Other cmds → admin/owner/GOD only.'
+    'Settings, AI keys and bot setup live on the website.'
   ].join('\n');
 }
 
@@ -6772,10 +6868,10 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
   // ---- Help menu buttons ----
   if (data.startsWith('help:')) {
     await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id });
-    const section = data.slice(5); // menu | global | personal | community
+    const section = data.slice(5); // menu | global | personal | community | channels
     if (section === 'menu') {
       await editTelegramMessage(token, chatId, msgId, helpTextForSection('menu'), helpMenuKeyboard(), threadId, null);
-    } else if (section === 'global' || section === 'personal' || section === 'community') {
+    } else if (section === 'global' || section === 'personal' || section === 'community' || section === 'channels') {
       await editTelegramMessage(token, chatId, msgId, helpTextForSection(section), helpBackKeyboard(), threadId, null);
     }
     return new Response('OK', { status: 200, headers: corsHeaders });
@@ -7915,10 +8011,10 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        '',
        `• chat_id — the group/channel to backfill (forward a post to ${linkHtml('https://t.me/userinfobot', '@userinfobot')}; channels are -100…)`,
        '• api_id + api_hash — from my.telegram.org (the app the session belongs to)',
-       '• session_string — gramjs StringSession (export with any trusted session-string tool)',
+       `• session_string — gramjs StringSession. On the server: ${codeHtml('npm install telegram')} then ${codeHtml('node scripts/gen-session.js')} (Athena repo) prints one interactively.`,
        '',
        'Pacing is built in (flood-wait honored, ~1.5s/page). The triggering message is deleted; the session is deleted when the job completes. Progress every 300 messages; stopped jobs resume from the cursor.',
-       `${codeHtml('/index_status')} · ${codeHtml('/index_stop')}`
+       `Full guide: /help → 📡 Channels · ${codeHtml('/index_status')} · ${codeHtml('/index_stop')}`
      ].join('\n');
      const communityIdArg = parts[1] || '';
      const chatIdArg = parts[2] || '';
@@ -10459,7 +10555,8 @@ const FREE_MODEL_LIST_TTL_MS = 60 * 60 * 1000;
 
 function isModelFreeEntry(entry) {
   const id = String(entry.id || entry.model || '');
-  if (id.endsWith(':free')) return true;
+  // OpenRouter free suffix is ":free"; OpenCode Zen free variants end in "-free".
+  if (/(^|:)free$/i.test(id) || /-free$/i.test(id)) return true;
   const p = entry.pricing || entry.cost || {};
   const vals = [p.prompt, p.completion, p.input, p.output, entry.input, entry.output];
   for (const v of vals) {
@@ -10489,36 +10586,55 @@ function providerLimitInfo(baseUrl, model, free) {
 async function fetchModelList(baseUrl, env, apiKey) {
   const root = cleanApiBase(baseUrl);
   if (!root) return null;
+  // The live /models endpoint is the source of truth for WHAT exists: zen and
+  // zen/go expose different catalogs, and third-party catalogs lag behind
+  // (removed models listed, new ones missing). Metadata (name, cost, context)
+  // comes from models.dev when available, matched by exact id — it never adds
+  // or keeps a model the endpoint no longer serves.
+  let live = null;
+  const url = `${root}/models`;
+  try {
+    if (await isSafeExternalUrl(new URL(url), env)) {
+      const headers = {};
+      if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+      const res = await fetchWithTimeout(url, { headers, env }, 5000);
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        const raw = Array.isArray(data?.data) ? data.data
+          : Array.isArray(data?.models) ? data.models
+          : Array.isArray(data) ? data : null;
+        if (raw) {
+          live = raw.map((e) => ({ id: String(e.id || e.model || '').trim() })).filter((e) => e.id);
+        }
+      }
+    }
+  } catch (_) {}
+  let meta = null;
   if (root.includes('opencode.ai')) {
     try {
-      const url = 'https://models.dev/api.json';
-      if (await isSafeExternalUrl(new URL(url), env)) {
-        const res = await fetchWithTimeout(url, { env }, 5000);
+      const devUrl = 'https://models.dev/api.json';
+      if (await isSafeExternalUrl(new URL(devUrl), env)) {
+        const res = await fetchWithTimeout(devUrl, { env }, 5000);
         if (res.ok) {
           const data = await res.json().catch(() => null);
-          const opencodeModels = data?.opencode?.models;
-          if (opencodeModels && typeof opencodeModels === 'object') {
-            const list = Object.entries(opencodeModels).map(([id, meta]) => ({ id, ...meta }));
-            if (list.length) return list;
-          }
+          const models = data?.opencode?.models;
+          if (models && typeof models === 'object') meta = models;
         }
       }
     } catch (_) {}
   }
-  const url = `${root}/models`;
-  try {
-    if (!(await isSafeExternalUrl(new URL(url), env))) return null;
-  } catch (_) { return null; }
-  const headers = {};
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-  try {
-    const res = await fetchWithTimeout(url, { headers, env }, 5000);
-    if (!res.ok) return null;
-    const data = await res.json().catch(() => null);
-    if (!data) return null;
-    const list = Array.isArray(data.data) ? data.data : Array.isArray(data.models) ? data.models : Array.isArray(data) ? data : [];
-    return list;
-  } catch (_) { return null; }
+  if (live && meta) {
+    return live.map((e) => {
+      const m = meta[e.id];
+      return m ? { ...e, name: m.name, cost: m.cost, limit: m.limit } : e;
+    });
+  }
+  if (live) return live;
+  if (meta) {
+    const list = Object.entries(meta).map(([id, m]) => ({ id, ...m }));
+    if (list.length) return list;
+  }
+  return null;
 }
 
 function hostMatches(baseUrl, domain) {
