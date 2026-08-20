@@ -3438,7 +3438,7 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
     await ensureLinkMetaColumns(env);
     const accelerated = await meiliSearchScope(env, 'personal', user.id, q, { limit: effectiveLimit });
     const rows = accelerated?.rows || await searchAllLinks(env, 'personal', user.id, q, effectiveLimit);
-    const links = accelerated ? dedupeLinkRows(rows) : rankLinks(dedupeLinkRows(rows), q, effectiveLimit);
+    const links = rankLinks(dedupeLinkRows(rows), q, effectiveLimit);
     const enrichmentPending = queueMissingLinkEnrichment(env, 'personal', user.id, links);
     const total = await countScopeLinks(env, 'personal', user.id);
     return Response.json(
@@ -3457,7 +3457,7 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
   await ensureLinkMetaColumns(env);
   const accelerated = await meiliSearchScope(env, 'community', communityId, q, { limit: effectiveLimit });
   const rows = accelerated?.rows || await searchAllLinks(env, 'community', communityId, q, effectiveLimit);
-  const links = accelerated ? dedupeLinkRows(rows) : rankLinks(dedupeLinkRows(rows), q, effectiveLimit);
+  const links = rankLinks(dedupeLinkRows(rows), q, effectiveLimit);
   const enrichmentPending = queueMissingLinkEnrichment(env, 'community', communityId, links);
   const total = await countScopeLinks(env, 'community', communityId);
   return Response.json(
@@ -3467,7 +3467,7 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
 }
 
 /** Rank candidates by how well they match, best first. */
-function rankLinks(rows, query, limit = null) {
+function rankLinks(rows, query, limit = null, minScore = 8) {
   const q = String(query || '').toLowerCase().trim();
   const qa = q.replace(/[^a-z0-9]/g, '');
   if (!q) return takeResults(rows, limit);
@@ -3495,7 +3495,7 @@ function rankLinks(rows, query, limit = null) {
     }
     if (terms.length && termHits === terms.length) score += 30;
     else if (termHits > 1) score += termHits * 5;
-    if (score > 0) scored.push({ r, score });
+    if (score >= minScore) scored.push({ r, score });
   }
   scored.sort((a, b) => b.score - a.score || (b.r.created_at || 0) - (a.r.created_at || 0));
   return takeResults(scored.map(s => s.r), limit);
@@ -6792,7 +6792,7 @@ const SEARCH_SYNONYMS = {
 };
 
 function expandServerSearchTerms(query) {
-  const STOPWORDS_SERVER = new Set(['what','is','are','was','were','where','when','why','how','a','an','the','does','do','did','can','could','would','should','tell','me','about','of','for','on','in','to','you','your','it','this','that','with','from','and','or','as','at','be','by','if','we','us','my','our']);
+  const STOPWORDS_SERVER = new Set(['what','is','are','was','were','where','when','why','how','a','an','the','does','do','did','can','could','would','should','tell','me','about','of','for','on','in','to','you','your','it','this','that','with','from','and','or','as','at','be','by','if','we','us','my','our','please','list','some','show','find','give','get','recommend','recommendation','recommendations','suggest','suggestions','best','good']);
   const base = String(query || '').toLowerCase().trim().split(/\s+/).filter(Boolean);
   // Filter stopwords for search matching - "what is tokenrouter" should search for "tokenrouter", not "is"
   const filtered = base.filter(w => {

@@ -76,11 +76,24 @@
     ctx: ['context', 'lean-ctx', 'leanctx']
   };
 
+  // These words describe the request rather than the saved item. Counting
+  // them as retrieval terms makes a question such as "list some movie
+  // websites" match any document that happens to contain "some" or "list".
+  const QUERY_FILLER = new Set([
+    'a', 'an', 'the', 'what', 'is', 'are', 'was', 'were', 'where', 'when', 'why', 'how',
+    'does', 'do', 'did', 'can', 'could', 'would', 'should', 'tell', 'me', 'about', 'of',
+    'for', 'on', 'in', 'to', 'you', 'your', 'it', 'this', 'that', 'with', 'from', 'and',
+    'or', 'as', 'at', 'be', 'by', 'if', 'we', 'us', 'my', 'our', 'please', 'list', 'some',
+    'show', 'find', 'give', 'get', 'recommend', 'recommendation', 'recommendations',
+    'suggest', 'suggestions', 'best', 'good'
+  ]);
+
   function expandQueryTerms(query) {
     const base = tokens(query);
+    const meaningful = base.filter(t => !QUERY_FILLER.has(alnum(t)));
     const extra = new Set();
     const ql = query.toLowerCase();
-    for (const t of base) {
+    for (const t of meaningful) {
       const key = alnum(t);
       (SYNONYMS[key] || []).forEach(x => extra.add(x));
       stems(t).forEach(s => extra.add(s));
@@ -92,7 +105,7 @@
     if (/youtube|yt\b|video\s*down/.test(ql)) {
       ['yt-dlp', 'ytdlp', 'youtube-dl', 'download'].forEach(x => extra.add(x));
     }
-    return { tokens: base, expanded: [...extra] };
+    return { tokens: meaningful, expanded: [...extra] };
   }
 
   function itemText(item) {
@@ -110,7 +123,6 @@
     const segs = [];
     const text = itemText(item);
     segs.push(...tokens(text));
-    segs.push(alnum(text));
     try {
       if (item.url) {
         const u = new URL(item.url.startsWith('http') ? item.url : 'https://' + item.url);
@@ -134,6 +146,7 @@
       text,
       textSoft: soft(text),
       textAlnum: alnum(text),
+      wordAlnum: tokens(text).map(alnum),
       segs,
       segsAlnum: segs.map(alnum),
       // Pre-built trigram index so large documents aren't rescanned on every
@@ -152,6 +165,7 @@
     const text = sd.text;
     const textSoft = sd.textSoft;
     const textAlnum = sd.textAlnum;
+    const wordAlnum = sd.wordAlnum;
     const qSoft = soft(q);
     const qAlnum = alnum(q);
     const { tokens: qTokens, expanded } = expandQueryTerms(q);
@@ -170,7 +184,9 @@
       let hit = false;
       for (const st of stemSet) {
         if (st.length < 2) continue;
-        if (textAlnum.includes(st) || textSoft.includes(st)) {
+        const wordHit = wordAlnum.some(word => word === st || word.includes(st));
+        const compactHit = st.length >= 4 && textAlnum.includes(st);
+        if (wordHit || compactHit) {
           hit = true;
           score += st.length >= 4 ? 18 : 10;
           break;
@@ -185,7 +201,7 @@
       if (hit) tokenHits += 1;
       else {
         // n-gram soft match
-        const tg = ngrams(t, 3);
+        const tg = t.length >= 4 ? ngrams(t, 3) : [];
         const ig = sd.ngramsSet;
         let ng = 0;
         for (const g of tg) if (ig.has(g)) ng++;
@@ -201,7 +217,7 @@
     for (const ex of expanded) {
       const ea = alnum(ex);
       if (ea.length < 2) continue;
-      if (textAlnum.includes(ea) || segsAlnum.some(sa => sa.includes(ea) || ea.includes(sa))) {
+      if ((ea.length >= 4 && textAlnum.includes(ea)) || segsAlnum.some(sa => sa === ea || (ea.length >= 3 && sa.includes(ea)))) {
         score += 28;
       }
     }

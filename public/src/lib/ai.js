@@ -199,7 +199,9 @@ INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on 
     const retrieve = window.AthenaSearch?.retrieveForQuestion || ((q, c) => c);
     const list = corpus || [];
     const limit = isSteroidEnabled() ? list.length : 8;
-    const docs = retrieve(question, list, limit);
+    // Local fallback must be as strict as the LLM retrieval path. Otherwise a
+    // provider 502 turns weak/generic matches into the visible answer.
+    const docs = retrieve(question, list, limit, { minScore: 18, strict: true });
     if (!docs.length) {
       return {
         answer: corpusSize
@@ -219,6 +221,14 @@ INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on 
       sources: display,
       results: docs
     };
+  }
+
+  function formatAiFallbackMessage(error) {
+    const status = Number(error?.details?.status || error?.status || 0);
+    if (status >= 500) return 'AI provider is temporarily unavailable; showing relevant saved matches.';
+    if (status === 401 || status === 403) return 'AI provider rejected the request; showing relevant saved matches.';
+    if (status === 429) return 'AI provider is rate-limited; showing relevant saved matches.';
+    return 'AI is unavailable; showing relevant saved matches.';
   }
 
   async function callViaProxy({ baseUrl, apiKey, model, mode, system, user, messages, onDelta, onThinking }) {
@@ -494,7 +504,7 @@ INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on 
       };
     } catch (err) {
       const local = answerLocal(q, docs, corpusSize);
-      return { ...local, mode: 'local', thinking: '', error: err.message || String(err), errorDetails: err.details || null };
+      return { ...local, mode: 'local', thinking: '', error: formatAiFallbackMessage(err), errorDetails: err.details || null };
     }
   }
 
@@ -532,6 +542,7 @@ INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on 
     PRESETS,
     normalizeModelId,
     instanceAiConfigured,
-    getLastServerAiConfig
+    getLastServerAiConfig,
+    formatAiFallbackMessage
   };
 })();

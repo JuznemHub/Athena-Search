@@ -1960,7 +1960,7 @@ document.addEventListener('DOMContentLoaded', () => {
           label.textContent = 'AI · grounded in your markdown brain';
         } else {
           const errHint = result.error ? ` — ${result.error}` : '';
-          label.textContent = `AI · local brain${errHint ? '' : ' (add API key in Settings for full assistant)'}`;
+          label.textContent = `AI · ${errHint ? 'local fallback' : 'local brain'}${errHint ? '' : ' (add API key in Settings for full assistant)'}`;
           if (result.error) {
             showToast(result.error, true);
             console.warn('[athena] AI fell back to local:', result.error);
@@ -1970,11 +1970,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
       if (result.error && result.mode === 'local') {
         const errDiv = document.createElement('div');
-        errDiv.className = 'ai-error-banner';
-        errDiv.style.cssText = 'margin:8px 0;padding:8px 12px;background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.35);border-radius:8px;color:var(--danger-color);font-size:0.85em';
+        errDiv.className = 'ai-fallback-banner';
+        errDiv.style.cssText = 'margin:8px 0;padding:8px 12px;background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.35);border-radius:8px;color:var(--text-color);font-size:0.85em';
         const d = result.errorDetails;
         const detail = d ? ` (HTTP ${d.status || '?'}${d.model ? ` · ${d.model}` : ''})` : '';
-        errDiv.textContent = `AI provider error${detail}: ${result.error}`;
+        errDiv.textContent = `${result.error}${detail}`;
         aiAnswerText.appendChild(errDiv);
       }
 
