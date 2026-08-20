@@ -109,12 +109,16 @@
   }
 
   function itemText(item) {
+    // Truncate huge content (e.g. 1.8M char PDF) for search indexing - prevents
+    // stack overflow from spread and keeps scoring relevant to title/notes
+    const content = String(item.content || '');
+    const truncatedContent = content.length > 20000 ? content.slice(0, 20000) : content;
     return [
       item.title || '',
       item.url || '',
       item.notes || '',
       item.filename || '',
-      item.content || '',
+      truncatedContent,
       Array.isArray(item.tags) ? item.tags.join(' ') : String(item.tags || '')
     ].join(' ');
   }
@@ -122,7 +126,8 @@
   function itemSegments(item) {
     const segs = [];
     const text = itemText(item);
-    segs.push(...tokens(text));
+    const toks = tokens(text);
+    for (let i=0;i<toks.length;i++) segs.push(toks[i]);
     try {
       if (item.url) {
         const u = new URL(item.url.startsWith('http') ? item.url : 'https://' + item.url);
