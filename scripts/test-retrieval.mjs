@@ -77,6 +77,16 @@ searchWindow.__athenaSteroid = false;
 const hermesRetrieved = searchWindow.AthenaSearch.retrieveForQuestion('ytdlp', rows, 8);
 assert.equal(hermesRetrieved.length, 8);
 
+const movieRows = [
+  { id: 'law', title: 'Public International Law (John H Currie) (Z-Library).pdf', filename: 'law.pdf', content: 'Public international law reference.' },
+  { id: 'filmygod', title: 'FilmyGod - The Original FilmyGod.UK Website', url: 'https://filmygod.buzz/', notes: 'Movies and web series website.' },
+  { id: 'mkv', title: 'mkvCinemas Movies of Bollywood Hollywood and TV Shows', url: 'https://mkvcinemas.nexus/', notes: 'Movies website.' },
+];
+const movieRetrieved = searchWindow.AthenaSearch.retrieveForQuestion('list some movie websites', movieRows, 8, { minScore: 18, strict: true });
+assert.ok(movieRetrieved.some(row => row.id === 'filmygod'));
+assert.ok(movieRetrieved.some(row => row.id === 'mkv'));
+assert.equal(movieRetrieved.some(row => row.id === 'law'), false);
+
 const aiWindow = {
   AthenaSearch: searchWindow.AthenaSearch,
   localStorage: { getItem: () => null, setItem: () => {} },
@@ -93,5 +103,12 @@ aiWindow.__athenaSteroid = false;
 const hermesLocal = aiWindow.AthenaAI.answerLocal('ytdlp', rows);
 assert.equal(hermesLocal.sources.length, 5);
 assert.equal(hermesLocal.results.length, 8);
+const movieLocal = aiWindow.AthenaAI.answerLocal('list some movie websites', movieRows);
+assert.match(movieLocal.answer, /FilmyGod/);
+assert.doesNotMatch(movieLocal.answer, /Public International Law/);
+assert.equal(
+  aiWindow.AthenaAI.formatAiFallbackMessage({ details: { status: 502 } }),
+  'AI provider is temporarily unavailable; showing relevant saved matches.'
+);
 
 console.log('retrieval tests passed');
