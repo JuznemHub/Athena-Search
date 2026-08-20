@@ -6,7 +6,8 @@
 
   const PRESETS = {
     openai: { label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', mode: 'openai', model: 'gpt-4o-mini' },
-    openrouter: { label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', mode: 'openai', model: 'openai/gpt-4o-mini' },
+    openrouter: { label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', mode: 'openai', model: 'openrouter/free' },
+    omniroute: { label: 'OmniRoute (self-hosted)', baseUrl: 'http://127.0.0.1:20128/v1', mode: 'openai', model: 'openrouter/free' },
     anthropic: { label: 'Anthropic', baseUrl: 'https://api.anthropic.com', mode: 'anthropic', model: 'claude-sonnet-4-20250514' },
     groq: { label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', mode: 'openai', model: 'llama-3.3-70b-versatile' },
     nvidia: { label: 'NVIDIA NIM', baseUrl: 'https://integrate.api.nvidia.com/v1', mode: 'openai', model: 'meta/llama-3.1-8b-instruct' },
@@ -48,7 +49,7 @@
   function cleanBaseUrl(baseUrl) {
     let root = String(baseUrl || '').trim().replace(/^['"]|['"]$/g, '');
     root = root.replace(/[.,;]+$/g, '').replace(/\/+$/g, '');
-    root = root.replace(/\/chat\/completions$/i, '').replace(/\/messages$/i, '');
+    root = root.replace(/\/chat\/completions$/i, '').replace(/\/messages$/i, '').replace(/\/(?:api\/)?models$/i, '');
     return root;
   }
 

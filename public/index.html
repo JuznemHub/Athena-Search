@@ -259,8 +259,9 @@
             <option value="opencode_go">OpenCode Zen Go</option>
             <option value="opencode_zen">OpenCode Zen</option>
             <option value="cohere_command">Cohere Command</option>
-            <option value="openai">OpenAI</option>
-            <option value="openrouter">OpenRouter</option>
+             <option value="openai">OpenAI</option>
+             <option value="openrouter">OpenRouter</option>
+             <option value="omniroute">OmniRoute (self-hosted)</option>
             <option value="anthropic">Anthropic</option>
             <option value="groq">Groq</option>
             <option value="nvidia">NVIDIA NIM</option>
@@ -276,11 +277,13 @@
           <label for="aiModel">Model</label>
           <div style="display:flex;gap:8px;">
             <input type="text" id="aiModel" placeholder="deepseek-v4-flash" style="flex:1;">
-            <button type="button" id="aiLoadModelsBtn" class="btn btn-secondary" title="Fetch the model list from the provider (GOD)">Models…</button>
+             <button type="button" id="aiLoadModelsBtn" class="btn btn-secondary" title="Fetch the model list from the provider (GOD)">Models…</button>
+             <button type="button" id="aiRefreshModelsBtn" class="btn btn-secondary" title="Refresh the live model list (GOD)" aria-label="Refresh model list">↻</button>
           </div>
           <div id="aiModelPicker" class="hidden" style="margin-top:8px;">
-            <input type="text" id="aiModelFilter" placeholder="Filter models…" style="width:100%;">
-            <div id="aiModelList" class="model-list" role="listbox" aria-label="Provider models"></div>
+             <input type="text" id="aiModelFilter" placeholder="Filter models…" style="width:100%;">
+             <div id="aiModelList" class="model-list" role="listbox" aria-label="Provider models"></div>
+             <div id="aiModelPager" class="status-msg" style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:8px;"></div>
           </div>
         </div>
         <div id="aiFreeBadge" class="status-msg" style="font-size:0.85em;min-height:1.2em;"></div>

@@ -188,13 +188,32 @@ CREATE TABLE IF NOT EXISTS uploaded_documents (
     uploaded_by TEXT NOT NULL,
     github_path TEXT,
     created_at INTEGER NOT NULL,
-    search_blob TEXT
+    search_blob TEXT,
+    source_chat_id TEXT,
+    source_message_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_documents_personal
   ON uploaded_documents(scope, user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_documents_community
   ON uploaded_documents(scope, community_id, created_at);
+
+-- Short-lived server-side state for Telegram /search pagination. The query and
+-- scope stay here instead of in callback_data, which is size-limited and user-editable.
+CREATE TABLE IF NOT EXISTS telegram_search_sessions (
+    id TEXT PRIMARY KEY,
+    tg_user_id TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    query TEXT NOT NULL,
+    page INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tg_search_sessions_expiry
+  ON telegram_search_sessions(expires_at);
 
 CREATE TABLE IF NOT EXISTS oauth_states (
     state TEXT PRIMARY KEY,

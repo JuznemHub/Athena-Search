@@ -6,6 +6,8 @@ dist/
 .DS_Store
 *.log
 worker/.env.deploy
+.superpowers/
+docs/superpowers/
 
 .dev.vars*
 !.dev.vars.example
