@@ -4906,7 +4906,7 @@ async function callAiChatShared(env, { baseUrl, apiKey, mode, model, system, use
       }
       if (!res.ok) {
         const text = await res.text().catch(() => '');
-        const retryable = res.status === 429 || res.status === 503 || res.status === 401 || res.status === 402;
+        const retryable = res.status === 429 || res.status === 503 || res.status === 502 || res.status === 500 || res.status === 401 || res.status === 402;
         const retryAfter = parseInt(res.headers.get('retry-after') || res.headers.get('Retry-After') || '0', 10);
         if (retryable && mi < tryModels.length - 1) {
           const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 400 * (mi + 1);
@@ -4957,25 +4957,18 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
     return Response.json({ success: false, error: 'Login required', code: 'AUTH_REQUIRED' }, { status: 401, headers: corsHeaders });
   }
   const body = await request.json().catch(() => ({}));
-  // Prefer instance (GOD) credentials; client may still send overrides for GOD testing
   const inst = await getInstanceAiConfig(env);
   const bodyBase = cleanApiBase(body.baseUrl || body.base_url || '');
   const bodyKey = (body.apiKey || body.api_key || '').trim();
   const bodyMode = (body.mode || '').toLowerCase();
   const bodyModel = (body.model || '').trim();
   const hasOverride = !!(bodyBase || bodyKey || bodyMode || bodyModel);
-  // Per-request overrides are a paired set, allowed only for GOD. Mixing a
-  // request's baseUrl with the instance's key would hand the stored secret to
-  // an arbitrary host (exfiltration). Non-GOD users always use the instance
-  // config for both URL and key.
   if (hasOverride && !(await isInstanceOwnerUserAsync(user, env))) {
     return Response.json(
       { success: false, error: 'Per-request AI overrides are GOD rank only' },
       { status: 403, headers: corsHeaders }
     );
   }
-  // A partial override is the same exfiltration: baseUrl alone would inherit
-  // inst.api_key and ship it to the caller's host.
   if (hasOverride && !(bodyBase && bodyKey)) {
     return deny(corsHeaders, 'Per-request AI overrides must supply both baseUrl and apiKey', 'AI_OVERRIDE_INCOMPLETE');
   }
@@ -4983,14 +4976,11 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
   const apiKey = (bodyKey || inst?.api_key || '').trim();
   const mode = (bodyMode || inst?.mode || 'openai').toLowerCase();
   let model = normalizeModelId(bodyModel || inst?.model, baseUrl);
-    const system = body.system || '';
-    const userMsg = body.user || body.prompt || '';
-    const messages = Array.isArray(body.messages) ? body.messages : null;
-    // Only stream to clients that opt in (new frontends). Older frontends that
-    // expect a plain JSON answer would otherwise get an SSE body and fail to
-    // parse it, showing "Empty response from model".
-    const wantStream = body.stream === true ||
-      (request.headers.get('accept') || '').toLowerCase().includes('text/event-stream');
+  const system = body.system || '';
+  const userMsg = body.user || body.prompt || '';
+  const messages = Array.isArray(body.messages) ? body.messages : null;
+  const wantStream = body.stream === true ||
+    (request.headers.get('accept') || '').toLowerCase().includes('text/event-stream');
 
   if (!baseUrl || !apiKey || !model) {
     const detail = inst?._decrypt_failed
@@ -5002,8 +4992,6 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
     );
   }
 
-  // Public providers must use HTTPS. A self-hosted local gateway (for example
-  // OmniRoute on 127.0.0.1:20128) is the one intentional HTTP exception.
   try {
     const u = new URL(baseUrl.startsWith('http') ? baseUrl : `https://${baseUrl}`);
     if (!(await isAllowedAiEndpoint(u, env))) {
@@ -5022,326 +5010,258 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
     return Response.json({ success: false, error: 'API base must be HTTPS or a local self-hosted gateway' }, { status: 400, headers: corsHeaders });
   }
 
+  let contextLimit = null;
   try {
-  // hermes-like fallback: try primary then live free models on 429/503/401/402
-  const tryModels = [model, ...(await getFallbackChain(baseUrl, env, apiKey, model))];
-  let upstreamRes = null;
-  let usedModel = model;
-  let lastErrText = '';
-  let upstreamIsPlainJson = false;
-  for (let mi=0; mi<tryModels.length; mi++) {
-    const curModel = tryModels[mi];
-    // The Telegram bot path (/ai) sends plain JSON and is the proven transport
-    // for every supported provider; streaming is a website nicety. When the
-    // streamed attempt fails fast — provider refuses stream:true, or an
-    // SSE-hostile reverse proxy in front of the server — retry the same model
-    // without stream and synthesize SSE from the JSON answer below. Timeouts
-    // are not retried: a second 30s wait helps nobody.
-    const streamAttempts = wantStream ? [true, false] : [false];
-    for (let ai=0; ai<streamAttempts.length; ai++) {
-      const doStream = streamAttempts[ai];
-    try {
-      const maxTok = Math.min(parseInt(body.max_tokens, 10) || 500, 8192);
-      let curRes;
-      // fetchWithTimeout, not fetch: it never follows a redirect blindly. Here
-      // redirect:'error' refuses them outright — the request carries the API key
-      // and the prompt, and a public-but-hostile hop passes isSafeExternalUrl.
-      // Checking upstreamRes.url afterwards would be too late. Time-to-headers
-      // only; the timer is cleared before the SSE body streams.
-      if (mode === 'anthropic') {
-        curRes = await fetchWithTimeout(endpoint, {
-          method: 'POST',
-           env,
-           redirect: 'error',
-           allowPrivate: true,
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': apiKey,
-            'anthropic-version': '2023-06-01'
-          },
-          body: JSON.stringify({
-            model: curModel,
-            max_tokens: maxTok,
-            system: system || undefined,
-            messages: messages || [{ role: 'user', content: userMsg }],
-            ...(doStream ? { stream: true } : {})
-          })
-        }, AI_PROXY_TIMEOUT_MS);
-      } else if (endpoint.endsWith('/responses')) {
-        const input = messages
-          ? messages.map(m => `${m.role}: ${m.content}`).join('\n\n')
-          : (system ? `${system}\n\n${userMsg}` : userMsg);
-        curRes = await fetchWithTimeout(endpoint, {
-          method: 'POST',
-          env,
-           redirect: 'error',
-           allowPrivate: true,
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`
-          },
-          body: JSON.stringify({
-            model: curModel,
-            input
-          })
-        }, AI_PROXY_TIMEOUT_MS);
-      } else {
-        const msgs = messages || [
-          ...(system ? [{ role: 'system', content: system }] : []),
-          { role: 'user', content: userMsg }
-        ];
-        curRes = await fetchWithTimeout(endpoint, {
-          method: 'POST',
-          env,
-           redirect: 'error',
-           allowPrivate: true,
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`
-          },
-          body: JSON.stringify({
-            model: curModel,
-            messages: msgs,
-            temperature: body.temperature ?? 0.2,
-            max_tokens: maxTok,
-            ...(doStream ? { stream: true } : {})
-          })
-        }, AI_PROXY_TIMEOUT_MS);
-      }
+    for (let ctxIter = 0; ctxIter < 6; ctxIter++) {
+      let effectiveSystem = system;
+      let effectiveUser = userMsg;
+      let effectiveMessages = messages ? JSON.parse(JSON.stringify(messages)) : null;
 
-      if (!curRes.ok) {
-        const text = await curRes.text();
-        const isRetryable = curRes.status===429 || curRes.status===503 || curRes.status===401 || curRes.status===402;
-        const retryAfter = parseInt(curRes.headers.get('retry-after')||curRes.headers.get('Retry-After')||'0',10);
-        const waitMs = Number.isFinite(retryAfter) && retryAfter>0 ? retryAfter*1000 : 400*(mi+1);
-        // A streamed attempt the provider refused earns one plain-JSON retry
-        // on the same model before burning a fallback-model slot.
-        if (doStream && ai < streamAttempts.length-1) {
-          lastErrText = `stream refused (HTTP ${curRes.status})`;
-          continue;
-        }
-        if (isRetryable && mi < tryModels.length-1) {
-          console.warn(`AI chat fallback ${curModel} ${curRes.status} retryAfter ${retryAfter}s -> next`);
-          await new Promise(r=>setTimeout(r, waitMs));
-          break;
-        }
-        let data = {};
-        try { data = JSON.parse(text); } catch (_) { data = { raw: text.slice(0, 500) }; }
-        let msg =
-          data.error?.message ||
-          data.message ||
-          data.error?.type ||
-          (typeof data.error === 'string' ? data.error : null) ||
-          null;
-        if (!msg) {
-          if (/^\s*</.test(text) || /<!DOCTYPE/i.test(text)) {
-            msg = `Provider returned HTML (HTTP ${curRes.status}) — check base URL. Expected OpenAI chat endpoint.`;
-          } else {
-            msg = text.slice(0, 200) || curRes.statusText;
+      if (contextLimit !== null) {
+        const suffix = '\n[content shortened for provider context]';
+        if (effectiveSystem) {
+          if (effectiveSystem.length > contextLimit) {
+            effectiveSystem = effectiveSystem.slice(0, Math.max(0, contextLimit - suffix.length)) + suffix;
           }
-        }
-        // non-retryable or last try -> return error
-        recordAiError({ model: curModel, status: curRes.status, endpoint, message: msg, source: 'proxy' });
-        return Response.json({
-          success: false,
-          error: msg,
-          status: curRes.status,
-          endpoint,
-          model: curModel
-        }, { status: 502, headers: corsHeaders });
-      }
-      // success -> keep this response for streaming
-      upstreamRes = curRes;
-      usedModel = curModel;
-      upstreamIsPlainJson = !doStream;
-      break;
-    } catch (e) {
-      lastErrText = e?.message || String(e);
-      const timedOut = e?.name === 'AbortError';
-      if (!timedOut && doStream && ai < streamAttempts.length-1) { continue; }
-      if (mi < tryModels.length-1) { await new Promise(r=>setTimeout(r, 300*(mi+1))); break; }
-      throw e;
-    }
-    }
-    if (upstreamRes) break;
-  }
-  if (!upstreamRes || !upstreamRes.ok) {
-    return Response.json({ success: false, error: lastErrText || 'All AI models failed', model: usedModel, endpoint }, { status: 502, headers: corsHeaders });
-  }
-
-  // A streaming client whose request had to fall back to plain JSON (the bot's
-  // proven transport, or a provider that ignored stream:true) still gets SSE:
-  // synthesize the stream from the JSON answer.
-  if (wantStream && !endpoint.endsWith('/responses') &&
-      (upstreamIsPlainJson || (upstreamRes.headers.get('content-type') || '').includes('application/json'))) {
-    const data = await upstreamRes.json().catch(() => ({}));
-    let jsonContent = '';
-    let jsonThinking = '';
-    if (mode === 'anthropic') {
-      jsonContent = (data.content || []).filter(b => b.type === 'text').map(b => b.text || '').join('\n');
-    } else {
-      const m0 = data.choices?.[0]?.message || {};
-      jsonContent = m0.content || data.choices?.[0]?.text || '';
-      jsonThinking = m0.reasoning_content || '';
-    }
-    const encoder = new TextEncoder();
-    const events = [];
-    if (jsonThinking) events.push({ thinking: jsonThinking });
-    const chunk = 40;
-    for (let i = 0; i < jsonContent.length; i += chunk) {
-      events.push({ delta: jsonContent.slice(i, i + chunk) });
-    }
-    return new Response(new ReadableStream({
-      start(controller) {
-        for (const ev of events) controller.enqueue(encoder.encode(`data: ${JSON.stringify(ev)}\n\n`));
-        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-        controller.close();
-      }
-    }), { headers: { ...corsHeaders, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' } });
-  }
-
-      if (endpoint.endsWith('/responses')) {
-        const data = await upstreamRes.json().catch(() => ({}));
-        const content = data.output_text
-          || (Array.isArray(data.output) ? data.output.map(o => Array.isArray(o.content) ? o.content.map(c => c.text || '').join('') : '').join('\n') : '')
-          || data.choices?.[0]?.message?.content || '';
-        if (!wantStream) {
-          return Response.json({ success: true, content, thinking: null, endpoint, model, usage: null }, { headers: corsHeaders });
-        }
-        const encoder = new TextEncoder();
-        return new Response(new ReadableStream({
-          start(controller) {
-            const chunk = 40;
-            for (let i = 0; i < content.length; i += chunk) {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ delta: content.slice(i, i + chunk) })}\n\n`));
+        } else if (effectiveMessages) {
+          let remaining = contextLimit;
+          for (let i = 0; i < effectiveMessages.length; i++) {
+            const c = String(effectiveMessages[i].content || '');
+            if (c.length > remaining && remaining > 500) {
+              effectiveMessages[i].content = c.slice(0, remaining - suffix.length) + suffix;
+              remaining = 0;
+            } else {
+              remaining -= c.length;
             }
-            controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
-            controller.close();
+            if (remaining <= 0) {
+              effectiveMessages = effectiveMessages.slice(0, i + 1);
+              break;
+            }
           }
-        }), { headers: { ...corsHeaders, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' } });
+        } else if (effectiveUser) {
+          if (effectiveUser.length > contextLimit) {
+            effectiveUser = effectiveUser.slice(0, Math.max(0, contextLimit - suffix.length)) + suffix;
+          }
+        }
       }
 
-      // Client that can't consume a stream (older frontends) gets a classic
-      // JSON answer: we still ask the model to stream, then collect it here.
-      if (!wantStream) {
-        const text = await upstreamRes.text();
-        let contentBuf = '';
-        let reasonBuf = '';
-        for (const line of text.split('\n')) {
-          if (!line.startsWith('data:') || !line.includes('{')) continue;
-          const p = line.slice(5).trim();
-          if (!p || p === '[DONE]') continue;
-          let j; try { j = JSON.parse(p); } catch (_) { continue; }
-          const d = j.choices?.[0]?.delta || {};
-          if (d.content) contentBuf += d.content;
-          if (d.reasoning_content) reasonBuf += d.reasoning_content;
-        }
-        // Prefer the model's clean answer; fall back to reasoning only if the
-        // model put everything there (reasoning models sometimes do this).
-        let content = contentBuf || reasonBuf;
-        let thinkingOut = reasonBuf || null;
-        if (!content) {
-          // Non-streamed JSON (provider ignored stream:true) — use directly.
-          let data = {};
-          try { data = JSON.parse(text); } catch (_) {}
-          if (mode === 'anthropic') content = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
-          else content = data.choices?.[0]?.message?.content || data.choices?.[0]?.text || data.output_text || '';
-        }
-        return Response.json({ success: true, content, thinking: thinkingOut, endpoint, model, usage: null }, { headers: corsHeaders });
-      }
+      try {
+        const tryModels = [model, ...(await getFallbackChain(baseUrl, env, apiKey, model))];
+        let upstreamRes = null;
+        let usedModel = model;
+        let lastErrText = '';
+        let _upstreamIsPlainJson = false;
+        for (let mi=0; mi<tryModels.length; mi++) {
+          const curModel = tryModels[mi];
+          const streamAttempts = wantStream ? [true, false] : [false];
+          for (let ai=0; ai<streamAttempts.length; ai++) {
+            const doStream = streamAttempts[ai];
+            try {
+              const maxTok = Math.min(parseInt(body.max_tokens, 10) || 500, 8192);
+              let curRes;
+              if (mode === 'anthropic') {
+                curRes = await fetchWithTimeout(endpoint, {
+                  method: 'POST', env, redirect: 'error', allowPrivate: true,
+                  headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+                  body: JSON.stringify({ model: curModel, max_tokens: maxTok, system: effectiveSystem || undefined, messages: effectiveMessages || [{ role: 'user', content: effectiveUser }], ...(doStream ? { stream: true } : {}) })
+                }, AI_PROXY_TIMEOUT_MS);
+              } else if (endpoint.endsWith('/responses')) {
+                const input = effectiveMessages ? effectiveMessages.map(m => `${m.role}: ${m.content}`).join('\n\n') : (effectiveSystem ? `${effectiveSystem}\n\n${effectiveUser}` : effectiveUser);
+                curRes = await fetchWithTimeout(endpoint, {
+                  method: 'POST', env, redirect: 'error', allowPrivate: true,
+                  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+                  body: JSON.stringify({ model: curModel, input })
+                }, AI_PROXY_TIMEOUT_MS);
+              } else {
+                const msgs = effectiveMessages || [...(effectiveSystem ? [{ role: 'system', content: effectiveSystem }] : []), { role: 'user', content: effectiveUser }];
+                curRes = await fetchWithTimeout(endpoint, {
+                  method: 'POST', env, redirect: 'error', allowPrivate: true,
+                  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+                  body: JSON.stringify({ model: curModel, messages: msgs, temperature: body.temperature ?? 0.2, max_tokens: maxTok, ...(doStream ? { stream: true } : {}) })
+                }, AI_PROXY_TIMEOUT_MS);
+              }
 
-      // Stream the upstream SSE back as normalized SSE so the browser renders
-      // the answer token-by-token (matches the feel of web-chat UIs).
-      const reader = upstreamRes.body.getReader();
-      const decoder = new TextDecoder();
-      const encoder = new TextEncoder();
-      let buf = '';
-      const out = new ReadableStream({
-        async start(controller) {
-          let contentSeen = '';
+              if (!curRes.ok) {
+                const text = await curRes.text();
+                const isRetryable = curRes.status===429 || curRes.status===503 || curRes.status===502 || curRes.status===500 || curRes.status===401 || curRes.status===402;
+                const retryAfter = parseInt(curRes.headers.get('retry-after')||curRes.headers.get('Retry-After')||'0',10);
+                const waitMs = Number.isFinite(retryAfter) && retryAfter>0 ? retryAfter*1000 : 400*(mi+1);
+                if (doStream && ai < streamAttempts.length-1) {
+                  lastErrText = `stream refused (HTTP ${curRes.status})`;
+                  continue;
+                }
+                if (isRetryable && mi < tryModels.length-1) {
+                  console.warn(`AI chat fallback ${curModel} ${curRes.status} retryAfter ${retryAfter}s -> next`);
+                  await new Promise(r=>setTimeout(r, waitMs));
+                  break;
+                }
+                let data = {};
+                try { data = JSON.parse(text); } catch (_) { data = { raw: text.slice(0, 500) }; }
+                let msg = data.error?.message || data.message || data.error?.type || (typeof data.error === 'string' ? data.error : null) || null;
+                if (!msg) {
+                  if (/^\s*</.test(text) || /<!DOCTYPE/i.test(text)) {
+                    msg = `Provider returned HTML (HTTP ${curRes.status}) — check base URL. Expected OpenAI chat endpoint.`;
+                  } else {
+                    msg = text.slice(0, 200) || curRes.statusText;
+                  }
+                }
+                if (isAiContextError(msg) || isAiContextError(text)) {
+                  const e = new Error(msg);
+                  e.status = curRes.status;
+                  e.endpoint = endpoint;
+                  e.model = curModel;
+                  throw e;
+                }
+                recordAiError({ model: curModel, status: curRes.status, endpoint, message: msg, source: 'proxy' });
+                return Response.json({ success: false, error: msg, status: curRes.status, endpoint, model: curModel }, { status: 502, headers: corsHeaders });
+              }
+              upstreamRes = curRes;
+              usedModel = curModel;
+              _upstreamIsPlainJson = !doStream;
+              break;
+            } catch (e) {
+              if (isAiContextError(e)) throw e;
+              lastErrText = e?.message || String(e);
+              const timedOut = e?.name === 'AbortError';
+              if (!timedOut && doStream && ai < streamAttempts.length-1) { continue; }
+              if (mi < tryModels.length-1) { await new Promise(r=>setTimeout(r, 300*(mi+1))); break; }
+              throw e;
+            }
+          }
+          if (upstreamRes) break;
+        }
+        if (!upstreamRes || !upstreamRes.ok) {
+          return Response.json({ success: false, error: lastErrText || 'All AI models failed', model: usedModel, endpoint }, { status: 502, headers: corsHeaders });
+        }
+
+        if (endpoint.endsWith('/responses')) {
+          const data = await upstreamRes.json().catch(() => ({}));
+          const content = data.output_text || (Array.isArray(data.output) ? data.output.map(o => Array.isArray(o.content) ? o.content.map(c => c.text || '').join('') : '').join('\n') : '') || data.choices?.[0]?.message?.content || '';
+          if (!wantStream) {
+            return Response.json({ success: true, content, thinking: null, endpoint, model, usage: null }, { headers: corsHeaders });
+          }
+          const encoder = new TextEncoder();
+          return new Response(new ReadableStream({
+            start(controller) {
+              const chunk = 40;
+              for (let i = 0; i < content.length; i += chunk) {
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ delta: content.slice(i, i + chunk) })}\n\n`));
+              }
+              controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
+              controller.close();
+            }
+          }), { headers: { ...corsHeaders, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' } });
+        }
+
+        if (!wantStream) {
+          const text = await upstreamRes.text();
+          let contentBuf = '';
           let reasonBuf = '';
-          try {
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              buf += decoder.decode(value, { stream: true });
-              let nl;
-              while ((nl = buf.indexOf('\n')) !== -1) {
-                const line = buf.slice(0, nl).trim();
-                buf = buf.slice(nl + 1);
-                if (!line.startsWith('data:')) continue;
-                const payload = line.slice(5).trim();
-                if (!payload || payload === '[DONE]') continue;
-                let j;
-                try { j = JSON.parse(payload); } catch (_) { continue; }
-                let delta = '';
-                if (mode === 'anthropic') {
-                  if (j.type === 'content_block_delta' && j.delta && j.delta.type === 'text_delta') {
-                    delta = j.delta.text || '';
-                    if (delta) {
-                      contentSeen += delta;
-                      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ delta })}\n\n`));
+          for (const line of text.split('\n')) {
+            if (!line.startsWith('data:') || !line.includes('{')) continue;
+            const p = line.slice(5).trim();
+            if (!p || p === '[DONE]') continue;
+            let j; try { j = JSON.parse(p); } catch (_) { continue; }
+            const d = j.choices?.[0]?.delta || {};
+            if (d.content) contentBuf += d.content;
+            if (d.reasoning_content) reasonBuf += d.reasoning_content;
+          }
+          let content = contentBuf || reasonBuf;
+          let thinkingOut = reasonBuf || null;
+          if (!content) {
+            let data = {};
+            try { data = JSON.parse(text); } catch (_) {}
+            if (mode === 'anthropic') content = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
+            else content = data.choices?.[0]?.message?.content || data.choices?.[0]?.text || data.output_text || '';
+          }
+          return Response.json({ success: true, content, thinking: thinkingOut, endpoint, model, usage: null }, { headers: corsHeaders });
+        }
+
+        const reader = upstreamRes.body.getReader();
+        const decoder = new TextDecoder();
+        const encoder = new TextEncoder();
+        let buf = '';
+        const out = new ReadableStream({
+          async start(controller) {
+            let contentSeen = '';
+            let reasonBuf = '';
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buf += decoder.decode(value, { stream: true });
+                let nl;
+                while ((nl = buf.indexOf('\n')) !== -1) {
+                  const line = buf.slice(0, nl).trim();
+                  buf = buf.slice(nl + 1);
+                  if (!line.startsWith('data:')) continue;
+                  const payload = line.slice(5).trim();
+                  if (!payload || payload === '[DONE]') continue;
+                  let j;
+                  try { j = JSON.parse(payload); } catch (_) { continue; }
+                  let delta = '';
+                  if (mode === 'anthropic') {
+                    if (j.type === 'content_block_delta' && j.delta && j.delta.type === 'text_delta') {
+                      delta = j.delta.text || '';
+                      if (delta) {
+                        contentSeen += delta;
+                        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ delta })}\n\n`));
+                      }
                     }
-                  }
-                } else {
-                  const d = j.choices?.[0]?.delta || {};
-                  // Forward content as normal answer deltas.
-                  if (d.content) {
-                    contentSeen += d.content;
-                    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ delta: d.content })}\n\n`));
-                  }
-                  // Forward reasoning as a separate "thinking" stream so the
-                  // frontend can show it in a collapsible block.
-                  if (d.reasoning_content) {
-                    reasonBuf += d.reasoning_content;
-                    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ thinking: d.reasoning_content })}\n\n`));
-                  }
-                  // Some providers use choices[0].text instead of delta.content.
-                  if (!d.content && !d.reasoning_content) {
-                    const text = j.choices?.[0]?.text || '';
-                    if (text) {
-                      contentSeen += text;
-                      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ delta: text })}\n\n`));
+                  } else {
+                    const d = j.choices?.[0]?.delta || {};
+                    if (d.content) {
+                      contentSeen += d.content;
+                      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ delta: d.content })}\n\n`));
+                    }
+                    if (d.reasoning_content) {
+                      reasonBuf += d.reasoning_content;
+                      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ thinking: d.reasoning_content })}\n\n`));
+                    }
+                    if (!d.content && !d.reasoning_content) {
+                      const text = j.choices?.[0]?.text || '';
+                      if (text) {
+                        contentSeen += text;
+                        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ delta: text })}\n\n`));
+                      }
                     }
                   }
                 }
               }
+              if (!contentSeen && reasonBuf) {
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ delta: reasonBuf })}\n\n`));
+              }
+              controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+            } catch (err) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: String((err && err.message) || err) })}\n\n`));
+            } finally {
+              controller.close();
             }
-            // Fallback: if the model only produced reasoning (no content answer),
-            // forward the reasoning so the user gets *something*.
-            if (!contentSeen && reasonBuf) {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ delta: reasonBuf })}\n\n`));
-            }
-            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-          } catch (err) {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: String((err && err.message) || err) })}\n\n`));
-          } finally {
-            controller.close();
           }
+        });
+        return new Response(out, {
+          headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no', ...corsHeaders }
+        });
+      } catch (err) {
+        if (isAiContextError(err)) {
+          const currentSize = (system?.length || 0) + (userMsg?.length || 0) + JSON.stringify(messages || []).length;
+          const effectiveSize = contextLimit === null ? currentSize : contextLimit;
+          const nextLimit = Math.floor(effectiveSize * 0.6);
+          if (nextLimit < 1000 || nextLimit >= effectiveSize) {
+            recordAiError({ model, status: err.status || 400, endpoint, message: err.message || String(err), source: 'proxy-context' });
+            return Response.json({ success: false, error: err.message || String(err), status: err.status || 400, endpoint, model }, { status: 502, headers: corsHeaders });
+          }
+          contextLimit = nextLimit;
+          console.warn(`AI context too large (${currentSize} chars), retrying with ${nextLimit} chars`);
+          continue;
         }
-      });
-      return new Response(out, {
-        headers: {
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache, no-transform',
-          'Connection': 'keep-alive',
-          'X-Accel-Buffering': 'no',
-          ...corsHeaders
-        }
-      });
+        throw err;
+      }
+    }
   } catch (err) {
-    return Response.json({
-      success: false,
-      error: err.message || 'Proxy request failed',
-      endpoint,
-      model
-    }, { status: 502, headers: corsHeaders });
+    return Response.json({ success: false, error: err.message || 'Proxy request failed', endpoint, model }, { status: 502, headers: corsHeaders });
   }
 }
-
-// ============================================================
-// Personal Links
-// ============================================================
 
 async function handleGetPersonalLinks(userId, env, corsHeaders) {
   await ensureFresh(env, 'personal', userId);
@@ -11546,7 +11466,7 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
       const res = await fetchWithTimeout(endpoint, { method: 'POST', headers, body: JSON.stringify(payload), env }, AI_PROXY_TIMEOUT_MS);
       if (!res.ok) {
         const errorText = await res.text().catch(() => '');
-        const isRetryable = res.status===429 || res.status===503 || res.status===401 || res.status===402;
+        const isRetryable = res.status===429 || res.status===503 || res.status===502 || res.status===500 || res.status===401 || res.status===402;
         const retryAfter = parseInt(res.headers.get('retry-after')||res.headers.get('Retry-After')||'0',10);
         const waitMs = Number.isFinite(retryAfter) && retryAfter>0 ? retryAfter*1000 : 400*(mi+1);
         console.error(`AI link enrichment failed ${curModel} ${res.status}`, errorText.slice(0,180));
