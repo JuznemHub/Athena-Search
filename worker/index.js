@@ -5050,7 +5050,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
         let upstreamRes = null;
         let usedModel = model;
         let lastErrText = '';
-        let upstreamIsPlainJson = false;
+        let _upstreamIsPlainJson = false;
         for (let mi=0; mi<tryModels.length; mi++) {
           const curModel = tryModels[mi];
           const streamAttempts = wantStream ? [true, false] : [false];
@@ -5117,7 +5117,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
               }
               upstreamRes = curRes;
               usedModel = curModel;
-              upstreamIsPlainJson = !doStream;
+              _upstreamIsPlainJson = !doStream;
               break;
             } catch (e) {
               if (isAiContextError(e)) throw e;
