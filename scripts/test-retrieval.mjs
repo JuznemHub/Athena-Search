@@ -5,11 +5,15 @@ import vm from 'node:vm';
 import {
   buildSearchBlob,
   cleanApiBase,
+  compactAiContext,
+  dedupeLinkRows,
   fuzzyMatchLinks,
   helpTextForSection,
+  isGroundedAiAnswer,
   normalizeModelId,
   parseAiDescribeResponse,
   parseTelegramEditPayload,
+  rankLinks,
   resolveChatEndpoint,
   resultLimitClause
 } from '../worker/index.js';
@@ -58,6 +62,24 @@ const document = {
 assert.match(buildSearchBlob(document), /ytdlp/);
 assert.match(buildSearchBlob(document), /download/);
 
+const rankedMovieRows = rankLinks([
+  { id: 'law', title: 'Public International Law (John H Currie) (Z-Library).pdf', filename: 'law.pdf', content: 'Public international law reference.' },
+  { id: 'movie', title: 'Movies4u.VIP - Bollywood and Hollywood Movies Download', url: 'https://movies4u.example/', notes: 'Movie website.' },
+], 'list some movie websites');
+assert.equal(rankedMovieRows.some(row => row.id === 'law'), false);
+assert.equal(rankedMovieRows[0].id, 'movie');
+assert.equal(dedupeLinkRows([
+  { id: 'doc-1', type: 'document', title: 'First', url: null },
+  { id: 'doc-2', type: 'document', title: 'Second', url: null },
+]).length, 2);
+assert.ok(compactAiContext(['x'.repeat(900), 'y'.repeat(900)], 1000).length <= 1000);
+assert.equal(isGroundedAiAnswer('Saved item [#1] https://movies4u.example/', [
+  { url: 'https://movies4u.example/' }
+]), true);
+assert.equal(isGroundedAiAnswer('General answer https://other.example/', [
+  { url: 'https://movies4u.example/' }
+]), false);
+
 const rows = Array.from({ length: 20 }, (_, i) => ({
   id: `doc-${i}`,
   title: `Document ${i}`,
@@ -86,6 +108,16 @@ const movieRetrieved = searchWindow.AthenaSearch.retrieveForQuestion('list some 
 assert.ok(movieRetrieved.some(row => row.id === 'filmygod'));
 assert.ok(movieRetrieved.some(row => row.id === 'mkv'));
 assert.equal(movieRetrieved.some(row => row.id === 'law'), false);
+const hugeDocument = {
+  id: 'huge-law',
+  title: 'Public International Law reference.pdf',
+  filename: 'law.pdf',
+  content: 'public international law '.repeat(100000),
+};
+const hugeRetrieved = searchWindow.AthenaSearch.retrieveForQuestion(
+  'list some movie websites', [hugeDocument, ...movieRows], 8, { minScore: 18, strict: true }
+);
+assert.equal(hugeRetrieved.some(row => row.id === 'huge-law'), false);
 
 const aiWindow = {
   AthenaSearch: searchWindow.AthenaSearch,
@@ -97,11 +129,11 @@ vm.runInNewContext(
   { window: aiWindow, localStorage: aiWindow.localStorage }
 );
 const local = aiWindow.AthenaAI.answerLocal('ytdlp', rows);
-assert.equal(local.sources.length, rows.length);
+assert.equal(local.sources.length, 8);
 assert.equal(local.results.length, rows.length);
 aiWindow.__athenaSteroid = false;
 const hermesLocal = aiWindow.AthenaAI.answerLocal('ytdlp', rows);
-assert.equal(hermesLocal.sources.length, 5);
+assert.equal(hermesLocal.sources.length, 8);
 assert.equal(hermesLocal.results.length, 8);
 const movieLocal = aiWindow.AthenaAI.answerLocal('list some movie websites', movieRows);
 assert.match(movieLocal.answer, /FilmyGod/);
@@ -110,5 +142,13 @@ assert.equal(
   aiWindow.AthenaAI.formatAiFallbackMessage({ details: { status: 502 } }),
   'AI provider is temporarily unavailable; showing relevant saved matches.'
 );
+assert.equal(aiWindow.AthenaAI.isGroundedAiAnswer(
+  'Saved movie site [#1] https://filmygod.buzz/',
+  [{ url: 'https://filmygod.buzz/' }]
+), true);
+assert.equal(aiWindow.AthenaAI.isGroundedAiAnswer(
+  'Here is a general answer: https://untrusted.example/',
+  [{ url: 'https://filmygod.buzz/' }]
+), false);
 
 console.log('retrieval tests passed');

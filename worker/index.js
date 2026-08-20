@@ -3212,6 +3212,54 @@ async function handleDeleteCommunityLink(request, user, env, corsHeaders) {
  */
 const MEILI_STATE = new Map();
 const MEILI_BATCH_SIZE = 250;
+const AI_RETRIEVAL_LIMIT = 24;
+const AI_CONTEXT_MAX_CHARS = 120_000;
+const AI_DOC_MAX_CHARS = 20_000;
+
+function clipAiText(value, maxChars = AI_DOC_MAX_CHARS) {
+  const text = String(value || '');
+  if (text.length <= maxChars) return text;
+  const marker = '\n[… content shortened for context …]\n';
+  const side = Math.max(1, Math.floor((maxChars - marker.length) / 2));
+  return `${text.slice(0, side)}${marker}${text.slice(-side)}`;
+}
+
+function compactAiContext(sections, maxChars = AI_CONTEXT_MAX_CHARS) {
+  const available = Math.max(0, Number(maxChars) || AI_CONTEXT_MAX_CHARS);
+  const out = [];
+  let used = 0;
+  for (const section of sections || []) {
+    const value = String(section || '');
+    if (!value || used >= available) break;
+    const separator = out.length ? '\n\n' : '';
+    const remaining = available - used - separator.length;
+    if (remaining <= 0) break;
+    out.push(separator + (value.length > remaining ? clipAiText(value, remaining) : value));
+    used += separator.length + Math.min(value.length, remaining);
+  }
+  return out.join('');
+}
+
+function isGroundedAiAnswer(text, docs) {
+  const answer = String(text || '');
+  const citations = [...answer.matchAll(/\[(?:#)?(\d+)\]/g)]
+    .map(match => Number(match[1]))
+    .filter(index => index >= 1 && index <= (docs || []).length);
+  if (!citations.length) return false;
+  const normalizeUrl = url => String(url || '').replace(/[),.;!?'\s"]+$/g, '');
+  const knownUrls = new Set((docs || []).map(doc => normalizeUrl(doc.url)));
+  const urls = answer.match(/https?:\/\/[^\s<>()[\]{}"']+/gi) || [];
+  return urls.every(url => knownUrls.has(normalizeUrl(url)));
+}
+
+function groundedMatchesReply(docs) {
+  const lines = (docs || []).slice(0, 8).map((doc, index) => {
+    const title = doc.title || doc.filename || doc.url || 'Saved item';
+    const url = doc.url ? ` — ${doc.url}` : '';
+    return `${index + 1}. **${title}**${url} [#${index + 1}]`;
+  });
+  return `Closest matches in your brain:\n\n${lines.join('\n\n')}`;
+}
 
 function meiliConfig(env) {
   const raw = String(env.MEILI_URL || env.MEILISEARCH_URL || '').trim().replace(/\/+$/, '');
@@ -3329,6 +3377,47 @@ function meiliRowFromHit(hit) {
   };
 }
 
+/**
+ * Meilisearch is the recall/ranking index; PostgreSQL is the source of truth
+ * for the context sent to the model. Hydrate hits by scoped primary key so a
+ * stale/truncated index payload can never become the AI answer by itself.
+ */
+async function hydrateMeiliRows(env, scope, key, hits) {
+  const rows = Array.isArray(hits) ? hits : [];
+  if (!rows.length) return [];
+  const table = scope === 'personal' ? 'personal_links' : 'links';
+  const col = scope === 'personal' ? 'user_id' : 'community_id';
+  const linkIds = [...new Set(rows.filter(row => row.type !== 'document' && !row.isDocument).map(row => String(row.id || '')).filter(Boolean))];
+  const documentIds = [...new Set(rows.filter(row => row.type === 'document' || row.isDocument).map(row => String(row.id || '')).filter(Boolean))];
+  const byKey = new Map();
+
+  try {
+    if (linkIds.length) {
+      const placeholders = linkIds.map(() => '?').join(',');
+      const { results } = await env.DB.prepare(
+        `SELECT * FROM ${table} WHERE ${col} = ? AND id IN (${placeholders})`
+      ).bind(key, ...linkIds).all();
+      for (const row of results || []) byKey.set(`link:${row.id}`, { ...row, type: 'link' });
+    }
+  } catch (_) {}
+
+  try {
+    if (documentIds.length) {
+      await ensureDocumentsTable(env);
+      const placeholders = documentIds.map(() => '?').join(',');
+      const { results } = await env.DB.prepare(
+        `SELECT * FROM uploaded_documents WHERE scope = ? AND ${col} = ? AND id IN (${placeholders})`
+      ).bind(scope, key, ...documentIds).all();
+      for (const row of results || []) byKey.set(`document:${row.id}`, { ...documentAsLink(row), isDocument: true });
+    }
+  } catch (_) {}
+
+  return rows.map((hit) => {
+    const kind = hit.type === 'document' || hit.isDocument ? 'document' : 'link';
+    return byKey.get(`${kind}:${hit.id}`) || hit;
+  });
+}
+
 async function syncMeiliScope(env, scope, key) {
   const cfg = meiliConfig(env);
   if (!cfg || !(await ensureMeiliIndex(env))) return false;
@@ -3379,6 +3468,21 @@ function scheduleMeiliSync(env, scope, key) {
   runInBackground(env, state.syncPromise);
 }
 
+async function syncMeiliScopeNow(env, scope, key) {
+  const cfg = meiliConfig(env);
+  if (!cfg) return false;
+  const state = meiliStateFor(cfg, scope, key);
+  if (state.synced && !state.dirty) return true;
+  const pending = state.syncPromise || syncMeiliScope(env, scope, key);
+  state.syncPromise ||= pending;
+  try {
+    await pending;
+  } finally {
+    if (state.syncPromise === pending) state.syncPromise = null;
+  }
+  return !!state.synced && !state.dirty;
+}
+
 function markMeiliScopeDirty(env, scope, key) {
   const cfg = meiliConfig(env);
   if (!cfg || key == null || key === '') return;
@@ -3387,13 +3491,16 @@ function markMeiliScopeDirty(env, scope, key) {
   if (state.synced) scheduleMeiliSync(env, scope, key);
 }
 
-async function meiliSearchScope(env, scope, key, query, { limit = 50, offset = 0 } = {}) {
+async function meiliSearchScope(env, scope, key, query, { limit = 50, offset = 0, waitForSync = false } = {}) {
   const cfg = meiliConfig(env);
   if (!cfg || !(await ensureMeiliIndex(env))) return null;
   const state = meiliStateFor(cfg, scope, key);
   if (!state.synced || state.dirty) {
-    scheduleMeiliSync(env, scope, key);
-    return null;
+    if (!waitForSync) {
+      scheduleMeiliSync(env, scope, key);
+      return null;
+    }
+    if (!(await syncMeiliScopeNow(env, scope, key))) return null;
   }
   const indexPath = `/indexes/${encodeURIComponent(cfg.index)}`;
   const response = await meiliRequest(env, `${indexPath}/search`, {
@@ -3402,8 +3509,7 @@ async function meiliSearchScope(env, scope, key, query, { limit = 50, offset = 0
       q: String(query || '').slice(0, 240),
       filter: meiliScopeFilter(scope, key),
       limit: limit == null ? 1000 : Math.max(1, Math.min(Number(limit) || 50, 1000)),
-      offset: Math.max(0, Number(offset) || 0),
-      sort: ['created_at:desc']
+      offset: Math.max(0, Number(offset) || 0)
     })
   });
   if (!response || !response.ok) return null;
@@ -3419,6 +3525,47 @@ async function meiliSearchScope(env, scope, key, query, { limit = 50, offset = 0
   };
 }
 
+/**
+ * Bounded hybrid retrieval for AI. Meilisearch finds candidates, PostgreSQL
+ * hydrates the authoritative rows, and the shared ranker removes weak hits.
+ * PostgreSQL remains a complete fallback when the index is unavailable.
+ */
+async function retrieveAiRows(env, scope, key, query, { limit = AI_RETRIEVAL_LIMIT } = {}) {
+  const max = Math.max(1, Math.min(Number(limit) || AI_RETRIEVAL_LIMIT, AI_RETRIEVAL_LIMIT));
+  // Remove conversational filler before asking Meilisearch; SQL still gets
+  // the original question so its synonym expansion remains authoritative.
+  const meiliTerms = expandServerSearchTerms(query).slice(0, 6);
+  const meiliQuery = meiliTerms.join(' ') || query;
+  const accelerated = await meiliSearchScope(env, scope, key, meiliQuery, {
+    limit: Math.min(max * 2, 100),
+    waitForSync: true
+  });
+  let rows;
+  let engine = 'postgres';
+
+  if (accelerated?.rows?.length) {
+    const hits = await hydrateMeiliRows(env, scope, key, accelerated.rows);
+    const ranked = rankLinks(dedupeLinkRows(hits), query, max, 8);
+    rows = ranked.length ? ranked : dedupeLinkRows(hits).slice(0, max);
+    engine = 'meilisearch+postgres';
+    // The index may be a little ahead/behind PostgreSQL search_blob backfill;
+    // top up from the authoritative SQL path without exceeding the AI budget.
+    if (rows.length < max) {
+      const sqlRows = await searchAllLinks(env, scope, key, query, max);
+      rows = rankLinks(dedupeLinkRows([...rows, ...sqlRows]), query, max, 8);
+    }
+  } else {
+    const sqlRows = await searchAllLinks(env, scope, key, query, max);
+    rows = rankLinks(dedupeLinkRows(sqlRows), query, max, 8);
+  }
+
+  return {
+    rows: rows.slice(0, max),
+    total: await countScopeLinks(env, scope, key),
+    engine
+  };
+}
+
 async function handleSearchLinks(url, user, env, corsHeaders) {
   const q = (url.searchParams.get('q') || '').trim();
   const scope = (url.searchParams.get('scope') || 'community').toLowerCase();
@@ -3429,6 +3576,39 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
   const steroid = await getSteroidMode(env);
   const effectiveLimit = steroid ? requestedLimit : (requestedLimit == null ? 50 : Math.min(requestedLimit, 50));
   if (!q) return Response.json({ success: true, links: [], query: '' }, { headers: corsHeaders });
+  const aiPurpose = url.searchParams.get('purpose') === 'ai';
+
+  if (aiPurpose) {
+    if (scope === 'personal') {
+      if (!(await isInstanceOwnerUserAsync(user, env))) {
+        return deny(corsHeaders, 'Personal mode is for GOD rank (instance host) only', 'PERSONAL_LOCKED');
+      }
+      await ensureFresh(env, 'personal', user.id);
+    } else {
+      const communityId = url.searchParams.get('community_id');
+      const gate = await requireActiveMember(env, communityId, user, corsHeaders);
+      if (gate) return gate;
+      await ensureFresh(env, 'community', communityId);
+    }
+    const scopeKey = scope === 'personal' ? user.id : url.searchParams.get('community_id');
+    const retrieval = await retrieveAiRows(env, scope, scopeKey, q, { limit: AI_RETRIEVAL_LIMIT });
+    const enrichmentPending = queueMissingLinkEnrichment(env, scope, scopeKey, retrieval.rows);
+    return Response.json({
+      success: true,
+      query: q,
+      scope,
+      // The browser only needs bounded context; the bot keeps the full
+      // PostgreSQL rows locally for its own prompt builder.
+      links: retrieval.rows.map(row => ({
+        ...row,
+        notes: clipAiText(row.notes || '', 6_000),
+        content: clipAiText(row.content || '', AI_DOC_MAX_CHARS)
+      })),
+      total: retrieval.total,
+      retrieval_engine: retrieval.engine,
+      enrichment_pending: enrichmentPending
+    }, { headers: corsHeaders });
+  }
 
   if (scope === 'personal') {
     if (!(await isInstanceOwnerUserAsync(user, env))) {
@@ -3476,7 +3656,11 @@ function rankLinks(rows, query, limit = null, minScore = 8) {
   for (const r of rows) {
     const title = String(r.title || '').toLowerCase();
     const urlStr = String(r.url || '').toLowerCase();
-    const bag = [r.title, r.url, r.filename, r.notes, r.content, r.tags].join(' ').toLowerCase();
+    const content = String(r.content || '');
+    const boundedContent = content.length > 50_000
+      ? `${content.slice(0, 25_000)} ${content.slice(-25_000)}`
+      : content;
+    const bag = [r.title, r.url, r.filename, r.notes, boundedContent, r.search_blob, r.tags].join(' ').toLowerCase();
     const ba = bag.replace(/[^a-z0-9]/g, '');
     let score = 0;
     if (title === q) score += 100;
@@ -9417,24 +9601,23 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        }
      }
 
-      // RAG retrieval — use the same optional Meilisearch accelerator as the
-      // website, with the complete PostgreSQL candidate path as fallback.
-       const scopeKey = scope === 'personal' ? athenaUser.id : aiCommunityId;
-        await ensureFresh(env, scope, scopeKey);
-        const steroidAi = await getSteroidMode(env);
-        const accelerated = await meiliSearchScope(env, scope, scopeKey, q, {
-          limit: steroidAi ? 1000 : 300
-        });
-        const rows = accelerated?.rows || await candidateLinks(env, scope, scopeKey, q, steroidAi ? null : 300);
-        queueMissingLinkEnrichment(env, scope, scopeKey, rows);
-        let docs = accelerated ? dedupeLinkRows(rows) : fuzzyMatchLinks(rows, q);
-        if (!steroidAi) docs = docs.slice(0, 8);
-       if (!docs.length && rows.length) docs = steroidAi ? rows : rows.slice(0, 8);
+      // RAG retrieval — Meilisearch finds a small candidate set, PostgreSQL
+      // hydrates the authoritative rows, and SQL remains the fallback.
+      const scopeKey = scope === 'personal' ? athenaUser.id : aiCommunityId;
+      await ensureFresh(env, scope, scopeKey);
+      const retrieval = await retrieveAiRows(env, scope, scopeKey, q, { limit: AI_RETRIEVAL_LIMIT });
+      const rows = retrieval.rows;
+      const docs = rows;
+      queueMissingLinkEnrichment(env, scope, scopeKey, rows);
+      if (!docs.length) {
+        await sendTelegramFormatted(token, chatId, 'You have no saved link on this in your brain', forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
 
       // Build context — same format as website (includes document content)
       const formatDoc = (item, i) => {
-        const notes = item.notes || '';
-        const content = item.content || '';
+        const notes = item.type === 'document' || item.isDocument ? '' : clipAiText(item.notes || '', 6_000);
+        const content = clipAiText(item.content || '', AI_DOC_MAX_CHARS);
         const parts = [`[#${i + 1}]`, `Title: ${item.title || 'Untitled'}`];
         if (item.filename) parts.push(`Document: ${item.filename}`);
         if (item.url) parts.push(`URL: ${item.url}`);
@@ -9442,12 +9625,10 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         if (content) parts.push(`Content:\n${content}`);
         return parts.join('\n');
       };
-      const ctx = docs.length
-        ? docs.map(formatDoc).filter(Boolean).join('\n\n')
-        : '(no saved items)';
+      const contextSections = docs.map(formatDoc).filter(Boolean);
 
-      // Same system prompt as website. The full context is sent first; it is
-      // shortened only after the provider reports a context-size failure.
+      // Same system prompt as website. The context is bounded before the
+      // request; the retry loop is a second safety net for provider limits.
       const baseSystemPrompt = `You are Athena, a second-brain assistant. You ONLY use BRAIN CONTEXT below (the user's saved links, notes, and uploaded documents).
 
 Rules:
@@ -9467,12 +9648,10 @@ Rules:
 
       try {
         let content = '';
-        let contextLimit = null;
+        let contextLimit = AI_CONTEXT_MAX_CHARS;
         for (;;) {
-          const context = contextLimit == null
-            ? ctx
-            : `${ctx.slice(0, contextLimit)}\n[content shortened for provider context]`;
-          const systemPrompt = `${baseSystemPrompt}\n\nBRAIN has ${rows.length} saved item(s). Retrieved for this question:\n\n${context}`;
+          const context = compactAiContext(contextSections, contextLimit);
+          const systemPrompt = `${baseSystemPrompt}\n\nBRAIN has ${retrieval.total ?? rows.length} saved item(s). Retrieved for this question via ${retrieval.engine}:\n\n${context || '(no saved items)'}`;
           try {
             // Same request path as the website proxy: SSRF-checked endpoint,
             // model fallback chain, Retry-After, normalized + logged errors.
@@ -9480,11 +9659,13 @@ Rules:
               baseUrl: cfg.base_url, apiKey: cfg.api_key, mode: cfg.mode || 'openai', model,
               system: systemPrompt, user: q, maxTokens: 3000, source: 'bot-ai',
             });
-            content = out.content;
+            content = isGroundedAiAnswer(out.content, docs)
+              ? out.content
+              : groundedMatchesReply(docs);
             break;
           } catch (err) {
             if (!isAiContextError(err) || !docs.length) throw err;
-            const currentSize = systemPrompt.length;
+            const currentSize = context.length;
             const nextLimit = Math.floor(currentSize * 0.6);
             if (nextLimit < 1000 || nextLimit >= currentSize) throw err;
             contextLimit = nextLimit;
@@ -10227,7 +10408,11 @@ function dedupeLinkRows(rows) {
   const seen = new Map();
   for (const r of rows || []) {
     let key;
-    try { key = canonicalUrlForHash(r.url || ''); } catch (_) { key = `hash:${r.url_hash || r.url || ''}`; }
+    if (r?.type === 'document' || r?.isDocument || !r?.url) {
+      key = `id:${r?.type || 'row'}:${r?.id || r?.filename || r?.title || ''}`;
+    } else {
+      try { key = canonicalUrlForHash(r.url); } catch (_) { key = `hash:${r.url_hash || r.url || ''}`; }
+    }
     const cur = seen.get(key);
     if (!cur || Number(r.created_at || 0) >= Number(cur.created_at || 0)) seen.set(key, r);
   }
@@ -11541,15 +11726,19 @@ export {
   scrapeViaKage,
   buildSearchBlob,
   cleanApiBase,
+  compactAiContext,
+  dedupeLinkRows,
   expandServerSearchTerms,
   fuzzyMatchLinks,
   getInstanceAiConfig,
   getSteroidMode,
+  isGroundedAiAnswer,
   helpTextForSection,
   isFreeTierModel,
   normalizeModelId,
   parseAiDescribeResponse,
   parseTelegramEditPayload,
+  rankLinks,
   resolveChatEndpoint,
   resultLimitClause,
   syncAiConfigToPeer,

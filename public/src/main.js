@@ -1957,7 +1957,12 @@ document.addEventListener('DOMContentLoaded', () => {
       const label = document.querySelector('.ai-answer-label');
       if (label) {
         if (result.mode === 'llm') {
-          label.textContent = 'AI · grounded in your markdown brain';
+          const engine = String(result.retrievalEngine || '').includes('meilisearch')
+            ? 'Meilisearch + PostgreSQL'
+            : result.retrievalEngine === 'browser-local'
+              ? 'local matches'
+              : 'PostgreSQL';
+          label.textContent = `AI · grounded in ${engine}`;
         } else {
           const errHint = result.error ? ` — ${result.error}` : '';
           label.textContent = `AI · ${errHint ? 'local fallback' : 'local brain'}${errHint ? '' : ' (add API key in Settings for full assistant)'}`;

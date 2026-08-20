@@ -71,10 +71,38 @@
     return !!window.__athenaSteroid;
   }
 
+  const AI_REMOTE_LIMIT = 24;
+  const AI_CONTEXT_MAX_CHARS = 120000;
+  const AI_DOC_MAX_CHARS = 20000;
+
+  function clipAiText(value, maxChars = AI_DOC_MAX_CHARS) {
+    const text = String(value || '');
+    if (text.length <= maxChars) return text;
+    const marker = '\n[… content shortened for context …]\n';
+    const side = Math.max(1, Math.floor((maxChars - marker.length) / 2));
+    return `${text.slice(0, side)}${marker}${text.slice(-side)}`;
+  }
+
+  function compactAiContext(sections, maxChars = AI_CONTEXT_MAX_CHARS) {
+    const available = Math.max(0, Number(maxChars) || AI_CONTEXT_MAX_CHARS);
+    const out = [];
+    let used = 0;
+    for (const section of sections || []) {
+      const value = String(section || '');
+      if (!value || used >= available) break;
+      const separator = out.length ? '\n\n' : '';
+      const remaining = available - used - separator.length;
+      if (remaining <= 0) break;
+      out.push(separator + (value.length > remaining ? clipAiText(value, remaining) : value));
+      used += separator.length + Math.min(value.length, remaining);
+    }
+    return out.join('');
+  }
+
   function formatDoc(item, i) {
     const tags = Array.isArray(item.tags) ? item.tags.join(', ') : (item.tags || '');
-    const notes = item.notes || '';
-    const content = item.content || '';
+    const notes = item.type === 'document' || item.isDocument ? '' : clipAiText(item.notes || '', 6000);
+    const content = clipAiText(item.content || '', AI_DOC_MAX_CHARS);
     return [
       `[#${i + 1}]`,
       `Title: ${item.title || 'Untitled'}`,
@@ -120,10 +148,11 @@ INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on 
       return formatDoc(d, i);
     }).filter(Boolean);
     const full = sections.join('\n\n');
-    if (!Number.isFinite(maxChars) || full.length + prefix.length <= maxChars) {
+    const budget = Number.isFinite(maxChars) ? maxChars : AI_CONTEXT_MAX_CHARS;
+    if (full.length + prefix.length <= budget) {
       return prefix + full;
     }
-    const available = Math.max(0, maxChars - prefix.length);
+    const available = Math.max(0, budget - prefix.length);
     const compact = [];
     let used = 0;
     for (const section of sections) {
@@ -153,6 +182,8 @@ INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on 
     return {
       ...row,
       tags: Array.isArray(tags) ? tags : [],
+      notes: clipAiText(row.notes || '', 6000),
+      content: clipAiText(row.content || '', AI_DOC_MAX_CHARS),
       createdAt: row.createdAt || row.created_at || 0,
       imageUrl: row.imageUrl || row.image_url || '',
       siteName: row.siteName || row.site_name || '',
@@ -168,31 +199,37 @@ INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on 
       .filter(message => message.role === 'user')
       .map(message => String(message.content || '').slice(0, 200))
       .slice(-2);
-    let retrievalQuestion = [...prior, String(question || '').slice(0, 500)].filter(Boolean).join(' ').slice(0, 500);
+    const currentQuestion = String(question || '').slice(0, 500);
+    const currentTerms = window.AthenaSearch?.expandQueryTerms?.(currentQuestion)?.tokens || [];
+    let retrievalQuestion = (currentTerms.length ? [currentQuestion] : [...prior, currentQuestion])
+      .filter(Boolean).join(' ').slice(0, 500);
     if (!retrievalQuestion) retrievalQuestion = String(question || '').slice(0, 500);
-    const expanded = window.AthenaSearch?.expandQueryTerms?.(retrievalQuestion)?.expanded || [];
-    const truncatedExpanded = (expanded || []).map(t => String(t).slice(0, 200)).slice(0, 12);
-    const queries = [...new Set([retrievalQuestion, ...truncatedExpanded])].filter(Boolean);
     const docs = new Map();
     let total = 0;
-    for (const q of queries) {
-      const safeQ = String(q).slice(0, 500);
-      const params = new URLSearchParams({ q: safeQ, scope: context.scope || 'personal', limit: isSteroidEnabled() ? 'all' : '50' });
-      if (context.scope === 'community' && context.communityId) params.set('community_id', context.communityId);
-      try {
-        const res = await fetch(`${apiBase}/api/links/search?${params}`, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {}
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok || !Array.isArray(data.links)) continue;
-        total = Math.max(total, Number(data.total || 0));
+    const safeQ = String(retrievalQuestion).slice(0, 500);
+    const params = new URLSearchParams({
+      q: safeQ,
+      scope: context.scope || 'personal',
+      limit: String(AI_REMOTE_LIMIT),
+      purpose: 'ai'
+    });
+    if (context.scope === 'community' && context.communityId) params.set('community_id', context.communityId);
+    let engine = 'postgres';
+    try {
+      const res = await fetch(`${apiBase}/api/links/search?${params}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {}
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && Array.isArray(data.links)) {
+        total = Number(data.total || 0);
+        engine = data.retrieval_engine || engine;
         for (const row of data.links) {
           const doc = normalizeRemoteDoc(row);
           if (doc.id && !docs.has(doc.id)) docs.set(doc.id, doc);
         }
-      } catch (_) {}
-    }
-    return { docs: [...docs.values()], total: total || docs.size };
+      }
+    } catch (_) {}
+    return { docs: [...docs.values()], total: total || docs.size, engine: docs.size ? engine : 'browser-local' };
   }
 
   function answerLocal(question, corpus, corpusSize = (corpus || []).length) {
@@ -211,7 +248,7 @@ INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on 
         results: []
       };
     }
-    const display = isSteroidEnabled() ? docs : docs.slice(0, 5);
+    const display = docs.slice(0, 8);
     const lines = display.map((d, i) => {
       const label = d.title || d.url || 'Note';
       return `${i + 1}. **${label}**${d.url ? ` — ${d.url}` : ''}`;
@@ -229,6 +266,18 @@ INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on 
     if (status === 401 || status === 403) return 'AI provider rejected the request; showing relevant saved matches.';
     if (status === 429) return 'AI provider is rate-limited; showing relevant saved matches.';
     return 'AI is unavailable; showing relevant saved matches.';
+  }
+
+  function isGroundedAiAnswer(text, docs) {
+    const answer = String(text || '');
+    const citations = [...answer.matchAll(/\[(?:#)?(\d+)\]/g)]
+      .map(match => Number(match[1]))
+      .filter(index => index >= 1 && index <= (docs || []).length);
+    if (!citations.length) return false;
+    const normalizeUrl = url => String(url || '').replace(/[),.;!?'\s"]+$/g, '');
+    const knownUrls = new Set((docs || []).map(doc => normalizeUrl(doc.url)));
+    const urls = answer.match(/https?:\/\/[^\s<>()[\]{}"']+/gi) || [];
+    return urls.every(url => knownUrls.has(normalizeUrl(url)));
   }
 
   async function callViaProxy({ baseUrl, apiKey, model, mode, system, user, messages, onDelta, onThinking }) {
@@ -359,8 +408,11 @@ INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on 
     const localDocs = retrieve ? retrieve(retrievalQuestion || q, list, localLimit, { minScore: 18, strict: true }) : list;
     const remote = await retrieveRemoteDocs(q, history);
     const merged = new Map();
-    for (const doc of remote.docs) merged.set(doc.id || doc.url || `remote-${merged.size}`, doc);
-    for (const doc of localDocs) merged.set(doc.id || doc.url || `local-${merged.size}`, doc);
+    // The server retrieval is authoritative: it searches the complete
+    // PostgreSQL scope through Meilisearch/SQL. Browser-local rows are only a
+    // network fallback, never extra context that can pollute the prompt.
+    const retrievalDocs = remote.docs.length ? remote.docs : localDocs;
+    for (const doc of retrievalDocs) merged.set(doc.id || doc.url || `retrieved-${merged.size}`, doc);
     const docs = [...merged.values()];
     const corpusSize = Math.max(list.length, remote.total || 0);
 
@@ -378,25 +430,21 @@ INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on 
       };
     }
 
-        // THIN-DOCS GUARD: If retrieved docs have no grounded content for the QUERY-RELEVANT subset, do NOT call LLM.
-    // LLM will invent details for bare URLs like tokenrouter.com with empty notes.
-    // "Relevant" = doc bag contains the core query term (last non-stopword). This prevents
-    // unrelated docs that matched "what"/"is" via expanded terms from masking a thin relevant doc.
-    const STOPWORDS = new Set(['what','is','are','was','were','where','when','why','how','a','an','the','does','do','did','can','could','would','should','tell','me','about','of','for','on','in','to','you','your','it','this','that','with','from','and','or','as','at','be','by','if','we','us']);
-    const qTokens = String(q || '').toLowerCase().split(/\s+/).filter(Boolean);
-    const coreTokens = qTokens.filter(w => {
-      const al = w.replace(/[^a-z0-9]/g, '');
-      return al.length > 2 && !STOPWORDS.has(al);
-    });
-    const coreTerm = (coreTokens.length ? coreTokens[coreTokens.length - 1] : qTokens[qTokens.length - 1] || q || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-    function isRelevantDoc(d, term) {
-      if (!term || term.length < 2) return true;
+        // THIN-DOCS GUARD: If retrieved docs have no grounded content for the
+    // query-relevant subset, do NOT call the model and let it invent details.
+    const expandedQuery = window.AthenaSearch?.expandQueryTerms?.(q) || { tokens: [], expanded: [] };
+    const coreTerms = [...(expandedQuery.tokens || []), ...(expandedQuery.expanded || [])]
+      .map(term => String(term).toLowerCase().replace(/[^a-z0-9]/g, ''))
+      .filter((term, index, all) => term.length >= 3 && all.indexOf(term) === index)
+      .slice(0, 32);
+    function isRelevantDoc(d, terms) {
+      if (!terms.length) return true;
       const bag = [d.title, d.url, d.filename, d.notes, d.content, Array.isArray(d.tags) ? d.tags.join(' ') : d.tags].join(' ').toLowerCase();
       const bagAl = bag.replace(/[^a-z0-9]/g, '');
-      return bag.includes(term) || (bagAl.includes(term) && term.length >= 3);
+      return terms.some(term => bag.includes(term) || bagAl.includes(term));
     }
-    const relevantDocs = coreTerm ? docs.filter(d => isRelevantDoc(d, coreTerm)) : docs;
-    const docsToCheck = relevantDocs.length ? relevantDocs : docs;
+    const relevantDocs = coreTerms.length ? docs.filter(d => isRelevantDoc(d, coreTerms)) : docs;
+    const docsToCheck = relevantDocs;
     if (relevantDocs.length === 0) {
       return {
         answer: 'You have no saved link on this in your brain',
@@ -494,13 +542,23 @@ INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on 
           }
         }
       }
-      const displaySources = isSteroidEnabled() ? docs : docs.slice(0, 8);
+      if (!isGroundedAiAnswer(cleaned, docs)) {
+        const local = answerLocal(q, docs, corpusSize);
+        return {
+          ...local,
+          mode: 'local',
+          thinking: '',
+          error: 'AI response was not grounded in the retrieved PostgreSQL matches; showing saved matches.'
+        };
+      }
+      const displaySources = docs.slice(0, 8);
       return {
         answer: cleaned || text || 'Empty response from model.',
         thinking,
         sources: displaySources,
         results: docs,
-        mode: 'llm'
+        mode: 'llm',
+        retrievalEngine: remote.engine
       };
     } catch (err) {
       const local = answerLocal(q, docs, corpusSize);
@@ -543,6 +601,8 @@ INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on 
     normalizeModelId,
     instanceAiConfigured,
     getLastServerAiConfig,
-    formatAiFallbackMessage
+    formatAiFallbackMessage,
+    isGroundedAiAnswer,
+    compactAiContext
   };
 })();
