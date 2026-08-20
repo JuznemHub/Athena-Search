@@ -2204,33 +2204,42 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // --- GOD: provider model catalog + recent AI error log ---
   let aiModelCatalog = null;
+  let aiModelCatalogKey = '';
+  let aiModelPage = 0;
+  const AI_MODEL_PAGE_SIZE = 100;
 
-  async function loadAiModels() {
+  async function loadAiModels(force = false) {
     if (!canEditAiConfig()) return showToast('Model picker is GOD only', true);
     const list = $('aiModelList');
     const picker = $('aiModelPicker');
     if (!picker) return;
+    const base = $('aiBaseUrl')?.value.trim() || '';
+    const key = $('aiApiKey')?.value.trim() || '';
+    const catalogKey = `${base}\u0000${key}`;
     if (picker.classList.contains('hidden')) {
       picker.classList.remove('hidden');
-    } else if (aiModelCatalog) {
+    } else if (!force && aiModelCatalog && aiModelCatalogKey === catalogKey) {
       picker.classList.add('hidden');
       return;
     }
-    if (aiModelCatalog) return renderModelList($('aiModelFilter')?.value || '');
+    if (!force && aiModelCatalog && aiModelCatalogKey === catalogKey) {
+      return renderModelList($('aiModelFilter')?.value || '');
+    }
     if (list) list.innerHTML = '<div class="model-item status-msg">Loading models…</div>';
     try {
       // Candidate (unsaved) base+key from the form, if both present — the
       // server refuses mixed pairs, so send them together or neither.
-      const base = $('aiBaseUrl')?.value.trim() || '';
-      const key = $('aiApiKey')?.value.trim() || '';
       const qs = new URLSearchParams();
       if (base && key) { qs.set('base', base); qs.set('key', key); }
+      if (force) qs.set('refresh', '1');
       const { res, data } = await api(`/api/ai/models${qs.toString() ? `?${qs}` : ''}`);
       if (!res.ok || data.success === false) {
         if (list) list.innerHTML = `<div class="model-item" style="color:var(--danger-color)">${escapeHtml(data.error || `HTTP ${res.status}`)}</div>`;
         return;
       }
       aiModelCatalog = data.models || [];
+      aiModelCatalogKey = catalogKey;
+      aiModelPage = 0;
       renderModelList($('aiModelFilter')?.value || '');
     } catch (err) {
       if (list) list.innerHTML = `<div class="model-item" style="color:var(--danger-color)">${escapeHtml(err.message)}</div>`;
@@ -2240,13 +2249,19 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderModelList(filterText) {
     const list = $('aiModelList');
     if (!list || !aiModelCatalog) return;
+    const pager = $('aiModelPager');
     const f = (filterText || '').toLowerCase();
     const items = aiModelCatalog.filter((m) => !f || m.id.toLowerCase().includes(f) || (m.name || '').toLowerCase().includes(f));
     if (!items.length) {
       list.innerHTML = '<div class="model-item status-msg">No models match.</div>';
+      if (pager) pager.innerHTML = '';
       return;
     }
-    list.innerHTML = items.slice(0, 200).map((m) => {
+    const pageCount = Math.max(1, Math.ceil(items.length / AI_MODEL_PAGE_SIZE));
+    aiModelPage = Math.min(Math.max(aiModelPage, 0), pageCount - 1);
+    const start = aiModelPage * AI_MODEL_PAGE_SIZE;
+    const visible = items.slice(start, start + AI_MODEL_PAGE_SIZE);
+    list.innerHTML = visible.map((m) => {
       const ctx = m.context_length ? ` · ${(m.context_length / 1000).toFixed(0)}k ctx` : '';
       let price = '';
       if (m.pricing) {
@@ -2257,7 +2272,8 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       const cls = m.free ? 'model-item model-free' : 'model-item';
       const tag = m.free ? '<span style="color:var(--success-color);font-weight:600;">FREE</span> ' : '';
-      return `<div class="${cls}" role="option" tabindex="0" data-model="${escapeHtml(m.id)}">${tag}<span class="model-id">${escapeHtml(m.id)}</span><span class="status-msg">${ctx}${price}</span></div>`;
+      const name = m.name && m.name !== m.id ? `<span class="status-msg">${escapeHtml(m.name)} · </span>` : '';
+      return `<div class="${cls}" role="option" tabindex="0" data-model="${escapeHtml(m.id)}">${tag}<span class="model-id">${escapeHtml(m.id)}</span><span class="status-msg">${name}${ctx}${price}</span></div>`;
     }).join('');
     list.querySelectorAll('.model-item[data-model]').forEach((el) => {
       const pick = () => {
@@ -2267,6 +2283,11 @@ document.addEventListener('DOMContentLoaded', () => {
       el.addEventListener('click', pick);
       el.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); pick(); } });
     });
+    if (pager) {
+      pager.innerHTML = `<span>Showing ${start + 1}–${Math.min(start + visible.length, items.length)} of ${items.length}${aiModelCatalog.length !== items.length ? ` · ${aiModelCatalog.length} total` : ''}</span><span style="display:flex;gap:6px;"><button type="button" class="btn btn-secondary" data-model-page="prev" ${aiModelPage === 0 ? 'disabled' : ''}>‹</button><span>${aiModelPage + 1}/${pageCount}</span><button type="button" class="btn btn-secondary" data-model-page="next" ${aiModelPage >= pageCount - 1 ? 'disabled' : ''}>›</button></span>`;
+      pager.querySelector('[data-model-page="prev"]')?.addEventListener('click', () => { aiModelPage--; renderModelList(filterText); });
+      pager.querySelector('[data-model-page="next"]')?.addEventListener('click', () => { aiModelPage++; renderModelList(filterText); });
+    }
   }
 
   async function loadAiErrors(showPanel) {
@@ -2839,9 +2860,11 @@ document.addEventListener('DOMContentLoaded', () => {
       aiModelEl.addEventListener('input', () => { clearTimeout(window._freeBadgeTimer); window._freeBadgeTimer = setTimeout(updateAiFreeBadge, 700); });
     }
     const aiLoadModelsBtn = $('aiLoadModelsBtn');
-    if (aiLoadModelsBtn) aiLoadModelsBtn.addEventListener('click', loadAiModels);
+    if (aiLoadModelsBtn) aiLoadModelsBtn.addEventListener('click', () => loadAiModels(false));
+    const aiRefreshModelsBtn = $('aiRefreshModelsBtn');
+    if (aiRefreshModelsBtn) aiRefreshModelsBtn.addEventListener('click', () => loadAiModels(true));
     const aiModelFilter = $('aiModelFilter');
-    if (aiModelFilter) aiModelFilter.addEventListener('input', () => renderModelList(aiModelFilter.value));
+    if (aiModelFilter) aiModelFilter.addEventListener('input', () => { aiModelPage = 0; renderModelList(aiModelFilter.value); });
     const aiErrorsRefreshBtn = $('aiErrorsRefreshBtn');
     if (aiErrorsRefreshBtn) aiErrorsRefreshBtn.addEventListener('click', () => loadAiErrors(true));
     const aiErrorsClearBtn = $('aiErrorsClearBtn');

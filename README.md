@@ -1,488 +1,218 @@
-# Athena — Second Brain Search
+# Athena Search
 
-One bar: search, dump, and AI answers from your markdown brain.
+Your second brain for links, documents, Telegram messages, and grounded AI answers.
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-1.0.53-blueviolet?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/license_CC_BY--NC_4.0-blue?style=flat-square" alt="license">
-  <img src="https://img.shields.io/badge/telegram-bot-blue?style=flat-square&logo=telegram" alt="telegram">
-  <img src="https://img.shields.io/badge/discord-login-5865F2?style=flat-square&logo=discord" alt="discord">
+  <img src="https://img.shields.io/badge/PostgreSQL-required-336791?style=flat-square&logo=postgresql" alt="PostgreSQL">
+  <img src="https://img.shields.io/badge/Telegram-bot-26A5E4?style=flat-square&logo=telegram" alt="Telegram">
 </p>
 
----
+Athena is a self-hostable bookmark and document archive. Save from the web UI, Telegram, the terminal, or a linked channel; search the whole database; and ask an AI model to answer with sources from your own collection.
 
-## Features
-
-- **Save** links from the web UI or the Telegram bot. Upload text files (.md, .py, .json, .sql, and 30+ more, 512 KB each), plus documents (.pdf, .docx, .pptx, .xlsx, .odt, .rtf, .epub, …, up to 20 MB) — converted to Markdown on ingest via [anydoc](https://github.com/firecrawl/anydoc), self-hosted instances only.
-- **Search** with fuzzy matching across titles, URLs, notes, and tags — tolerant of typos and partial matches, with server-side search for large brains.
-- **Ask** questions with RAG over your links and documents. Supports OpenAI, Anthropic, Groq, OpenRouter, and OpenCode Zen, with streaming answers and cited sources.
-- **Share** a brain with a Telegram group in community mode, with voting, reporting, and rank-based permissions — or keep it private in personal mode.
-- **Store** your data in self-hosted PostgreSQL. MCP memory uses the same DB via `postgres-mcp`.
-- **Log in** with Telegram (OAuth or Mini App) or Discord. Sessions last 30 days.
-
----
-
-## Themes
-
-Four themes — **Dark**, **Light**, **Material** (MD3 surfaces, no blur), and **Glass** (iOS-style vibrancy) — each with a free-form accent color picker in Settings. Buttons, glows, borders, and highlights update instantly and persist locally.
-
-<p>
-<img src="screenshots/dark-purple.svg" width="24%" alt="Dark Purple">
-<img src="screenshots/glass-purple.svg" width="24%" alt="Glass Purple">
-<img src="screenshots/material-blue.svg" width="24%" alt="Material Blue">
-<img src="screenshots/light-green.svg" width="24%" alt="Light Green">
+<p align="center">
+  <img src="screenshots/dark-purple.svg" width="24%" alt="Dark theme">
+  <img src="screenshots/glass-purple.svg" width="24%" alt="Glass theme">
+  <img src="screenshots/material-blue.svg" width="24%" alt="Material theme">
+  <img src="screenshots/light-green.svg" width="24%" alt="Light theme">
 </p>
 
----
+## What it does
 
-## Install
+- Saves URLs, notes, code, text files, and self-hosted binary documents as searchable Markdown.
+- Searches titles, URLs, notes, tags, and document content across the complete PostgreSQL corpus.
+- Uses optional [Meilisearch](https://www.meilisearch.com/) as a fast derived index; PostgreSQL remains the source of truth and the fallback.
+- Answers questions with retrieval-augmented context and source links.
+- Supports OpenAI-compatible gateways, Anthropic, OpenRouter, OpenCode Zen, Groq, and local routers such as [OmniRoute](https://github.com/df4p/omniroute).
+- Provides personal and community brains with rank-aware permissions, voting, reports, and Telegram group membership gates.
+- Includes a Telegram bot, channel indexing, optional history backfill, and a zero-build terminal UI.
 
-### A. Cloudflare Worker — static frontend (optional)
+## Quick start
 
-The Worker now serves only the frontend + API proxy; storage is PostgreSQL. Set `DATABASE_URL` as a Worker secret/binding and deploy:
-
-```bash
-git clone https://github.com/JuznemHub/Athena-Search.git
-cd Athena-Search/worker
-npx wrangler secret put TELEGRAM_CLIENT_SECRET
-npx wrangler secret put TELEGRAM_BOT_TOKEN
-npx wrangler secret put DISCORD_CLIENT_SECRET
-npx wrangler secret put STORAGE_KEY
-npx wrangler secret put DATABASE_URL
-npx wrangler deploy
-```
-
-> **Document conversion limitation:** the Worker runtime cannot run the [anydoc](https://github.com/firecrawl/anydoc) converter, so binary document uploads (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.odt`, `.rtf`, `.epub`, …) are rejected here with a "self-host only" error. Text and code file uploads are unaffected. To accept documents, run the self-hosted server (below) — either standalone, or behind the Cloudflare frontend in ["Cloudflare frontend, self-hosted backend"](#cloudflare-frontend-self-hosted-backend) mode, where file uploads go straight from the browser to your server and conversion runs there.
-
-### B. Self-hosted PostgreSQL — production, recommended
-
-Requires Node.js 22+ and PostgreSQL 14+.
+The recommended deployment is the self-hosted Node server with PostgreSQL.
 
 ```bash
 git clone https://github.com/JuznemHub/Athena-Search.git
 cd Athena-Search
-
 npm install
-cp .env.example .env     # see server/.env.example for the annotated reference
+cp .env.example .env
 node server/index.js
 ```
 
-Optional add-ons (both self-host only, both degrade gracefully when absent):
+Requirements: Node.js 22+ and PostgreSQL 14+. Set at least:
 
-```bash
-npm install telegram   # enables /index_start history backfill (gramjs)
-# kage + Chrome/Chromium on the server + KAGE_BIN in .env
-#   → headless-rendered scraping for JS-only sites (see "Scraping")
-```
-
-```bash
+```dotenv
 DATABASE_URL=postgresql://athena:password@localhost:5432/athena
 PORT=8787
 TG_OWNER_IDS=your_telegram_user_id
-TELEGRAM_CLIENT_ID=your_telegram_app_id
-TELEGRAM_CLIENT_SECRET=your_telegram_app_secret
 TELEGRAM_BOT_TOKEN=your_bot_token
-DISCORD_CLIENT_ID=your_discord_app_id
-DISCORD_CLIENT_SECRET=your_discord_app_secret
-
-# Optional: backups
-BACKUP_INTERVAL_HOURS=6
-GDRIVE_CLIENT_ID=your_google_client_id
-GDRIVE_CLIENT_SECRET=your_google_secret
-GDRIVE_REFRESH_TOKEN=your_refresh_token
-GDRIVE_FOLDER_ID=your_drive_folder_id
 ```
 
-Examples for Caddy (`server/Caddyfile.example`), systemd (`server/athena.service.example`), and Cloudflare Tunnel (`server/cloudflared-athena.service.example`) ship with the repo.
+The server creates and migrates the PostgreSQL tables on startup. See [`server/.env.example`](server/.env.example) for the annotated configuration reference. Caddy, systemd, Cloudflare Tunnel, and Nginx examples are in [`server/`](server/).
 
-<details>
-<summary>Nginx reverse proxy</summary>
+### Cloudflare frontend
 
-Behind Cloudflare, set SSL/TLS to **Full (strict)** and serve the origin over HTTPS with a [Cloudflare origin certificate](https://developers.cloudflare.com/ssl/origin-configuration/origin-ca/). Keep plain-HTTP origins private behind a Cloudflare Tunnel instead of exposing them.
+The Worker can serve the static frontend and API while PostgreSQL remains the only database. Set `DATABASE_URL` and the required OAuth/bot secrets as Wrangler secrets, then deploy:
 
-```nginx
-# /etc/nginx/conf.d/athena.conf
-server {
-    listen 443 ssl default_server;
-    server_name athena.yourdomain.com;
-
-    ssl_certificate     /etc/ssl/cloudflare/athena.pem;
-    ssl_certificate_key /etc/ssl/cloudflare/athena.key;
-
-    location / {
-        proxy_pass http://127.0.0.1:8787;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_cache_bypass $http_upgrade;
-    }
-}
+```bash
+cd worker
+npx wrangler secret put DATABASE_URL
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+npx wrangler deploy
 ```
 
-If another block catches requests first, disable the distro's default site (`/etc/nginx/sites-enabled/default` on Debian/Ubuntu, the `server` block in `/etc/nginx/nginx.conf` on RHEL) — only one block per port may be `default_server`.
-</details>
+Text uploads work in the Worker runtime. Binary conversion needs the self-hosted Node backend, either directly or behind the Cloudflare frontend.
 
-### Cloudflare frontend, self-hosted backend
+## Configuration
 
-Set `ATHENA_FRONTEND_URL` on your server to wherever OAuth should send the browser after login — it has to be a URL your users can actually reach, serving this same UI. Then in Settings → Backend, enter your server URL and click "Set backend for everyone". The choice is stored per-instance, so every visitor uses the same backend.
+| Area | Variables | Notes |
+| --- | --- | --- |
+| Database | `DATABASE_URL` | Required; PostgreSQL is canonical. |
+| Telegram bot | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` | Bot API ingestion, commands, and webhooks. |
+| Telegram login | `TELEGRAM_CLIENT_ID`, `TELEGRAM_CLIENT_SECRET` | OAuth/Mini App login. |
+| Session history | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `STORAGE_KEY` | Optional self-hosted GramJS backfill; never expose these to the browser. |
+| Search index | `MEILI_URL`, `MEILI_MASTER_KEY`, `MEILI_INDEX` | Optional; defaults to index `athena`. |
+| JS scraping | `KAGE_BIN`, `KAGE_CHROME` | Optional [Kage](https://github.com/tamnd/kage) + Chrome/Chromium fallback. |
+| AI | `OPENROUTER_API_KEY` or settings UI | Credentials are stored server-side and never returned to normal users. |
 
-Storage is always PostgreSQL regardless of frontend URL. Set `DATABASE_URL` on both Worker and self-host.
+## Search and AI
 
-In this mode the browser talks to your server directly, so binary document uploads (.pdf, .docx, …) work — conversion runs on the Node backend, not the Worker.
+PostgreSQL is authoritative. When `MEILI_URL` is configured, Athena creates the `athena` index, syncs each personal/community scope in the background, and uses it for normal search and AI retrieval. Writes mark the relevant scope dirty; an unavailable or warming Meilisearch instance falls back to the complete PostgreSQL search instead of returning an incomplete corpus.
 
----
-
-## Terminal UI (athena-tui)
-
-Dump your browser bookmarks into your Athena brain straight from the terminal — no browser needed. Zero dependencies, Node >= 22.
+The web UI’s **Models** picker calls the configured endpoint’s live `/models` catalog and preserves provider metadata, pricing, context length, and supported model IDs. OpenRouter’s router model is available as:
 
 ```text
-                                    ✦
-                   █▀█ ▀█▀ █ █ █▀▀ █▄ █ █▀█  ▄▀▀ █▀▀ █▀█ █▀▄ ▄▀▀ █ █
-                   █▄█  █  █▀█ █▀  █ ▀█ █▄█  █▄▄ █▀  █▄█ █▀▄ █   █▀█
-                   ▀ ▀  ▀  ▀ ▀ ▀▀▀ ▀  ▀ ▀ ▀  ▀▀▀ ▀▀▀ ▀ ▀ ▀▀  ▀▀▀ ▀ ▀
-              search your second brain · dump your bookmarks · ai answers
-                                 server  not connected
-
-                   ╭─ actions ─────────────────────────────────────╮
-                   │ ❯ 1 Login with Telegram         not logged in │
-                   │   2 Connect instance            not connected │
-                   │   3 Join community              not joined    │
-                   │   4 Scan bookmarks              not scanned   │
-                   │   5 Dump bookmarks                            │
-                   │   6 Status                                    │
-                   │   7 Quit                                      │
-                   ╰───────────────────────────────────────────────╯
-                       ╭────────────────────────────────────────╮
-                       │ ↑↓ move · ↵ select · 1-9 jump · q quit │
-                       ╰────────────────────────────────────────╯
+Base URL: https://openrouter.ai/api/v1
+Model:    openrouter/free
 ```
 
-Installed from npm, so it works on any machine without cloning the repo — the website and database can live on your VPS while you run the TUI locally to collect bookmarks:
+`openrouter/free` is the default OpenRouter choice. For a local OpenAI-compatible router, choose **OmniRoute** or enter:
+
+```text
+Base URL: http://127.0.0.1:20128/v1
+Model:    openrouter/free   # or a model exposed by the gateway
+```
+
+Local HTTP endpoints are allowed only by the self-hosted server and are restricted to loopback/private addresses. Public upstream endpoints must use HTTPS. The proxy keeps streaming responses, model fallbacks, rate limits, and upstream error history.
+
+## Telegram bot
+
+1. Create a bot with [@BotFather](https://t.me/BotFather).
+2. DM it `/id` to obtain your Telegram user ID.
+3. In Athena, open **Settings → Bot**, enter the token and owner ID, and verify it.
+4. Add the bot to a group and run `/community_verify` to create or bind a community.
+
+### Bot mode and session mode
+
+Bot API mode is the default and safest mode:
+
+- no user session string is required;
+- the bot indexes new messages, links, and supported documents it can see;
+- a channel must be linked with `/channel_link <community_id> <channel_id>`;
+- the bot must have the required admin/read permissions in that channel.
+
+Session mode is optional and self-host-only. It uses a Telegram user session to backfill older history with `/index_start`; the encrypted session is kept only for the job and removed when the job finishes or is stopped. Treat a session string like a password: it can grant access to the Telegram account that created it.
+
+Athena accepts compatible Telethon/Pyrogram-style StringSession values for this bridge. It does not vendor or execute the full [Ultroid](https://github.com/TeamUltroid/Ultroid) userbot; Ultroid can remain a separate session generator/client if you already use it.
+
+### Exporting into the bot
+
+Use `/export` for the complete setup guide. A Telegram export is normally imported in bot format through the TUI or `/index_start` workflow; it does not require changing the bot into a userbot. The bot’s normal link/document dump path remains available in both personal and community scopes.
+
+Useful commands:
+
+| Command | Purpose |
+| --- | --- |
+| `/help` | Detailed command menu and setup guidance. |
+| `/search <query>` | Search only matching links/documents with page buttons. |
+| `/ai <question>` | Ask the configured model over the active brain. |
+| `/export` | Explain bot-mode export and optional session-history import. |
+| `/channel_link <community_id> <channel_id>` | Index new channel posts into a community. |
+| `/channel_unlink <channel_id>` | Stop channel indexing. |
+| `/index` | Show indexing status and available backfill actions. |
+| `/index_start ...` | Start optional self-hosted history backfill. |
+| `/index_status` / `/index_stop` | Inspect or cancel a backfill. |
+| `/community_join <id>` | Join a community after joining its Telegram group. |
+| `/personal` / `/community` | Switch the GOD user’s dump target. |
+| `/delete <url>` | Delete a link, or reply to a saved link with `/delete`. |
+
+`/search` is deliberately scoped: every page contains only results matching the query, and **Next page** loads the next matching slice before the close button. Unrelated recent bookmarks are never appended to the result list.
+
+## Scraping
+
+Every saved URL is first handled by Athena’s normal safe fetch and extractor. GitHub, GitLab, Reddit, and common forge pages have dedicated metadata paths. If a page is JavaScript-rendered and the static result is too thin, self-hosted Athena can invoke Kage with a real Chrome/Chromium browser:
+
+```bash
+kage clone https://example.com --max-pages 1 --workers 1 -o /tmp/athena-kage-check
+```
+
+Configure the binary explicitly when needed:
+
+```dotenv
+KAGE_BIN=/usr/local/bin/kage
+KAGE_CHROME=/usr/bin/chromium
+```
+
+Kage is optional. If it is missing, disabled, or fails, Athena keeps the safe static metadata fallback. The browser-rendered output is read from Kage’s host directory under the selected output root; scripts are not stored as page content.
+
+## Terminal UI
+
+[`athena-tui`](tui/README.md) imports browser bookmarks and export files without requiring a browser session on the server.
 
 ```bash
 npm install -g athena-tui
 athena-tui
 ```
 
-Prefer a longer name? [`athenasearch-tui`](https://www.npmjs.com/package/athenasearch-tui) is an alias package for the same CLI.
+It supports Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Arc, Firefox, and explicit export files. `Tab` opens the advanced AI/MCP view when configured; the website and database can stay on a VPS while the TUI runs locally.
 
-**Setup** — the menu is the whole app, just press in order:
+## Permissions
 
-1. **1** Connect instance — paste your instance URL
-2. **2** Login with Telegram — browser opens the site login; paste the address-bar URL (or `session=` token) back
-3. **3** Join community — paste the community id from your GOD (skip if personal-brain only)
-4. **4** Scan bookmarks — all detected browsers, one browser, or an export file
-5. **5** Dump bookmarks — GODs pick *personal* or *community* brain; others dump to their community
+| Rank | Personal brain | AI | Bot settings | Community links/docs |
+| --- | ---: | ---: | ---: | ---: |
+| GOD / instance owner | Yes | Yes | Yes | Full |
+| Community owner | No | Yes | No | Manage |
+| Community admin | No | Yes | No | Manage |
+| Member | No | Yes | No | Add/search |
+| Banned user | No | No | No | No |
 
-Detects Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Arc, and Firefox bookmarks automatically.
+Empty `TG_OWNER_IDS` is convenient for a private instance: every authenticated user is treated as GOD. For a shared deployment, set it explicitly.
 
-Advanced mode (`Tab`) opens opencode wired to your brain via the `athena` MCP server, with `/athena` strict mode, `/athena-study <topic>` (deep cross-linked study notes from your documents, with citations), `/athena-ingest` (dedupe-checked ingestion), and an `athena-researcher` subagent.
+## API surface
 
-Full docs in [`tui/README.md`](tui/README.md).
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/health` | Runtime, database, version, and feature status. |
+| GET | `/api/links/search` | Whole-corpus scoped search; Meilisearch-backed when configured. |
+| GET/POST/PATCH/DELETE | `/api/links` | Community link CRUD. |
+| GET/POST/DELETE | `/api/documents` | Document CRUD. |
+| GET | `/api/ai/models` | Live model catalog for the settings picker. |
+| POST | `/api/ai/chat` | Streaming AI proxy with retrieved context. |
+| GET/POST | `/api/ai/config` | GOD-only AI configuration. |
+| POST | `/api/telegram-webhook` | Telegram update ingress. |
 
----
-
-## Ranks
-
-| Rank | Who | Personal brain | AI | Bot settings | Delete links | Upload docs |
-|------|-----|---------------|-----|--------------|--------------|-------------|
-| **GOD** | Instance host (`TG_OWNER_IDS`) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Owner** | Community creator (`/community_verify`) | ❌ | ✅ | ❌ | ✅ | ✅ |
-| **Admin** | Promoted with `/admin` | ❌ | ✅ | ❌ | ✅ | ✅ |
-| **Member** | Login + join TG group + `/community_join` | ❌ | ✅ | ❌ | ❌ | ✅ |
-| **Banned** | Left or kicked from the TG group | ❌ | ❌ | ❌ | ❌ | ❌ |
-
-Empty owner lists mean every logged-in user is GOD — convenient for a personal self-host. Bans are per-community, and Telegram presence stays in sync: leaving the group auto-bans, rejoining auto-unbans.
-
----
-
-## Personal and community brains
-
-**Personal** (GOD only) is private — stored under your user ID, visible only to you. **Community** is shared with a Telegram group, where every member can dump, search, and ask. Switch with `/personal` and `/community` in the bot, or the toggle on the website.
-
-In a group, everything goes to the community brain. In DMs, the mode decides where pasted links land.
-
-**Creating a community**: add your bot to a Telegram group and run `/community_verify`. The group title becomes the community name and you become its owner, free to promote admins with `/admin`.
-
-**Joining one**: log in on the website, join the Telegram group, then DM the bot `/community_join <community_id>` — the ID comes from `/community_list` or the website.
-
----
-
-## Storage
-
-PostgreSQL is the only backend. D1 and GitHub Markdown were removed — they added parking/sync complexity (`storage.js` 600L, `storeAddLink` 409/422 retries, 500 GitHub writes/hour) and block MCP memory + paragraph-level RAG.
-
-| Backend | How it works | When to use |
-|---------|-------------|-------------|
-| **PostgreSQL** | Single source of truth. Any agent can use it as memory via `postgres-mcp` (`DATABASE_URL`). | All deployments |
-
-Set `DATABASE_URL=postgresql://athena:pass@localhost:5432/athena` on both Worker (`wrangler secret put DATABASE_URL`) and self-host `.env`. No Storage → GitHub UI; `Settings → Storage` shows `PostgreSQL` read-only. Use Postgres backups (`/backup` → Telegram/Drive on self-host, or `pg_dump`) — `/sync` is removed.
+## Project layout
 
 ```text
-PostgreSQL tables: links, personal_links, uploaded_documents, link_votes, ...
-MCP: npx @modelcontextprotocol/server-postgres $DATABASE_URL  →  any agent (Hermes / Claude / OpenCode) as memory
+public/       zero-build frontend and themes
+worker/       Worker routes, Telegram bot, schema, scraping, AI proxy
+server/       Node adapter, PostgreSQL driver, backups, static server
+tui/          terminal bookmark importer and MCP-aware client
+scripts/      versioning and retrieval checks
 ```
 
----
-
-## Scraping
-
-Every saved link (website, bot, channel, backfill) is scraped for title, description, and readable content, which feeds AI tagging and search. Static HTML covers most sites; Reddit/Gists/forges have dedicated extractors.
-
-**JS-rendered pages (self-host, optional)** — client-side-rendered sites return an empty shell to a plain fetch. Install [kage](https://github.com/tamnd/kage) (plus Chrome/Chromium) on the server and set `KAGE_BIN` in `.env` (e.g. `KAGE_BIN=/usr/local/bin/kage`); when a static scrape comes back thin, Athena renders the page headless via kage and re-extracts. Off by default; a missing binary is detected once and skipped for 10 minutes.
-
-## MCP: Use your brain as memory for any agent
-
-Your `PostgreSQL` *is* the MCP memory — any agent that speaks MCP can `search`/`dump` it.
-
-TUI Advanced (already wired): `Tab` → `Advanced (opencode)` opens `opencode` with `athena` MCP (`tui/src/mcp-athena.js` rank-aware `GOD`/`community` + `para_idx` `600tok`). Default is plain `opencode`, `/athena <query>` strictly fetches `athena_search` then `cite`, `/athena` alone toggles strict mode.
-
-Any CLI harness — 1 env var:
-```bash
-export DATABASE_URL=postgresql://athena:pass@YOUR_VPS:5432/athena
-# or tunnel: ssh -N -L 5432:localhost:5432 you@vps
-
-# Claude Code
-claude mcp add athena -- npx @modelcontextprotocol/server-postgres $DATABASE_URL
-claude  # then: /mcp → athena → athena_search
-
-# OpenCode (global)
-opencode mcp add athena -- npx @modelcontextprotocol/server-postgres $DATABASE_URL
-opencode  # TUI → /
-
-# Cursor / Windsurf / Continue — add to their mcp.json:
-{
-  "mcpServers": {
-    "athena": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://athena:pass@YOUR_VPS:5432/athena"]
-    }
-  }
-}
-
-# Or via TUI's rank-aware wrapper (recommended, enforces GOD personal + community bans):
-# use tui/src/mcp-athena.js as local MCP with ATHENA_INSTANCE/TOKEN
-
-B mode fallback: if `DATABASE_URL` is not set (e.g., laptop without tunnel), `mcp-athena.js` proxies to `https://athena.juznem.eu.org/api/*` with your `ATHENA_INSTANCE`/`TOKEN` — no direct DB needed.
-
-## AI
-
-As GOD, go to Settings → AI assistant, pick a provider, and enter the base URL, model, and API key. Saving syncs the config to the server, so the website and the bot's `/ai` share one set of credentials.
-
-**Models… button** — fetches the provider's full catalog (`GET /api/ai/models`) with free/paid classification, pricing, and context length. Works against the saved config, or against a base URL + key you are testing before saving. Free models are badged `FREE` so cost-free setups are one click.
-
-**Recent AI errors** — the panel under Save lists the last 50 upstream failures (time, source, model, HTTP status, message) from the chat proxy, bot `/ai`, and link enrichment. In-memory: it clears on restart. Use it to answer "why did my answers fall back to local mode".
-
-**Steroid mode** — the toggle now shows exactly what it changes: off = retrieval capped at 300 items, top 8 into the prompt, enrichment one link at a time; on = no retrieval cap, full RAG context, 4× parallel enrichment — bounded only by the provider's context window.
-
-| Provider | Base URL | Model example |
-|----------|----------|---------------|
-| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
-| Anthropic | `https://api.anthropic.com` | `claude-sonnet-4-20250514` |
-| Groq | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
-| OpenRouter | `https://openrouter.ai/api/v1` | `openai/gpt-4o-mini` |
-| OpenCode Zen Go | `https://opencode.ai/zen/go/v1` | `deepseek-v4-flash` |
-| OpenCode Zen | `https://opencode.ai/zen/v1` | `deepseek-v4-flash` |
-
-Questions are fuzzy-matched against your links and documents, the top matches are injected into the system prompt, and the answer comes back grounded in your brain with its sources listed underneath.
-
----
-
-## Telegram bot
-
-1. Get a token from [@BotFather](https://t.me/BotFather) with `/newbot`
-2. DM your bot `/id` to find your user ID
-3. Website → Settings → Bot → paste the token and your ID → "Verify & save bot"
-4. For groups: add the bot, then run `/community_verify`
-
-In forum groups, `/id` inside a topic gives you the topic ID, and `/topic <id>` locks the bot to it.
-
-**Webhook (self-hosted)** — the endpoint is `/api/telegram-webhook`:
+## Development
 
 ```bash
-curl "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=https://yourdomain.com/api/telegram-webhook&secret_token=<TELEGRAM_WEBHOOK_SECRET>"
+npm install
+npx eslint worker/ server/ public/ scripts/
+npm run check:version
+npm run test:unit
 ```
 
-If you set `TELEGRAM_WEBHOOK_SECRET`, pass the same value as `secret_token`. If you don't, Athena derives one from the bot token — in which case re-register the webhook whenever the token changes. `WEBHOOK_ALLOW_UNSIGNED=1` disables the check entirely; it's insecure and only meant for migration.
-
-**Log channel** — send login and community-join notices to a channel instead of GOD's DMs. Add the bot as a channel admin, get the channel ID (forward a message to @userinfobot, then prefix it with `-100`), and DM `/setlogchannel -1001234567890`. Turn it off with `/setlogchannel off`.
-
-<details>
-<summary><b>Bot commands</b></summary>
-
-**Everyone**
-
-| Command | Description |
-|---------|-------------|
-| `/start` | Welcome message and status |
-| `/help` | Command menu with categories |
-| `/id` | Chat ID, your user ID, topic ID |
-| `/rank` | Your ranks across all communities |
-| `/db` | Show storage backend info |
-| `/search <query>` | Search active brain |
-| `/ai <question>` | AI over brain context |
-| `/community_join <id>` | Join a community |
-| `/community_list [id]` | List your communities, or one community's details |
-
-Sending or forwarding any supported text file — or a document (.pdf, .docx, .pptx, .xlsx, .odt, .rtf, .epub, …) on self-hosted instances — saves it to the active scope; documents are converted to Markdown on ingest. Channels linked with /channel_link are indexed in real time: every new post's links and files land in the community brain automatically (bot must be the channel admin; run /channel_link as community owner/GOD).
-
-**Staff** (admin, owner, GOD)
-
-| Command | Description |
-|---------|-------------|
-| `/delete <url>` | Delete a link (or reply `/delete`) |
-| `/edit <url> \| notes: ...` | Edit link description |
-| `/admin` | Reply to a user → promote to admin |
-| `/demote` | Demote admin to member |
-| `/clear @user` | Remove member (can rejoin) |
-| `/topic <id>` / `/topic off` | Lock bot to a forum topic |
-| `/dumpall on/off` | Multi-link mode |
-
-**Owner and GOD**
-
-| Command | Description |
-|---------|-------------|
-| `/community_verify` | Link group to community |
-| `/community_delete <id>` | Wipe community + all data |
-| `/clear_db <id>` | Wipe links only, keep members |
-| `/sync` | Removed — PostgreSQL only (returns `POSTGRES_ONLY`) |
-| `/backup` | Trigger backup (self-hosted) |
-| `/setlogchannel <id\|off>` | Set log channel for notifications |
-| `/channel_link <community_id> <channel_id>` | Auto-index a channel's new posts (bot must be channel admin) |
-| `/channel_unlink <channel_id>` | Stop indexing a channel |
-| `/index` | Indexing status + backfill info |
-| `/index_start <community_id> <chat_id> <api_id> <api_hash> <session_string>` | Backfill a group/channel's history (self-host, DM only; session encrypted at rest, deleted when done; requires `npm install telegram` on the server) |
-| `/index_status` / `/index_stop` | Backfill progress / cancel + delete session |
-
-**GOD only**
-
-| Command | Description |
-|---------|-------------|
-| `/personal` / `/community` | Switch dump mode |
-| `/mode` | Show current dump mode |
-| `/clear_personal_db` | Wipe personal links |
-
-</details>
-
----
-
-## API
-
-<details>
-<summary><b>Endpoints</b></summary>
-
-**Public**
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/health` | Health check, version, features |
-| GET | `/api/auth/config` | OAuth provider status |
-| GET | `/api/auth/telegram` | Start Telegram OAuth |
-| GET | `/api/auth/telegram/callback` | Telegram OAuth callback |
-| POST | `/api/auth/telegram/webapp` | Telegram Mini App auth |
-| GET | `/api/auth/discord` | Start Discord OAuth |
-| GET | `/api/auth/discord/callback` | Discord OAuth callback |
-| POST | `/api/telegram-webhook` | Telegram bot webhook |
-| GET | `/api/instance/config` | Instance default backend |
-
-**Authenticated**
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/auth/me` | Current user info |
-| POST | `/api/auth/logout` | Destroy session |
-| GET | `/api/communities` | List communities |
-| POST | `/api/communities/join` | Join community |
-| GET, POST, PATCH, DELETE | `/api/links` | Read, create, edit, delete links |
-| GET | `/api/links/search` | Server-side search |
-| POST | `/api/links/vote` | Vote on link |
-| POST | `/api/links/report` | Report link |
-| GET, POST, DELETE | `/api/documents` | Read, upload, delete documents |
-| GET, POST | `/api/personal-links` | Personal links (GOD) |
-| GET | `/api/notifications` | List notifications |
-| POST | `/api/ai/chat` | AI chat proxy (streaming) |
-| GET, POST | `/api/ai/config` | Read config status, save config (GOD) |
-| GET, POST | `/api/storage/config` | Read backend info — always `postgres` (compat) |
-| POST | `/api/storage/sync` | Removed — returns `POSTGRES_ONLY` |
-
-</details>
-
----
-
-## Architecture
-
-```text
-athena/
-├── public/              # Frontend (static assets served by Worker/server)
-│   ├── index.html       # SPA entry point
-│   └── src/
-│       ├── main.js      # App logic (auth, search, AI, themes)
-│       ├── style.css    # Base styles
-│       ├── themes.css   # Theme tokens (dark/light/material/glass)
-│       └── lib/         # ai.js (RAG), search.js (fuzzy), dedupe.js (URLs)
-│
-├── worker/              # Cloudflare Worker — API + bot + static
-│   ├── index.js         # All API routes, auth, Telegram webhook (PostgreSQL only)
-│   ├── storage.js       # Legacy GitHub store (retained on disk, not imported)
-│   ├── pgcompat.js      # SQLite → Postgres SQL translator
-│   ├── schema.sql       # Database schema
-│   └── wrangler.toml    # Cloudflare config (D1 binding removed)
-│
-└── server/              # Self-hosted wrapper (PostgreSQL)
-    ├── index.js         # Node HTTP → Worker adapter
-    ├── pgdb.js          # D1-compatible Postgres driver
-    ├── assets.js        # Static file server
-    ├── backup.js        # Telegram + Drive backup
-    └── restore.js       # Backup restore tool
-```
-
-Requests always land on the Worker or the Node server, which reads and writes PostgreSQL and proxies AI calls:
-
-```text
-Browser/Telegram → Worker or Node server → PostgreSQL
-                              ↓
-                        AI Proxy → OpenAI/Anthropic/etc
-Any agent (Hermes/Claude) → postgres-mcp → same PostgreSQL (as memory)
-```
-
----
-
-## A Note
-
-> [!NOTE]
-> Athena started as a personal second brain, one search bar over my own notes and grew into a proper project: a Cloudflare Worker that also runs self-hosted on Node, a Telegram bot, RAG-based AI search, and a zero-build frontend. It's linted, versioned, and checked by CI on every PR; changes go through code review before they land. By its nature its vibe coded but I try to take help of my friends who are good at coding and trying to make this better. 
->
-> Built with the help of [OpenCode](https://opencode.ai), [ChatGPT](https://chatgpt.com/), and [Claude](https://claude.ai/). I'm a student on a tight budget, and their accessible tooling made this possible.
-
-> [!NOTE]
-> If you find this useful, consider giving it a star or sharing it. And if you hit a bug or want a feature, issues and PRs are welcome.
->
-> Aaron Swartz's thoughts and ideas have deeply shaped who I am. Long live.
-
-## Roadmap
-
-- [ ] **1. Improve AI features on website** — better RAG chunking (`para_idx` → `line_number` `5MB` `anydoc` `document_chunks`), streaming `cite` chips, `steroid` `line` mode, Telegram `mdToTelegramHtml` rich text parity.
-- [ ] **2. Community skills for Athena** — `tui` `/athena-study` (deep cross-linked notes), `/athena-ingest` (dedupe), `athena-researcher` subagent, `AGENTS.md` conventions for `docs`/`links` research.
-- [ ] **3. Plugin ecosystem** — adapters for `Reddit`, `X/Twitter`, `Notion`, `GitHub`, etc. via `mcp`/`postgres-mcp` + `tui/src/mcp-athena.js` rank-aware wrapper; `opencode` `command` `plugins` as prior art.
-- [ ] **4. RSS support** — `RSS` `pubsub` real-time indexing including changes (`/channel_link` already does polling, add `rss` `cron` + `delta` `hash` for edits/deletes).
-- [ ] **5. Credits** — see below.
-- [ ] **6. Extensions** — browser `Web Clipper` `md` (Obsidian) + `Chrome`/`Firefox` `mv3` quick-dump, `VS Code` `mcp` sidebar.
-- [ ] **7. Android app** — `React Native`/`Expo` wrapper for `athena.juznem.eu.org` `PWA` + `Telegram Mini App` parity, `biometric` `session` store.
-- [ ] **8. Update website UI more** — `feat/ui-polish` `1.0.51` modal/skeletons/streaming/dropzone shipped, next: `search` `line` highlights, `graph view` `qmd` `lazy`.
-
----
+The repository’s CI also runs the TUI test suite and secret scanning. PostgreSQL is required for runtime integration checks; the unit retrieval test is self-contained.
 
 ## License
 
-## License
-
-[CC BY-NC 4.0](LICENSE) — Attribution-NonCommercial
-
-You may use, modify, and share this code for non-commercial purposes with proper attribution. Commercial use requires a separate license.
-</content>
-</invoke>
+[CC BY-NC 4.0](LICENSE) — attribution required; commercial use requires separate permission.

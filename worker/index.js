@@ -421,10 +421,15 @@ export default {
         const baseUrl = cleanApiBase(qBase || inst?.base_url || '');
         const apiKey = (qKey || inst?.api_key || '').trim();
         if (!baseUrl) return Response.json({ success: false, error: 'No base URL configured' }, { status: 400, headers: corsHeaders });
+        const refresh = ['1', 'true', 'yes'].includes(String(url.searchParams.get('refresh') || '').toLowerCase());
+        // Unsaved base+key pairs must always hit the live endpoint: caching by
+        // base alone can leak one account's provider-visible catalog to another
+        // account using the same gateway with a different key.
+        const override = !!(qBase || qKey);
         const cacheKey = `models:${baseUrl}`;
-        const cached = AI_MODEL_LIST_CACHE.get(cacheKey);
-        if (cached && cached.expires > Date.now()) {
-          return Response.json({ success: true, baseUrl, models: cached.list, cached: true }, { headers: corsHeaders });
+        const cached = override ? null : AI_MODEL_LIST_CACHE.get(cacheKey);
+        if (!refresh && cached && cached.expires > Date.now()) {
+          return Response.json({ success: true, baseUrl, models: cached.list, cached: true, provider: detectProviderForModel('', baseUrl) }, { headers: { ...corsHeaders, 'Cache-Control': 'no-store' } });
         }
         const raw = await fetchModelList(baseUrl, env, apiKey) || [];
         const models = raw.map((e) => {
@@ -437,6 +442,10 @@ export default {
           const outPrice = p.completion != null ? Number(p.completion) : (p.output != null ? Number(p.output) : null);
           const pricing = { prompt: inPrice, completion: outPrice };
           return {
+            // Keep provider metadata used by model pickers and diagnostics. The
+            // endpoint is GOD-only, so preserving architecture/limits/links is
+            // useful and does not expose a non-owner's credentials.
+            ...e,
             id,
             name: String(e.name || id),
             free: isModelFreeEntry(e),
@@ -444,8 +453,8 @@ export default {
             ...(pricing.prompt != null || pricing.completion != null ? { pricing } : {}),
           };
         }).filter(Boolean).sort((a, b) => (a.free === b.free ? a.id.localeCompare(b.id) : (a.free ? -1 : 1)));
-        if (models.length) AI_MODEL_LIST_CACHE.set(cacheKey, { list: models, expires: Date.now() + 5 * 60_000 });
-        return Response.json({ success: true, baseUrl, models, provider: detectProviderForModel('', baseUrl) }, { headers: corsHeaders });
+        if (models.length && !override) AI_MODEL_LIST_CACHE.set(cacheKey, { list: models, expires: Date.now() + 5 * 60_000 });
+        return Response.json({ success: true, baseUrl, models, provider: detectProviderForModel('', baseUrl), cached: false }, { headers: { ...corsHeaders, 'Cache-Control': 'no-store' } });
       }
 
       // Recent upstream AI failures (in-memory ring buffer, newest first).
@@ -1121,6 +1130,7 @@ async function clearCommunityLinksOnly(env, communityId) {
     try { await env.DB.prepare('DELETE FROM link_reports WHERE link_id = ?').bind(row.id).run(); } catch (_) {}
   }
   try { await env.DB.prepare('DELETE FROM links WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
+  markMeiliScopeDirty(env, 'community', communityId);
   try { await env.DB.prepare('DELETE FROM telegram_pending WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
   // Only the ACTIVE store is cleared. In GitHub mode that means the Markdown
   // too; the parked Cloudflare copy is deliberately left alone, and vice versa.
@@ -1496,6 +1506,7 @@ async function handleWipePersonalAccount(request, user, env, corsHeaders) {
     await clearActiveDocumentFolder(env, 'personal', uid);
     await env.DB.prepare("DELETE FROM uploaded_documents WHERE scope = 'personal' AND user_id = ?").bind(uid).run();
   } catch (_) {}
+  markMeiliScopeDirty(env, 'personal', uid);
   try {
     await env.DB.prepare('DELETE FROM user_ai_config WHERE user_id = ?').bind(uid).run();
   } catch (_) {}
@@ -2690,6 +2701,7 @@ const TELEGRAM_COMMAND_MENU = [
   { command: 'start', description: 'Welcome / status' },
   { command: 'help', description: 'Help menu' },
   { command: 'search', description: 'Search the active brain' },
+  { command: 'export', description: 'Telegram bot export / history guide' },
   { command: 'ai', description: 'Ask AI over your brain' },
   { command: 'personal', description: 'Dump → personal brain (GOD)' },
   { command: 'community', description: 'Dump → community brain' },
@@ -3143,6 +3155,7 @@ async function handlePostCommunityLink(request, user, env, corsHeaders) {
     ).run();
   }
 
+  markMeiliScopeDirty(env, 'community', communityId);
   return Response.json({
     success: true,
     id,
@@ -3184,6 +3197,7 @@ async function handleDeleteCommunityLink(request, user, env, corsHeaders) {
 
   await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(link.id).run();
   await env.DB.prepare('DELETE FROM link_votes WHERE link_id = ?').bind(link.id).run();
+  markMeiliScopeDirty(env, 'community', link.community_id);
   const gh = await storeMutateLink(env, 'community', link.community_id, link.id, null);
   if (gh.handled && !gh.ok) {
     return Response.json({ success: false, error: `GitHub write failed: ${gh.error}` }, { status: 502, headers: corsHeaders });
@@ -3196,6 +3210,215 @@ async function handleDeleteCommunityLink(request, user, env, corsHeaders) {
  * Same rank rules as everywhere else: personal is GOD-only, community requires
  * an unbanned membership. Scans the whole store, not a recency window.
  */
+const MEILI_STATE = new Map();
+const MEILI_BATCH_SIZE = 250;
+
+function meiliConfig(env) {
+  const raw = String(env.MEILI_URL || env.MEILISEARCH_URL || '').trim().replace(/\/+$/, '');
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    if (!['http:', 'https:'].includes(u.protocol)) return null;
+    if (u.protocol === 'http:' && !isSelfHosted(env)) return null;
+    const index = String(env.MEILI_INDEX || 'athena').trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/.test(index)) return null;
+    return { base: u.toString().replace(/\/+$/, ''), index, key: String(env.MEILI_MASTER_KEY || '').trim() };
+  } catch (_) {
+    return null;
+  }
+}
+
+function meiliStateFor(cfg, scope, key) {
+  const stateKey = `${cfg.base}/${cfg.index}|${scope}|${key}`;
+  let state = MEILI_STATE.get(stateKey);
+  if (!state) {
+    state = { ready: false, synced: false, dirty: true, syncing: false };
+    MEILI_STATE.set(stateKey, state);
+  }
+  return state;
+}
+
+async function meiliRequest(env, path, init = {}, timeoutMs = 8000) {
+  const cfg = meiliConfig(env);
+  if (!cfg) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const headers = new Headers(init.headers || {});
+    headers.set('Accept', 'application/json');
+    if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+    if (cfg.key) headers.set('Authorization', `Bearer ${cfg.key}`);
+    return await fetch(`${cfg.base}${path}`, { ...init, headers, signal: controller.signal });
+  } catch (_) {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function ensureMeiliIndex(env) {
+  const cfg = meiliConfig(env);
+  if (!cfg) return false;
+  const state = meiliStateFor(cfg, '__index__', '__index__');
+  if (state.ready) return true;
+  const indexPath = `/indexes/${encodeURIComponent(cfg.index)}`;
+  const created = await meiliRequest(env, '/indexes', {
+    method: 'POST',
+    body: JSON.stringify({ uid: cfg.index, primaryKey: 'id' })
+  });
+  if (!created || (!created.ok && created.status !== 409)) return false;
+  const settings = await meiliRequest(env, `${indexPath}/settings`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      searchableAttributes: ['title', 'url', 'filename', 'notes', 'content', 'tags'],
+      filterableAttributes: ['scope', 'scope_key', 'type'],
+      sortableAttributes: ['created_at']
+    })
+  });
+  if (!settings || !settings.ok) return false;
+  state.ready = true;
+  return true;
+}
+
+function meiliFilterValue(value) {
+  return String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function meiliScopeFilter(scope, key) {
+  return `scope = "${meiliFilterValue(scope)}" AND scope_key = "${meiliFilterValue(key)}"`;
+}
+
+function meiliDocumentFromRow(row, scope, key) {
+  let tags = row.tags || [];
+  if (typeof tags === 'string') {
+    try { tags = JSON.parse(tags); } catch (_) { tags = tags.split(',').map((tag) => tag.trim()).filter(Boolean); }
+  }
+  const isDocument = row.type === 'document' || (!row.url && row.filename);
+  return {
+    id: `${scope}:${key}:${row.id}`,
+    source_id: String(row.id),
+    scope,
+    scope_key: String(key),
+    type: isDocument ? 'document' : 'link',
+    title: String(row.title || row.filename || ''),
+    url: String(row.url || ''),
+    filename: String(row.filename || ''),
+    notes: String(row.notes || ''),
+    content: String(row.content || '').slice(0, 250_000),
+    tags: Array.isArray(tags) ? tags : [],
+    image_url: String(row.image_url || ''),
+    site_name: String(row.site_name || ''),
+    created_at: Number(row.created_at || 0)
+  };
+}
+
+function meiliRowFromHit(hit) {
+  return {
+    id: hit.source_id || hit.id,
+    type: hit.type || 'link',
+    isDocument: hit.type === 'document',
+    title: hit.title || hit.filename || '',
+    url: hit.url || null,
+    filename: hit.filename || null,
+    notes: hit.notes || hit.content || '',
+    content: hit.content || '',
+    tags: Array.isArray(hit.tags) ? hit.tags : (hit.tags || []),
+    image_url: hit.image_url || '',
+    site_name: hit.site_name || '',
+    created_at: Number(hit.created_at || 0)
+  };
+}
+
+async function syncMeiliScope(env, scope, key) {
+  const cfg = meiliConfig(env);
+  if (!cfg || !(await ensureMeiliIndex(env))) return false;
+  const state = meiliStateFor(cfg, scope, key);
+  if (state.syncing) return false;
+  state.syncing = true;
+  try {
+    const table = scope === 'personal' ? 'personal_links' : 'links';
+    const col = scope === 'personal' ? 'user_id' : 'community_id';
+    const { results: links } = await env.DB.prepare(`SELECT * FROM ${table} WHERE ${col} = ? ORDER BY created_at DESC`).bind(key).all();
+    await ensureDocumentsTable(env);
+    const { results: documents } = await env.DB.prepare(
+      `SELECT * FROM uploaded_documents WHERE scope = ? AND ${col} = ? ORDER BY created_at DESC`
+    ).bind(scope, key).all();
+    const docs = [
+      ...(links || []).map((row) => meiliDocumentFromRow(row, scope, key)),
+      ...(documents || []).map((row) => meiliDocumentFromRow({ ...documentAsLink(row), content: row.content }, scope, key))
+    ];
+    const indexPath = `/indexes/${encodeURIComponent(cfg.index)}`;
+    const cleared = await meiliRequest(env, `${indexPath}/documents/delete`, {
+      method: 'POST',
+      body: JSON.stringify({ filter: meiliScopeFilter(scope, key) })
+    });
+    if (!cleared || !cleared.ok) return false;
+    for (let i = 0; i < docs.length; i += MEILI_BATCH_SIZE) {
+      const response = await meiliRequest(env, `${indexPath}/documents`, {
+        method: 'POST',
+        body: JSON.stringify(docs.slice(i, i + MEILI_BATCH_SIZE))
+      }, 15_000);
+      if (!response || !response.ok) return false;
+    }
+    state.synced = true;
+    state.dirty = false;
+    return true;
+  } catch (_) {
+    return false;
+  } finally {
+    state.syncing = false;
+  }
+}
+
+function scheduleMeiliSync(env, scope, key) {
+  const cfg = meiliConfig(env);
+  if (!cfg) return;
+  const state = meiliStateFor(cfg, scope, key);
+  if (state.syncPromise || state.syncing) return;
+  state.syncPromise = syncMeiliScope(env, scope, key).finally(() => { state.syncPromise = null; });
+  runInBackground(env, state.syncPromise);
+}
+
+function markMeiliScopeDirty(env, scope, key) {
+  const cfg = meiliConfig(env);
+  if (!cfg || key == null || key === '') return;
+  const state = meiliStateFor(cfg, scope, key);
+  state.dirty = true;
+  if (state.synced) scheduleMeiliSync(env, scope, key);
+}
+
+async function meiliSearchScope(env, scope, key, query, { limit = 50, offset = 0 } = {}) {
+  const cfg = meiliConfig(env);
+  if (!cfg || !(await ensureMeiliIndex(env))) return null;
+  const state = meiliStateFor(cfg, scope, key);
+  if (!state.synced || state.dirty) {
+    scheduleMeiliSync(env, scope, key);
+    return null;
+  }
+  const indexPath = `/indexes/${encodeURIComponent(cfg.index)}`;
+  const response = await meiliRequest(env, `${indexPath}/search`, {
+    method: 'POST',
+    body: JSON.stringify({
+      q: String(query || '').slice(0, 240),
+      filter: meiliScopeFilter(scope, key),
+      limit: limit == null ? 1000 : Math.max(1, Math.min(Number(limit) || 50, 1000)),
+      offset: Math.max(0, Number(offset) || 0),
+      sort: ['created_at:desc']
+    })
+  });
+  if (!response || !response.ok) return null;
+  const data = await response.json().catch(() => null);
+  if (!data || !Array.isArray(data.hits)) return null;
+  // Meilisearch writes are task-based. During the short window after a
+  // background rebuild, an empty response can be stale; let PostgreSQL serve
+  // the authoritative fallback instead of presenting a false empty result.
+  if (!data.hits.length) return null;
+  return {
+    rows: data.hits.map(meiliRowFromHit),
+    total: Number(data.estimatedTotalHits ?? data.total ?? data.hits.length)
+  };
+}
+
 async function handleSearchLinks(url, user, env, corsHeaders) {
   const q = (url.searchParams.get('q') || '').trim();
   const scope = (url.searchParams.get('scope') || 'community').toLowerCase();
@@ -3213,8 +3436,9 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
     }
     await ensureFresh(env, 'personal', user.id);
     await ensureLinkMetaColumns(env);
-    const rows = await candidateLinks(env, 'personal', user.id, q, effectiveLimit);
-    const links = rankLinks(dedupeLinkRows(rows), q, effectiveLimit);
+    const accelerated = await meiliSearchScope(env, 'personal', user.id, q, { limit: effectiveLimit });
+    const rows = accelerated?.rows || await searchAllLinks(env, 'personal', user.id, q, effectiveLimit);
+    const links = accelerated ? dedupeLinkRows(rows) : rankLinks(dedupeLinkRows(rows), q, effectiveLimit);
     const enrichmentPending = queueMissingLinkEnrichment(env, 'personal', user.id, links);
     const total = await countScopeLinks(env, 'personal', user.id);
     return Response.json(
@@ -3231,8 +3455,9 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
   if (gate) return gate;
   await ensureFresh(env, 'community', communityId);
   await ensureLinkMetaColumns(env);
-  const rows = await candidateLinks(env, 'community', communityId, q, effectiveLimit);
-  const links = rankLinks(dedupeLinkRows(rows), q, effectiveLimit);
+  const accelerated = await meiliSearchScope(env, 'community', communityId, q, { limit: effectiveLimit });
+  const rows = accelerated?.rows || await searchAllLinks(env, 'community', communityId, q, effectiveLimit);
+  const links = accelerated ? dedupeLinkRows(rows) : rankLinks(dedupeLinkRows(rows), q, effectiveLimit);
   const enrichmentPending = queueMissingLinkEnrichment(env, 'community', communityId, links);
   const total = await countScopeLinks(env, 'community', communityId);
   return Response.json(
@@ -3332,10 +3557,13 @@ async function ensureDocumentsTable(env) {
   await env.DB.prepare(
     `CREATE TABLE IF NOT EXISTS uploaded_documents (
       id TEXT PRIMARY KEY, scope TEXT NOT NULL, user_id TEXT, community_id TEXT,
-      filename TEXT NOT NULL, content TEXT NOT NULL, uploaded_by TEXT NOT NULL,
-      github_path TEXT, created_at INTEGER NOT NULL, search_blob TEXT
+       filename TEXT NOT NULL, content TEXT NOT NULL, uploaded_by TEXT NOT NULL,
+       github_path TEXT, created_at INTEGER NOT NULL, search_blob TEXT,
+       source_chat_id TEXT, source_message_id TEXT
     )`
   ).run();
+  await env.DB.prepare('ALTER TABLE uploaded_documents ADD COLUMN IF NOT EXISTS source_chat_id TEXT').run().catch(() => {});
+  await env.DB.prepare('ALTER TABLE uploaded_documents ADD COLUMN IF NOT EXISTS source_message_id TEXT').run().catch(() => {});
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_documents_personal ON uploaded_documents(scope, user_id, created_at)').run();
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_documents_community ON uploaded_documents(scope, community_id, created_at)').run();
 }
@@ -3498,6 +3726,7 @@ async function handlePostDocument(request, user, env, corsHeaders) {
     }
     throw err;
   }
+  markMeiliScopeDirty(env, doc.scope, key);
   const row = await env.DB.prepare('SELECT * FROM uploaded_documents WHERE id = ?').bind(id).first();
   return Response.json({ success: true, document: row }, { status: 201, headers: corsHeaders });
 }
@@ -3527,6 +3756,7 @@ async function handleDeleteDocument(request, user, env, corsHeaders) {
     }
   }
   await env.DB.prepare('DELETE FROM uploaded_documents WHERE id = ?').bind(row.id).run();
+  markMeiliScopeDirty(env, row.scope, row.scope === 'personal' ? row.user_id : row.community_id);
   return Response.json({ success: true, deleted: row.id }, { headers: corsHeaders });
 }
 
@@ -3663,6 +3893,7 @@ async function handleNotificationAction(request, user, env, corsHeaders) {
     }
     await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(payload.link_id).run();
     await env.DB.prepare('DELETE FROM link_votes WHERE link_id = ?').bind(payload.link_id).run();
+    markMeiliScopeDirty(env, 'community', payload.community_id || n.community_id);
     if (payload.report_id) {
       await env.DB.prepare(`UPDATE link_reports SET status = 'deleted' WHERE id = ?`).bind(payload.report_id).run();
     }
@@ -4144,6 +4375,7 @@ async function replaceCachedLinks(env, scope, key, links) {
         ).run();
       } catch (_) {}
     }
+    markMeiliScopeDirty(env, 'personal', key);
     return;
   }
   await env.DB.prepare('DELETE FROM links WHERE community_id = ?').bind(key).run();
@@ -4161,6 +4393,7 @@ async function replaceCachedLinks(env, scope, key, links) {
       ).run();
     } catch (_) {}
   }
+  markMeiliScopeDirty(env, 'community', key);
 }
 
 function storageHeadingFor(scope, key) {
@@ -4392,10 +4625,36 @@ function cleanApiBase(baseUrl) {
   root = root.replace(/\/chat\/completions$/i, '');
   root = root.replace(/\/responses$/i, '');
   root = root.replace(/\/messages$/i, '');
+  root = root.replace(/\/(?:api\/)?models$/i, '');
   root = root.replace(/\/+$/g, '');
   // OpenCode Zen / Go: ensure /v1 (saved as .../zen/go without /v1 → 404)
   if (/opencode\.ai\/zen(\/go)?$/i.test(root)) root = `${root}/v1`;
   return root;
+}
+
+/**
+ * Self-hosted gateways such as OmniRoute normally listen on loopback over
+ * plain HTTP. They are administrator-controlled instance configuration, so
+ * allow only explicitly local targets while keeping public AI URLs HTTPS-only.
+ */
+function isLocalAiEndpoint(u, env) {
+  if (!isSelfHosted(env) || !u || u.protocol !== 'http:') return false;
+  const host = String(u.hostname || '').toLowerCase();
+  if (host === 'localhost' || host === 'host.docker.internal' || host === '::1') return true;
+  const v4 = host.match(/^(\d{1,3})(?:\.(\d{1,3})){3}$/);
+  if (!v4) return false;
+  const octets = host.split('.').map(Number);
+  if (octets.some((n) => n > 255)) return false;
+  return octets[0] === 127
+    || octets[0] === 10
+    || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31)
+    || (octets[0] === 192 && octets[1] === 168);
+}
+
+async function isAllowedAiEndpoint(u, env) {
+  if (!u) return false;
+  if (u.protocol === 'http:') return isLocalAiEndpoint(u, env);
+  return u.protocol === 'https:' && await isSafeExternalUrl(u, env);
 }
 
 const PRIVATE_HOST_RE =
@@ -4607,12 +4866,11 @@ async function callAiChatShared(env, { baseUrl, apiKey, mode, model, system, use
   let endpoint;
   try {
     const u = new URL(base.startsWith('http') ? base : `https://${base}`);
-    if (u.protocol !== 'https:') throw new Error('Only HTTPS API bases allowed');
-    if (!(await isSafeExternalUrl(u, env))) throw new Error('API base must be a public HTTPS host');
+    if (!(await isAllowedAiEndpoint(u, env))) throw new Error('API base must be a public HTTPS host or a local self-hosted gateway');
     endpoint = resolveChatEndpoint(base, aiMode, m);
     if (!endpoint) throw new Error('Could not resolve chat endpoint');
     const ep = new URL(endpoint);
-    if (ep.protocol !== 'https:' || !(await isSafeExternalUrl(ep, env))) throw new Error('API base must be a public HTTPS host');
+    if (!(await isAllowedAiEndpoint(ep, env))) throw new Error('API base must be a public HTTPS host or a local self-hosted gateway');
   } catch (err) {
     recordAiError({ model: m, endpoint: base, message: err?.message || String(err), source });
     const e = new Error(err?.message || 'Invalid AI base URL');
@@ -4629,19 +4887,19 @@ async function callAiChatShared(env, { baseUrl, apiKey, mode, model, system, use
       let res;
       if (aiMode === 'anthropic') {
         res = await fetchWithTimeout(curEndpoint, {
-          method: 'POST', env, redirect: 'error',
+          method: 'POST', env, redirect: 'error', allowPrivate: true,
           headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
           body: JSON.stringify({ model: curModel, max_tokens: maxTokens, system: system || undefined, messages: [{ role: 'user', content: userMsg }] })
         }, AI_PROXY_TIMEOUT_MS);
       } else if (curEndpoint.endsWith('/responses')) {
         res = await fetchWithTimeout(curEndpoint, {
-          method: 'POST', env, redirect: 'error',
+          method: 'POST', env, redirect: 'error', allowPrivate: true,
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
           body: JSON.stringify({ model: curModel, input: system ? `${system}\n\n${userMsg}` : userMsg })
         }, AI_PROXY_TIMEOUT_MS);
       } else {
         res = await fetchWithTimeout(curEndpoint, {
-          method: 'POST', env, redirect: 'error',
+          method: 'POST', env, redirect: 'error', allowPrivate: true,
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
           body: JSON.stringify({ model: curModel, messages: [{ role: 'system', content: system || '' }, { role: 'user', content: userMsg }], temperature, max_tokens: maxTokens })
         }, AI_PROXY_TIMEOUT_MS);
@@ -4744,14 +5002,12 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
     );
   }
 
-  // Only allow https endpoints; reject private hosts on self-host (SSRF)
+  // Public providers must use HTTPS. A self-hosted local gateway (for example
+  // OmniRoute on 127.0.0.1:20128) is the one intentional HTTP exception.
   try {
     const u = new URL(baseUrl.startsWith('http') ? baseUrl : `https://${baseUrl}`);
-    if (u.protocol !== 'https:') {
-      return Response.json({ success: false, error: 'Only HTTPS API bases allowed' }, { status: 400, headers: corsHeaders });
-    }
-    if (!(await isSafeExternalUrl(u, env))) {
-      return Response.json({ success: false, error: 'API base must be a public HTTPS host' }, { status: 400, headers: corsHeaders });
+    if (!(await isAllowedAiEndpoint(u, env))) {
+      return Response.json({ success: false, error: 'API base must be HTTPS or a local self-hosted gateway' }, { status: 400, headers: corsHeaders });
     }
   } catch (_) {
     return Response.json({ success: false, error: 'Invalid baseUrl' }, { status: 400, headers: corsHeaders });
@@ -4762,8 +5018,8 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
     return Response.json({ success: false, error: 'Could not resolve chat endpoint' }, { status: 400, headers: corsHeaders });
   }
   const ep = new URL(endpoint);
-  if (ep.protocol !== 'https:' || !(await isSafeExternalUrl(ep, env))) {
-    return Response.json({ success: false, error: 'API base must be a public HTTPS host' }, { status: 400, headers: corsHeaders });
+  if (!(await isAllowedAiEndpoint(ep, env))) {
+    return Response.json({ success: false, error: 'API base must be HTTPS or a local self-hosted gateway' }, { status: 400, headers: corsHeaders });
   }
 
   try {
@@ -4795,8 +5051,9 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
       if (mode === 'anthropic') {
         curRes = await fetchWithTimeout(endpoint, {
           method: 'POST',
-          env,
-          redirect: 'error',
+           env,
+           redirect: 'error',
+           allowPrivate: true,
           headers: {
             'Content-Type': 'application/json',
             'x-api-key': apiKey,
@@ -4817,7 +5074,8 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
         curRes = await fetchWithTimeout(endpoint, {
           method: 'POST',
           env,
-          redirect: 'error',
+           redirect: 'error',
+           allowPrivate: true,
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${apiKey}`
@@ -4835,7 +5093,8 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
         curRes = await fetchWithTimeout(endpoint, {
           method: 'POST',
           env,
-          redirect: 'error',
+           redirect: 'error',
+           allowPrivate: true,
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${apiKey}`
@@ -5253,6 +5512,7 @@ async function handlePostPersonalLinksBatch(request, userId, env, corsHeaders) {
       // Dump was fast by design; enrich the fresh links in the background so
       // they carry descriptions/site names/images like Telegram saves do.
       runInBackground(env, enrichLinksInBackground(env, 'personal', userId, stored));
+      markMeiliScopeDirty(env, 'personal', userId);
     }
   }
 
@@ -5361,6 +5621,7 @@ async function handlePostCommunityLinksBatch(request, user, env, corsHeaders) {
         return Response.json(failure, { status: 502, headers: corsHeaders });
       }
       runInBackground(env, enrichLinksInBackground(env, 'community', communityId, stored));
+      markMeiliScopeDirty(env, 'community', communityId);
     }
   }
 
@@ -5436,6 +5697,8 @@ async function handlePostPersonalLink(request, userId, env, corsHeaders) {
     ).bind(id, userId, rawUrl, urlHash, meta.title, meta.notes, JSON.stringify(body.tags || []), now).run();
   }
 
+  markMeiliScopeDirty(env, 'personal', userId);
+
   return Response.json({
     success: true,
     id,
@@ -5451,6 +5714,7 @@ async function handleDeletePersonalLink(request, userId, env, corsHeaders) {
   await env.DB.prepare(
     'DELETE FROM personal_links WHERE id = ? AND user_id = ?'
   ).bind(body.id, userId).run();
+  markMeiliScopeDirty(env, 'personal', userId);
   // Entries live inside shared Markdown files, so removal means rewriting the folder.
   const gh = await storeMutateLink(env, 'personal', userId, body.id, null);
   if (gh.handled && !gh.ok) {
@@ -5516,6 +5780,8 @@ async function handlePatchPersonalLink(request, userId, env, corsHeaders) {
   if (ghPatch.handled && !ghPatch.ok) {
     return Response.json({ success: false, error: `GitHub write failed: ${ghPatch.error}` }, { status: 502, headers: corsHeaders });
   }
+
+  markMeiliScopeDirty(env, 'personal', userId);
 
   return Response.json({
     success: true,
@@ -5591,6 +5857,8 @@ async function handlePatchCommunityLink(request, user, env, corsHeaders) {
     return Response.json({ success: false, error: `GitHub write failed: ${ghPatch.error}` }, { status: 502, headers: corsHeaders });
   }
 
+  markMeiliScopeDirty(env, 'community', existing.community_id);
+
   return Response.json({
     success: true,
     id,
@@ -5621,6 +5889,114 @@ async function ensurePendingTable(env) {
       created_at INTEGER NOT NULL
     )`
   ).run();
+}
+
+// Keep each HTML page comfortably below Telegram's 4096-character message
+// limit so the navigation keyboard stays attached to the complete result page.
+const TG_SEARCH_PAGE_SIZE = 5;
+const TG_SEARCH_SESSION_TTL_MS = 2 * 60 * 60 * 1000;
+
+async function ensureTelegramSearchTable(env) {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS telegram_search_sessions (
+      id TEXT PRIMARY KEY,
+      tg_user_id TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      scope_key TEXT NOT NULL,
+      query TEXT NOT NULL,
+      page INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL
+    )`
+  ).run();
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_tg_search_sessions_expiry ON telegram_search_sessions(expires_at)').run().catch(() => {});
+  await env.DB.prepare('DELETE FROM telegram_search_sessions WHERE expires_at < ?').bind(Date.now()).run().catch(() => {});
+}
+
+function telegramSearchKeyboard(sessionId, page, total) {
+  const pages = Math.max(1, Math.ceil(total / TG_SEARCH_PAGE_SIZE));
+  const nav = [];
+  if (page > 0) nav.push({ text: '◀ Previous', callback_data: `search:prev:${sessionId}` });
+  if (page < pages - 1) nav.push({ text: 'Next page ▶', callback_data: `search:next:${sessionId}` });
+  return {
+    inline_keyboard: [
+      ...(nav.length ? [nav] : []),
+      [{ text: '✖ Close', callback_data: `search:close:${sessionId}` }]
+    ]
+  };
+}
+
+function telegramSearchRowHtml(row) {
+  const title = (row.title && !/^link from telegram/i.test(row.title))
+    ? row.title
+    : titleFromUrl(row.url || row.filename || '');
+  const prefix = row.isDocument || row.type === 'document' ? '📄' : '🔗';
+  const bits = [`${prefix} ${boldHtml(title || 'Untitled')}`];
+  if (row.url) {
+    const displayUrl = String(row.url).length > 220 ? `${String(row.url).slice(0, 220)}…` : row.url;
+    bits.push(linkHtml(row.url, displayUrl));
+  }
+  else bits.push(italicHtml(`(${row.filename || 'document'})`));
+  const notes = String(row.notes || row.content || '').replace(/\s+/g, ' ').trim();
+  if (notes) bits.push(escHtml(notes.slice(0, 360)) + (notes.length > 360 ? '…' : ''));
+  return bits.join('\n');
+}
+
+async function getTelegramSearchPage(env, session) {
+  await ensureFresh(env, session.scope, session.scope_key);
+  const accelerated = await meiliSearchScope(env, session.scope, session.scope_key, session.query, {
+    limit: TG_SEARCH_PAGE_SIZE,
+    offset: Math.max(0, Number(session.page || 0)) * TG_SEARCH_PAGE_SIZE
+  });
+  let hits;
+  let total;
+  if (accelerated) {
+    hits = accelerated.rows;
+    total = accelerated.total;
+  } else {
+    const rows = await searchAllLinks(env, session.scope, session.scope_key, session.query, null);
+    const ranked = rankLinks(dedupeLinkRows(rows), session.query, null);
+    total = ranked.length;
+    const start = Math.max(0, Number(session.page || 0)) * TG_SEARCH_PAGE_SIZE;
+    hits = ranked.slice(start, start + TG_SEARCH_PAGE_SIZE);
+  }
+  const pages = Math.max(1, Math.ceil(total / TG_SEARCH_PAGE_SIZE));
+  const page = Math.min(Math.max(0, Number(session.page || 0)), pages - 1);
+  if (page !== Number(session.page || 0)) {
+    session.page = page;
+    await env.DB.prepare('UPDATE telegram_search_sessions SET page = ? WHERE id = ?').bind(page, session.id).run().catch(() => {});
+  }
+  const start = total ? page * TG_SEARCH_PAGE_SIZE + 1 : 0;
+  const end = Math.min(total, page * TG_SEARCH_PAGE_SIZE + hits.length);
+  const label = session.scope === 'personal' ? 'Personal' : 'Community';
+  const header = `${boldHtml(`🔍 ${label} Search`)} · ${start}–${end} of ${total}`;
+  const html = hits.length
+    ? `${header}\n${italicHtml(`Query: ${session.query}`)}\n\n${hits.map(telegramSearchRowHtml).join('\n\n')}`
+    : `${header}\n\n${escHtml(session.query ? 'No matching saved items.' : 'Enter a search query.')}`;
+  return { html, keyboard: telegramSearchKeyboard(session.id, page, total), page, total };
+}
+
+async function startTelegramSearch(env, token, chatId, tgUserId, scope, scopeKey, query, threadId) {
+  await ensureTelegramSearchTable(env);
+  const now = Date.now();
+  const session = {
+    id: `ts_${randomToken().slice(0, 12)}`,
+    tg_user_id: String(tgUserId || ''),
+    chat_id: String(chatId),
+    scope,
+    scope_key: String(scopeKey),
+    query: String(query || '').trim().slice(0, 240),
+    page: 0
+  };
+  await env.DB.prepare(
+    `INSERT INTO telegram_search_sessions
+      (id, tg_user_id, chat_id, scope, scope_key, query, page, created_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`
+  ).bind(session.id, session.tg_user_id, session.chat_id, session.scope, session.scope_key,
+    session.query, now, now + TG_SEARCH_SESSION_TTL_MS).run();
+  const view = await getTelegramSearchPage(env, session);
+  return sendTelegramMessageWithKeyboard(token, chatId, view.html, view.keyboard, threadId, 'HTML');
 }
 
 async function findTelegramBinding(env, chatId, tgUserId) {
@@ -5784,11 +6160,13 @@ async function deleteCommunityFully(env, communityId) {
     try { await env.DB.prepare('DELETE FROM link_reports WHERE link_id = ?').bind(row.id).run(); } catch (_) {}
   }
   try { await env.DB.prepare('DELETE FROM links WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
+  markMeiliScopeDirty(env, 'community', communityId);
   try {
     await ensureDocumentsTable(env);
     await clearActiveDocumentFolder(env, 'community', communityId);
     await env.DB.prepare("DELETE FROM uploaded_documents WHERE scope = 'community' AND community_id = ?").bind(communityId).run();
   } catch (_) {}
+  markMeiliScopeDirty(env, 'community', communityId);
   try { await env.DB.prepare('DELETE FROM link_reports WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
   try { await env.DB.prepare('DELETE FROM community_admins WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
   try { await env.DB.prepare('DELETE FROM community_members WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
@@ -5950,6 +6328,7 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
   } catch (_) {
     reply = formatSavedLinkReply('community', meta.title, rawUrl, null, meta.notes);
   }
+  markMeiliScopeDirty(env, 'community', communityId);
   await sendTelegramMessage(token, chatId, reply, threadId);
 }
 
@@ -6583,6 +6962,7 @@ async function savePersonalUrl(env, userId, rawUrl, senderName, userNotes = '', 
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(id, userId, rawUrl, urlHash, meta.title, meta.notes, JSON.stringify(['telegram', 'dump']), Date.now()).run();
   }
+  markMeiliScopeDirty(env, 'personal', userId);
   return {
     duplicate: false,
     id,
@@ -6598,6 +6978,7 @@ async function deletePersonalUrl(env, userId, rawUrl) {
   const existing = await findExistingLink(env, 'personal_links', 'user_id', userId, rawUrl);
   if (!existing) return { found: false };
   await env.DB.prepare('DELETE FROM personal_links WHERE id = ? AND user_id = ?').bind(existing.id, userId).run();
+  markMeiliScopeDirty(env, 'personal', userId);
   return { found: true, id: existing.id };
 }
 
@@ -6606,6 +6987,7 @@ async function deleteCommunityUrl(env, communityId, rawUrl) {
   if (!existing) return { found: false };
   await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(existing.id).run();
   await env.DB.prepare('DELETE FROM link_votes WHERE link_id = ?').bind(existing.id).run();
+  markMeiliScopeDirty(env, 'community', communityId);
   return { found: true, id: existing.id };
 }
 
@@ -6684,14 +7066,15 @@ function helpTextForSection(section) {
       `/personal — dump → ${boldHtml('your personal brain')}`,
       `/community — dump → ${boldHtml('community brain')} ${italicHtml('(DM or group)')}`,
       `/mode — show current dump mode`,
-      `/mode personal | community — switch`,
+       `${codeHtml('/mode personal | community')} — switch`,
       '',
       `${italicHtml('In bot DM after')} /community: ${italicHtml('paste URLs → community DB')}`,
       `${italicHtml('In bot DM after')} /personal: ${italicHtml('paste URLs → personal DB')}`,
       '',
       `${boldHtml('Links')}`,
       `• Paste a URL ${italicHtml('(or forward)')} in the active mode`,
-      `• /search ${codeHtml('<query>')} — search active brain`,
+       `• /search ${codeHtml('<query>')} — search active brain`,
+       `• /export — Telegram export status and bot/session modes`,
       `• /ai ${codeHtml('<question>')} — AI over brain ${italicHtml('(all ranks community; personal GOD-only)')}`,
       `• /delete ${codeHtml('<url>')} — delete ${italicHtml('(or add if missing)')} — or reply /delete`,
       `• /edit ${codeHtml('<url or title words>')} | notes: New description`,
@@ -6778,8 +7161,13 @@ function helpTextForSection(section) {
       `/index — indexing status`,
       `/channel_unlink ${codeHtml('<channel_id>')} — stop indexing a channel`,
       '',
-      `${boldHtml('Backfill OLD history')} ${italicHtml('(userbot mode)')}`,
-      `${italicHtml('Bots cannot read old messages. Backfill logs in as YOUR account via a session string — self-host only, GOD/community owner, bot DM only.')}`,
+       `${boldHtml('Backfill OLD history')} ${italicHtml('(userbot mode)')}`,
+       `${boldHtml('Bot mode (default)')} ${italicHtml('uses the Telegram Bot API: link a channel and new posts are indexed automatically. It never needs a session string and cannot read messages from before the webhook was linked.')}`,
+       `• ${codeHtml('/export')} — show the current bot-mode export status`,
+       `• ${codeHtml('/channel_link <community_id> <channel_id>')} — enable new-post export`,
+       '',
+       `${boldHtml('Session mode (optional history)')} ${italicHtml('logs in as your Telegram user account with a GramJS/Telethon-compatible StringSession. Use only for a one-off self-hosted backfill.')}`,
+       `${italicHtml('Bots cannot read old messages. Backfill logs in as YOUR account via a session string — self-host only, GOD/community owner, bot DM only.')}`,
       '',
       `${codeHtml('1)')} Get ${codeHtml('api_id + api_hash')}: ${linkHtml('https://my.telegram.org', 'my.telegram.org')} → ${boldHtml('API development tools')}`,
       `${codeHtml('2)')} Generate a ${codeHtml('gramjs StringSession')} with a tool you trust. On the server:`,
@@ -6790,7 +7178,8 @@ function helpTextForSection(section) {
       `   • ${codeHtml('chat_id')} — the group/channel to backfill ${italicHtml('(forward a post to')} ${codeHtml('@userinfobot')}${italicHtml(')')}`,
       `${codeHtml('4)')} /index_status — progress · /index_stop — cancel + delete session`,
       '',
-      `${italicHtml('The')} /index_start ${italicHtml('message self-deletes; the session is stored encrypted')} ${italicHtml('(needs')} ${codeHtml('STORAGE_KEY')}${italicHtml(') and deleted when the job finishes; stopped jobs resume.')}`,
+       `${italicHtml('The')} /index_start ${italicHtml('message self-deletes; the session is stored encrypted')} ${italicHtml('(needs')} ${codeHtml('STORAGE_KEY')}${italicHtml(') and deleted when the job finishes; stopped jobs resume.')}`,
+       `${italicHtml('Ultroid users: its session generator is a separate userbot project; Athena accepts the resulting compatible StringSession but does not vendor or run the whole userbot.')}`,
       `${boldHtml('⚠️ A session string grants full account access — revoke anytime in')} ${italicHtml('Telegram Settings → Devices → terminate session.')}`,
     ].join('\n');
   }
@@ -6808,6 +7197,7 @@ function helpTextForSection(section) {
     `2. Login on the website with Telegram`,
     `3. /community_join id — in bot DM`,
     `4. Paste links → /search query · /ai question`,
+    `5. For Telegram export: /export (Bot API by default; session history is optional)`,
     '',
     `${italicHtml('Settings, AI keys and bot setup live on the website.')}`,
   ].join('\n');
@@ -6871,6 +7261,51 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
     const u = await resolveAthenaUserFromTg(env, tgUserId);
     const personal = u ? await findPersonalBotForOwner(env, u.id) : null;
     if (personal?.bot_token) token = await decryptBotToken(env, personal.bot_token);
+  }
+
+  // ---- Telegram search pagination ----
+  // Callback data contains only an opaque id; query, scope, and page are kept
+  // server-side so users cannot edit the callback into another brain/query.
+  if (data.startsWith('search:')) {
+    await ensureTelegramSearchTable(env);
+    const [, action, sessionId] = data.split(':');
+    const session = sessionId
+      ? await env.DB.prepare('SELECT * FROM telegram_search_sessions WHERE id = ? AND expires_at > ?').bind(sessionId, Date.now()).first()
+      : null;
+    if (!session || String(session.chat_id) !== String(chatId) || String(session.tg_user_id) !== String(tgUserId)) {
+      await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Search expired or not yours', show_alert: true }).catch(() => {});
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    if (action === 'close') {
+      await env.DB.prepare('DELETE FROM telegram_search_sessions WHERE id = ?').bind(session.id).run().catch(() => {});
+      await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id });
+      await editTelegramMessage(token, chatId, msgId, `${boldHtml('🔍 Search closed.')}`, null, threadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    const callbackUser = await resolveAthenaUserFromTg(env, tgUserId);
+    if (session.scope === 'personal') {
+      if (!isGodTgId(tgUserId, env) && !(callbackUser && await isInstanceOwnerUserAsync(callbackUser, env))) {
+        await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Personal search is GOD-only', show_alert: true }).catch(() => {});
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+    } else if (callbackUser) {
+      if (await isBannedFromCommunity(env, session.scope_key, callbackUser)) {
+        await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'You are banned from this community', show_alert: true }).catch(() => {});
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      const elevated = (await isElevatedUser(callbackUser, env)) || isInstanceOwnerTgId(tgUserId, env);
+      if (!elevated && !(await ensureMember(session.scope_key, callbackUser.id, env))) {
+        await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Join the community to continue searching', show_alert: true }).catch(() => {});
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+    }
+    const currentPage = Number(session.page || 0);
+    session.page = action === 'prev' ? Math.max(0, currentPage - 1) : currentPage + 1;
+    await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id });
+    const view = await getTelegramSearchPage(env, session);
+    await editTelegramMessage(token, chatId, msgId, view.html, view.keyboard, threadId, 'HTML');
+    await env.DB.prepare('UPDATE telegram_search_sessions SET page = ? WHERE id = ?').bind(view.page, session.id).run().catch(() => {});
+    return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
   // ---- Help menu buttons ----
@@ -7007,6 +7442,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       }
     }
     await env.DB.prepare(`UPDATE telegram_pending SET status = 'approved' WHERE id = ?`).bind(pendingId).run();
+    markMeiliScopeDirty(env, 'community', pend.community_id);
     if (chatId && msgId) {
       await telegramApi(token, 'editMessageText', {
         chat_id: chatId,
@@ -7050,12 +7486,16 @@ async function indexChannelPost(msg, binding, token, env) {
       const filename = doc.file_name || 'document.txt';
       const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
       if (DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) {
-        const fileInfo = await telegramApi(token, 'getFile', { file_id: doc.file_id });
-        if (fileInfo?.ok && fileInfo.result?.file_path) {
-          const fileRes = await fetch(`https://api.telegram.org/file/bot${token}/${fileInfo.result.file_path}`);
-          if (fileRes.ok) {
-            const r = await saveIndexedDocument(env, communityId, filename, ext, new Uint8Array(await fileRes.arrayBuffer()), `channel:${msg.chat.id}`);
-            if (r && r.error) console.warn(`channel doc skipped (${channelTitle}): ${r.error}`);
+        if (Number(doc.file_size || 0) > CONVERT_SOURCE_MAX_BYTES) {
+          console.warn(`channel doc skipped (${channelTitle}): exceeds ${CONVERT_SOURCE_MAX_BYTES} bytes`);
+        } else {
+          const fileInfo = await telegramApi(token, 'getFile', { file_id: doc.file_id });
+          if (fileInfo?.ok && fileInfo.result?.file_path) {
+            const fileRes = await fetchWithTimeout(`https://api.telegram.org/file/bot${token}/${fileInfo.result.file_path}`, { env, redirect: 'error' }, 60_000);
+            if (fileRes.ok) {
+              const r = await saveIndexedDocument(env, communityId, filename, ext, new Uint8Array(await fileRes.arrayBuffer()), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id });
+              if (r && r.error) console.warn(`channel doc skipped (${channelTitle}): ${r.error}`);
+            }
           }
         }
       }
@@ -7070,8 +7510,17 @@ async function indexChannelPost(msg, binding, token, env) {
 }
 
 /** Shared by channel indexing and history backfill. Returns {error?} or {saved} or null on skip. */
-async function saveIndexedDocument(env, communityId, filename, ext, bytes, uploadedBy) {
+async function saveIndexedDocument(env, communityId, filename, ext, bytes, uploadedBy, sourceMessage = null) {
   if (!DOCUMENT_EXTENSIONS.has(ext) && !CONVERTIBLE_EXTENSIONS.has(ext)) return null;
+  if (!bytes || bytes.length > CONVERT_SOURCE_MAX_BYTES) return { error: 'document exceeds 20 MiB' };
+  await ensureDocumentsTable(env);
+  if (sourceMessage?.chatId != null && sourceMessage?.messageId != null) {
+    const duplicate = await env.DB.prepare(
+      `SELECT id FROM uploaded_documents
+       WHERE scope = 'community' AND community_id = ? AND source_chat_id = ? AND source_message_id = ? LIMIT 1`
+    ).bind(communityId, String(sourceMessage.chatId), String(sourceMessage.messageId)).first().catch(() => null);
+    if (duplicate) return { duplicate: true, id: duplicate.id };
+  }
   let valid;
   if (CONVERTIBLE_EXTENSIONS.has(ext)) {
     let bin = '';
@@ -7084,11 +7533,22 @@ async function saveIndexedDocument(env, communityId, filename, ext, bytes, uploa
   if (valid?.error) return valid;
   if (!valid || !valid.content) return null;
   const id = 'doc_ix_' + Date.now().toString(36) + '_' + randomToken().slice(0, 4);
-  await ensureDocumentsTable(env);
-  await env.DB.prepare(
-    `INSERT INTO uploaded_documents (id, scope, community_id, filename, content, uploaded_by, created_at)
-     VALUES (?, 'community', ?, ?, ?, ?, ?)`
-  ).bind(id, communityId, valid.filename, valid.content, uploadedBy, Date.now()).run();
+  try {
+    await env.DB.prepare(
+      `INSERT INTO uploaded_documents
+       (id, scope, community_id, filename, content, uploaded_by, created_at, source_chat_id, source_message_id)
+       VALUES (?, 'community', ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(id, communityId, valid.filename, valid.content, uploadedBy, Date.now(),
+      sourceMessage?.chatId == null ? null : String(sourceMessage.chatId),
+      sourceMessage?.messageId == null ? null : String(sourceMessage.messageId)).run();
+  } catch (error) {
+    if (!/source_chat_id|source_message_id|column .* does not exist/i.test(String(error?.message || error))) throw error;
+    await env.DB.prepare(
+      `INSERT INTO uploaded_documents (id, scope, community_id, filename, content, uploaded_by, created_at)
+       VALUES (?, 'community', ?, ?, ?, ?, ?)`
+    ).bind(id, communityId, valid.filename, valid.content, uploadedBy, Date.now()).run();
+  }
+  markMeiliScopeDirty(env, 'community', communityId);
   return { saved: id };
 }
 
@@ -7099,7 +7559,7 @@ async function saveIndexedLinks(env, communityId, urls, attributionName, postTex
   for (const rawUrl of urls) {
     try {
       if (await findExistingLink(env, 'links', 'community_id', communityId, rawUrl)) continue;
-      const meta = await enrichLinkFields(env, rawUrl, { title: '', notes: '' });
+      const meta = await enrichLinkFields(env, rawUrl, { title: '', notes: postText || '' });
       const urlHash = generateUrlHash(rawUrl);
       const id = 'ix_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
       await ensureLinkMetaColumns(env);
@@ -7146,6 +7606,7 @@ async function saveIndexedLinks(env, communityId, urls, attributionName, postTex
       console.error(`indexed link save failed (${rawUrl})`, e?.message || e);
     }
   }
+  markMeiliScopeDirty(env, 'community', communityId);
   return saved;
 }
 
@@ -7267,7 +7728,7 @@ async function runHistoryIndexJob(env, job, token) {
             try {
               const buf = await client.downloadMedia(message, {});
               if (buf && buf.length) {
-                const r = await saveIndexedDocument(env, job.community_id, filename, ext, new Uint8Array(buf), `backfill:${job.chat_id}`);
+                const r = await saveIndexedDocument(env, job.community_id, filename, ext, new Uint8Array(buf), `backfill:${job.chat_id}`, { chatId: job.chat_id, messageId: message.id });
                 if (r?.saved) savedDocs++;
               }
               await sleep(400);
@@ -7405,7 +7866,10 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   // for channels linked to a community via /channel_link. Bots cannot reply
   // in channels, so this path is silent by necessity.
   if (String(msg.chat?.type || '') === 'channel') {
-    await indexChannelPost(msg, binding, token, env);
+    // A Kage/static scrape or a Telegram file download can exceed Telegram's
+    // webhook response window. ACK first; the adapter's waitUntil keeps this
+    // work alive on Cloudflare and the Node shim handles it in the background.
+    runInBackground(env, indexChannelPost(msg, binding, token, env));
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
   let athenaUser = await resolveAthenaUserFromTg(env, tgUserId);
@@ -7542,6 +8006,10 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       }
       // Download file from Telegram
       try {
+        if (Number(doc.file_size || 0) > CONVERT_SOURCE_MAX_BYTES) {
+          await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} File exceeds the 20 MiB Telegram indexing limit.`, forumThreadId);
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
         const botToken = token || env.TELEGRAM_BOT_TOKEN;
         const fileInfo = await telegramApi(botToken, 'getFile', { file_id: doc.file_id });
         if (!fileInfo?.ok || !fileInfo.result?.file_path) {
@@ -7549,7 +8017,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
           return new Response('OK', { status: 200, headers: corsHeaders });
         }
         const fileUrl = `https://api.telegram.org/file/bot${botToken}/${fileInfo.result.file_path}`;
-        const fileRes = await fetch(fileUrl);
+        const fileRes = await fetchWithTimeout(fileUrl, { env, redirect: 'error' }, 60_000);
         if (!fileRes.ok) throw new Error(`Download failed: ${fileRes.status}`);
         // Same validators as the API path — byte-accurate size cap, filename and
         // UTF-8 checks. Binary formats convert to Markdown first (self-host
@@ -7591,6 +8059,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
           const communityName = binding?.group_name || docCommunityId;
           await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Saved to community brain (${escHtml(communityName)}): ${codeHtml(filename)}`, forumThreadId);
         }
+        markMeiliScopeDirty(env, docScope, docScope === 'personal' ? athenaUser.id : docCommunityId);
       } catch (err) {
         await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} File upload failed: ${escHtml(err.message)}`, forumThreadId);
       }
@@ -7972,7 +8441,41 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
-   // ---- /index — indexing status + backfill pointer ----
+    // ---- /export — Telegram Bot API default + optional session history ----
+    if (cmd === '/export' || cmd === '/telegram_export') {
+      const mode = (rest.split(/\s+/)[0] || 'bot').toLowerCase();
+      if (mode === 'session' || mode === 'history') {
+        await sendTelegramFormatted(token, chatId, [
+          `${boldHtml('🗂 Session history export')}`,
+          '',
+          `${italicHtml('This is optional. Bot mode is the default and handles new posts without a user session.')}`,
+          `Run ${codeHtml('/index_start <community_id> <chat_id> <api_id> <api_hash> <session_string>')} in a private bot DM.`,
+          `Install ${codeHtml('npm install telegram')} on the self-hosted server first.`,
+          `${boldHtml('Never paste a session string in a group.')} It grants the user account access and is encrypted only when ${codeHtml('STORAGE_KEY')} is configured.`,
+          `Progress: ${codeHtml('/index_status')} · cancel and delete session: ${codeHtml('/index_stop')}`
+        ].join('\n'), forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      const linked = binding?.community_id ? await env.DB.prepare(
+        `SELECT group_id, group_name FROM community_bots
+         WHERE platform = 'telegram' AND community_id = ? AND group_id LIKE '-100%' ORDER BY created_at DESC`
+      ).bind(binding.community_id).all() : { results: [] };
+      const channels = (linked.results || []).map((row) => `• ${escHtml(row.group_name || row.group_id)} (${codeHtml(row.group_id)})`);
+      await sendTelegramFormatted(token, chatId, [
+        `${boldHtml('📤 Telegram export')}`,
+        '',
+        `${boldHtml('Default: Bot API mode')}`,
+        'New channel posts, links, captions, and supported documents are exported into the linked community brain as the webhook receives them.',
+        channels.length ? `${boldHtml('Linked channels')}\n${channels.join('\n')}` : 'No channels linked yet.',
+        `Enable it with ${codeHtml('/channel_link <community_id> <channel_id>')} after promoting this bot to channel admin.`,
+        '',
+        `${boldHtml('Optional: session mode')}`,
+        `Use ${codeHtml('/export session')} for the private history-backfill guide. Bots cannot read old history; a short-lived encrypted user session is required for that one task.`
+      ].join('\n'), forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+
+    // ---- /index — indexing status + backfill pointer ----
    if (cmd === '/index') {
      const linked = binding?.community_id ? await env.DB.prepare(
        `SELECT group_id, group_name FROM community_bots WHERE platform = 'telegram' AND community_id = ? AND group_id LIKE '-100%'`
@@ -8375,6 +8878,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     try {
       await env.DB.prepare('DELETE FROM personal_links WHERE user_id = ?').bind(athenaUser.id).run();
     } catch (_) {}
+    markMeiliScopeDirty(env, 'personal', athenaUser.id);
     await logOperationalEvent(env, '🧹 Personal database cleared', `${athenaUser.username || athenaUser.display_name || athenaUser.id} cleared personal links`, athenaUser.id);
     await sendTelegramMessage(token, chatId, 'Personal DB cleared for your GOD account.', forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
@@ -8904,28 +9408,11 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         await sendTelegramFormatted(token, chatId, 'Login with Telegram on the website first so personal search works.', forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
-      await ensureFresh(env, 'personal', athenaUser.id);
-      const steroid = await getSteroidMode(env);
-      const rows = await candidateLinks(env, 'personal', athenaUser.id, q, steroid ? null : 300);
-      queueMissingLinkEnrichment(env, 'personal', athenaUser.id, rows);
-      let hits = fuzzyMatchLinks(rows, q);
-      if (!steroid) hits = hits.slice(0, 8);
-      if (!hits.length) {
-        await sendTelegramFormatted(token, chatId, q ? `No personal results for: ${boldHtml(q)}` : 'No personal links yet.', forumThreadId);
+      if (!q) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('🔍 Usage:')} ${codeHtml('/search <query>')}\nSearch returns matching links/documents only; use the buttons below a result page for older matches.`, forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
-      const lines = hits.map((h) => {
-        const t = (h.title && !/^link from telegram/i.test(h.title)) ? h.title : titleFromUrl(h.url || '');
-        const d = (h.notes || '').trim();
-        const isDoc = h.isDocument || h.type === 'document';
-        const prefix = isDoc ? '📄' : '🔗';
-        let line = `${prefix} ${boldHtml(t)}`;
-        if (h.url) line += `\n${linkHtml(h.url, h.url)}`;
-        else if (isDoc) line += `\n${italicHtml('(document)')}`;
-        if (d) line += `\n${escHtml(d)}`;
-        return line;
-      }).join('\n\n');
-      await sendTelegramFormatted(token, chatId, `${boldHtml('🔍 Personal Search')} (${hits.length} results)\n\n${lines}`, forumThreadId);
+      await startTelegramSearch(env, token, chatId, tgUserId, 'personal', athenaUser.id, q, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     // Community mode: all ranks
@@ -8949,28 +9436,11 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       await sendTelegramFormatted(token, chatId, `Join first: ${codeHtml('/community_join ' + searchCommunityId)}`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    await ensureFresh(env, 'community', searchCommunityId);
-    const steroidCommunity = await getSteroidMode(env);
-    const rows = await candidateLinks(env, 'community', searchCommunityId, q, steroidCommunity ? null : 300);
-    queueMissingLinkEnrichment(env, 'community', searchCommunityId, rows);
-    let hits = fuzzyMatchLinks(rows, q);
-    if (!steroidCommunity) hits = hits.slice(0, 8);
-    if (!hits.length) {
-      await sendTelegramFormatted(token, chatId, q ? `No results for: ${boldHtml(q)}` : 'No links in this community brain yet.', forumThreadId);
+    if (!q) {
+      await sendTelegramFormatted(token, chatId, `${boldHtml('🔍 Usage:')} ${codeHtml('/search <query>')}\nSearch returns matching links/documents only; use the buttons below a result page for older matches.`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    const lines = hits.map((h) => {
-      const t = (h.title && !/^link from telegram/i.test(h.title)) ? h.title : titleFromUrl(h.url || '');
-      const d = (h.notes || '').trim();
-      const isDoc = h.isDocument || h.type === 'document';
-      const prefix = isDoc ? '📄' : '🔗';
-      let line = `${prefix} ${boldHtml(t)}`;
-      if (h.url) line += `\n${linkHtml(h.url, h.url)}`;
-      else if (isDoc) line += `\n${italicHtml('(document)')}`;
-      if (d) line += `\n${escHtml(d)}`;
-      return line;
-    }).join('\n\n');
-    await sendTelegramFormatted(token, chatId, `${boldHtml('🔍 Community Search')} (${hits.length} results)\n\n${lines}`, forumThreadId);
+    await startTelegramSearch(env, token, chatId, tgUserId, 'community', searchCommunityId, q, forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
@@ -9027,13 +9497,17 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        }
      }
 
-      // RAG retrieval — same logic as website (candidateLinks + fuzzyMatchLinks)
+      // RAG retrieval — use the same optional Meilisearch accelerator as the
+      // website, with the complete PostgreSQL candidate path as fallback.
        const scopeKey = scope === 'personal' ? athenaUser.id : aiCommunityId;
         await ensureFresh(env, scope, scopeKey);
         const steroidAi = await getSteroidMode(env);
-        const rows = await candidateLinks(env, scope, scopeKey, q, steroidAi ? null : 300);
+        const accelerated = await meiliSearchScope(env, scope, scopeKey, q, {
+          limit: steroidAi ? 1000 : 300
+        });
+        const rows = accelerated?.rows || await candidateLinks(env, scope, scopeKey, q, steroidAi ? null : 300);
         queueMissingLinkEnrichment(env, scope, scopeKey, rows);
-        let docs = fuzzyMatchLinks(rows, q);
+        let docs = accelerated ? dedupeLinkRows(rows) : fuzzyMatchLinks(rows, q);
         if (!steroidAi) docs = docs.slice(0, 8);
        if (!docs.length && rows.length) docs = steroidAi ? rows : rows.slice(0, 8);
 
@@ -9333,6 +9807,7 @@ Rules:
       await sendTelegramMessage(token, chatId, `Updated in database, but storage sync failed: ${storePatch.error}`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
+    markMeiliScopeDirty(env, scope, storeScopeKey);
     await sendTelegramMessage(token, chatId,
       `Updated:\nTitle: ${title || '(untitled)'}\nURL: ${hit.url}\nNotes: ${String(notes || '(empty)')}`, forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
@@ -9459,6 +9934,7 @@ Rules:
               }
             }
           } catch (_) {}
+          markMeiliScopeDirty(env, 'community', binding.community_id);
           await sendTelegramMessage(token, chatId, `Was not in DB — added to community: ${rawUrl}`, forumThreadId);
         }
       }
@@ -10075,17 +10551,21 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = SCRAPE_TIMEOUT_MS
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
+    const { env: requestEnv, allowPrivate = false, ...fetchOptions } = options;
     let u = url;
     let hops = 0;
-    const redirect = (options.redirect === undefined) ? 'follow' : options.redirect;
+    const redirect = (fetchOptions.redirect === undefined) ? 'follow' : fetchOptions.redirect;
     while (true) {
       const target = new URL(u);
-      if (!(await isSafeExternalUrl(target, options.env))) {
+      const allowed = allowPrivate && isLocalAiEndpoint(target, requestEnv)
+        ? true
+        : await isSafeExternalUrl(target, requestEnv);
+      if (!allowed) {
         const err = new Error(`blocked: ${target.hostname} is not a public host`);
         err.code = 'SSRF_BLOCKED';
         throw err;
       }
-      const res = await fetch(u, { ...options, env: undefined, redirect: 'manual', signal: ctrl.signal });
+      const res = await fetch(u, { ...fetchOptions, redirect: 'manual', signal: ctrl.signal });
       if ([301, 302, 303, 307, 308].includes(res.status)) {
         const loc = res.headers.get('location');
         if (redirect === 'error') {
@@ -10404,8 +10884,14 @@ async function scrapeViaKage(rawUrl, env) {
     const { tmpdir } = await import(osSpec);
     const { join } = await import(pathSpec);
     dir = await mkdtemp(join(tmpdir(), 'athena-kage-'));
+    const childEnv = typeof process !== 'undefined' ? { ...process.env } : undefined;
+    if (childEnv && env.KAGE_CHROME) childEnv.KAGE_CHROME = String(env.KAGE_CHROME);
     await new Promise((resolve, reject) => {
-      execFile(bin, ['clone', rawUrl, '--max-pages', '1', '-o', dir], { timeout: 90_000 }, (err) => (err ? reject(err) : resolve()));
+      execFile(bin, ['clone', rawUrl, '--max-pages', '1', '--workers', '1', '-o', dir], {
+        timeout: 90_000,
+        env: childEnv,
+        windowsHide: true
+      }, (err) => (err ? reject(err) : resolve()));
     });
     // The mirror lands in <dir>/<host>/…; pick the largest HTML file that is
     // not a localized asset under _kage/.
@@ -10436,7 +10922,9 @@ async function scrapeViaKage(rawUrl, env) {
     try { if (image && !/^https?:\/\//i.test(image)) image = new URL(image, rawUrl).href; } catch (_) { image = ''; }
     const content = extractReadableContent(html);
     if (!content && !description) return null;
-    return { title, description, content, image };
+    let siteName = '';
+    try { siteName = new URL(rawUrl).hostname.replace(/^www\./, ''); } catch (_) {}
+    return { title, description, content, image, siteName };
   } catch (e) {
     // ENOENT = kage not installed; back off so saves stay fast without it.
     if (/ENOENT|not found|not executable/i.test(String(e?.message || e))) _kageUnavailableUntil = Date.now() + 10 * 60_000;
@@ -10487,7 +10975,20 @@ async function scrapeLinkMetadata(rawUrl, env) {
         'Accept-Language': 'en-US,en;q=0.9'
       }
     });
-    if (!res.ok) return fallback;
+    if (!res.ok) {
+      const kage = await scrapeViaKage(rawUrl, env);
+      if (kage) {
+        return {
+          title: kage.title || fallback.title,
+          description: kage.description || '',
+          content: kage.content || '',
+          image: kage.image || '',
+          siteName: kage.siteName || '',
+          viaKage: true
+        };
+      }
+      return fallback;
+    }
 
     const ctype = (res.headers.get('content-type') || '').toLowerCase();
     if (!ctype.includes('html') && !ctype.includes('text') && !ctype.includes('xml')) {
@@ -10667,16 +11168,13 @@ const FREE_MODEL_LIST_TTL_MS = 60 * 60 * 1000;
 function isModelFreeEntry(entry) {
   const id = String(entry.id || entry.model || '');
   // OpenRouter free suffix is ":free"; OpenCode Zen free variants end in "-free".
+  if (id.toLowerCase() === 'openrouter/free') return true;
   if (/(^|:)free$/i.test(id) || /-free$/i.test(id)) return true;
   const p = entry.pricing || entry.cost || {};
   const vals = [p.prompt, p.completion, p.input, p.output, entry.input, entry.output];
-  for (const v of vals) {
-    if (v === 0 || v === '0' || v === '0.0' || v === '0.00') return true;
-  }
-  if (p && typeof p === 'object') {
-    const nums = Object.values(p).map(v => Number(v));
-    if (nums.length && nums.every(n => n === 0)) return true;
-  }
+  const nums = vals.filter(v => v !== null && v !== undefined && v !== '')
+    .map(v => Number(v)).filter(Number.isFinite);
+  if (nums.length && nums.every(n => n === 0)) return true;
   return false;
 }
 
@@ -10688,6 +11186,9 @@ function providerLimitInfo(baseUrl, model, free) {
     nvidia: { rpm: 32, notes: 'free key: worker request limit 35/32; nemotron-ultra 503, use llama-3.1-8b' },
     openai: { rpm: 'varies', notes: 'paid per-usage / tier rate limits' },
     anthropic: { rpd: 'varies', notes: 'paid; 429 on usage tier' },
+    deepseek: { rpm: 'varies', notes: 'provider quota and balance apply' },
+    cohere: { rpm: 'varies', notes: 'provider quota and account tier apply' },
+    omniroute: { notes: 'local gateway limits, routing policy, and upstream provider quotas apply' },
     openrouter: { rpm: free ? 20 : null, rpd: free ? 50 : null, notes: free ? 'free models: 20/min 50/day; 402 = no balance' : 'paid per-usage' },
     auto: { notes: 'unknown provider — check provider console' }
   };
@@ -10705,21 +11206,39 @@ async function fetchModelList(baseUrl, env, apiKey) {
   let live = null;
   const url = `${root}/models`;
   try {
-    if (await isSafeExternalUrl(new URL(url), env)) {
+    const endpoint = new URL(url.startsWith('http') ? url : `https://${url}`);
+    if (await isAllowedAiEndpoint(endpoint, env)) {
       const headers = {};
       if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-      const res = await fetchWithTimeout(url, { headers, env }, 5000);
+      const res = await fetchWithTimeout(endpoint.toString(), {
+        headers, env, allowPrivate: isLocalAiEndpoint(endpoint, env)
+      }, 5000);
       if (res.ok) {
         const data = await res.json().catch(() => null);
         const raw = Array.isArray(data?.data) ? data.data
           : Array.isArray(data?.models) ? data.models
           : Array.isArray(data) ? data : null;
         if (raw) {
-          live = raw.map((e) => ({ id: String(e.id || e.model || '').trim() })).filter((e) => e.id);
+          live = raw.map((e) => {
+            if (typeof e === 'string') return { id: e.trim() };
+            if (!e || typeof e !== 'object') return null;
+            const id = String(e.id || e.model || e.name || '').trim();
+            return id ? { ...e, id } : null;
+          }).filter(Boolean);
         }
       }
     }
   } catch (_) {}
+  // OpenRouter's router is a valid model even when the catalog endpoint omits
+  // virtual/router entries. Keep it selectable and classify it as free.
+  if (hostMatches(root, 'openrouter.ai') && live && !live.some((e) => String(e.id).toLowerCase() === 'openrouter/free')) {
+    live.push({
+      id: 'openrouter/free',
+      name: 'OpenRouter Free Router',
+      description: 'Routes each request to a compatible free OpenRouter model.',
+      pricing: { prompt: '0', completion: '0' }
+    });
+  }
   let meta = null;
   if (root.includes('opencode.ai')) {
     try {
@@ -10737,7 +11256,7 @@ async function fetchModelList(baseUrl, env, apiKey) {
   if (live && meta) {
     return live.map((e) => {
       const m = meta[e.id];
-      return m ? { ...e, name: m.name, cost: m.cost, limit: m.limit } : e;
+      return m ? { ...e, name: e.name || m.name, cost: e.cost || m.cost, limit: e.limit || m.limit } : e;
     });
   }
   if (live) return live;
@@ -10760,9 +11279,14 @@ function hostMatches(baseUrl, domain) {
 function detectProviderForModel(model, baseUrl) {
   const m = String(model||'').toLowerCase();
   if (hostMatches(baseUrl, 'opencode.ai')) return 'opencode';
+  if (hostMatches(baseUrl, 'openrouter.ai') || m.startsWith('openrouter/')) return 'openrouter';
+  if (hostMatches(baseUrl, 'omniroute') || /:20128(?:\/|$)/i.test(String(baseUrl || ''))) return 'omniroute';
   if (hostMatches(baseUrl, 'groq.com')) return 'groq';
   if (hostMatches(baseUrl, 'anthropic.com')) return 'anthropic';
   if (hostMatches(baseUrl, 'openai.com')) return 'openai';
+  if (hostMatches(baseUrl, 'deepseek.com') || m.startsWith('deepseek/')) return 'deepseek';
+  if (hostMatches(baseUrl, 'nvidia.com') || m.startsWith('meta/')) return 'nvidia';
+  if (hostMatches(baseUrl, 'cohere.ai') || m.startsWith('command-')) return 'cohere';
   if (m.startsWith('openai/') || m.startsWith('gpt-')) return 'openai';
   if (m.startsWith('anthropic/') || m.includes('claude')) return 'anthropic';
   if (m.includes('groq') || m.includes('llama')) return 'groq';
@@ -10870,6 +11394,7 @@ async function enrichLinksInBackground(env, scope, key, links) {
         }
         // Best effort on GitHub storage: the .md entry catches up with the row.
         await storeMutateLink(env, scope, key, link.id, update);
+        markMeiliScopeDirty(env, scope, key);
       } catch (_) { /* one bad link must not stall the rest */ }
     }
   };

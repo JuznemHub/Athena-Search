@@ -54,7 +54,9 @@ const ALLOWED_ENV = [
   'BACKUP_TELEGRAM_TOKEN', 'BACKUP_TELEGRAM_CHAT_ID', 'GDRIVE_CLIENT_ID',
   'OAUTH_RELAY_BACKEND',
   // Optional headless-Chrome scraper (kage) for JS-rendered pages
-  'KAGE_BIN',
+  'KAGE_BIN', 'KAGE_CHROME',
+  // Optional derived search index; PostgreSQL remains the source of truth.
+  'MEILI_URL', 'MEILISEARCH_URL', 'MEILI_MASTER_KEY', 'MEILI_INDEX',
 ];
 const allowedEnv = {};
 for (const k of ALLOWED_ENV) {

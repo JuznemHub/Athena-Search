@@ -15,6 +15,9 @@ const server = http.createServer((req, res) => {
     if (req.url === '/api/health') return send(200, { ok: true, version: '1.0.5' });
     if (req.url === '/api/storage/config') return send(200, { provider: 'postgres' });
     if (req.url === '/api/auth/me') return send(200, { user: { username: 'neo', is_god: true } });
+    if (req.url === '/api/communities' && req.method === 'GET') {
+      return send(200, { communities: [{ id: 7, name: 'Neo Circle', role: 'owner' }] });
+    }
     if (req.url === '/api/communities/join' && req.method === 'POST') {
       return send(200, { community: { id: JSON.parse(raw).community_id, name: 'Neo Circle', role: 'owner' } });
     }
@@ -56,7 +59,7 @@ const env = {
   ATHENA_TOKEN: 'test-token',
   ATHENA_TUI_NO_ANIMATION: '1',
 };
-fs.rmSync(path.join(os.homedir(), '.config', 'athena-tui', 'config.json'), { force: true });
+fs.rmSync(path.join(testHome, '.config', 'athena-tui', 'config.json'), { force: true });
 
 const cmd = `script -qec "node src/index.js" /dev/null`;
 const proc = spawn('bash', ['-c', cmd], { cwd: process.cwd(), env, detached: true });
@@ -67,29 +70,43 @@ proc.stderr.on('data', (d) => { out += d; });
 
 const keys = (k) => proc.stdin.write(k);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let observedOutput = 0;
+const waitFor = async (pattern, timeout = 10_000) => {
+  const started = Date.now();
+  for (;;) {
+    const match = out.slice(observedOutput).match(pattern);
+    if (match) {
+      observedOutput += match.index + match[0].length;
+      return;
+    }
+    if (Date.now() - started >= timeout) throw new Error(`Timed out waiting for ${pattern}\n${out.slice(-2000)}`);
+    await sleep(50);
+  }
+};
 
-await sleep(1200);
+await waitFor(/Login with Telegram/);
 keys('3');                     // Join community
 console.log('> join');
-await sleep(600);
+await waitFor(/Community id/);
 keys('7\n');                   // community id 7
 console.log('> id');
-await sleep(800);
+await waitFor(/Scan bookmarks/);
 keys('4');                     // Scan bookmarks (auto-detects all browsers)
 console.log('> scan');
-await sleep(1500);
+await waitFor(/Press .*to continue/);
 keys('\n');                    // continue
 console.log('> continue');
-await sleep(600);
+await waitFor(/Dump bookmarks/);
 keys('5');                     // Dump bookmarks
 console.log('> dump');
-await sleep(800);
+await waitFor(/Dump where\?/);
 keys('2');                     // Personal brain
 console.log('> personal');
-await sleep(600);
+await waitFor(/Send them now\?/);
 keys('y');                     // confirm
 console.log('> confirm y');
-await sleep(2000);
+await waitFor(/221 bookmarks stored in personal brain/);
+await waitFor(/Dump bookmarks/);
 keys('q');                     // quit
 console.log('> quit');
 proc.stdin.end();              // EOF → script unwinds the pty
@@ -98,7 +115,7 @@ const killer = setTimeout(() => {
   console.log('=== STUCK — last TUI output ===');
   console.log(out.slice(-1200));
   try { process.kill(-proc.pid, 'SIGKILL'); } catch { try { proc.kill('SIGKILL'); } catch { /* gone */ } }
-}, 20000);
+}, 20_000);
 await new Promise((r) => proc.on('close', r));
 clearTimeout(killer);
 
