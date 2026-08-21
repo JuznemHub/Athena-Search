@@ -26,6 +26,20 @@ Athena is a self-hostable bookmark and document archive. Save from the web UI, T
   <img src="screenshots/screenshot-2026-08-21_14-29-24.png" width="32%" alt="Athena app view">
 </p>
 
+> ⭐ **Like Athena?** [Star the repo](https://github.com/JuznemHub/Athena-Search/stargazers) and test it out extensively — real usage is what makes it better.
+>
+> 🐛 **Found a bug?** [Open an issue](https://github.com/JuznemHub/Athena-Search/issues/new?template=bug_report.md) with: what you did, what you expected vs what happened, exact steps to reproduce, relevant logs (`journalctl -u athena -n 100` on self-host, or browser console output), a screenshot/photo if it's visual, and your setup (self-host/Cloudflare, OS, Node version). Reports missing these take far longer to fix.
+>
+> 💬 **Need help?** Join the community chat → [@Juznem discussion group on Telegram](https://t.me/Juznem)
+
+## Juznem's favourite features
+
+- **📚 Dump all your browser bookmarks straight into Athena via the TUI** — Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Arc and Firefox are detected automatically; scan, pick folders, and dump everything into your personal or community brain from the terminal. No export-file gymnastics.
+- **🧠 Advanced (opencode) mode tailored for research** — press `Tab` in the TUI and you get an opencode-powered session wired to your brain through the `athena` MCP server, with the `/athena` command kept strict for Athena-related research and knowledge work: grounded search, citations with `[#n]`, paragraph-level document lookup (`para_idx`), plus `/athena-study` and `/athena-ingest` skills.
+- **🏠 Self-host it for yourself — or run your own Telegram community** — full control end-to-end: PostgreSQL storage, your own bot, rank hierarchy (GOD / owner / admin / member), approve whom to add, kick/ban with automatic sync to Telegram group presence, per-community brains, backups to Telegram, and GOD-only switches like AI credentials and channel targets.
+- **📡 Live cloning of any Telegram channel, group — even a single forum topic** — powered by a userbot session or a linked bot: links, documents (pdf/epub/docx/…), button links, and text posts land in your brain automatically, with GOD-rank targets (community / personal / both), one-command history backfill by id range or topic, a VPS media vault, per-session rollback, and honest live progress bars.
+- *…and much more:* Meilisearch acceleration, pgvector paragraph search, multi-agent MCP memory, streaming AI answers grounded in your own sources, themes, accent colors, and a zero-build frontend.
+
 ## What it does
 
 - Saves URLs, notes, code, text files, and self-hosted binary documents as searchable Markdown.
