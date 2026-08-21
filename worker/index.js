@@ -7358,6 +7358,7 @@ function helpTextForSection(section) {
       `${italicHtml('In-chat shortcuts:')} ${codeHtml('/follow [target]')} ${italicHtml('and')} ${codeHtml('/backfill')} ${italicHtml('— auto-detect chat/topic/community, reuse the connected session.')}`,
       `${boldHtml('Why a session?')} Bots only see messages after they are added as admin. A user session is your account reading the chat like Telegram Desktop does — connect it once and both live cloning and history backfill reuse it; nothing is asked twice.`,
       `${boldHtml('Progress & errors:')} backfills show a live progress bar; ${codeHtml('/userbot_status')} lists per-chat counters and the last errors.`,
+      `${boldHtml('🏷 Tags:')} clones auto-tag via AI, context fallback when AI is down. ${codeHtml('/forcetags')} retags every untagged link.`,
       `${boldHtml('Undo a bad clone:')} ${codeHtml('/transfers')} → ${codeHtml('/clone_del <session_id> [files]')} removes everything that session imported (vault media too with "files").`,
       `/topic_link ${codeHtml('<community_id> [target]')} — clone this topic (run inside it)`,
       `/topic_list · /topic_unlink ${codeHtml('<thread_id>')} · /topic_target ${codeHtml('<thread_id> <target>')}`,
@@ -7959,11 +7960,16 @@ async function saveIndexedLinks(env, communityId, urls, attributionName, postTex
         finalTags = [...new Set([...baseTags, ...userTags])];
       } else {
         const vocab = await recentTagsForScope(env, 'community', communityId);
-        const ai = await aiDescribeAndTag(env, rawUrl, meta, vocab);
+        let ai = null;
+        try { ai = await aiDescribeAndTag(env, rawUrl, meta, vocab); } catch (_) {}
         if (ai) {
           finalTitle = ai.title || meta.title;
           finalNotes = ai.description || meta.notes || '';
           finalTags = ai.tags?.length ? [...new Set([...baseTags, ...ai.tags])] : baseTags;
+        } else {
+          // AI down → context tags from caption/URL so clones are never tagless
+          const fb = fallbackTagsFromMeta(rawUrl, { title: meta.title, notes: meta.notes || postText, content: '' });
+          finalTags = [...new Set([...baseTags, ...(fb || [])])];
         }
       }
       if (finalTags) {
@@ -9755,6 +9761,77 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      await ensureUserbotTables(env);
      const r = await env.DB.prepare('DELETE FROM userbot_follows WHERE chat_id = ?').bind(cidArg).run();
      await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Unfollowed ${codeHtml(cidArg)}${r?.changes ? '' : italicHtml(' (was not followed)')}.`, forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /forcetags — GOD: backfill tags for every untagged link ----
+   if (cmd === '/forcetags') {
+     if (!isGod) { await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId); return new Response('OK', { status: 200, headers: corsHeaders }); }
+     await ensureAiConfigTable(env);
+     const cfgFt = await getInstanceAiConfig(env);
+     const BATCH = 150;
+     const think = await sendTelegramFormatted(token, chatId, `${boldHtml('🏷')} Scanning for untagged links…`, forumThreadId);
+     const thinkId = think?.message_id;
+     const targets = [];
+     const pick = async (table, col) => {
+       await ensureSearchColumns(env);
+       const { results } = await env.DB.prepare(
+         `SELECT id, url, title, notes, search_blob FROM ${table}
+          WHERE COALESCE(tags,'') IN ('', '[]', 'null') OR metadata_version IS NULL OR metadata_version < 1
+          ORDER BY created_at DESC LIMIT ${BATCH}`
+       ).all();
+       for (const r of results || []) targets.push({ table, col, row: r });
+     };
+     await pick('links', 'community_id');
+     await pick('personal_links', 'user_id');
+     if (!targets.length) {
+       if (thinkId) await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: thinkId, text: `${boldHtml('✅')} Every link already has tags.`, parse_mode: 'HTML' }).catch(() => {});
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     let done = 0, aiHits = 0, ctxHits = 0;
+     const editProgress = async () => {
+       const pct = Math.min(100, Math.round((done / targets.length) * 100));
+       const filled = Math.round((pct / 100) * 18);
+       const bar = '▮'.repeat(filled) + '▯'.repeat(18 - filled);
+       await telegramApi(token, 'editMessageText', {
+         chat_id: chatId, message_id: thinkId, parse_mode: 'HTML',
+         text: `${boldHtml('🏷 Force tags')}\n${codeHtml(bar + ' ' + pct + '%')}\n${done}/${targets.length} · AI ${aiHits} · context ${ctxHits}`
+       }).catch(() => {});
+     };
+     for (const t of targets) {
+       try {
+         const r = t.row;
+         const meta = { title: r.title || '', notes: r.notes || '', content: r.search_blob || '' };
+         let tags = null; let title = r.title || ''; let notes = r.notes || '';
+         if (cfgFt?.api_key) {
+           try {
+             const vocab = await recentTagsForScope(env, t.table === 'links' ? 'community' : 'personal', t.col);
+             const ai = await aiDescribeAndTag(env, r.url, meta, vocab, cfgFt);
+             if (ai) {
+               aiHits++;
+               title = ai.title || title;
+               notes = ai.description || notes;
+               tags = ai.tags || [];
+             }
+           } catch (_) {}
+         }
+         if (!tags?.length) {
+           tags = fallbackTagsFromMeta(r.url, meta);
+           ctxHits++;
+         }
+         if (!tags.length) tags = ['untagged'];
+         await env.DB.prepare(
+           `UPDATE ${t.table} SET tags = ?, title = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
+         ).bind(JSON.stringify(tags), title, notes, r.id).run();
+         markMeiliScopeDirty(env, t.table === 'links' ? 'community' : 'personal', t.col);
+       } catch (_) {}
+       done++;
+       if (done % 10 === 0) await editProgress();
+     }
+     await editProgress();
+     await sendTelegramFormatted(token, chatId,
+       `${boldHtml('✅')} Tagged ${done} link(s): ${aiHits} via AI · ${ctxHits} via context fallback.\n${italicHtml(targets.length >= BATCH ? 'More remain — run /forcetags again to continue.' : 'All caught up.')}`,
+       forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
