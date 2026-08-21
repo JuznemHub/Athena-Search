@@ -9433,7 +9433,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     ).bind(chatIdN, label, communityIdArg || null, targetArg || 'community', athenaUser.id, Date.now()).run();
 
     // History backfill right after — dedupe makes overlap harmless.
-    await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg, communityName, userbotLabel: label });
+    await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg, communityName, userbotLabel: label, minId: minIdArg, maxId: maxIdArg });
 
     const scopeLine = targetArg === 'personal'
       ? `${boldHtml('your personal brain')}`
