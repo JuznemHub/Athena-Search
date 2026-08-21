@@ -2749,6 +2749,10 @@ const TELEGRAM_COMMAND_MENU = [
   { command: 'topic_link', description: 'Clone this forum topic into a brain' },
   { command: 'topic_list', description: 'Linked topics in this group' },
   { command: 'topic_target', description: 'GOD: topic → community/personal/both' },
+  { command: 'userbot_connect', description: 'GOD: connect live-clone session' },
+  { command: 'userbot_follow', description: 'Follow a chat for live cloning' },
+  { command: 'userbot_status', description: 'Userbot connection + follows' },
+  { command: 'userbot_disconnect', description: 'GOD: stop + delete session' },
   { command: 'dumpsmart', description: 'Multi-link: primary only' },
 ];
 
@@ -7314,6 +7318,10 @@ function helpTextForSection(section) {
       `/channel_target ${codeHtml('<channel_id> <community|personal|both>')} — GOD: where content lands`,
       `${boldHtml('Groups & forum topics')}`,
       `/group_copy ${codeHtml('on|off')} — also save text-only posts (owner)`,
+      `${boldHtml('🤖 Userbot live-clone')} ${italicHtml('(self-host, GOD)')}`,
+      `/userbot_connect ${codeHtml('<api_id> <api_hash> <session>')} — persistent session`,
+      `/userbot_follow ${codeHtml('<community_id> <chat_id> [target]')} — clone a chat live`,
+      `/userbot_status · /userbot_unfollow ${codeHtml('<chat_id>')} · /userbot_disconnect`,
       `/topic_link ${codeHtml('<community_id> [target]')} — clone this topic (run inside it)`,
       `/topic_list · /topic_unlink ${codeHtml('<thread_id>')} · /topic_target ${codeHtml('<thread_id> <target>')}`,
       '',
@@ -9184,6 +9192,154 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      ).bind(jobId, communityIdArg, chatIdArg, athenaUser.id, chatId, Date.now(), Date.now(), threadArg || null).run();
      runInBackground(env, runHistoryIndexJob(env, { id: jobId, community_id: communityIdArg, chat_id: chatIdArg, thread_id: threadArg || null, offset_id: 0, processed: 0, saved_links: 0, saved_docs: 0, progress_chat_id: chatId }, token));
      await sendTelegramFormatted(token, chatId, `${boldHtml('▶️')} Backfill started for ${codeHtml(chatIdArg)}${threadArg ? ` topic ${codeHtml('#' + threadArg)}` : ''} → ${boldHtml(escHtml(community.name || communityIdArg))}.\nSession message deleted. I will report progress here. ${codeHtml('/index_stop')} to cancel.`, forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /userbot_connect — GOD: persistent live-clone session (self-host) ----
+   if (cmd === '/userbot_connect' || cmd === '/userbotconnect') {
+     const dmOnly = !chatId.startsWith('-');
+     if (!isSelfHosted(env)) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Userbot mode runs on the self-hosted server only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!isGod) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!dmOnly) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Session strings are secrets — DM only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const apiIdArg = parts[1] || '';
+     const apiHashArg = parts[2] || '';
+     const sessionArg = parts.slice(3).join(' ');
+     if (!apiIdArg || !apiHashArg || !sessionArg) {
+       await sendTelegramFormatted(token, chatId,
+         `Usage: ${codeHtml('/userbot_connect <api_id> <api_hash> <session_string>')}\nGenerate a session: ${codeHtml('node scripts/gen-session.js')} on the server.\n${italicHtml('The account must already be a member of the chats you want to follow.')}`,
+         forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await telegramApi(token, 'deleteMessage', { chat_id: chatId, message_id: msg.message_id }).catch(() => {});
+     await ensureUserbotTables(env);
+     const sessionEnc = await encryptSecret(env, sessionArg.trim());
+     const apiHashEnc = await encryptSecret(env, apiHashArg.trim());
+     if (!String(sessionEnc).startsWith('enc:v1:') || !String(apiHashEnc).startsWith('enc:v1:')) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Server has no STORAGE_KEY — refusing to store the session unencrypted.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await env.DB.prepare(
+       `INSERT INTO userbot_state (id, api_id, api_hash_enc, session_enc, enabled, updated_at)
+        VALUES ('singleton', ?, ?, ?, 1, ?)
+        ON CONFLICT(id) DO UPDATE SET api_id = excluded.api_id, api_hash_enc = excluded.api_hash_enc,
+          session_enc = excluded.session_enc, enabled = 1, last_error = NULL, updated_at = excluded.updated_at`
+     ).bind(apiIdArg.trim(), apiHashEnc, sessionEnc, Date.now()).run();
+     if (USERBOT?.client) { try { await USERBOT.client.disconnect(); } catch (_) {} USERBOT = null; }
+     const started = await startUserbotDaemon(env);
+     await sendTelegramFormatted(token, chatId,
+       started.ok
+         ? `${boldHtml('✅')} Userbot connected — live cloning active for followed chats.\n${codeHtml('/userbot_follow <community_id> <chat_id> [target]')} to add chats · ${codeHtml('/userbot_disconnect')} to stop + delete session.`
+         : `${boldHtml('❌')} Connect failed: ${escHtml(started.reason || 'unknown')}`,
+       forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /userbot_follow — GOD/owner: add a chat to live clone ----
+   if (cmd === '/userbot_follow' || cmd === '/userbotfollow') {
+     if (!isSelfHosted(env)) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Userbot mode is self-host only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!athenaUser) {
+       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const communityIdArg = (parts[1] || '').trim();
+     const chatIdArg = (parts[2] || '').trim();
+     const targetArg = (parts[3] || '').trim().toLowerCase();
+     if (!communityIdArg || !chatIdArg) {
+       await sendTelegramFormatted(token, chatId,
+         `Usage: ${codeHtml('/userbot_follow <community_id> <chat_id> [community|personal|both]')}\n${italicHtml('The userbot account must be a member of that chat. personal/both are GOD rank only.')}`,
+         forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (targetArg && !CHANNEL_TARGETS.has(targetArg)) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Target must be ${codeHtml('community')}, ${codeHtml('personal')} or ${codeHtml('both')}.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if ((targetArg === 'personal' || targetArg === 'both') && !isGod) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} ${codeHtml('personal')}/${codeHtml('both')} targets are GOD rank only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!(await ensureOwnerOrAdmin(communityIdArg, athenaUser.id, env)) && !isGod) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const community = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityIdArg).first();
+     if (!community) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(communityIdArg)} not found.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await ensureUserbotTables(env);
+     let cid = chatIdArg.startsWith('-') ? chatIdArg : `-100${chatIdArg.replace(/^-100/, '')}`;
+     if (!/^(-\d+|\d+)$/.test(cid)) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Invalid chat id.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await env.DB.prepare(
+       `INSERT INTO userbot_follows (chat_id, community_id, target, created_by, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(chat_id) DO UPDATE SET community_id = excluded.community_id,
+          target = excluded.target, created_by = excluded.created_by`
+     ).bind(cid, communityIdArg, targetArg || 'community', athenaUser.id, Date.now()).run();
+     await sendTelegramFormatted(token, chatId,
+       `${boldHtml('✅')} Following ${codeHtml(cid)} → ${boldHtml(escHtml(community.name || communityIdArg))} · target ${codeHtml(targetArg || 'community')}\n${italicHtml('New messages clone automatically while the userbot is connected. Existing history: /index_start')}`,
+       forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /userbot_unfollow ----
+   if (cmd === '/userbot_unfollow' || cmd === '/userbotunfollow') {
+     const cidArg = (parts[1] || '').trim();
+     if (!cidArg) {
+       await sendTelegramFormatted(token, chatId, `Usage: ${codeHtml('/userbot_unfollow <chat_id>')}`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await ensureUserbotTables(env);
+     const r = await env.DB.prepare('DELETE FROM userbot_follows WHERE chat_id = ?').bind(cidArg).run();
+     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Unfollowed ${codeHtml(cidArg)}${r?.changes ? '' : italicHtml(' (was not followed)')}.`, forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /userbot_status ----
+   if (cmd === '/userbot_status' || cmd === '/userbotstatus') {
+     if (!isSelfHosted(env)) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Userbot mode is self-host only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await ensureUserbotTables(env);
+     const st = await env.DB.prepare("SELECT * FROM userbot_state WHERE id = 'singleton'").first();
+     const { results: follows } = await env.DB.prepare('SELECT chat_id, community_id, target FROM userbot_follows ORDER BY chat_id').all();
+     const conn = USERBOT?.client ? `🟢 connected (${Math.round((Date.now() - USERBOT.startedAt) / 60000)}m)` : (Number(st?.enabled) === 1 ? '🔴 configured but disconnected — restart server or /userbot_connect again' : '⚪ not configured');
+     const lines = follows?.length ? follows.map((f) => `• ${codeHtml(f.chat_id)} → ${escHtml(f.community_id)} · ${codeHtml(f.target || 'community')}`) : ['• no chats followed yet'];
+     await sendTelegramFormatted(token, chatId,
+       `${boldHtml('🤖 Userbot')}\n${boldHtml('Connection:')} ${conn}${st?.last_error ? `\n${boldHtml('Last error:')} ${escHtml(st.last_error)}` : ''}\n\n${boldHtml('Followed chats')}\n${lines.join('\n')}`,
+       forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /userbot_disconnect — stop daemon and delete stored session ----
+   if (cmd === '/userbot_disconnect' || cmd === '/userbotdisconnect') {
+     if (!isGod) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!isSelfHosted(env)) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Userbot mode is self-host only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await ensureUserbotTables(env);
+     await stopUserbotDaemon(env, true);
+     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Userbot disconnected — stored session deleted. Followed chats kept; reconnect anytime with ${codeHtml('/userbot_connect')}.`, forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
@@ -12229,6 +12385,146 @@ function formatSavedLinkReply(kindLabel, title, rawUrl, ai, fallbackNotes = '') 
   lines.push('', rawUrl);
   if (ai.tags?.length) lines.push('', ai.tags.map(t => `#${t}`).join(' '));
   return lines.join('\n');
+}
+
+
+// ---- Userbot live-clone daemon (self-host only) ---------------------------
+// A stored user session (gramjs) keeps a persistent connection and mirrors
+// every new message from followed chats into brains — same capture pipeline
+// and rank-aware targets as channel indexing. The session is AES-GCM
+// encrypted at rest; /userbot_disconnect deletes it entirely.
+
+async function ensureUserbotTables(env) {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS userbot_state (
+       id TEXT PRIMARY KEY, api_id TEXT, api_hash_enc TEXT, session_enc TEXT,
+       enabled INTEGER NOT NULL DEFAULT 0, last_error TEXT, updated_at BIGINT)`
+  ).run();
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS userbot_follows (
+       chat_id TEXT PRIMARY KEY, community_id TEXT NOT NULL,
+       target TEXT NOT NULL DEFAULT 'community', created_by TEXT,
+       created_at BIGINT NOT NULL)`
+  ).run();
+}
+
+let USERBOT = null; // { client, startedAt }
+
+function gramjsChatId(message) {
+  // gramjs exposes marked ids on message.chatId (-100… for channels/supergroups)
+  const id = Number(message?.chatId ?? 0);
+  return id ? String(id) : null;
+}
+
+/** Mirror one gramjs message into the sinks of its follow. */
+async function captureGramjsMessage(env, follow, message, logTag) {
+  const text = String(message.message || '').trim();
+  if (text.startsWith('/')) return;
+  const target = CHANNEL_TARGETS.has(follow.target) ? follow.target : 'community';
+  const personalOwner = target === 'community' ? null : String(follow.created_by || '');
+  const sinks = sinkTargetsFor(target, personalOwner);
+  const urls = urlsFromGramjsMessage(message);
+
+  for (const sink of sinks) {
+    try {
+      if (sink === 'personal') {
+        if (urls.length) {
+          await savePersonalIndexedLinks(env, personalOwner, urls, 'userbot', text);
+        }
+        const media = message.media;
+        if (media?.className === 'MessageMediaDocument' && media.document) {
+          const docu = media.document;
+          const fnameAttr = (docu.attributes || []).find((a) => a.className === 'MessageAttributeFilename');
+          const filename = fnameAttr?.fileName || '';
+          const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+          if ((DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) && Number(docu.size || 0) <= CONVERT_SOURCE_MAX_BYTES) {
+            const buf = await USERBOT.client.downloadMedia(message, {});
+            if (buf?.length) {
+              await savePersonalIndexedDocument(env, personalOwner, filename, ext, new Uint8Array(buf), `userbot:${follow.chat_id}`, { chatId: follow.chat_id, messageId: message.id });
+            }
+          }
+        }
+        if (!urls.length && !message.media && text.length >= 80) {
+          const safeName = String(follow.chat_id).replace(/[^\w-]+/g, '_').slice(0, 40);
+          const md = `# Userbot clone ${follow.chat_id}\n\n${text}`;
+          await savePersonalIndexedDocument(env, personalOwner, `${safeName}_${message.id}.md`, 'md', new TextEncoder().encode(md), `userbot:${follow.chat_id}`, { chatId: follow.chat_id, messageId: message.id });
+        }
+        continue;
+      }
+      // community sink
+      if (urls.length) {
+        await saveIndexedLinks(env, follow.community_id, urls, 'userbot', text, 'channel');
+      }
+      const media = message.media;
+      if (media?.className === 'MessageMediaDocument' && media.document) {
+        const docu = media.document;
+        const fnameAttr = (docu.attributes || []).find((a) => a.className === 'MessageAttributeFilename');
+        const filename = fnameAttr?.fileName || '';
+        const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+        if ((DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) && Number(docu.size || 0) <= CONVERT_SOURCE_MAX_BYTES) {
+          const buf = await USERBOT.client.downloadMedia(message, {});
+          if (buf?.length) {
+            await saveIndexedDocument(env, follow.community_id, filename, ext, new Uint8Array(buf), `userbot:${follow.chat_id}`, { chatId: follow.chat_id, messageId: message.id });
+          }
+        }
+      }
+      if (!urls.length && !message.media && text.length >= 80) {
+        const safeName = String(follow.chat_id).replace(/[^\w-]+/g, '_').slice(0, 40);
+        const md = `# Userbot clone ${follow.chat_id}\n\n${text}`;
+        await saveIndexedDocument(env, follow.community_id, `${safeName}_${message.id}.md`, 'md', new TextEncoder().encode(md), `userbot:${follow.chat_id}`, { chatId: follow.chat_id, messageId: message.id });
+      }
+    } catch (e) {
+      console.error(`[userbot] capture failed (${sink}) ${logTag}`, e?.message || e);
+    }
+  }
+}
+
+/** Start (or no-op if running) the userbot daemon. Self-host only. */
+export async function startUserbotDaemon(env) {
+  if (!isSelfHosted(env)) return { ok: false, reason: 'self-host only' };
+  await ensureUserbotTables(env);
+  if (USERBOT?.client) return { ok: true, already: true };
+  const st = await env.DB.prepare("SELECT * FROM userbot_state WHERE id = 'singleton' AND enabled = 1").first();
+  if (!st) return { ok: false, reason: 'not configured' };
+  let gramjs;
+  try { gramjs = await import('telegram'); } catch (_) {
+    await env.DB.prepare("UPDATE userbot_state SET last_error = 'gramjs not installed', updated_at = ? WHERE id = 'singleton'").bind(Date.now()).run();
+    return { ok: false, reason: 'gramjs missing' };
+  }
+  const { TelegramClient } = gramjs;
+  const { StringSession } = gramjs.sessions;
+  const sessionString = await decryptBotToken(env, st.session_enc);
+  const apiHash = await decryptBotToken(env, st.api_hash_enc);
+  if (!sessionString || !apiHash) {
+    await env.DB.prepare("UPDATE userbot_state SET last_error = 'decrypt failed', updated_at = ? WHERE id = 'singleton'").bind(Date.now()).run();
+    return { ok: false, reason: 'decrypt failed' };
+  }
+  const client = new TelegramClient(new StringSession(sessionString), Number(st.api_id) || 0, apiHash, { connectionRetries: 5 });
+  await client.connect();
+  client.addEventHandler(async (update) => {
+    try {
+      const message = update.message;
+      if (!message) return;
+      const chatId = gramjsChatId(message);
+      if (!chatId) return;
+      const follow = await env.DB.prepare('SELECT * FROM userbot_follows WHERE chat_id = ?').bind(chatId).first();
+      if (!follow) return;
+      await captureGramjsMessage(env, follow, message, chatId);
+    } catch (e) {
+      if (e && typeof e.seconds === 'number') await sleep(Math.min(e.seconds * 1000, 300_000));
+      else console.error('[userbot] event failed', e?.message || e);
+    }
+  });
+  USERBOT = { client, startedAt: Date.now() };
+  console.log('[userbot] daemon connected');
+  return { ok: true };
+}
+
+async function stopUserbotDaemon(env, deleteSession = false) {
+  if (USERBOT?.client) { try { await USERBOT.client.disconnect(); } catch (_) {} }
+  USERBOT = null;
+  if (deleteSession) await env.DB.prepare("DELETE FROM userbot_state WHERE id = 'singleton'").run();
+  else await env.DB.prepare("UPDATE userbot_state SET enabled = 0, updated_at = ? WHERE id = 'singleton'").bind(Date.now()).run().catch(() => {});
 }
 
 export {
