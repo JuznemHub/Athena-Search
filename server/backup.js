@@ -429,6 +429,7 @@ export async function runBackupOnce({ connectionString, env, db = null }) {
     }
     if (!tgToken || !tgChat) console.log('[backup] telegram skipped — no bot linked and no BACKUP_TELEGRAM_* set');
 
+    await markBackupDone(db);
     return { ok: true, name, size, files: files.length };
   } catch (err) {
     console.error('[backup] FAILED:', err.message);
@@ -438,6 +439,25 @@ export async function runBackupOnce({ connectionString, env, db = null }) {
   }
 }
 
+const LAST_BACKUP_KEY = 'last_backup_at';
+
+async function readLastBackupAt(db) {
+  if (!db) return 0;
+  try {
+    const row = await db.prepare('SELECT value FROM instance_settings WHERE key = ?').bind(LAST_BACKUP_KEY).first();
+    return Number(row?.value || 0);
+  } catch (_) { return 0; }
+}
+
+async function markBackupDone(db) {
+  if (!db) return;
+  try {
+    await db.prepare(
+      `INSERT OR REPLACE INTO instance_settings (key, value, updated_at) VALUES (?, ?, ?)`
+    ).bind(LAST_BACKUP_KEY, String(Date.now()), Date.now()).run();
+  } catch (_) {}
+}
+
 export function startBackups({ connectionString, env, db = null }) {
   const hours = parseFloat(env.BACKUP_INTERVAL_HOURS || '6');
   if (!(hours > 0)) {
@@ -445,8 +465,24 @@ export function startBackups({ connectionString, env, db = null }) {
     return null;
   }
   const ms = Math.round(hours * 3600 * 1000);
-  console.log(`[backup] every ${hours}h`);
-  const timer = setInterval(() => { runBackupOnce({ connectionString, env, db }); }, ms);
-  timer.unref();
-  return timer;
+
+  // The interval is anchored to the last successful backup, not to process
+  // uptime: frequent restarts (deploys) previously reset the 6h timer forever,
+  // so a busy day could silently skip backups entirely.
+  const boot = async () => {
+    const last = await readLastBackupAt(db);
+    const elapsed = Date.now() - last;
+    if (elapsed >= ms) {
+      const agoH = last ? (elapsed / 3600000).toFixed(1) + 'h ago' : 'never';
+      console.log(`[backup] last backup ${agoH} — running now before arming the ${hours}h timer`);
+      const r = await runBackupOnce({ connectionString, env, db });
+      if (!r?.ok) await new Promise((res) => setTimeout(res, 30_000)); // brief backoff, then the interval still retries
+    } else {
+      console.log(`[backup] last backup ${(elapsed / 3600000).toFixed(1)}h ago — next in ${((ms - elapsed) / 3600000).toFixed(1)}h`);
+    }
+    const timer = setInterval(() => { runBackupOnce({ connectionString, env, db }); }, ms);
+    timer.unref();
+  };
+  boot().catch((e) => console.error('[backup] boot check failed:', e.message));
+  return { stop: () => {} };
 }
