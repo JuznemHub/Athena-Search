@@ -2625,6 +2625,10 @@ async function ensureBotBindingColumns(env) {
   try {
     await env.DB.prepare(`ALTER TABLE community_bots ADD COLUMN channel_target TEXT DEFAULT 'community'`).run();
   } catch (_) {}
+  // Full-copy toggle for groups: also capture text-only posts like channels do.
+  try {
+    await env.DB.prepare(`ALTER TABLE community_bots ADD COLUMN copy_text INTEGER DEFAULT 0`).run();
+  } catch (_) {}
 }
 
 const CHANNEL_TARGETS = new Set(['community', 'personal', 'both']);
@@ -2741,6 +2745,10 @@ const TELEGRAM_COMMAND_MENU = [
   { command: 'delete', description: 'Delete a saved link' },
   { command: 'dumpall', description: 'Multi-link posts: save all' },
   { command: 'channel_target', description: 'GOD: channel → community/personal/both' },
+  { command: 'group_copy', description: 'Owner: group full-copy on/off' },
+  { command: 'topic_link', description: 'Clone this forum topic into a brain' },
+  { command: 'topic_list', description: 'Linked topics in this group' },
+  { command: 'topic_target', description: 'GOD: topic → community/personal/both' },
   { command: 'dumpsmart', description: 'Multi-link: primary only' },
 ];
 
@@ -7299,6 +7307,11 @@ function helpTextForSection(section) {
       '',
       `/index — indexing status`,
       `/channel_unlink ${codeHtml('<channel_id>')} — stop indexing a channel`,
+      `/channel_target ${codeHtml('<channel_id> <community|personal|both>')} — GOD: where content lands`,
+      `${boldHtml('Groups & forum topics')}`,
+      `/group_copy ${codeHtml('on|off')} — also save text-only posts (owner)`,
+      `/topic_link ${codeHtml('<community_id> [target]')} — clone this topic (run inside it)`,
+      `/topic_list · /topic_unlink ${codeHtml('<thread_id>')} · /topic_target ${codeHtml('<thread_id> <target>')}`,
       '',
        `${boldHtml('Backfill OLD history')} ${italicHtml('(userbot mode)')}`,
        `${boldHtml('Bot mode (default)')} ${italicHtml('uses the Telegram Bot API: link a channel and new posts are indexed automatically. It never needs a session string and cannot read messages from before the webhook was linked.')}`,
@@ -7611,60 +7624,73 @@ async function indexChannelPost(msg, binding, token, env) {
   if (!binding?.community_id) return;
   // Anonymous source — commands typed in a channel are never executed.
   if (String(msg.text || '').trim().startsWith('/')) return;
-  const communityId = binding.community_id;
-  const channelTitle = msg.sender_chat?.title || msg.chat?.title || 'channel';
-  const text = (msg.text || msg.caption || '').trim();
   await ensureBotBindingColumns(env);
 
   // Rank-aware target: GOD chose where this channel lands.
-  // 'community' (default) | 'personal' (linking GOD's brain) | 'both'.
   const target = CHANNEL_TARGETS.has(binding.channel_target) ? binding.channel_target : 'community';
   const personalOwner = target === 'community' ? null : String(binding.created_by || binding.user_id || '');
-  if (target !== 'community' && !personalOwner) {
-    console.warn(`channel ${channelTitle}: target=${target} but no linking GOD user — falling back to community`);
-  }
-  const sinks = [];
-  if (target === 'community' || target === 'both' || !personalOwner) sinks.push('community');
-  if ((target === 'personal' || target === 'both') && personalOwner) sinks.push('personal');
+  const sinks = sinkTargetsFor(target, personalOwner);
+  await capturePostIntoSinks(env, sinks, {
+    msg, token,
+    communityId: binding.community_id,
+    personalOwner,
+    channelTitle: msg.sender_chat?.title || msg.chat?.title || 'channel',
+  });
+}
 
+/**
+ * Where should a full-copy post land? GOD's chosen target resolved to sink
+ * list. Falls back to community when a personal target has no linking user.
+ */
+function sinkTargetsFor(target, personalOwner) {
+  const sinks = [];
+  if (target === 'personal' && personalOwner) sinks.push('personal');
+  else if (target === 'both' && personalOwner) sinks.push('personal', 'community');
+  else sinks.push('community');
+  return sinks;
+}
+
+/**
+ * Full-copy one Telegram post into every sink: links, documents
+ * (pdf/docx/epub/md/…), and text-only announcements as markdown. Used by
+ * channels, forum topics, and copy-mode groups. Dedupe is per-sink.
+ */
+async function capturePostIntoSinks(env, sinks, ctx) {
+  const { msg, token, communityId, personalOwner, channelTitle } = ctx;
+  const text = String(msg.text || msg.caption || '').trim();
   const urls = [...new Set(extractUrlsFromTelegramMessage(msg, { includeReply: false }))];
   const doc = msg.document;
 
   for (const sink of sinks) {
     try {
       if (sink === 'personal') {
-        // Documents
+        if (!personalOwner) continue;
         if (doc && doc.file_id) {
           const filename = doc.file_name || 'document.txt';
           const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
-          if (DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) {
-            if (Number(doc.file_size || 0) > CONVERT_SOURCE_MAX_BYTES) {
-              console.warn(`channel doc skipped (${channelTitle}, personal): exceeds limit`);
-            } else {
-              const fileInfo = await telegramApi(token, 'getFile', { file_id: doc.file_id });
-              if (fileInfo?.ok && fileInfo.result?.file_path) {
-                const fileRes = await fetchWithTimeout(`${TG_API_BASE}/file/bot${token}/${fileInfo.result.file_path}`, { env, redirect: 'error', allowPrivate: true }, 60_000);
-                if (fileRes.ok) {
-                  const r = await savePersonalIndexedDocument(env, personalOwner, filename, ext, new Uint8Array(await fileRes.arrayBuffer()), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id });
-                  if (r && r.error) console.warn(`channel doc skipped (${channelTitle}, personal): ${r.error}`);
-                }
+          if ((DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) && Number(doc.file_size || 0) <= CONVERT_SOURCE_MAX_BYTES) {
+            const fileInfo = await telegramApi(token, 'getFile', { file_id: doc.file_id });
+            if (fileInfo?.ok && fileInfo.result?.file_path) {
+              const fileRes = await fetchWithTimeout(`${TG_API_BASE}/file/bot${token}/${fileInfo.result.file_path}`, { env, redirect: 'error', allowPrivate: true }, 60_000);
+              if (fileRes.ok) {
+                const r = await savePersonalIndexedDocument(env, personalOwner, filename, ext, new Uint8Array(await fileRes.arrayBuffer()), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id });
+                if (r && r.error) console.warn(`post doc skipped (${channelTitle}, personal): ${r.error}`);
               }
             }
           }
         }
         const savedP = await savePersonalIndexedLinks(env, personalOwner, urls, channelTitle, text);
-        if (savedP) console.log(`channel ${channelTitle} → personal: indexed ${savedP} link(s)`);
-        // Text-only announcements
+        if (savedP) console.log(`${channelTitle} → personal: indexed ${savedP} link(s)`);
         if (!savedP && !doc && text.length >= 80) {
           const dateStr = msg.date ? new Date(msg.date * 1000).toISOString().slice(0, 10) : '';
-          const safeName = String(channelTitle).replace(/[^\w-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'channel';
+          const safeName = String(channelTitle).replace(/[^\w-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'chat';
           const md = `# ${channelTitle}${dateStr ? ` — ${dateStr}` : ''}\n\n${text}`;
           await savePersonalIndexedDocument(env, personalOwner, `${safeName}_${msg.message_id}.md`, 'md', new TextEncoder().encode(md), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id });
         }
         continue;
       }
 
-      // community sink (existing behavior)
+      // community sink
       await ensureDocumentsTable(env);
       if (doc && doc.file_id) {
         try {
@@ -7672,41 +7698,59 @@ async function indexChannelPost(msg, binding, token, env) {
           const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
           if (DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) {
             if (Number(doc.file_size || 0) > CONVERT_SOURCE_MAX_BYTES) {
-              console.warn(`channel doc skipped (${channelTitle}): exceeds ${CONVERT_SOURCE_MAX_BYTES} bytes`);
+              console.warn(`post doc skipped (${channelTitle}): exceeds ${CONVERT_SOURCE_MAX_BYTES} bytes`);
             } else {
               const fileInfo = await telegramApi(token, 'getFile', { file_id: doc.file_id });
               if (fileInfo?.ok && fileInfo.result?.file_path) {
                 const fileRes = await fetchWithTimeout(`${TG_API_BASE}/file/bot${token}/${fileInfo.result.file_path}`, { env, redirect: 'error', allowPrivate: true }, 60_000);
                 if (fileRes.ok) {
                   const r = await saveIndexedDocument(env, communityId, filename, ext, new Uint8Array(await fileRes.arrayBuffer()), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id });
-                  if (r && r.error) console.warn(`channel doc skipped (${channelTitle}): ${r.error}`);
+                  if (r && r.error) console.warn(`post doc skipped (${channelTitle}): ${r.error}`);
                 }
               }
             }
           }
         } catch (e) {
-          console.error('channel doc index failed', e?.message || e);
+          console.error('post doc index failed', e?.message || e);
         }
       }
 
       const saved = await saveIndexedLinks(env, communityId, urls, channelTitle, text, 'channel');
-      if (saved) console.log(`channel ${channelTitle}: indexed ${saved} link(s)`);
+      if (saved) console.log(`${channelTitle}: indexed ${saved} link(s)`);
 
       if (!saved && !doc && text.length >= 80) {
         try {
           const dateStr = msg.date ? new Date(msg.date * 1000).toISOString().slice(0, 10) : '';
-          const safeName = String(channelTitle).replace(/[^\w-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'channel';
+          const safeName = String(channelTitle).replace(/[^\w-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'chat';
           const filename = `${safeName}_${msg.message_id}.md`;
           const md = `# ${channelTitle}${dateStr ? ` — ${dateStr}` : ''}\n\n${text}`;
           await saveIndexedDocument(env, communityId, filename, 'md', new TextEncoder().encode(md), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id });
         } catch (e) {
-          console.error('channel text post index failed', e?.message || e);
+          console.error('post text index failed', e?.message || e);
         }
       }
     } catch (e) {
-      console.error(`channel index failed (${sink})`, e?.message || e);
+      console.error(`capture failed (${sink})`, e?.message || e);
     }
   }
+}
+
+// ---- Forum-topic bindings: clone specific topics, rank-aware targets ----
+async function ensureTopicBindingTable(env) {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS telegram_topic_bindings (
+       id TEXT PRIMARY KEY,
+       chat_id TEXT NOT NULL,
+       thread_id TEXT NOT NULL,
+       community_id TEXT NOT NULL,
+       target TEXT NOT NULL DEFAULT 'community',
+       created_by TEXT,
+       created_at BIGINT NOT NULL
+     )`
+  ).run();
+  await env.DB.prepare(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_topic_bind_chat_thread ON telegram_topic_bindings(chat_id, thread_id)'
+  ).run().catch(() => {});
 }
 
 /** Shared by channel indexing and history backfill. Returns {error?} or {saved} or null on skip. */
@@ -7954,7 +7998,11 @@ async function runHistoryIndexJob(env, job, token) {
       if (!row || row.status === 'stopping') { await patch({ status: 'stopped' }); log('stopped'); break; }
       let messages;
       try {
-        messages = await client.getMessages(job.chat_id, { limit: INDEX_BATCH, offsetId });
+        messages = await client.getMessages(job.chat_id, {
+          limit: INDEX_BATCH,
+          offsetId,
+          ...(job.thread_id ? { replyTo: Number(job.thread_id) } : {})
+        });
       } catch (e) {
         if (e && typeof e.seconds === 'number') { // FloodWaitError
           log(`flood-wait ${e.seconds}s — sleeping`);
@@ -8233,6 +8281,42 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   const isCommOwner = userRank === 'owner' || isGod;
   const isCommAdmin = userRank === 'admin' || isCommOwner;
   const isMemberPlus = rankAtLeast(userRank, 'member');
+
+  // ---- Full-copy indexing for forum topics & copy-mode groups ----
+  // A linked topic (telegram_topic_bindings) or a group with copy_text=1 gets
+  // the channel treatment: links, documents, and text-only posts, routed by
+  // the GOD-chosen target. Runs in background; the normal dump path below is
+  // untouched (DB-level dedupe prevents double saves).
+  const isGroupChat0 = String(msg.chat?.type || '').includes('group') || chatId.startsWith('-');
+  if (isGroupChat0 && !(String(msg.text || msg.caption || '').trim().startsWith('/'))) {
+    try {
+      await ensureBotBindingColumns(env);
+      await ensureTopicBindingTable(env);
+      const threadId0 = msg.message_thread_id != null ? String(msg.message_thread_id) : null;
+      let fullCopy = null;
+      if (threadId0) {
+        const tb = await env.DB.prepare(
+          'SELECT * FROM telegram_topic_bindings WHERE chat_id = ? AND thread_id = ?'
+        ).bind(chatId, threadId0).first();
+        if (tb) fullCopy = { communityId: tb.community_id, target: tb.target, owner: tb.created_by, label: `topic ${threadId0}` };
+      }
+      if (!fullCopy && Number(binding?.copy_text || 0) === 1 && binding?.community_id) {
+        fullCopy = { communityId: binding.community_id, target: binding.channel_target || 'community', owner: binding.created_by, label: 'group copy' };
+      }
+      if (fullCopy) {
+        const personalOwner = fullCopy.target === 'community' ? null : String(fullCopy.owner || '');
+        const sinks = sinkTargetsFor(fullCopy.target, personalOwner);
+        runInBackground(env, capturePostIntoSinks(env, sinks, {
+          msg, token,
+          communityId: fullCopy.communityId,
+          personalOwner,
+          channelTitle: `${msg.chat?.title || 'group'}${threadId0 ? ` · #${threadId0}` : ''}`,
+        }));
+      }
+    } catch (e) {
+      console.error('full-copy hook failed', e?.message || e);
+    }
+  }
 
   // ---- Document/file handling ----
   // When a user sends a .md or supported file, save it to the active scope.
@@ -8741,6 +8825,159 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
+   // ---- /group_copy — GOD toggles full-copy (text posts) for this group ----
+   if (cmd === '/group_copy' || cmd === '/groupcopy') {
+     if (!binding?.community_id) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Not a linked community group. ${codeHtml('/community_verify')} first.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!isGod && !(await ensureOwnerOrAdmin(binding.community_id, athenaUser?.id || '', env))) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const arg = (parts[1] || '').trim().toLowerCase();
+     await ensureBotBindingColumns(env);
+     if (arg === 'on' || arg === 'off') {
+       const val = arg === 'on' ? 1 : 0;
+       await env.DB.prepare('UPDATE community_bots SET copy_text = ? WHERE id = ?').bind(val, binding.id).run();
+       await sendTelegramFormatted(token, chatId,
+         `${boldHtml('✅')} Group full-copy ${arg === 'on' ? 'ON' : 'OFF'}.` +
+         (arg === 'on' ? `\n${italicHtml('Text-only posts are now saved too. Target:')} ${codeHtml(binding.channel_target || 'community')} ${italicHtml('(change with /channel_target)')}` : ''),
+         forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const cur = Number(binding.copy_text || 0) === 1;
+     await sendTelegramFormatted(token, chatId,
+       `${boldHtml('Group full-copy:')} ${cur ? 'ON' : 'OFF'}\n${codeHtml('/group_copy on')} — also save text-only posts\n${codeHtml('/group_copy off')} — links & documents only`,
+       forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /topic_link — clone a specific forum topic into the brain ----
+   if (cmd === '/topic_link' || cmd === '/topiclink') {
+     if (!msg.is_topic_message || msg.message_thread_id == null) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Use ${codeHtml('/topic_link')} inside the forum topic you want to clone.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!athenaUser) {
+       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const communityIdArg = (parts[1] || '').trim();
+     const targetArg = (parts[2] || '').trim().toLowerCase();
+     if (!communityIdArg) {
+       await sendTelegramFormatted(token, chatId,
+         `Usage: ${codeHtml('/topic_link <community_id> [community|personal|both]')}\n${italicHtml('Run inside the topic. personal/both are GOD rank only.')}`,
+         forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (targetArg && !CHANNEL_TARGETS.has(targetArg)) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Target must be ${codeHtml('community')}, ${codeHtml('personal')} or ${codeHtml('both')}.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if ((targetArg === 'personal' || targetArg === 'both') && !isGod) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} ${codeHtml('personal')}/${codeHtml('both')} targets are GOD rank only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!(await ensureOwnerOrAdmin(communityIdArg, athenaUser.id, env)) && !isGod) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const community = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityIdArg).first();
+     if (!community) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(communityIdArg)} not found.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await ensureTopicBindingTable(env);
+     const threadIdStr = String(msg.message_thread_id);
+     const existing = await env.DB.prepare(
+       'SELECT id FROM telegram_topic_bindings WHERE chat_id = ? AND thread_id = ?'
+     ).bind(chatId, threadIdStr).first();
+     if (existing) {
+       await env.DB.prepare('UPDATE telegram_topic_bindings SET community_id = ?, target = COALESCE(NULLIF(?, \'\'), target), created_by = ? WHERE id = ?')
+         .bind(communityIdArg, targetArg, athenaUser.id, existing.id).run();
+     } else {
+       await env.DB.prepare(
+         `INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`
+       ).bind('tb_' + Date.now().toString(36) + '_' + randomToken().slice(0, 5), chatId, threadIdStr, communityIdArg, targetArg || 'community', athenaUser.id, Date.now()).run();
+     }
+     // Backfill pointer for this topic
+     await sendTelegramFormatted(token, chatId, [
+       `${boldHtml('✅')} Topic ${codeHtml('#' + threadIdStr)} linked to ${boldHtml(escHtml(community.name || communityIdArg))} · target ${codeHtml(targetArg || 'community')}.`,
+       `${italicHtml('New posts in this topic are copied automatically (links, files, text).')}`,
+       `History: ${codeHtml('/index_start <community_id> <chat_id> <api_id> <api_hash> <session> ' + threadIdStr)} ${italicHtml('(last arg = thread)')}`,
+       `Manage: ${codeHtml('/topic_target ' + threadIdStr + ' <target>')} · ${codeHtml('/topic_unlink ' + threadIdStr)}`
+     ].join('\n'), forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /topic_unlink ----
+   if (cmd === '/topic_unlink' || cmd === '/topicunlink') {
+     const threadArg = (parts[1] || '').trim() || (msg.message_thread_id != null ? String(msg.message_thread_id) : '');
+     if (!threadArg) {
+       await sendTelegramFormatted(token, chatId, `Usage: ${codeHtml('/topic_unlink <thread_id>')}`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await ensureTopicBindingTable(env);
+     const row = await env.DB.prepare(
+       'SELECT * FROM telegram_topic_bindings WHERE chat_id = ? AND thread_id = ?'
+     ).bind(chatId, threadArg).first();
+     if (!row) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No linked topic ${codeHtml('#' + threadArg)} in this group.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!(await ensureOwnerOrAdmin(row.community_id, athenaUser?.id || '', env)) && !isGod) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await env.DB.prepare('DELETE FROM telegram_topic_bindings WHERE id = ?').bind(row.id).run();
+     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Topic ${codeHtml('#' + threadArg)} unlinked — new posts are no longer cloned.`, forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /topic_list ----
+   if (cmd === '/topic_list' || cmd === '/topiclist') {
+     await ensureTopicBindingTable(env);
+     const { results } = await env.DB.prepare(
+       'SELECT thread_id, community_id, target FROM telegram_topic_bindings WHERE chat_id = ? ORDER BY thread_id'
+     ).bind(chatId).all();
+     if (!results?.length) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No topics linked in this group yet. ${codeHtml('/topic_link <community_id>')} inside a topic.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const lines = results.map((r) => `• ${codeHtml('#' + r.thread_id)} → ${escHtml(r.community_id)} · ${codeHtml(r.target || 'community')}`);
+     await sendTelegramFormatted(token, chatId, `${boldHtml('🗂 Linked topics in this group')}\n\n${lines.join('\n')}`, forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /topic_target — GOD switches where a linked topic lands ----
+   if (cmd === '/topic_target' || cmd === '/topictarget') {
+     if (!isGod) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const threadArg = (parts[1] || '').trim();
+     const tArg = (parts[2] || '').trim().toLowerCase();
+     if (!threadArg || !CHANNEL_TARGETS.has(tArg)) {
+       await sendTelegramFormatted(token, chatId,
+         `Usage: ${codeHtml('/topic_target <thread_id> <community|personal|both>')}`,
+         forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await ensureTopicBindingTable(env);
+     const row = await env.DB.prepare(
+       'SELECT id FROM telegram_topic_bindings WHERE chat_id = ? AND thread_id = ?'
+     ).bind(chatId, threadArg).first();
+     if (!row) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No linked topic ${codeHtml('#' + threadArg)}.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await env.DB.prepare('UPDATE telegram_topic_bindings SET target = ? WHERE id = ?').bind(tArg, row.id).run();
+     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Topic ${codeHtml('#' + threadArg)} now indexes into: ${codeHtml(tArg)}`, forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
    // ---- /channel_target — GOD switches where a linked channel lands ----
    if (cmd === '/channel_target' || cmd === '/channeltarget') {
      if (!athenaUser) {
@@ -8880,7 +9117,8 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      const usage = [
        `${boldHtml('🗂 History backfill')}`,
        '',
-       `Usage (in bot DM): ${codeHtml('/index_start <community_id> <chat_id> <api_id> <api_hash> <session_string>')}`,
+       `Usage (in bot DM): ${codeHtml('/index_start <community_id> <chat_id> <api_id> <api_hash> <session_string> [thread_id]')}`,
+       `• thread_id — optional; backfill only that forum topic`,
        '',
        `• chat_id — the group/channel to backfill (forward a post to ${linkHtml('https://t.me/userinfobot', '@userinfobot')}; channels are -100…)`,
        '• api_id + api_hash — from my.telegram.org (the app the session belongs to)',
@@ -8893,7 +9131,14 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      const chatIdArg = parts[2] || '';
      const apiIdArg = parts[3] || '';
      const apiHashArg = parts[4] || '';
-     const sessionArg = parts.slice(5).join(' ');
+     // Optional last arg = forum thread id → backfill only that topic.
+     let sessionArg = parts.slice(5).join(' ');
+     let threadArg = '';
+     const threadMatch = sessionArg.match(/\s(-?\d{6,})\s*$/);
+     if (threadMatch) {
+       threadArg = threadMatch[1];
+       sessionArg = sessionArg.slice(0, threadMatch.index).trim();
+     }
      if (!communityIdArg || !chatIdArg || !apiIdArg || !apiHashArg || !sessionArg) {
        await sendTelegramFormatted(token, chatId, usage, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
@@ -8927,12 +9172,13 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        `INSERT INTO telegram_index_sessions (id, user_id, community_id, chat_id, api_id, api_hash_enc, session_enc, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
      ).bind(jobId, athenaUser.id, communityIdArg, chatIdArg, apiIdArg.trim(), apiHashEnc, sessionEnc, Date.now()).run();
+     try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN thread_id TEXT').run(); } catch (_) {}
      await env.DB.prepare(
-       `INSERT INTO index_jobs (id, community_id, chat_id, user_id, status, offset_id, progress_chat_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?)`
-     ).bind(jobId, communityIdArg, chatIdArg, athenaUser.id, chatId, Date.now(), Date.now()).run();
-     runInBackground(env, runHistoryIndexJob(env, { id: jobId, community_id: communityIdArg, chat_id: chatIdArg, offset_id: 0, processed: 0, saved_links: 0, saved_docs: 0, progress_chat_id: chatId }, token));
-     await sendTelegramFormatted(token, chatId, `${boldHtml('▶️')} Backfill started for ${codeHtml(chatIdArg)} → ${boldHtml(escHtml(community.name || communityIdArg))}.\nSession message deleted. I will report progress here. ${codeHtml('/index_stop')} to cancel.`, forumThreadId);
+       `INSERT INTO index_jobs (id, community_id, chat_id, user_id, status, offset_id, progress_chat_id, created_at, updated_at, thread_id)
+        VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?)`
+     ).bind(jobId, communityIdArg, chatIdArg, athenaUser.id, chatId, Date.now(), Date.now(), threadArg || null).run();
+     runInBackground(env, runHistoryIndexJob(env, { id: jobId, community_id: communityIdArg, chat_id: chatIdArg, thread_id: threadArg || null, offset_id: 0, processed: 0, saved_links: 0, saved_docs: 0, progress_chat_id: chatId }, token));
+     await sendTelegramFormatted(token, chatId, `${boldHtml('▶️')} Backfill started for ${codeHtml(chatIdArg)}${threadArg ? ` topic ${codeHtml('#' + threadArg)}` : ''} → ${boldHtml(escHtml(community.name || communityIdArg))}.\nSession message deleted. I will report progress here. ${codeHtml('/index_stop')} to cancel.`, forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 

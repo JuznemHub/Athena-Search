@@ -26,7 +26,9 @@ Athena is a self-hostable bookmark and document archive. Save from the web UI, T
 - Answers questions with retrieval-augmented context and source links.
 - Supports OpenAI-compatible gateways, Anthropic, OpenRouter, OpenCode Zen, Groq, and local routers such as [OmniRoute](https://github.com/df4p/omniroute).
 - Provides personal and community brains with rank-aware permissions, voting, reports, and Telegram group membership gates.
-- Includes a Telegram bot, channel indexing, optional history backfill, and a zero-build terminal UI.
+- Clones Telegram channels, groups, and individual forum topics into your brain — links, documents (pdf/epub/docx/…), and text posts — with GOD-rank targets (community / personal / both) and one-time history backfill.
+- Grounds every AI answer in retrieved sources and rejects responses containing URLs outside your saved set.
+- Includes a zero-build terminal UI for bookmark import and MCP-powered AI sessions.
 
 ## Quick start
 
@@ -72,8 +74,9 @@ Text uploads work in the Worker runtime. Binary conversion needs the self-hosted
 | Telegram bot | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` | Bot API ingestion, commands, and webhooks. |
 | Telegram login | `TELEGRAM_CLIENT_ID`, `TELEGRAM_CLIENT_SECRET` | OAuth/Mini App login. |
 | Session history | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `STORAGE_KEY` | Optional self-hosted GramJS backfill; never expose these to the browser. |
-| Search index | `MEILI_URL`, `MEILI_MASTER_KEY`, `MEILI_INDEX` | Optional; defaults to index `athena`. |
+| Search index | `MEILI_URL`, `MEILI_MASTER_KEY`, `MEILI_INDEX` | Optional Meilisearch accelerator; defaults to index `athena`. |
 | JS scraping | `KAGE_BIN`, `KAGE_CHROME` | Optional [Kage](https://github.com/tamnd/kage) + Chrome/Chromium fallback. |
+| Local Bot API | `TELEGRAM_API_BASE` | Optional self-hosted telegram-bot-api; lifts file cap 20 MB → 2 GB. |
 | AI | `OPENROUTER_API_KEY` or settings UI | Credentials are stored server-side and never returned to normal users. |
 
 ## Search and AI
@@ -107,14 +110,85 @@ Local HTTP endpoints are allowed only by the self-hosted server and are restrict
 
 Bot API mode is the default and safest mode:
 
-- no user session string is required;
-- the bot indexes new messages, links, and supported documents it can see;
-- a channel must be linked with `/channel_link <community_id> <channel_id>`;
-- the bot must have the required admin/read permissions in that channel.
+- no user session string is required for live indexing;
+- links, captions, documents (pdf/docx/epub/md/…), and text-only announcements are captured;
+- video/audio/apk/archives are skipped by design;
+- every insert is deduplicated — canonical URL hash per brain (community or personal), plus `chat_id + message_id` identity for channel documents, so replays and cross-posts never create duplicates.
 
 Session mode is optional and self-host-only. It uses a Telegram user session to backfill older history with `/index_start`; the encrypted session is kept only for the job and removed when the job finishes or is stopped. Treat a session string like a password: it can grant access to the Telegram account that created it.
 
-Athena accepts compatible Telethon/Pyrogram-style StringSession values for this bridge. It does not vendor or execute the full [Ultroid](https://github.com/TeamUltroid/Ultroid) userbot; Ultroid can remain a separate session generator/client if you already use it.
+Athena accepts compatible Telethon/Pyrogram-style StringSession values for this bridge. It does not vendor or execute the full [Ultroid](https://github.com/TeamUltroid/Ultroid) userbot; Ultroid can remain a separate session generator/client if you already use one.
+
+### Channels: full-copy indexing with rank-aware targets
+
+Link any public or private channel; from then on every post is cloned into a brain automatically.
+
+```text
+/channel_link <community_id> <channel_id> [community|personal|both]
+/channel_target <channel_id> <community|personal|both>   # GOD: switch later
+/channel_unlink <channel_id>
+```
+
+| Target | Who can set | Where content lands |
+| --- | --- | --- |
+| `community` (default) | owner/GOD | the linked community brain |
+| `personal` | **GOD only** | the linking GOD's personal brain |
+| `both` | **GOD only** | both brains at once |
+
+Requirements: the bot must be an **admin** of the channel. History backfill is separate (see below).
+
+### Groups and forum topics
+
+Groups work out of the box once bound with `/community_verify`: member links and supported files are saved to the community brain automatically (the bot must be able to read the chat — make it admin, or disable privacy mode via @BotFather).
+
+**Full-copy mode** also captures text-only announcements:
+
+```text
+/group_copy on    # owner/GOD, inside the group
+/group_copy off
+```
+
+**Forum topics** can be cloned individually — each topic gets its own binding and target:
+
+```text
+/topic_link <community_id> [community|personal|both]   # run inside the topic
+/topic_list                                            # linked topics in this group
+/topic_target <thread_id> <community|personal|both>    # GOD: switch target
+/topic_unlink <thread_id>
+```
+
+New posts in a linked topic are indexed in real time; existing topic history is pulled in by the backfill below (pass the thread id as the last argument).
+
+### History backfill (one-time, self-hosted)
+
+Bots cannot read old messages. To clone everything already in a channel/group/topic, run a one-time backfill with your own session:
+
+```bash
+node scripts/gen-session.js   # on the server — prints a gramjs StringSession
+```
+
+Then in a **private bot DM**:
+
+```text
+/index_start <community_id> <chat_id> <api_id> <api_hash> <session_string> [thread_id]
+```
+
+- pass `thread_id` to clone a single forum topic instead of the whole chat;
+- pacing honors Telegram flood-waits; progress every 300 messages (`/index_status`);
+- `/index_stop` cancels; jobs resume from their cursor;
+- the session is AES-GCM encrypted at rest (`STORAGE_KEY`) and auto-deleted when the job completes.
+
+### Local Bot API server (2 GB files)
+
+The cloud Bot API caps downloads at 20 MB. Run the bundled local server to lift it to 2 GB for live indexing and backups:
+
+```bash
+docker compose -f server/docker-compose.bot-api.yml up -d
+# .env:
+TELEGRAM_API_BASE=http://127.0.0.1:8081
+```
+
+Then move the webhook once: call `logOut` on the cloud API, restart Athena, and `setWebhook` against the local base (Athena's `telegramApi` calls follow `TELEGRAM_API_BASE` automatically; loopback/private addresses only).
 
 ### Exporting into the bot
 
@@ -128,16 +202,36 @@ Useful commands:
 | `/search <query>` | Search only matching links/documents with page buttons. |
 | `/ai <question>` | Ask the configured model over the active brain. |
 | `/export` | Explain bot-mode export and optional session-history import. |
-| `/channel_link <community_id> <channel_id>` | Index new channel posts into a community. |
+| `/channel_link <community_id> <channel_id> [target]` | Clone a channel; GOD may pick `personal`/`both`. |
+| `/channel_target <channel_id> <target>` | GOD: switch where a channel lands. |
 | `/channel_unlink <channel_id>` | Stop channel indexing. |
+| `/group_copy on\|off` | Owner: full-copy text posts for this group. |
+| `/topic_link <community_id> [target]` | Clone the forum topic you are in. |
+| `/topic_list` / `/topic_target` / `/topic_unlink` | Manage topic bindings. |
 | `/index` | Show indexing status and available backfill actions. |
-| `/index_start ...` | Start optional self-hosted history backfill. |
+| `/index_start ...` | Start optional self-hosted history backfill (optional `thread_id`). |
 | `/index_status` / `/index_stop` | Inspect or cancel a backfill. |
 | `/community_join <id>` | Join a community after joining its Telegram group. |
 | `/personal` / `/community` | Switch the GOD user’s dump target. |
 | `/delete <url>` | Delete a link, or reply to a saved link with `/delete`. |
 
 `/search` is deliberately scoped: every page contains only results matching the query, and **Next page** loads the next matching slice before the close button. Unrelated recent bookmarks are never appended to the result list.
+
+## Search index (Meilisearch, optional)
+
+PostgreSQL is always the source of truth. For large brains, add [Meilisearch](https://www.meilisearch.com/) as a derived index — search and AI retrieval get sub-second candidate finding while PostgreSQL hydrates the authoritative rows:
+
+```dotenv
+MEILI_URL=http://127.0.0.1:7700
+MEILI_MASTER_KEY=change-me-strong
+MEILI_INDEX=athena
+```
+
+Writes mark scopes dirty and re-sync in the background; if Meili is slow, warming, or down, Athena silently falls back to complete PostgreSQL search. AI retrieval reports which engine served a query (`meilisearch+postgres` vs `postgres`).
+
+## Duplicate protection
+
+Every save path — website, bot DM, group, channel, topic, TUI batch — shares one identity rule: URLs are canonicalized (host lowercased, `www.` stripped, trailing slashes and fragments dropped) and hashed per brain. The database enforces uniqueness; the app reports friendly "already added" replies instead of errors. Channel documents additionally dedupe on `chat_id + message_id`, so Telegram redeliveries never double-store.
 
 ## Scraping
 
