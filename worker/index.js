@@ -9932,33 +9932,59 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
-   // ---- /userbot_status — accounts, follows, live counters, recent errors ----
-   if (cmd === '/userbot_status' || cmd === '/userbotstatus') {
+   // ---- /userbot_status — the one dashboard: accounts, channels, live + backfill status ----
+   if (cmd === '/userbot_status' || cmd === '/userbotstatus' || cmd === '/indexing') {
      if (!isSelfHosted(env)) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Userbot mode is self-host only.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      await ensureUserbotTables(env);
+     await ensureIndexTables(env);
      const { results: accounts } = await env.DB.prepare('SELECT label, enabled, last_error FROM userbot_accounts ORDER BY label').all();
      const { results: follows } = await env.DB.prepare('SELECT chat_id, label, community_id, target FROM userbot_follows ORDER BY label, chat_id').all();
+     const { results: jobs } = await env.DB.prepare(
+       'SELECT id, chat_id, status, processed, saved_links, saved_docs, error, updated_at FROM index_jobs ORDER BY updated_at DESC'
+     ).all();
+
      const accLines = (accounts || []).map((a) => {
        const live = USERBOT_ACCOUNTS.has(a.label) ? `🟢 connected (${Math.round((Date.now() - USERBOT_ACCOUNTS.get(a.label).startedAt) / 60000)}m)` : '🔴 stored, disconnected';
        return `• ${codeHtml(a.label)} — ${live}${a.last_error ? ` · ${escHtml(a.last_error)}` : ''}`;
      });
-     const followLines = (follows || []).map((f) => {
-       const s = USERBOT_STATS.get(f.chat_id);
-       const live = s ? ` · ${s.msgs} msgs · ${s.links} links · ${s.docs} docs` : '';
-       return `• [${codeHtml(f.label)}] ${codeHtml(f.chat_id)} → ${escHtml(f.community_id)} · ${codeHtml(f.target || 'community')}${live}`;
-     });
+
+     const jobByChat = new Map();
+     for (const j of jobs || []) {
+       const k = normalizeTgChatId(j.chat_id);
+       if (!jobByChat.has(k)) jobByChat.set(k, j);
+     }
+     const followLines = [];
+     for (const f of follows || []) {
+       let name = f.chat_id;
+       try {
+         const ch = await telegramApi(token, 'getChat', { chat_id: f.chat_id });
+         if (ch?.ok && (ch.result?.title || ch.result?.username)) name = ch.result.title ? `${ch.result.title}` : `@${ch.result.username}`;
+       } catch (_) {}
+       const s = USERBOT_STATS.get(f.chat_id) || USERBOT_STATS.get(String(Number(f.chat_id))) || {};
+       const liveBits = [`msgs ${s.msgs || 0}`, `links ${s.links || 0}`, `docs ${s.docs || 0}`];
+       if (s.lastAt) liveBits.push(`last ${Math.max(1, Math.round((Date.now() - s.lastAt) / 60000))}m ago`);
+       const jb = jobByChat.get(normalizeTgChatId(f.chat_id));
+       const bf = jb ? `backfill: ${jb.status}${jb.processed ? ` (${jb.processed} msgs)` : ''}` : 'backfill: not run';
+       followLines.push(
+         `• ${boldHtml(escHtml(name))} ${italicHtml(`[${f.target || 'community'}]`)}\n` +
+         `  live: ${liveBits.join(' · ')}\n` +
+         `  ${bf}${jb?.error ? ` — ${escHtml(String(jb.error).slice(0, 80))}` : ''}`
+       );
+     }
+
      let errLines = [];
      try {
        const { results: errs } = await env.DB.prepare('SELECT t, label, chat, error FROM userbot_errors ORDER BY t DESC LIMIT 5').all();
        errLines = (errs || []).map((e) => `• ${new Date(e.t).toISOString().slice(11, 19)} [${escHtml(e.label || '-')}] ${escHtml(String(e.error).slice(0, 110))}`);
      } catch (_) {}
+
      await sendTelegramFormatted(token, chatId,
-       `${boldHtml('🤖 Userbots')}\n${accLines.length ? accLines.join('\n') : italicHtml('none — /userbot_add <label> <api_id> <api_hash> <session>')}` +
-       `\n\n${boldHtml('Followed chats')}\n${followLines.length ? followLines.join('\n') : italicHtml('none — /follow inside a chat')}` +
-       (errLines.length ? `\n\n${boldHtml('Recent errors')}\n${errLines.join('\n')}` : ''),
+       `${boldHtml('🤖 Accounts')}\n${accLines.length ? accLines.join('\n') : italicHtml('none — /userbot_add')}` +
+       `\n\n${boldHtml('📡 Channels/chats being indexed')}\n${followLines.length ? followLines.join('\n\n') : italicHtml('none — run /clone inside a chat, or /clone <chat_id> in DM')}` +
+       (errLines.length ? `\n\n${boldHtml('⚠️ Recent errors')}\n${errLines.join('\n')}` : ''),
        forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
