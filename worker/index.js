@@ -8888,12 +8888,21 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Invalid channel ID (use -100…).`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
+     // Userbot mode makes this command unnecessary — point the way.
+     await ensureUserbotTables(env);
+     const ubCount = (await env.DB.prepare('SELECT COUNT(*) AS n FROM userbot_accounts WHERE enabled = 1').first())?.n || 0;
+     if (ubCount > 0) {
+       await sendTelegramFormatted(token, chatId,
+         `${boldHtml('💡')} You have a userbot connected — no bot-admin needed.\nRun in my DM: ${codeHtml('/clone ' + cid + (targetArg ? ' ' + targetArg : ''))}\n${italicHtml('(or forward any post from that channel and reply with /clone)')}`,
+         forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
      // Validate: channel exists, bot is admin — with THIS bot's token.
      const me = await telegramApi(token, 'getMe', {});
      const botId = me?.result?.id;
      const chk = await telegramApi(token, 'getChat', { chat_id: cid });
      if (!chk?.ok || chk?.result?.type !== 'channel') {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} ${codeHtml(cid)} is not a reachable channel for this bot — add the bot as ADMIN first.`, forumThreadId);
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} ${codeHtml(cid)} is not a reachable channel for this bot — add the bot as ADMIN first.\n${italicHtml('Or connect a userbot account (/userbot_add) and use /clone — no admin needed.')}`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      const member = botId ? await telegramApi(token, 'getChatMember', { chat_id: cid, user_id: botId }) : null;
