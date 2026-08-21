@@ -13193,7 +13193,6 @@ async function ensureUserbotTables(env) {
 }
 
 const USERBOT_ACCOUNTS = new Map(); // label -> { client, startedAt }
-let gramjsEvents = null; // telegram/events module cache
 const USERBOT_STARTING = new Set();
 const USERBOT_STATS = new Map(); // chat_id -> {msgs, links, docs, lastAt}
 
@@ -13379,12 +13378,17 @@ export async function startUserbotAccount(env, label = 'main') {
         else await userbotLogError(env, label, chatId, e);
       }
     };
-    try {
-      const events = gramjsEvents ||= await import('telegram/events/index.js');
-      client.addEventHandler(handler, new events.NewMessage({}));
-    } catch (_) {
-      client.addEventHandler(handler); // fallback: raw updates
-    }
+    // Raw handler (no event filter): proven to receive channel posts for this
+    // session. A keepalive ping keeps Telegram's update stream warm — without
+    // periodic requests the socket can go quiet and stop delivering updates.
+    client.addEventHandler(handler);
+    const ping = async () => {
+      try { await client.getDialogs({ limit: 1 }); } catch (_) {}
+    };
+    ping();
+    const keepalive = setInterval(ping, 4 * 60_000);
+    keepalive.unref?.();
+    acc.keepalive = keepalive;
     USERBOT_ACCOUNTS.set(label, { client, startedAt: Date.now() });
     console.log(`[userbot:${label}] connected`);
     return { ok: true };
@@ -13408,7 +13412,7 @@ export async function startUserbotDaemon(env) {
 
 async function stopUserbotAccount(env, label, deleteRow = true) {
   const acc = USERBOT_ACCOUNTS.get(label);
-  if (acc) { try { await acc.client.disconnect(); } catch (_) {} USERBOT_ACCOUNTS.delete(label); }
+  if (acc) { try { await acc.client.disconnect(); } catch (_) {} if (acc.keepalive) clearInterval(acc.keepalive); USERBOT_ACCOUNTS.delete(label); }
   if (deleteRow) {
     await env.DB.prepare('DELETE FROM userbot_accounts WHERE label = ?').bind(label).run();
     await env.DB.prepare('DELETE FROM userbot_follows WHERE label = ?').bind(label).run();
