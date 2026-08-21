@@ -307,6 +307,32 @@ npm run test:unit
 
 The repository’s CI also runs the TUI test suite and secret scanning. PostgreSQL is required for runtime integration checks; the unit retrieval test is self-contained.
 
+## Note on Discord
+
+You will see a **Discord login** option in the UI. It is **not tested and not supported yet** — do not use it. Telegram login is the supported auth path.
+
+## Roadmap
+
+- [ ] **RSS support** — live indexing of RSS/Atom feeds with change tracking: new items land automatically, and edits/removals on the source site are reflected (content updated or removed from the DB) instead of leaving stale copies.
+- [ ] **Android app** — fully based on `athena-tui`: the same menu-driven flows (login, connect instance, scan/dump bookmarks, search, AI) wrapped in a native mobile shell, sharing the TUI's zero-dependency logic.
+- [ ] **Frontend polish** — further beautification of the web UI: richer result cards, smoother transitions, better mobile ergonomics, and more theme refinement.
+- [ ] **Extensions (as needed)** — browser Web Clipper for one-click saves, and other integrations where they earn their place.
+
+## Credits
+
+Athena stands on the shoulders of these projects — their code and ideas are part of this codebase:
+
+- [OpenCode](https://github.com/anomalyco/opencode) — the CLI agent harness; Athena's MCP integration and TUI advanced mode build on its patterns.
+- [Kage](https://github.com/tamnd/kage) — headless-Chrome site cloner powering JS-rendered page scraping.
+- [@firecrawl/anydoc](https://github.com/firecrawl/anydoc) — Rust document converter (pdf/docx/pptx/xlsx/odt/rtf/epub → Markdown).
+- [binthere](https://github.com/nxfu/binthere) — the TUI app whose wordmark, box menus, cursor, and spinner `athena-tui` is based on.
+- [gramjs](https://github.com/gram-js/gramjs) — Telegram user-session client for history backfill.
+- [Meilisearch](https://www.meilisearch.com/) — optional derived search index.
+- [pgvector](https://github.com/pgvector/pgvector) — embedding similarity for paragraph-level document search.
+- [aiogram/telegram-bot-api](https://github.com/aiogram/telegram-bot-api) — local Bot API server for 2 GB file support.
+
+**Inspiration:** [Aaron Swartz](https://en.wikipedia.org/wiki/Aaron_Swartz) — his fight for open access to knowledge and his belief that information wants to be free are the reason this project exists. Long live.
+
 ## License
 
 [CC BY-NC 4.0](LICENSE) — attribution required; commercial use requires separate permission.
