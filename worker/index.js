@@ -2750,7 +2750,8 @@ const TELEGRAM_COMMAND_MENU = [
   { command: 'topic_link', description: 'Clone this forum topic into a brain' },
   { command: 'topic_list', description: 'Linked topics in this group' },
   { command: 'topic_target', description: 'GOD: topic → community/personal/both' },
-  { command: 'userbot_connect', description: 'GOD: connect live-clone session' },
+  { command: 'userbot_add', description: 'GOD: add userbot account' },
+  { command: 'userbot_del', description: 'GOD: remove account(s)' },
   { command: 'userbot_follow', description: 'Follow a chat for live cloning' },
   { command: 'userbot_status', description: 'Userbot connection + follows' },
   { command: 'userbot_disconnect', description: 'GOD: stop + delete session' },
@@ -8043,15 +8044,18 @@ async function runHistoryIndexJob(env, job, token) {
     } catch (_) {}
   };
   try {
-    // Session comes from the connected userbot (userbot_state) — one connect
-    // powers live cloning AND every backfill. Legacy per-job sessions removed.
+    // Session comes from the named userbot account (job.userbot_label),
+    // or the first enabled one. One connect powers live cloning AND backfills.
     await ensureUserbotTables(env);
-    const sess = await env.DB.prepare("SELECT * FROM userbot_state WHERE id = 'singleton' AND enabled = 1").first();
+    let sess = null;
+    if (job.userbot_label) sess = await env.DB.prepare('SELECT * FROM userbot_accounts WHERE label = ? AND enabled = 1').bind(job.userbot_label).first().catch(() => null);
+    if (!sess) sess = await env.DB.prepare('SELECT * FROM userbot_accounts WHERE enabled = 1 ORDER BY label LIMIT 1').first();
     if (!sess) {
-      await patch({ status: 'error', error: 'no userbot session — /userbot_connect first' });
-      await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('❌')} No connected session. Run ${codeHtml('/userbot_connect')} once, then retry.`).catch(() => {});
+      await patch({ status: 'error', error: 'no userbot session — /userbot_add first' });
+      await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('❌')} No connected session. Run ${codeHtml('/userbot_add')} once, then retry.`).catch(() => {});
       return;
     }
+    const _ubLabel = sess.label;
     let gramjs;
     try {
       // Non-literal specifier: bundlers must never try to resolve the native
@@ -8070,19 +8074,8 @@ async function runHistoryIndexJob(env, job, token) {
     if (!sessionString || !apiHash) { await patch({ status: 'error', error: 'session decrypt failed (STORAGE_KEY rotated?)' }); return; }
     const client = new TelegramClient(new StringSession(sessionString), Number(sess.api_id) || 0, apiHash, { connectionRetries: 3 });
     await client.connect();
-    // Prime the entity cache — a fresh session cannot resolve raw -100… ids.
-    // Page through dialogs until the target chat is seen (or exhausted).
-    try {
-      const deadline = Date.now() + 90_000;
-      let offsetPeer;
-      while (Date.now() < deadline) {
-        const dialogs = await client.getDialogs({ limit: 200, offsetPeer });
-        if (!dialogs?.length) break;
-        const hit = dialogs.find((d) => String(d.id) === String(BigInt(job.chat_id)));
-        if (hit) break;
-        offsetPeer = dialogs[dialogs.length - 1];
-      }
-    } catch (_) {}
+    // Prime the entity cache — fresh sessions cannot resolve raw -100… ids.
+    await primeEntity(client, job.chat_id);
     let offsetId = job.offset_id || 0;
     let processed = job.processed || 0;
     // Approximate total for the progress bar: latest message id in the chat.
@@ -9299,10 +9292,10 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      }
      if (!legacy) {
        await ensureUserbotTables(env);
-       const st = await env.DB.prepare("SELECT * FROM userbot_state WHERE id = 'singleton' AND enabled = 1").first();
+       const st = await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled = 1 ORDER BY label LIMIT 1').first();
        if (!st) {
          await sendTelegramFormatted(token, chatId,
-           `${boldHtml('🤖')} No userbot session yet. Connect once — after that backfills never ask again:\n${codeHtml('/userbot_connect <api_id> <api_hash> <session_string>')}\nGenerate a session on the server: ${codeHtml('node scripts/gen-session.js')}`,
+           `${boldHtml('🤖')} No userbot session yet. Add one — after that backfills never ask again:\n${codeHtml('/userbot_add <label> <api_id> <api_hash> <session_string>')}\nGenerate a session on the server: ${codeHtml('node scripts/gen-session.js')}`,
            forumThreadId);
          return new Response('OK', { status: 200, headers: corsHeaders });
        }
@@ -9331,18 +9324,20 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
          return new Response('OK', { status: 200, headers: corsHeaders });
        }
        await env.DB.prepare(
-         `INSERT INTO userbot_state (id, api_id, api_hash_enc, session_enc, enabled, updated_at)
-          VALUES ('singleton', ?, ?, ?, 1, ?)
-          ON CONFLICT(id) DO UPDATE SET api_id = excluded.api_id, api_hash_enc = excluded.api_hash_enc,
+         `INSERT INTO userbot_accounts (label, api_id, api_hash_enc, session_enc, enabled, updated_at)
+          VALUES ('main', ?, ?, ?, 1, ?)
+          ON CONFLICT(label) DO UPDATE SET api_id = excluded.api_id, api_hash_enc = excluded.api_hash_enc,
             session_enc = excluded.session_enc, enabled = 1, last_error = NULL, updated_at = excluded.updated_at`
        ).bind(apiIdArg.trim(), apiHashEnc, sessionEnc, Date.now()).run();
+       if (USERBOT_ACCOUNTS.has('main')) { try { await USERBOT_ACCOUNTS.get('main').client.disconnect(); } catch (_) {} USERBOT_ACCOUNTS.delete('main'); }
+       await startUserbotAccount(env, 'main');
      }
      await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg, threadArg, communityName: community.name || communityIdArg });
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
-   // ---- /userbot_connect — GOD: persistent live-clone session (self-host) ----
-   if (cmd === '/userbot_connect' || cmd === '/userbotconnect') {
+   // ---- /userbot_add — GOD: store a named account (multiple allowed) ----
+   if (cmd === '/userbot_add' || cmd === '/userbotadd' || cmd === '/userbot_connect' || cmd === '/userbotconnect') {
      const dmOnly = !chatId.startsWith('-');
      if (!isSelfHosted(env)) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Userbot mode runs on the self-hosted server only.`, forumThreadId);
@@ -9356,15 +9351,16 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Session strings are secrets — DM only.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
-     const apiIdArg = parts[1] || '';
-     const apiHashArg = parts[2] || '';
-     const sessionArg = parts.slice(3).join(' ');
+     const label = (parts[1] || 'main').toLowerCase().replace(/[^\w-]/g, '').slice(0, 24) || 'main';
+     const apiIdArg = parts[2] || '';
+     const apiHashArg = parts[3] || '';
+     const sessionArg = parts.slice(4).join(' ');
      if (!apiIdArg || !apiHashArg || !sessionArg) {
        await ensureUserbotTables(env);
-       const have = await env.DB.prepare("SELECT enabled FROM userbot_state WHERE id = 'singleton'").first();
+       const { results: have } = await env.DB.prepare('SELECT label FROM userbot_accounts ORDER BY label').all();
+       const lines = have?.length ? have.map((h) => `• ${codeHtml(h.label)}`) : ['• none yet'];
        await sendTelegramFormatted(token, chatId,
-         (have ? `${italicHtml('A session is already stored — you do NOT need to connect again.')}\n` : '') +
-         `Usage: ${codeHtml('/userbot_connect <api_id> <api_hash> <session_string>')}\nGenerate a session: ${codeHtml('node scripts/gen-session.js')} on the server.\n${italicHtml('One connect powers live cloning AND all backfills. The account must be a member of the chats you want to follow.')}`,
+         `${boldHtml('🤖 Add a userbot account')}\n${codeHtml('/userbot_add <label> <api_id> <api_hash> <session_string>')}\n\n${boldHtml('Stored accounts:')}\n${lines.join('\n')}\n\n${italicHtml('Generate a session on the server: node scripts/gen-session.js')}\n${italicHtml('One add powers live cloning AND all backfills for that account. The account must be a member of the chats it follows.')}`,
          forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
@@ -9377,18 +9373,53 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      await env.DB.prepare(
-       `INSERT INTO userbot_state (id, api_id, api_hash_enc, session_enc, enabled, updated_at)
-        VALUES ('singleton', ?, ?, ?, 1, ?)
-        ON CONFLICT(id) DO UPDATE SET api_id = excluded.api_id, api_hash_enc = excluded.api_hash_enc,
+       `INSERT INTO userbot_accounts (label, api_id, api_hash_enc, session_enc, enabled, updated_at)
+        VALUES (?, ?, ?, ?, 1, ?)
+        ON CONFLICT(label) DO UPDATE SET api_id = excluded.api_id, api_hash_enc = excluded.api_hash_enc,
           session_enc = excluded.session_enc, enabled = 1, last_error = NULL, updated_at = excluded.updated_at`
-     ).bind(apiIdArg.trim(), apiHashEnc, sessionEnc, Date.now()).run();
-     if (USERBOT?.client) { try { await USERBOT.client.disconnect(); } catch (_) {} USERBOT = null; }
-     const started = await startUserbotDaemon(env);
+     ).bind(label, apiIdArg.trim(), apiHashEnc, sessionEnc, Date.now()).run();
+     if (USERBOT_ACCOUNTS.has(label)) { try { await USERBOT_ACCOUNTS.get(label).client.disconnect(); } catch (_) {} USERBOT_ACCOUNTS.delete(label); }
+     const started = await startUserbotAccount(env, label);
      await sendTelegramFormatted(token, chatId,
        started.ok
-         ? `${boldHtml('✅')} Userbot connected — live cloning active for followed chats.\n${codeHtml('/userbot_follow <community_id> <chat_id> [target]')} to add chats · ${codeHtml('/userbot_disconnect')} to stop + delete session.`
-         : `${boldHtml('❌')} Connect failed: ${escHtml(started.reason || 'unknown')}`,
+         ? `${boldHtml('✅')} Account ${codeHtml(label)} connected.\n${codeHtml('/follow [target]')} inside any chat this account can see · ${codeHtml('/backfill')} for history · ${codeHtml('/userbot_del ' + label)} to remove.`
+         : `${boldHtml('❌')} Connect failed for ${codeHtml(label)}: ${escHtml(started.reason || 'unknown')}`,
        forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /userbot_del — GOD: remove one account or all ----
+   if (cmd === '/userbot_del' || cmd === '/userbotdel') {
+     if (!isGod) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!isSelfHosted(env)) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Userbot mode is self-host only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const target = (parts[1] || '').toLowerCase().trim();
+     await ensureUserbotTables(env);
+     if (!target) {
+       const { results: have } = await env.DB.prepare('SELECT label FROM userbot_accounts ORDER BY label').all();
+       await sendTelegramFormatted(token, chatId,
+         `Usage: ${codeHtml('/userbot_del <label>')} or ${codeHtml('/userbot_del all')}\n${boldHtml('Stored:')} ${have?.length ? have.map((h) => codeHtml(h.label)).join(', ') : 'none'}`,
+         forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (target === 'all') {
+       const { results: all } = await env.DB.prepare('SELECT label FROM userbot_accounts').all();
+       for (const r of all || []) await stopUserbotAccount(env, r.label, true);
+       await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Removed ${all?.length || 0} account(s), their sessions and follows.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const exists = await env.DB.prepare('SELECT label FROM userbot_accounts WHERE label = ?').bind(target).first();
+     if (!exists) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No account named ${codeHtml(target)}.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await stopUserbotAccount(env, target, true);
+     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Account ${codeHtml(target)} removed — session and its follows deleted.`, forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
@@ -9403,7 +9434,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      const communityIdArg = (parts[1] || '').trim();
-     const chatIdArg = (parts[2] || '').trim();
+     const chatIdArg = normalizeTgChatId((parts[2] || '').trim());
      const targetArg = (parts[3] || '').trim().toLowerCase();
      if (!communityIdArg || !chatIdArg) {
        await sendTelegramFormatted(token, chatId,
@@ -9429,19 +9460,34 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      await ensureUserbotTables(env);
-     let cid = chatIdArg.startsWith('-') ? chatIdArg : `-100${chatIdArg.replace(/^-100/, '')}`;
-     if (!/^(-\d+|\d+)$/.test(cid)) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Invalid chat id.`, forumThreadId);
+     const { results: enabledAccounts } = await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled = 1 ORDER BY label').all();
+     if (!enabledAccounts?.length) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🤖')} No userbot accounts. GOD: ${codeHtml('/userbot_add <label> <api_id> <api_hash> <session>')}`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
+     const label = enabledAccounts.length === 1 ? enabledAccounts[0].label
+       : (enabledAccounts.find((a) => a.label === (parts[4] || ''))?.label || '');
+     if (!label) {
+       await sendTelegramFormatted(token, chatId,
+         `${boldHtml('ℹ️')} Multiple accounts — specify which:\n${enabledAccounts.map((a) => codeHtml(`/userbot_follow ${communityIdArg} ${chatIdArg} ${targetArg || 'community'} ${a.label}`)).join('\n')}`,
+         forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     // Probe now so the user learns immediately if this account can see the chat.
+     const probe = USERBOT_ACCOUNTS.get(label);
+     let probeNote = '';
+     if (probe) {
+       const ok = await primeEntity(probe.client, chatIdArg, 30_000);
+       probeNote = ok ? '' : `\n${boldHtml('⚠️')} That account cannot see ${codeHtml(chatIdArg)} yet — join the chat with it, then re-run.`;
+     }
      await env.DB.prepare(
-       `INSERT INTO userbot_follows (chat_id, community_id, target, created_by, created_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(chat_id) DO UPDATE SET community_id = excluded.community_id,
+       `INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(chat_id) DO UPDATE SET label = excluded.label, community_id = excluded.community_id,
           target = excluded.target, created_by = excluded.created_by`
-     ).bind(cid, communityIdArg, targetArg || 'community', athenaUser.id, Date.now()).run();
+     ).bind(chatIdArg, label, communityIdArg, targetArg || 'community', athenaUser.id, Date.now()).run();
      await sendTelegramFormatted(token, chatId,
-       `${boldHtml('✅')} Following ${codeHtml(cid)} → ${boldHtml(escHtml(community.name || communityIdArg))} · target ${codeHtml(targetArg || 'community')}\n${italicHtml('New messages clone automatically while the userbot is connected. Existing history: /index_start')}`,
+       `${boldHtml('✅')} Following ${codeHtml(chatIdArg)} → ${boldHtml(escHtml(community.name || communityIdArg))} · account ${codeHtml(label)} · target ${codeHtml(targetArg || 'community')}${probeNote}\n${italicHtml('New messages clone automatically. Existing history: /backfill here or /index_start.')}`,
        forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
@@ -9459,28 +9505,32 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
-   // ---- /userbot_status ----
+   // ---- /userbot_status — accounts, follows, live counters, recent errors ----
    if (cmd === '/userbot_status' || cmd === '/userbotstatus') {
      if (!isSelfHosted(env)) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Userbot mode is self-host only.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      await ensureUserbotTables(env);
-     const st = await env.DB.prepare("SELECT * FROM userbot_state WHERE id = 'singleton'").first();
-     const { results: follows } = await env.DB.prepare('SELECT chat_id, community_id, target FROM userbot_follows ORDER BY chat_id').all();
-     const conn = USERBOT?.client ? `🟢 connected (${Math.round((Date.now() - USERBOT.startedAt) / 60000)}m)` : (Number(st?.enabled) === 1 ? '🔴 configured but disconnected — restart the server or /userbot_connect again' : '⚪ not configured');
-     const lines = follows?.length ? follows.map((f) => {
+     const { results: accounts } = await env.DB.prepare('SELECT label, enabled, last_error FROM userbot_accounts ORDER BY label').all();
+     const { results: follows } = await env.DB.prepare('SELECT chat_id, label, community_id, target FROM userbot_follows ORDER BY label, chat_id').all();
+     const accLines = (accounts || []).map((a) => {
+       const live = USERBOT_ACCOUNTS.has(a.label) ? `🟢 connected (${Math.round((Date.now() - USERBOT_ACCOUNTS.get(a.label).startedAt) / 60000)}m)` : '🔴 stored, disconnected';
+       return `• ${codeHtml(a.label)} — ${live}${a.last_error ? ` · ${escHtml(a.last_error)}` : ''}`;
+     });
+     const followLines = (follows || []).map((f) => {
        const s = USERBOT_STATS.get(f.chat_id);
        const live = s ? ` · ${s.msgs} msgs · ${s.links} links · ${s.docs} docs` : '';
-       return `• ${codeHtml(f.chat_id)} → ${escHtml(f.community_id)} · ${codeHtml(f.target || 'community')}${live}`;
-     }) : ['• no chats followed yet — /userbot_follow or /follow inside a chat'];
+       return `• [${codeHtml(f.label)}] ${codeHtml(f.chat_id)} → ${escHtml(f.community_id)} · ${codeHtml(f.target || 'community')}${live}`;
+     });
      let errLines = [];
      try {
-       const { results: errs } = await env.DB.prepare('SELECT t, chat, error FROM userbot_errors ORDER BY t DESC LIMIT 5').all();
-       errLines = (errs || []).map((e) => `• ${new Date(e.t).toISOString().slice(11, 19)} ${codeHtml(e.chat || '-')} — ${escHtml(String(e.error).slice(0, 120))}`);
+       const { results: errs } = await env.DB.prepare('SELECT t, label, chat, error FROM userbot_errors ORDER BY t DESC LIMIT 5').all();
+       errLines = (errs || []).map((e) => `• ${new Date(e.t).toISOString().slice(11, 19)} [${escHtml(e.label || '-')}] ${escHtml(String(e.error).slice(0, 110))}`);
      } catch (_) {}
      await sendTelegramFormatted(token, chatId,
-       `${boldHtml('🤖 Userbot')}\n${boldHtml('Connection:')} ${conn}${st?.last_error ? `\n${boldHtml('Last error:')} ${escHtml(st.last_error)}` : ''}\n\n${boldHtml('Followed chats')}\n${lines.join('\n')}` +
+       `${boldHtml('🤖 Userbots')}\n${accLines.length ? accLines.join('\n') : italicHtml('none — /userbot_add <label> <api_id> <api_hash> <session>')}` +
+       `\n\n${boldHtml('Followed chats')}\n${followLines.length ? followLines.join('\n') : italicHtml('none — /follow inside a chat')}` +
        (errLines.length ? `\n\n${boldHtml('Recent errors')}\n${errLines.join('\n')}` : ''),
        forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
@@ -9536,7 +9586,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
-   // ---- /userbot_disconnect — stop daemon and delete stored session ----
+   // ---- /userbot_disconnect — GOD: remove ALL accounts (alias /userbot_del all) ----
    if (cmd === '/userbot_disconnect' || cmd === '/userbotdisconnect') {
      if (!isGod) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId);
@@ -9547,8 +9597,11 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      await ensureUserbotTables(env);
-     await stopUserbotDaemon(env, true);
-     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Userbot disconnected — stored session deleted. Followed chats kept; reconnect anytime with ${codeHtml('/userbot_connect')}.`, forumThreadId);
+     const { results: all } = await env.DB.prepare('SELECT label FROM userbot_accounts').all();
+     for (const r of all || []) await stopUserbotAccount(env, r.label, true);
+     await sendTelegramFormatted(token, chatId,
+       `${boldHtml('✅')} Disconnected — ${all?.length || 0} account(s), sessions and follows deleted.`,
+       forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
@@ -12605,24 +12658,39 @@ function formatSavedLinkReply(kindLabel, title, rawUrl, ai, fallbackNotes = '') 
 
 async function ensureUserbotTables(env) {
   await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS userbot_state (
-       id TEXT PRIMARY KEY, api_id TEXT, api_hash_enc TEXT, session_enc TEXT,
-       enabled INTEGER NOT NULL DEFAULT 0, last_error TEXT, updated_at BIGINT)`
+    `CREATE TABLE IF NOT EXISTS userbot_accounts (
+       label TEXT PRIMARY KEY, api_id TEXT NOT NULL, api_hash_enc TEXT NOT NULL,
+       session_enc TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+       last_error TEXT, updated_at BIGINT)`
   ).run();
   await env.DB.prepare(
     `CREATE TABLE IF NOT EXISTS userbot_follows (
-       chat_id TEXT PRIMARY KEY, community_id TEXT NOT NULL,
-       target TEXT NOT NULL DEFAULT 'community', created_by TEXT,
-       created_at BIGINT NOT NULL)`
+       chat_id TEXT PRIMARY KEY, label TEXT NOT NULL DEFAULT 'main',
+       community_id TEXT NOT NULL, target TEXT NOT NULL DEFAULT 'community',
+       created_by TEXT, created_at BIGINT NOT NULL)`
   ).run();
   await env.DB.prepare(
     `CREATE TABLE IF NOT EXISTS userbot_errors (
-       t BIGINT PRIMARY KEY, chat TEXT, error TEXT)`
+       t BIGINT PRIMARY KEY, label TEXT, chat TEXT, error TEXT)`
   ).run();
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_userbot_errors_t ON userbot_errors(t)').run().catch(() => {});
+  // one-time migration from the old singleton table
+  try {
+    const legacy = await env.DB.prepare("SELECT * FROM userbot_state WHERE id = 'singleton' AND enabled = 1").first().catch(() => null);
+    if (legacy) {
+      const have = await env.DB.prepare("SELECT label FROM userbot_accounts WHERE label = 'main'").first().catch(() => null);
+      if (!have) {
+        await env.DB.prepare(
+          `INSERT INTO userbot_accounts (label, api_id, api_hash_enc, session_enc, enabled, updated_at)
+           VALUES ('main', ?, ?, ?, 1, ?) ON CONFLICT(label) DO NOTHING`
+        ).bind(legacy.api_id, legacy.api_hash_enc, legacy.session_enc, Date.now()).run();
+      }
+    }
+  } catch (_) {}
 }
 
-let USERBOT = null; // { client, startedAt }
-let USERBOT_STARTING = null; // concurrency lock — one connect at a time
+const USERBOT_ACCOUNTS = new Map(); // label -> { client, startedAt }
+const USERBOT_STARTING = new Set();
 const USERBOT_STATS = new Map(); // chat_id -> {msgs, links, docs, lastAt}
 
 function userbotStat(chatId, field) {
@@ -12630,15 +12698,21 @@ function userbotStat(chatId, field) {
   if (field) s[field] += 1;
   s.lastAt = Date.now();
   USERBOT_STATS.set(chatId, s);
+}
+
+/** Accepts -100… and bare channel ids — returns a stable key. */
+function normalizeTgChatId(id) {
+  let s = String(id || '').trim();
+  if (/^\d{9,}$/.test(s)) s = `-100${s}`;
   return s;
 }
 
-async function userbotLogError(env, chatId, error) {
+async function userbotLogError(env, label, chatId, error) {
   const msg = String(error?.message || error).slice(0, 300);
-  console.error(`[userbot] ${chatId || '-'}:`, msg);
+  console.error(`[userbot:${label}] ${chatId || '-'}:`, msg);
   try {
-    await env.DB.prepare('INSERT INTO userbot_errors (t, chat, error) VALUES (?, ?, ?)')
-      .bind(Date.now(), String(chatId || ''), msg).run();
+    await env.DB.prepare('INSERT INTO userbot_errors (t, label, chat, error) VALUES (?, ?, ?, ?)')
+      .bind(Date.now(), String(label || ''), String(chatId || ''), msg).run();
     await env.DB.prepare('DELETE FROM userbot_errors WHERE t < ?').bind(Date.now() - 7 * 86400_000).run().catch(() => {});
   } catch (_) {}
 }
@@ -12650,7 +12724,7 @@ function gramjsChatId(message) {
 }
 
 /** Mirror one gramjs message into the sinks of its follow. */
-async function captureGramjsMessage(env, follow, message, logTag) {
+async function captureGramjsMessage(env, follow, message) {
   const text = String(message.message || '').trim();
   if (text.startsWith('/')) return;
   userbotStat(follow.chat_id, 'msgs');
@@ -12658,6 +12732,7 @@ async function captureGramjsMessage(env, follow, message, logTag) {
   const personalOwner = target === 'community' ? null : String(follow.created_by || '');
   const sinks = sinkTargetsFor(target, personalOwner);
   const urls = urlsFromGramjsMessage(message);
+  const acc = USERBOT_ACCOUNTS.get(follow.label);
 
   for (const sink of sinks) {
     try {
@@ -12673,7 +12748,7 @@ async function captureGramjsMessage(env, follow, message, logTag) {
           const filename = fnameAttr?.fileName || '';
           const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
           if ((DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) && Number(docu.size || 0) <= CONVERT_SOURCE_MAX_BYTES) {
-            const buf = await USERBOT.client.downloadMedia(message, {});
+            const buf = await acc.client.downloadMedia(message, {});
             if (buf?.length) {
               await savePersonalIndexedDocument(env, personalOwner, filename, ext, new Uint8Array(buf), `userbot:${follow.chat_id}`, { chatId: follow.chat_id, messageId: message.id });
               userbotStat(follow.chat_id, 'docs');
@@ -12699,7 +12774,7 @@ async function captureGramjsMessage(env, follow, message, logTag) {
         const filename = fnameAttr?.fileName || '';
         const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
         if ((DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) && Number(docu.size || 0) <= CONVERT_SOURCE_MAX_BYTES) {
-          const buf = await USERBOT.client.downloadMedia(message, {});
+          const buf = await acc.client.downloadMedia(message, {});
           if (buf?.length) {
             await saveIndexedDocument(env, follow.community_id, filename, ext, new Uint8Array(buf), `userbot:${follow.chat_id}`, { chatId: follow.chat_id, messageId: message.id });
             userbotStat(follow.chat_id, 'docs');
@@ -12712,78 +12787,115 @@ async function captureGramjsMessage(env, follow, message, logTag) {
         await saveIndexedDocument(env, follow.community_id, `${safeName}_${message.id}.md`, 'md', new TextEncoder().encode(md), `userbot:${follow.chat_id}`, { chatId: follow.chat_id, messageId: message.id });
       }
     } catch (e) {
-      console.error(`[userbot] capture failed (${sink}) ${logTag}`, e?.message || e);
+      await userbotLogError(env, follow.label, follow.chat_id, e);
     }
   }
 }
 
-/** Start (or no-op if running) the userbot daemon. Self-host only. */
+/** Page dialogs until the chat resolves; returns true when visible. */
+async function primeEntity(client, chatId, budgetMs = 90_000) {
+  const want = normalizeTgChatId(chatId);
+  const deadline = Date.now() + budgetMs;
+  try { await client.getEntity(want); return true; } catch (_) {}
+  let offsetPeer;
+  while (Date.now() < deadline) {
+    let dialogs;
+    try { dialogs = await client.getDialogs({ limit: 200, offsetPeer }); } catch (_) { break; }
+    if (!dialogs?.length) break;
+    for (const d of dialogs) {
+      if (normalizeTgChatId(String(d.id)) === want) return true;
+    }
+    offsetPeer = dialogs[dialogs.length - 1];
+  }
+  return false;
+}
+
+/** Connect one account by label. Safe to call repeatedly. */
+export async function startUserbotAccount(env, label = 'main') {
+  if (!isSelfHosted(env)) return { ok: false, reason: 'self-host only' };
+  await ensureUserbotTables(env);
+  if (USERBOT_ACCOUNTS.has(label)) return { ok: true, already: true };
+  if (USERBOT_STARTING.has(label)) return { ok: false, reason: 'starting' };
+  USERBOT_STARTING.add(label);
+  try {
+    const st = await env.DB.prepare('SELECT * FROM userbot_accounts WHERE label = ? AND enabled = 1').bind(label).first();
+    if (!st) return { ok: false, reason: 'not configured' };
+    let gramjs;
+    try { gramjs = await import('telegram'); } catch (_) {
+      await env.DB.prepare("UPDATE userbot_accounts SET last_error = 'gramjs not installed', updated_at = ? WHERE label = ?").bind(Date.now(), label).run();
+      return { ok: false, reason: 'gramjs missing' };
+    }
+    const { TelegramClient } = gramjs;
+    const { StringSession } = gramjs.sessions;
+    const sessionString = await decryptBotToken(env, st.session_enc);
+    const apiHash = await decryptBotToken(env, st.api_hash_enc);
+    if (!sessionString || !apiHash) {
+      await env.DB.prepare("UPDATE userbot_accounts SET last_error = 'decrypt failed', updated_at = ? WHERE label = ?").bind(Date.now(), label).run();
+      return { ok: false, reason: 'decrypt failed' };
+    }
+    const client = new TelegramClient(new StringSession(sessionString), Number(st.api_id) || 0, apiHash, { connectionRetries: 5 });
+    await client.connect();
+    // Prime entity cache so raw -100… ids resolve for this account.
+    try {
+      let offsetPeer;
+      for (let i = 0; i < 6; i++) {
+        const dialogs = await client.getDialogs({ limit: 200, offsetPeer });
+        if (!dialogs?.length) break;
+        offsetPeer = dialogs[dialogs.length - 1];
+      }
+    } catch (_) {}
+    client.addEventHandler(async (update) => {
+      let chatId = null;
+      try {
+        const message = update.message;
+        if (!message) return;
+        chatId = gramjsChatId(message);
+        if (!chatId) return;
+        const variants = [chatId];
+        if (/^\d{9,}$/.test(chatId)) variants.push(`-100${chatId}`);
+        let follow = null;
+        for (const v of variants) {
+          follow = await env.DB.prepare('SELECT * FROM userbot_follows WHERE chat_id = ? AND label = ?').bind(v, label).first();
+          if (follow) break;
+        }
+        if (!follow) return;
+        userbotStat(follow.chat_id, 'msgs');
+        await captureGramjsMessage(env, follow, message);
+      } catch (e) {
+        if (e && typeof e.seconds === 'number') await sleep(Math.min(e.seconds * 1000, 300_000));
+        else await userbotLogError(env, label, chatId, e);
+      }
+    });
+    USERBOT_ACCOUNTS.set(label, { client, startedAt: Date.now() });
+    console.log(`[userbot:${label}] connected`);
+    return { ok: true };
+  } finally {
+    USERBOT_STARTING.delete(label);
+  }
+}
+
+/** Boot-time: connect every enabled account. No-op when none configured. */
 export async function startUserbotDaemon(env) {
   if (!isSelfHosted(env)) return { ok: false, reason: 'self-host only' };
   await ensureUserbotTables(env);
-  if (USERBOT?.client) return { ok: true, already: true };
-  if (USERBOT_STARTING) return USERBOT_STARTING;
-  USERBOT_STARTING = (async () => {
-    try {
-      return await userbotConnectInner(env);
-    } finally {
-      USERBOT_STARTING = null;
-    }
-  })();
-  return USERBOT_STARTING;
+  const { results } = await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled = 1').all();
+  let started = 0;
+  for (const r of results || []) {
+    const res = await startUserbotAccount(env, r.label);
+    if (res.ok && !res.already) started++;
+  }
+  return { ok: true, started };
 }
 
-async function userbotConnectInner(env) {
-  const st = await env.DB.prepare("SELECT * FROM userbot_state WHERE id = 'singleton' AND enabled = 1").first();
-  if (!st) return { ok: false, reason: 'not configured' };
-  let gramjs;
-  try { gramjs = await import('telegram'); } catch (_) {
-    await env.DB.prepare("UPDATE userbot_state SET last_error = 'gramjs not installed', updated_at = ? WHERE id = 'singleton'").bind(Date.now()).run();
-    return { ok: false, reason: 'gramjs missing' };
+async function stopUserbotAccount(env, label, deleteRow = true) {
+  const acc = USERBOT_ACCOUNTS.get(label);
+  if (acc) { try { await acc.client.disconnect(); } catch (_) {} USERBOT_ACCOUNTS.delete(label); }
+  if (deleteRow) {
+    await env.DB.prepare('DELETE FROM userbot_accounts WHERE label = ?').bind(label).run();
+    await env.DB.prepare('DELETE FROM userbot_follows WHERE label = ?').bind(label).run();
+  } else {
+    await env.DB.prepare('UPDATE userbot_accounts SET enabled = 0, updated_at = ? WHERE label = ?').bind(Date.now(), label).run().catch(() => {});
   }
-  const { TelegramClient } = gramjs;
-  const { StringSession } = gramjs.sessions;
-  const sessionString = await decryptBotToken(env, st.session_enc);
-  const apiHash = await decryptBotToken(env, st.api_hash_enc);
-  if (!sessionString || !apiHash) {
-    await env.DB.prepare("UPDATE userbot_state SET last_error = 'decrypt failed', updated_at = ? WHERE id = 'singleton'").bind(Date.now()).run();
-    return { ok: false, reason: 'decrypt failed' };
-  }
-  const client = new TelegramClient(new StringSession(sessionString), Number(st.api_id) || 0, apiHash, { connectionRetries: 5 });
-  await client.connect();
-  try {
-    let offsetPeer;
-    for (let i = 0; i < 6; i++) {
-      const dialogs = await client.getDialogs({ limit: 200, offsetPeer });
-      if (!dialogs?.length) break;
-      offsetPeer = dialogs[dialogs.length - 1];
-    }
-  } catch (_) {}
-  client.addEventHandler(async (update) => {
-    let chatId = null;
-    try {
-      const message = update.message;
-      if (!message) return;
-      chatId = gramjsChatId(message);
-      if (!chatId) return;
-      const follow = await env.DB.prepare('SELECT * FROM userbot_follows WHERE chat_id = ?').bind(chatId).first();
-      if (!follow) return;
-      await captureGramjsMessage(env, follow, message, chatId);
-    } catch (e) {
-      if (e && typeof e.seconds === 'number') await sleep(Math.min(e.seconds * 1000, 300_000));
-      else await userbotLogError(env, chatId, e);
-    }
-  });
-  USERBOT = { client, startedAt: Date.now() };
-  console.log('[userbot] daemon connected');
-  return { ok: true };
-}
-
-async function stopUserbotDaemon(env, deleteSession = false) {
-  if (USERBOT?.client) { try { await USERBOT.client.disconnect(); } catch (_) {} }
-  USERBOT = null;
-  if (deleteSession) await env.DB.prepare("DELETE FROM userbot_state WHERE id = 'singleton'").run();
-  else await env.DB.prepare("UPDATE userbot_state SET enabled = 0, updated_at = ? WHERE id = 'singleton'").bind(Date.now()).run().catch(() => {});
 }
 
 export {
