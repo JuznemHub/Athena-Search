@@ -8007,6 +8007,7 @@ async function ensureIndexTables(env) {
 const INDEX_BATCH = 100;
 const INDEX_BATCH_DELAY_MS = 1500; // ~40 req/min ceiling — well under Telegram's flood limits
 const INDEX_MAX_MESSAGES = 50000;
+const INDEX_AUTO_CONTINUATIONS = 20; // big channels finish across chunked runs
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
@@ -8101,6 +8102,8 @@ async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser,
   try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN max_id BIGINT').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] max_id alter:', e?.message); }
   try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN saved_files INTEGER DEFAULT 0').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] saved_files alter:', e?.message); }
   try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN skipped_media INTEGER DEFAULT 0').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] skipped_media alter:', e?.message); }
+  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN urls_seen INTEGER DEFAULT 0').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] urls_seen alter:', e?.message); }
+  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN continuations INTEGER DEFAULT 0').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] continuations alter:', e?.message); }
   const jobId = 'ij_' + Date.now().toString(36) + '_' + randomToken().slice(0, 6);
   await env.DB.prepare(
       `INSERT INTO index_jobs (id, community_id, chat_id, user_id, status, offset_id, progress_chat_id, created_at, updated_at, thread_id, min_id, max_id)
@@ -8135,6 +8138,7 @@ async function runHistoryIndexJob(env, job, token) {
     if (job.saved_links) parts.push(`${job.saved_links} links`);
     if (job.saved_docs) parts.push(`${job.saved_docs} docs`);
     if (job.saved_files) parts.push(`${job.saved_files} files`);
+    if (job.urls_seen) parts.push(`${job.urls_seen} urls found`);
     if (job.skipped_media) parts.push(`${job.skipped_media} media skipped`);
     return parts.join(' · ');
   };
@@ -8232,6 +8236,7 @@ async function runHistoryIndexJob(env, job, token) {
         if (text.startsWith('/')) continue;
         const urls = urlsFromGramjsMessage(message);
         if (urls.length) {
+          job.urls_seen = (job.urls_seen || 0) + urls.length;
           const saved = await saveIndexedLinks(env, job.community_id, urls, 'history backfill', text, 'backfill', job.id);
           savedLinks += saved || 0;
         }
@@ -8302,7 +8307,19 @@ async function runHistoryIndexJob(env, job, token) {
       await pushProgress(false, processed);
       await sleep(INDEX_BATCH_DELAY_MS);
     }
-    if (processed >= INDEX_MAX_MESSAGES) { await patch({ status: 'done', error: `capped at ${INDEX_MAX_MESSAGES} messages` }); log('capped'); }
+    if (processed >= INDEX_MAX_MESSAGES) {
+      const conts = Number(job.continuations || 0);
+      if (conts < INDEX_AUTO_CONTINUATIONS) {
+        await patch({ status: 'queued', continuations: conts + 1 });
+        log(`cap reached — auto-continuing (chunk ${conts + 2})`);
+        runInBackground(env, runHistoryIndexJob(env, { ...job, status: 'queued' }, token));
+      } else {
+        await patch({ status: 'error', error: `stopped after ${conts + 1} chunks (${processed} msgs) — /index_start resumes`.slice(0, 300) });
+      }
+      await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('🧩')} Chunk complete: ${processed} msgs · continuing automatically…`).catch(() => {});
+      try { await client.disconnect(); } catch (_) {}
+      return;
+    }
     const finalRow = await env.DB.prepare('SELECT status, saved_links, saved_docs FROM index_jobs WHERE id = ?').bind(job.id).first();
     const doneText = `${finalRow?.status === 'done' ? '✅' : '⏸'} Backfill ${finalRow?.status || 'done'}: ${processed} scanned · ${savedLinks} links · ${savedDocs} docs saved.`;
     if (progressMsgId) {
@@ -9959,6 +9976,11 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      const followLines = [];
      for (const f of follows || []) {
        let name = f.chat_id;
+       // Prefer the userbot's own entity cache — the BOT may not be in that chat.
+       const ubAcc = USERBOT_ACCOUNTS.get(f.label);
+       if (ubAcc) {
+         try { const ent = await ubAcc.client.getEntity(f.chat_id); if (ent?.title || ent?.username) name = ent.title || `@${ent.username}`; } catch (_) {}
+       }
        try {
          const ch = await telegramApi(token, 'getChat', { chat_id: f.chat_id });
          if (ch?.ok && (ch.result?.title || ch.result?.username)) name = ch.result.title ? `${ch.result.title}` : `@${ch.result.username}`;
@@ -9967,7 +9989,15 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        const liveBits = [`msgs ${s.msgs || 0}`, `links ${s.links || 0}`, `docs ${s.docs || 0}`];
        if (s.lastAt) liveBits.push(`last ${Math.max(1, Math.round((Date.now() - s.lastAt) / 60000))}m ago`);
        const jb = jobByChat.get(normalizeTgChatId(f.chat_id));
-       const bf = jb ? `backfill: ${jb.status}${jb.processed ? ` (${jb.processed} msgs)` : ''}` : 'backfill: not run';
+       let bf = 'backfill: not run';
+       if (jb) {
+         const capNote = jb.processed >= INDEX_MAX_MESSAGES ? ' · cap hit, auto-continuing' : '';
+         const totalBit = jb.processed ? `${jb.processed} msgs` : '';
+         bf = `backfill: ${jb.status}${totalBit ? ` (${totalBit})` : ''}${capNote}`;
+         if (jb.urls_seen) bf += ` · ${jb.urls_seen} urls found`;
+         if (jb.saved_files) bf += ` · ${jb.saved_files} files vaulted`;
+         if (jb.error) bf += ` — ${String(jb.error).slice(0, 80)}`;
+       }
        followLines.push(
          `• ${boldHtml(escHtml(name))} ${italicHtml(`[${f.target || 'community'}]`)}\n` +
          `  live: ${liveBits.join(' · ')}\n` +
