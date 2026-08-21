@@ -6052,6 +6052,15 @@ async function ensurePendingTable(env) {
 const TG_SEARCH_PAGE_SIZE = 5;
 const TG_SEARCH_SESSION_TTL_MS = 2 * 60 * 60 * 1000;
 
+// Conversation threads for bot /ai follow-ups (reply to an answer).
+async function ensureAiThreadsTable(env) {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS tg_ai_threads (
+       key TEXT PRIMARY KEY, ai_msg_id BIGINT, history TEXT, updated_at BIGINT)`
+  ).run();
+}
+function aiThreadKey(chatId, threadId) { return `${chatId}:${threadId || 0}`; }
+
 async function ensureTelegramSearchTable(env) {
   await env.DB.prepare(
     `CREATE TABLE IF NOT EXISTS telegram_search_sessions (
@@ -7233,6 +7242,7 @@ function helpTextForSection(section) {
        `• /search ${codeHtml('<query>')} — search active brain`,
        `• /export — Telegram export status and bot/session modes`,
       `• /ai ${codeHtml('<question>')} — AI over brain ${italicHtml('(all ranks community; personal GOD-only)')}`,
+      `  ${italicHtml('Reply to any AI answer to ask a follow-up.')}`,
       `• /delete ${codeHtml('<url>')} — delete ${italicHtml('(or add if missing)')} — or reply /delete`,
       `• /edit ${codeHtml('<url or title words>')} | notes: New description`,
       `• /edit ${codeHtml('<url>')} | title: New Title | notes: New notes`,
@@ -10547,8 +10557,22 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
    // ---- /ai (same RAG + proxy as website, with thinking blocks) ----
    if (cmd === '/ai') {
      const q = rest || '';
+     await ensureAiThreadsTable(env);
+     let conversationHistory = [];
+     const replyToId = msg.reply_to_message?.message_id;
+     if (replyToId) {
+       const row = await env.DB.prepare('SELECT history FROM tg_ai_threads WHERE key = ? AND ai_msg_id = ?')
+         .bind(aiThreadKey(chatId, forumThreadId), replyToId).first().catch(() => null);
+       if (row?.history) {
+         try { conversationHistory = JSON.parse(row.history) || []; } catch (_) {}
+       }
+     }
+     if (!q && conversationHistory.length) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🧠')} Reply with your follow-up question.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
      if (!q) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🧠 Usage:')} ${codeHtml('/ai your question about your brain')}\nExample: ${codeHtml('/ai how do I download youtube videos')}`, forumThreadId);
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🧠 Usage:')} ${codeHtml('/ai your question about your brain')}\nExample: ${codeHtml('/ai how do I download youtube videos')}\n${italicHtml('Tip: reply to any AI answer to ask a follow-up.')}`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      if (!athenaUser) {
@@ -10651,9 +10675,12 @@ Rules:
           try {
             // Same request path as the website proxy: SSRF-checked endpoint,
             // model fallback chain, Retry-After, normalized + logged errors.
+            const effectiveUser = conversationHistory.length
+              ? `${conversationHistory.map((m) => `${m.role === 'user' ? 'User' : 'Athena'}: ${m.content}`).join('\n\n')}\n\nUser: ${q}\n\n(Continue this conversation. Answer the latest question, grounded in BRAIN CONTEXT where relevant.)`
+              : q;
             const out = await callAiChatShared(env, {
               baseUrl: cfg.base_url, apiKey: cfg.api_key, mode: cfg.mode || 'openai', model,
-              system: systemPrompt, user: q, maxTokens: 3000, source: 'bot-ai',
+              system: systemPrompt, user: effectiveUser, maxTokens: 3000, source: 'bot-ai',
             });
             content = isGroundedAiAnswer(out.content, docs)
               ? out.content
@@ -10688,34 +10715,28 @@ Rules:
 
        // Separate main cited sources from other sources
        const mainSources = [];
-       const otherSources = [];
         docs.forEach((d, i) => {
          const t = d.title || titleFromUrl(d.url || '');
          const isDoc = d.isDocument || d.type === 'document';
          const sourceLine = isDoc ? `📄 ${t}` : (d.url ? `🔗 ${t}\n${d.url}` : null);
          if (!sourceLine) return;
-         if (citedIndices.has(i)) {
-           mainSources.push(sourceLine);
-         } else {
-           otherSources.push(sourceLine);
-         }
+         if (citedIndices.has(i)) mainSources.push(sourceLine);
        });
 
-       // Main source (cited in answer) — shown prominently
+       // Only CITED sources are shown — unrelated matches are never appended
+       // (use /search for the full paginated result list).
        if (mainSources.length) {
          msg += `\n\n${mainSources.join('\n')}`;
        }
-       // Other sources — shown below
-       if (otherSources.length) {
-         msg += `\n\n${boldHtml('📚 Other Sources:')}\n${otherSources.join('\n')}`;
-       } else if (!mainSources.length && docs.length) {
-         // Fallback: if no citations found, show all as Sources
-          const allSources = docs.map(d => {
+       if (!mainSources.length && docs.length) {
+         const allSources = docs.slice(0, 3).map((d) => {
            const t = d.title || titleFromUrl(d.url || '');
            const isDoc = d.isDocument || d.type === 'document';
            return isDoc ? `📄 ${t}` : (d.url ? `🔗 ${t}\n${d.url}` : null);
          }).filter(Boolean);
-         if (allSources.length) msg += `\n\n${boldHtml('📚 Sources:')}\n${allSources.join('\n')}`;
+         if (allSources.length) {
+           msg += `\n\n${boldHtml('📚 Top matches:')}\n${allSources.join('\n')}\n${italicHtml('More: /search ' + q.slice(0, 60))}`;
+         }
        }
 
         // editMessageText is single-message — long answers continue in
@@ -10725,6 +10746,15 @@ Rules:
         for (let pi = 1; pi < parts.length; pi++) {
           await sendTelegramFormatted(token, chatId, parts[pi], forumThreadId);
         }
+        // Remember the thread so replying to this message is a follow-up.
+        try {
+          conversationHistory.push({ role: 'user', content: q }, { role: 'assistant', content: content || '' });
+          const trimmed = JSON.stringify(conversationHistory.slice(-8));
+          await env.DB.prepare(
+            `INSERT INTO tg_ai_threads (key, ai_msg_id, history, updated_at) VALUES (?, ?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET ai_msg_id = excluded.ai_msg_id, history = excluded.history, updated_at = excluded.updated_at`
+          ).bind(aiThreadKey(chatId, forumThreadId), thinkMsgId, trimmed, Date.now()).run();
+        } catch (_) {}
       } catch (err) {
         await editTelegramMessage(token, chatId, thinkMsgId, `${boldHtml('❌ AI failed:')} ${escHtml(err.message)}`, null, forumThreadId);
       }
