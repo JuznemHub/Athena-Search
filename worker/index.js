@@ -7334,6 +7334,7 @@ function helpTextForSection(section) {
       `${boldHtml('🧬 Clone any chat')} ${italicHtml('(userbot mode — one command)')}`,
       `${codeHtml('/clone')} ${italicHtml('inside a channel/group/topic → live + history, auto-detected')}`,
       `${codeHtml('/clone <chat_id>')} ${italicHtml('in my DM — for channels you cannot type in; or forward a post and reply /clone')}`,
+      `${codeHtml('/clone <chat_id> <min_id> <max_id>')} ${italicHtml('— clone an id range only')}`,
       `${codeHtml('/clone personal')} / ${codeHtml('/clone both')} ${italicHtml('— GOD targets')}`,
       `${boldHtml('🤖 Userbot accounts')} ${italicHtml('(self-host, GOD)')}`,
       `/userbot_connect ${codeHtml('<api_id> <api_hash> <session>')} — persistent session`,
@@ -7971,6 +7972,42 @@ const INDEX_MAX_MESSAGES = 50000;
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
+/**
+ * Media vault: store original files on the VPS (self-host only) when
+ * ATHENA_MEDIA_DIR is set. Everything is kept — photos, videos, audio,
+ * archives, apk — independent of what gets indexed into the brain.
+ */
+const MEDIA_VAULT_DIR = String(process.env?.ATHENA_MEDIA_DIR || '').trim();
+async function vaultSave(chatId, messageId, filename, bytes) {
+  if (!MEDIA_VAULT_DIR || !bytes?.length) return false;
+  try {
+    const fsSpec = 'node:fs/promises';
+    const { mkdir, writeFile } = await import(fsSpec);
+    const safeName = String(filename || `file_${messageId}`).replace(/[^\w.-]+/g, '_').slice(0, 120);
+    const dir = `${MEDIA_VAULT_DIR}/${String(chatId).replace(/[^\w-]+/g, '_')}`;
+    await mkdir(dir, { recursive: true });
+    await writeFile(`${dir}/${messageId}_${safeName}`, bytes);
+    return true;
+  } catch (e) {
+    console.error('[vault] save failed', e?.message || e);
+    return false;
+  }
+}
+
+/** Classify gramjs media for skip/vault decisions. */
+function classifyGramjsMedia(docu) {
+  const attrs = docu?.attributes || [];
+  const fnameAttr = attrs.find((a) => a.className === 'MessageAttributeFilename');
+  const filename = fnameAttr?.fileName || '';
+  const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+  const mime = String(docu?.mimeType || '');
+  const isVideo = attrs.some((a) => a.className === 'MessageAttributeVideo') || mime.startsWith('video/');
+  const isAudio = attrs.some((a) => a.className === 'MessageAttributeAudio') || mime.startsWith('audio/');
+  const isPhoto = mime === 'image/jpeg' && !filename; // Telegram photos are jpegs w/o name
+  const kind = isVideo ? 'video' : isAudio ? 'audio' : isPhoto ? 'photo' : 'document';
+  return { filename, ext, kind };
+}
+
 /** URLs from a gramjs message: link entities + plain-text regex. */
 function urlsFromGramjsMessage(message) {
   const out = new Set();
@@ -7994,7 +8031,7 @@ function urlsFromGramjsMessage(message) {
  * Create + launch a backfill job using the connected userbot session
  * (userbot_state). One place for both /backfill (in-chat) and /index_start.
  */
-async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg, threadArg = '', communityName = '', userbotLabel = '' }) {
+async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg, threadArg = '', communityName = '', userbotLabel = '', minId = '', maxId = '' }) {
   await ensureUserbotTables(env);
   await ensureIndexTables(env);
   // Normalize bare channel ids (Telegram web apps often show them without -100)
@@ -8012,12 +8049,16 @@ async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser,
   }
   try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN thread_id TEXT').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] thread_id alter:', e?.message); }
   try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN progress_msg_id BIGINT').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] progress_msg_id alter:', e?.message); }
+  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN min_id BIGINT').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] min_id alter:', e?.message); }
+  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN max_id BIGINT').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] max_id alter:', e?.message); }
+  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN saved_files INTEGER DEFAULT 0').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] saved_files alter:', e?.message); }
+  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN skipped_media INTEGER DEFAULT 0').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] skipped_media alter:', e?.message); }
   const jobId = 'ij_' + Date.now().toString(36) + '_' + randomToken().slice(0, 6);
   await env.DB.prepare(
-    `INSERT INTO index_jobs (id, community_id, chat_id, user_id, status, offset_id, progress_chat_id, created_at, updated_at, thread_id)
-     VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?)`
-  ).bind(jobId, communityIdArg, cid, athenaUser.id, chatId, Date.now(), Date.now(), threadArg || null).run();
-  runInBackground(env, runHistoryIndexJob(env, { id: jobId, community_id: communityIdArg, chat_id: cid, thread_id: threadArg || null, userbot_label: userbotLabel || null, offset_id: 0, processed: 0, saved_links: 0, saved_docs: 0, progress_chat_id: chatId }, token));
+      `INSERT INTO index_jobs (id, community_id, chat_id, user_id, status, offset_id, progress_chat_id, created_at, updated_at, thread_id, min_id, max_id)
+       VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?)`
+    ).bind(jobId, communityIdArg, cid, athenaUser.id, chatId, Date.now(), Date.now(), threadArg || null, minId ? Number(minId) : null, maxId ? Number(maxId) : null).run();
+  runInBackground(env, runHistoryIndexJob(env, { id: jobId, community_id: communityIdArg, chat_id: cid, thread_id: threadArg || null, userbot_label: userbotLabel || null, min_id: minId ? Number(minId) : null, max_id: maxId ? Number(maxId) : null, saved_files: 0, skipped_media: 0, offset_id: 0, processed: 0, saved_links: 0, saved_docs: 0, progress_chat_id: chatId }, token));
   await sendTelegramFormatted(token, chatId,
     `${boldHtml('▶️')} Backfill started for ${codeHtml(chatIdArg)}${threadArg ? ` topic ${codeHtml('#' + threadArg)}` : ''} → ${boldHtml(escHtml(communityName || communityIdArg))}.\n${italicHtml('Live progress below ·')} ${codeHtml('/index_stop')} ${italicHtml('to cancel.')}`,
     forumThreadId).catch(() => {});
@@ -8036,10 +8077,18 @@ async function runHistoryIndexJob(env, job, token) {
   let progressMsgId = null;
   let lastProgressAt = 0;
   const renderBar = (done, total) => {
-    const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+    // Message ids are not sequential (deleted/legacy gaps), so the "total"
+    // (latest id) is approximate. When done exceeds it, show done as truth.
+    const denom = Math.max(done, total || 0);
+    const pct = denom ? Math.min(100, Math.round((done / denom) * 100)) : 0;
     const filled = Math.round((pct / 100) * 18);
     const bar = '▮'.repeat(filled) + '▯'.repeat(18 - filled);
-    return `${bar} ${pct}% · ${done}${total ? `/${total}` : ''} msgs · ${job.saved_links || 0} links · ${job.saved_docs || 0} docs`;
+    const parts = [`${bar} ${pct}%`, `${done}${total && total >= done ? `/${total}` : ''} msgs`];
+    if (job.saved_links) parts.push(`${job.saved_links} links`);
+    if (job.saved_docs) parts.push(`${job.saved_docs} docs`);
+    if (job.saved_files) parts.push(`${job.saved_files} files`);
+    if (job.skipped_media) parts.push(`${job.skipped_media} media skipped`);
+    return parts.join(' · ');
   };
   const pushProgress = async (force = false, done = 0) => {
     const now = Date.now();
@@ -8125,8 +8174,11 @@ async function runHistoryIndexJob(env, job, token) {
         throw e;
       }
       if (!messages || !messages.length) { await patch({ status: 'done' }); log('done (end of history)'); break; }
+      if (job.min_id && offsetId && offsetId < Number(job.min_id)) { await patch({ status: 'done' }); log('done (reached min_id)'); break; }
       for (const message of messages) {
         offsetId = Math.max(offsetId, Number(message.id || 0));
+        // Explicit id range (/clone <chat> <min> <max>): skip outside it.
+        if (job.max_id && Number(message.id || 0) > Number(job.max_id)) continue;
         processed++;
         const text = String(message.text || message.message || '');
         if (text.startsWith('/')) continue;
@@ -8134,6 +8186,32 @@ async function runHistoryIndexJob(env, job, token) {
         if (urls.length) {
           const saved = await saveIndexedLinks(env, job.community_id, urls, 'history backfill', text, 'backfill');
           savedLinks += saved || 0;
+        }
+        // Media vault: keep the ORIGINAL file on the VPS for every media type
+        // (photos/videos/audio/archives/apk included), independent of indexing.
+        const mediaAny = message.media;
+        if (MEDIA_VAULT_DIR && mediaAny && mediaAny.className === 'MessageMediaDocument' && mediaAny.document) {
+          try {
+            const cls = classifyGramjsMedia(mediaAny.document);
+            if (Number(mediaAny.document.size || 0) <= 2 * 1024 * 1024 * 1024) {
+              const buf = await client.downloadMedia(message, {});
+              if (buf?.length && await vaultSave(job.chat_id, message.id, cls.filename || `media_${message.id}`, new Uint8Array(buf))) {
+                job.saved_files = (job.saved_files || 0) + 1;
+              }
+              await sleep(300);
+            }
+          } catch (e) {
+            if (e && typeof e.seconds === 'number') await sleep(Math.min(e.seconds * 1000, 300_000));
+            else console.error('[vault] media failed', e?.message || e);
+          }
+        }
+        // Count non-indexable media so the user sees why docs can be 0.
+        if (mediaAny && mediaAny.className === 'MessageMediaDocument' && mediaAny.document) {
+          const cls0 = classifyGramjsMedia(mediaAny.document);
+          const idxable = DOCUMENT_EXTENSIONS.has(cls0.ext) || CONVERTIBLE_EXTENSIONS.has(cls0.ext);
+          if (!idxable) job.skipped_media = (job.skipped_media || 0) + 1;
+        } else if (message.media && ['MessageMediaPhoto'].includes(message.media.className)) {
+          job.skipped_media = (job.skipped_media || 0) + 1;
         }
         // Full-history copy: substantial text-only posts become documents too.
         if (!urls.length && text.length >= 80) {
@@ -9266,17 +9344,22 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
 
-    // Parse args: target word and/or community id (in-chat mode).
+    // Parse args: target word, community id, optional min/max id range.
     let targetArg = '';
     let communityIdArg = '';
-    if (!dmOnly) {
-      for (const a of parts.slice(1)) {
-        const t = a.trim();
-        if (!t) continue;
-        if (CHANNEL_TARGETS.has(t.toLowerCase())) targetArg = t.toLowerCase();
-        else if (/^c_/.test(t) || t.length > 8) communityIdArg = t;
-      }
+    let minIdArg = '';
+    let maxIdArg = '';
+    const rangeTokens = [];
+    for (const a of parts.slice(1)) {
+      const t = a.trim();
+      if (!t) continue;
+      if (CHANNEL_TARGETS.has(t.toLowerCase())) { targetArg = t.toLowerCase(); continue; }
+      if (/^c_/.test(t)) { communityIdArg = t; continue; }
+      if (/^\d{1,9}$/.test(t)) { rangeTokens.push(t); continue; }
+      if (t.length > 8 && !/^-?\d+$/.test(t)) communityIdArg = t;
     }
+    if (rangeTokens.length === 1) maxIdArg = rangeTokens[0];
+    if (rangeTokens.length >= 2) { minIdArg = rangeTokens[0]; maxIdArg = rangeTokens[1]; }
     if ((targetArg === 'personal' || targetArg === 'both') && !isGod) {
       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} ${codeHtml('personal')}/${codeHtml('both')} targets are GOD rank only.`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
@@ -9350,7 +9433,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     ).bind(chatIdN, label, communityIdArg || null, targetArg || 'community', athenaUser.id, Date.now()).run();
 
     // History backfill right after — dedupe makes overlap harmless.
-    await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg, communityName, userbotLabel: label });
+    await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg, communityName, userbotLabel: label, minId: minIdArg, maxId: maxIdArg });
 
     const scopeLine = targetArg === 'personal'
       ? `${boldHtml('your personal brain')}`
