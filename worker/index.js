@@ -13419,6 +13419,8 @@ async function stopUserbotAccount(env, label, deleteRow = true) {
 
 export {
   scrapeViaKage,
+  ensureIndexTables,
+  runHistoryIndexJob,
   buildSearchBlob,
   cleanApiBase,
   compactAiContext,
