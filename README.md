@@ -12,10 +12,13 @@ Your second brain for links, documents, Telegram messages, and grounded AI answe
 Athena is a self-hostable bookmark and document archive. Save from the web UI, Telegram, the terminal, or a linked channel; search the whole database; and ask an AI model to answer with sources from your own collection.
 
 <p align="center">
-  <img src="screenshots/dark-purple.svg" width="24%" alt="Dark theme">
-  <img src="screenshots/glass-purple.svg" width="24%" alt="Glass theme">
-  <img src="screenshots/material-blue.svg" width="24%" alt="Material theme">
-  <img src="screenshots/light-green.svg" width="24%" alt="Light theme">
+  <img src="screenshots/web-dark.png" width="70%" alt="Athena web — search, dump, and AI in one bar">
+</p>
+<p align="center">
+  <img src="screenshots/tui-menu.png" width="55%" alt="athena-tui — zero-dependency terminal client">
+</p>
+<p align="center">
+  <em>Live captures — public pages only; no accounts, tokens, or private brains shown.</em>
 </p>
 
 ## What it does
