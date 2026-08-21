@@ -7281,9 +7281,7 @@ function helpTextForSection(section) {
        `${italicHtml('Bots cannot read old messages. Backfill logs in as YOUR account via a session string — self-host only, GOD/community owner, bot DM only.')}`,
       '',
       `${codeHtml('1)')} Get ${codeHtml('api_id + api_hash')}: ${linkHtml('https://my.telegram.org', 'my.telegram.org')} → ${boldHtml('API development tools')}`,
-      `${codeHtml('2)')} Generate a ${codeHtml('gramjs StringSession')} with a tool you trust. On the server:`,
-      `   ${codeHtml('npm install telegram')} ${italicHtml('(in the Athena repo)')}`,
-      `   ${codeHtml('node scripts/gen-session.js')} → prints the session string`,
+      `${codeHtml('2)')} On the server run: ${codeHtml('node scripts/gen-session.js')} — prints your session string`,
       `${codeHtml('3)')} In the bot DM ${italicHtml('(private chat — the string is a live account key)')}:`,
       `   /index_start ${codeHtml('<community_id> <chat_id> <api_id> <api_hash> <session_string>')}`,
       `   • ${codeHtml('chat_id')} — the group/channel to backfill ${italicHtml('(forward a post to')} ${codeHtml('@userinfobot')}${italicHtml(')')}`,
@@ -7618,6 +7616,20 @@ async function indexChannelPost(msg, binding, token, env) {
   const urls = extractUrlsFromTelegramMessage(msg, { includeReply: false });
   const saved = await saveIndexedLinks(env, communityId, [...new Set(urls)], channelTitle, text, 'channel');
   if (saved) console.log(`channel ${channelTitle}: indexed ${saved} link(s)`);
+
+  // Full-channel copy: a text-only post (announcement, no links, no file)
+  // becomes a searchable markdown document so nothing in the channel is missed.
+  if (!saved && !doc && text.length >= 80) {
+    try {
+      const dateStr = msg.date ? new Date(msg.date * 1000).toISOString().slice(0, 10) : '';
+      const safeName = String(channelTitle).replace(/[^\w-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'channel';
+      const filename = `${safeName}_${msg.message_id}.md`;
+      const md = `# ${channelTitle}${dateStr ? ` — ${dateStr}` : ''}\n\n${text}`;
+      await saveIndexedDocument(env, communityId, filename, 'md', new TextEncoder().encode(md), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id });
+    } catch (e) {
+      console.error('channel text post index failed', e?.message || e);
+    }
+  }
 }
 
 /** Shared by channel indexing and history backfill. Returns {error?} or {saved} or null on skip. */
@@ -7826,6 +7838,19 @@ async function runHistoryIndexJob(env, job, token) {
         if (urls.length) {
           const saved = await saveIndexedLinks(env, job.community_id, urls, 'history backfill', text, 'backfill');
           savedLinks += saved || 0;
+        }
+        // Full-history copy: substantial text-only posts become documents too.
+        if (!urls.length && text.length >= 80) {
+          try {
+            const safeName = String(job.chat_id).replace(/[^\w-]+/g, '_').slice(0, 40);
+            const filename = `${safeName}_${message.id}.md`;
+            const when = message.date ? new Date(message.date * 1000).toISOString().slice(0, 10) : '';
+            const md = `# History backfill${when ? ` — ${when}` : ''}\n\n${text}`;
+            const r = await saveIndexedDocument(env, job.community_id, filename, 'md', new TextEncoder().encode(md), `backfill:${job.chat_id}`, { chatId: job.chat_id, messageId: message.id });
+            if (r?.saved) savedDocs++;
+          } catch (e) {
+            console.error('[index] text post failed', e?.message || e);
+          }
         }
         const media = message.media;
         if (media && media.className === 'MessageMediaDocument' && media.document) {
@@ -8522,7 +8547,17 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
           VALUES (?, ?, 'telegram', ?, ?, ?, ?, ?, 'community', NULL, NULL)`
        ).bind(id, communityIdArg, me?.result?.username || null, cid, channelTitle, athenaUser.id, Date.now()).run();
      }
-     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Channel ${boldHtml(escHtml(channelTitle))} linked to ${boldHtml(escHtml(community.name || communityIdArg))}.\nNew posts (links + documents) are indexed in real time.\nHistory backfill: ${codeHtml('/index')}`, forumThreadId);
+     await sendTelegramFormatted(token, chatId, [
+       `${boldHtml('✅')} Channel ${boldHtml(escHtml(channelTitle))} linked to ${boldHtml(escHtml(community.name || communityIdArg))}.`,
+       '',
+       `${boldHtml('From now on')} every new post is copied into the community brain automatically — links, captions, documents (pdf/docx/md/…), and text-only announcements. Video/audio/apk are skipped.`,
+       '',
+       `${boldHtml('Copy the existing history too')} (everything already in the channel):`,
+       `1. On this server run: ${codeHtml('node scripts/gen-session.js')}`,
+       `2. DM me: ${codeHtml('/index_start <community_id> <chat_id> <api_id> <api_hash> <session_string>')}`,
+       `   • chat_id = ${codeHtml(cid)} · progress: ${codeHtml('/index_status')} · stop: ${codeHtml('/index_stop')}`,
+       `${italicHtml('The session string is encrypted at rest and auto-deleted when the backfill finishes.')}`
+     ].join('\n'), forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
@@ -8598,7 +8633,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        '',
        `${boldHtml('Real time (automatic)')}`,
        isGroup ? '• This group: every posted link and file is saved as it arrives.' : '• Linked groups: every posted link and file is saved as it arrives.',
-       chanLines.length ? `• Linked channels:\n${chanLines.join('\n')}` : '• Channels: none linked yet — /channel_link <community_id> <channel_id>',
+       chanLines.length ? `• Linked channels (new posts auto-copied):\n${chanLines.join('\n')}` : '• Channels: none linked yet — /channel_link <community_id> <channel_id>',
        '',
        `${boldHtml('History backfill')}`,
        'Telegram bots cannot read old messages. Backfilling a group/channel history needs a user session string:',
