@@ -8247,8 +8247,44 @@ async function runHistoryIndexJob(env, job, token) {
         const urls = urlsFromGramjsMessage(message);
         if (urls.length) {
           job.urls_seen = (job.urls_seen || 0) + urls.length;
-          const saved = await saveIndexedLinks(env, job.community_id, urls, 'history backfill', text, 'backfill', job.id);
-          savedLinks += saved || 0;
+          // Fast path: insert now with caption-as-notes, then let the shared
+          // background enrichment do scrape + AI/context tags. Sequential
+          // per-URL scraping here made backfills crawl for hours.
+          await ensureTransferColumns(env);
+          const fresh = [];
+          for (const rawUrl of [...new Set(urls)]) {
+            try {
+              if (await findExistingLink(env, 'links', 'community_id', job.community_id, rawUrl)) continue;
+              const urlHash = generateUrlHash(rawUrl);
+              const id = 'ix_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+              await ensureLinkMetaColumns(env);
+              const capTitle = titleFromUrl(rawUrl);
+              try {
+                await env.DB.prepare(
+                  `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
+                    added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at, image_url, site_name)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'telegram', ?, 0, 0, ?, NULL, NULL)`
+                ).bind(id, job.community_id, rawUrl, urlHash, capTitle, (text || '').slice(0, 3000),
+                  JSON.stringify(['telegram', 'backfill']), 'history backfill', 'history backfill',
+                  Date.now()).run();
+                savedLinks++; fresh.push({ id, url: rawUrl });
+              } catch (error) {
+                if (isUniqueConstraintError(error)) continue;
+                if (!isMissingLinkMetaColumnError(error)) throw error;
+                await env.DB.prepare(
+                  'INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+                ).bind(id, job.community_id, rawUrl, urlHash, capTitle, (text || '').slice(0, 3000),
+                  JSON.stringify(['telegram', 'backfill']), 'history backfill', Date.now()).run();
+                savedLinks++; fresh.push({ id, url: rawUrl });
+              }
+            } catch (e) {
+              console.error(`[index] link insert failed (${rawUrl})`, e?.message || e);
+            }
+          }
+          if (fresh.length) {
+            markMeiliScopeDirty(env, 'community', job.community_id);
+            runInBackground(env, enrichLinksInBackground(env, 'community', job.community_id, fresh));
+          }
         }
         // Media vault: keep the ORIGINAL file on the VPS for every media type
         // (photos/videos/audio/archives/apk included), independent of indexing.
