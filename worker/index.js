@@ -100,6 +100,7 @@ export default {
     // via waitUntil; the self-host shim runs it with a no-op waitUntil, which
     // still executes it asynchronously after the response.
     env.__ctx = ctx || { waitUntil(p) { Promise.resolve(p).catch(() => {}); } };
+    TG_API_BASE = telegramApiBaseFor(env);
     const url = new URL(request.url);
     // Tolerate // and /// in paths (e.g. instance URLs saved with a trailing
     // slash joined to '/api/...') — route matching is exact below.
@@ -2659,8 +2660,27 @@ async function upsertCommunityMember(env, communityId, userId, role = 'member') 
   }
 }
 
+// Active Bot API origin. Defaults to Telegram cloud; a self-hosted instance can
+// point TELEGRAM_API_BASE at a local telegram-bot-api server to lift the 20 MB
+// getFile cap to 2 GB (files, ebooks, big PDFs). Set once per fetch() from env.
+const TG_CLOUD_BASE = 'https://api.telegram.org';
+let TG_API_BASE = TG_CLOUD_BASE;
+function telegramApiBaseFor(env) {
+  const raw = String(env?.TELEGRAM_API_BASE || '').trim().replace(/\/+$/, '');
+  if (!raw) return TG_CLOUD_BASE;
+  try {
+    const u = new URL(raw);
+    // loopback/private only — never ship the bot token to an arbitrary host
+    const host = u.hostname.toLowerCase();
+    const private_ = host === 'localhost' || host === '::1' ||
+      /^127\./.test(host) || /^10\./.test(host) ||
+      /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+    return (u.protocol === 'http:' || u.protocol === 'https:') && private_ ? u.origin : TG_CLOUD_BASE;
+  } catch (_) { return TG_CLOUD_BASE; }
+}
+
 async function telegramApi(token, method, payload = null) {
-  const url = `https://api.telegram.org/bot${token}/${method}`;
+  const url = `${TG_API_BASE}/bot${token}/${method}`;
   const opts = payload
     ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }
     : { method: 'GET' };
@@ -7600,7 +7620,7 @@ async function indexChannelPost(msg, binding, token, env) {
         } else {
           const fileInfo = await telegramApi(token, 'getFile', { file_id: doc.file_id });
           if (fileInfo?.ok && fileInfo.result?.file_path) {
-            const fileRes = await fetchWithTimeout(`https://api.telegram.org/file/bot${token}/${fileInfo.result.file_path}`, { env, redirect: 'error' }, 60_000);
+            const fileRes = await fetchWithTimeout(`${TG_API_BASE}/file/bot${token}/${fileInfo.result.file_path}`, { env, redirect: 'error', allowPrivate: true }, 60_000);
             if (fileRes.ok) {
               const r = await saveIndexedDocument(env, communityId, filename, ext, new Uint8Array(await fileRes.arrayBuffer()), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id });
               if (r && r.error) console.warn(`channel doc skipped (${channelTitle}): ${r.error}`);
@@ -8102,6 +8122,38 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   // When a user sends a .md or supported file, save it to the active scope.
   // In groups: always community scope. In DMs: respect /personal or /community mode.
   const doc = msg.document;
+
+  // Group/channel files from members who never logged into the website are
+  // still indexed into the community brain — group membership is the
+  // authorization (same trust model as /channel_link). Personal scope still
+  // requires a website account below.
+  if (doc && doc.file_id && !athenaUser && binding?.community_id &&
+      (String(msg.chat?.type || '').includes('group') || chatId.startsWith('-')) &&
+      !(String(msg.text || msg.caption || '').trim().startsWith('/'))) {
+    const filename0 = doc.file_name || 'document.txt';
+    const ext0 = filename0.includes('.') ? filename0.split('.').pop().toLowerCase() : '';
+    if (DOCUMENT_EXTENSIONS.has(ext0) || CONVERTIBLE_EXTENSIONS.has(ext0)) {
+      if (Number(doc.file_size || 0) > CONVERT_SOURCE_MAX_BYTES) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} ${codeHtml(filename0)} exceeds the ${CONVERT_SOURCE_MAX_BYTES / (1024 * 1024)} MiB indexing limit.`, forumThreadId);
+      } else {
+        try {
+          const fileInfo = await telegramApi(token, 'getFile', { file_id: doc.file_id });
+          if (fileInfo?.ok && fileInfo.result?.file_path) {
+            const fileRes = await fetchWithTimeout(`${TG_API_BASE}/file/bot${token}/${fileInfo.result.file_path}`, { env, redirect: 'error', allowPrivate: true }, 60_000);
+            if (fileRes.ok) {
+              const r = await saveIndexedDocument(env, binding.community_id, filename0, ext0, new Uint8Array(await fileRes.arrayBuffer()), `tg:${tgUserId}`, { chatId: msg.chat.id, messageId: msg.message_id });
+              if (r?.error) await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} ${escHtml(filename0)}: ${escHtml(r.error)}`, forumThreadId);
+              else if (r?.saved) await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Saved to community brain: ${codeHtml(escHtml(filename0))}\n${italicHtml('Login on the website to search it.')}`, forumThreadId);
+            }
+          }
+        } catch (e) {
+          console.error('group doc (no-user) index failed', e?.message || e);
+        }
+      }
+    }
+    return new Response('OK', { status: 200, headers: corsHeaders });
+  }
+
   if (doc && doc.file_id && athenaUser) {
     let filename = doc.file_name || 'document.txt';
     const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
@@ -8152,7 +8204,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
           await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} Could not download file.`, forumThreadId);
           return new Response('OK', { status: 200, headers: corsHeaders });
         }
-        const fileUrl = `https://api.telegram.org/file/bot${botToken}/${fileInfo.result.file_path}`;
+        const fileUrl = `${TG_API_BASE}/file/bot${botToken}/${fileInfo.result.file_path}`;
         const fileRes = await fetchWithTimeout(fileUrl, { env, redirect: 'error' }, 60_000);
         if (!fileRes.ok) throw new Error(`Download failed: ${fileRes.status}`);
         // Same validators as the API path — byte-accurate size cap, filename and
