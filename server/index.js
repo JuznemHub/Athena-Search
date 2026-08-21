@@ -12,7 +12,7 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import worker, { getInstanceAiConfig, getSteroidMode, syncAiConfigToPeer, syncSteroidToPeer, startUserbotDaemon } from '../worker/index.js';
+import worker, { getInstanceAiConfig, getSteroidMode, syncAiConfigToPeer, syncSteroidToPeer, startUserbotDaemon, ensureIndexTables, runHistoryIndexJob } from '../worker/index.js';
 import { createAssets } from './assets.js';
 import { startBackups, runBackupOnce } from './backup.js';
 import { PostgresD1, translateSchema } from './pgdb.js';
@@ -204,6 +204,30 @@ server.listen(PORT, HOST, () => {
   // Userbot live-clone daemon: connects the stored session (if configured)
   // and mirrors new messages from followed chats. No-op when not set up.
   startUserbotDaemon(env).catch((err) => console.error('[userbot] daemon failed:', err.message));
+
+  // Resume backfills that were interrupted by a restart/deploy — otherwise a
+  // job stays 'running' in the DB forever while nothing works on it.
+  (async () => {
+  try {
+    await ensureIndexTables(env);
+    const { results: stuck } = await DB.prepare(
+      "SELECT * FROM index_jobs WHERE status IN ('queued','running') ORDER BY created_at DESC LIMIT 5"
+    ).all();
+    for (const j of stuck || []) {
+      console.log(`[index] resuming interrupted job ${j.id} (${j.chat_id})`);
+      runHistoryIndexJob(env, {
+        id: j.id, community_id: j.community_id, chat_id: j.chat_id, thread_id: j.thread_id || null,
+        userbot_label: j.userbot_label || null, min_id: j.min_id || null, max_id: j.max_id || null,
+        offset_id: Number(j.offset_id || 0), processed: Number(j.processed || 0),
+        saved_links: Number(j.saved_links || 0), saved_docs: Number(j.saved_docs || 0),
+        saved_files: Number(j.saved_files || 0), skipped_media: Number(j.skipped_media || 0),
+        urls_seen: Number(j.urls_seen || 0), progress_chat_id: j.progress_chat_id,
+      }, process.env.TELEGRAM_BOT_TOKEN || '').catch((e) => console.error('[index] resume run failed:', e.message));
+    }
+  } catch (err) {
+    console.error('[index] resume failed:', err.message);
+  }
+  })();
 
   if (process.env.CF_PURGE_CACHE === '1' && process.env.CF_ZONE_ID && process.env.CF_API_EMAIL && process.env.CF_API_KEY) {
     fetch(`https://api.cloudflare.com/client/v4/zones/${process.env.CF_ZONE_ID}/purge_cache`, {
