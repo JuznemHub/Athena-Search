@@ -4745,11 +4745,13 @@ async function handleInternalSteroidSync(request, env, corsHeaders) {
 }
 
 async function getWebsiteDisplayUrl(env) {
+  // Instance website URL comes from the DB (GOD sets it in Settings → Backend)
+  // or ATHENA_FRONTEND_URL — never hardcoded, so forks stay neutral.
   try {
     const backend = await getInstanceSetting(env, 'default_backend');
-    const url = (backend || env.ATHENA_FRONTEND_URL || 'https://athena.juznem.eu.org').trim().replace(/\/+$/, '');
-    return url || 'https://athena.juznem.eu.org';
-  } catch (_) { return 'https://athena.juznem.eu.org'; }
+    const url = (backend || env.ATHENA_FRONTEND_URL || '').trim().replace(/\/+$/, '');
+    return url;
+  } catch (_) { return ''; }
 }
 
 async function handleGetInstanceConfig(env, corsHeaders) {
