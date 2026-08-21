@@ -20,6 +20,11 @@ Athena is a self-hostable bookmark and document archive. Save from the web UI, T
 <p align="center">
   <em>Live captures — public pages only; no accounts, tokens, or private brains shown.</em>
 </p>
+<p align="center">
+  <img src="screenshots/screenshot-2026-08-21_14-28-39.png" width="32%" alt="Athena app view">
+  <img src="screenshots/screenshot-2026-08-21_14-28-56.png" width="32%" alt="Athena app view">
+  <img src="screenshots/screenshot-2026-08-21_14-29-24.png" width="32%" alt="Athena app view">
+</p>
 
 ## What it does
 

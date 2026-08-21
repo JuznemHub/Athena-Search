@@ -196,7 +196,7 @@ export async function getPool() {
   _pool.on('error', () => {});
   return _pool;
 }
-// API-proxy helpers for when DATABASE_URL is not set (laptop → https://athena.juznem.eu.org)
+// API-proxy helpers for when DATABASE_URL is not set (laptop → instance API)
 async function apiFetch(instance, token, path, opts = {}) {
   const base = String(instance).replace(/\/+$/, '');
   const url = `${base}${path}`;
