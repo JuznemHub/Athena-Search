@@ -12,7 +12,7 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import worker, { getInstanceAiConfig, getSteroidMode, syncAiConfigToPeer, syncSteroidToPeer } from '../worker/index.js';
+import worker, { getInstanceAiConfig, getSteroidMode, syncAiConfigToPeer, syncSteroidToPeer, startUserbotDaemon } from '../worker/index.js';
 import { createAssets } from './assets.js';
 import { startBackups, runBackupOnce } from './backup.js';
 import { PostgresD1, translateSchema } from './pgdb.js';
@@ -200,6 +200,10 @@ server.listen(PORT, HOST, () => {
     console.log('[athena] WARNING: TG_OWNER_IDS is empty — every logged-in user is GOD. Set it before exposing this.');
   }
   startBackups({ connectionString: DATABASE_URL, env: process.env, db: DB });
+
+  // Userbot live-clone daemon: connects the stored session (if configured)
+  // and mirrors new messages from followed chats. No-op when not set up.
+  startUserbotDaemon(env).catch((err) => console.error('[userbot] daemon failed:', err.message));
 
   if (process.env.CF_PURGE_CACHE === '1' && process.env.CF_ZONE_ID && process.env.CF_API_EMAIL && process.env.CF_API_KEY) {
     fetch(`https://api.cloudflare.com/client/v4/zones/${process.env.CF_ZONE_ID}/purge_cache`, {

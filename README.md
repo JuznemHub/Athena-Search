@@ -186,6 +186,24 @@ Then in a **private bot DM**:
 - `/index_stop` cancels; jobs resume from their cursor;
 - the session is AES-GCM encrypted at rest (`STORAGE_KEY`) and auto-deleted when the job completes.
 
+### Userbot mode: live cloning without adding the bot
+
+Bot mode requires the bot to be an admin of each channel/group. **Userbot mode** removes that requirement: a Telegram *user account* (via session string) does the cloning, so any chat the account can read can be mirrored — including channels where adding bots is impossible.
+
+```text
+/userbot_connect <api_id> <api_hash> <session_string>   # GOD, bot DM, self-host
+/userbot_follow <community_id> <chat_id> [community|personal|both]
+/userbot_status
+/userbot_unfollow <chat_id>
+/userbot_disconnect    # stops the daemon and deletes the stored session
+```
+
+- generate the session with `node scripts/gen-session.js` (the account must already be a member of the chats you want to follow);
+- followed chats clone **live** — links, documents (pdf/epub/…), and text posts — into the chosen target (`community` / `personal` / `both`, rank rules identical to channel targets);
+- existing history: run `/index_start` for that chat once (optionally with `thread_id`);
+- the session is AES-GCM encrypted at rest under `STORAGE_KEY`; `/userbot_disconnect` deletes it completely;
+- self-hosted only (needs the persistent Node process; gramjs is bundled).
+
 ### Local Bot API server (2 GB files)
 
 The cloud Bot API caps downloads at 20 MB. Run the bundled local server to lift it to 2 GB for live indexing and backups:
