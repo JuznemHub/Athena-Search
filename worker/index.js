@@ -3242,14 +3242,21 @@ function compactAiContext(sections, maxChars = AI_CONTEXT_MAX_CHARS) {
 
 function isGroundedAiAnswer(text, docs) {
   const answer = String(text || '');
-  const citations = [...answer.matchAll(/\[(?:#)?(\d+)\]/g)]
-    .map(match => Number(match[1]))
-    .filter(index => index >= 1 && index <= (docs || []).length);
-  if (!citations.length) return false;
-  const normalizeUrl = url => String(url || '').replace(/[),.;!?'\s"]+$/g, '');
+  // Compare hosts+paths, ignoring scheme, trailing slashes and punctuation —
+  // models drop the trailing "/" or re-case the host, which is not hallucination.
+  const normalizeUrl = url => {
+    try {
+      const u = new URL(String(url || '').replace(/[),.;!?'"\s]+$/g, ''));
+      return `${u.hostname.toLowerCase().replace(/^www\./, '')}${u.pathname.replace(/\/+$/, '')}`;
+    } catch (_) { return String(url || '').toLowerCase(); }
+  };
   const knownUrls = new Set((docs || []).map(doc => normalizeUrl(doc.url)));
   const urls = answer.match(/https?:\/\/[^\s<>()[\]{}"']+/gi) || [];
-  return urls.every(url => knownUrls.has(normalizeUrl(url)));
+  // Hard hallucination signal: a URL that is not in the retrieved set.
+  if (!urls.every(url => knownUrls.has(normalizeUrl(url)))) return false;
+  // Uncited summaries are still grounded when every URL is known; do not
+  // discard a completed streamed answer over missing [#n] markers.
+  return true;
 }
 
 function groundedMatchesReply(docs) {
