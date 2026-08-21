@@ -2620,7 +2620,14 @@ async function ensureBotBindingColumns(env) {
   try {
     await env.DB.prepare(`ALTER TABLE community_bots ADD COLUMN log_channel_id TEXT`).run();
   } catch (_) {}
+  // Where a linked channel's content lands: 'community' | 'personal' | 'both'.
+  // personal/both are GOD-only and write into the linking GOD user's brain.
+  try {
+    await env.DB.prepare(`ALTER TABLE community_bots ADD COLUMN channel_target TEXT DEFAULT 'community'`).run();
+  } catch (_) {}
 }
+
+const CHANNEL_TARGETS = new Set(['community', 'personal', 'both']);
 
 /** Live D1 may predate role column — migrate safely. */
 async function ensureCommunityMembersColumns(env) {
@@ -2733,6 +2740,7 @@ const TELEGRAM_COMMAND_MENU = [
   { command: 'edit', description: 'Edit title/notes of a link' },
   { command: 'delete', description: 'Delete a saved link' },
   { command: 'dumpall', description: 'Multi-link posts: save all' },
+  { command: 'channel_target', description: 'GOD: channel → community/personal/both' },
   { command: 'dumpsmart', description: 'Multi-link: primary only' },
 ];
 
@@ -7606,48 +7614,97 @@ async function indexChannelPost(msg, binding, token, env) {
   const communityId = binding.community_id;
   const channelTitle = msg.sender_chat?.title || msg.chat?.title || 'channel';
   const text = (msg.text || msg.caption || '').trim();
-  await ensureDocumentsTable(env);
+  await ensureBotBindingColumns(env);
 
-  // Documents first (pdf/docx/md/json/… — same allowlists + conversion as uploads)
+  // Rank-aware target: GOD chose where this channel lands.
+  // 'community' (default) | 'personal' (linking GOD's brain) | 'both'.
+  const target = CHANNEL_TARGETS.has(binding.channel_target) ? binding.channel_target : 'community';
+  const personalOwner = target === 'community' ? null : String(binding.created_by || binding.user_id || '');
+  if (target !== 'community' && !personalOwner) {
+    console.warn(`channel ${channelTitle}: target=${target} but no linking GOD user — falling back to community`);
+  }
+  const sinks = [];
+  if (target === 'community' || target === 'both' || !personalOwner) sinks.push('community');
+  if ((target === 'personal' || target === 'both') && personalOwner) sinks.push('personal');
+
+  const urls = [...new Set(extractUrlsFromTelegramMessage(msg, { includeReply: false }))];
   const doc = msg.document;
-  if (doc && doc.file_id) {
+
+  for (const sink of sinks) {
     try {
-      const filename = doc.file_name || 'document.txt';
-      const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
-      if (DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) {
-        if (Number(doc.file_size || 0) > CONVERT_SOURCE_MAX_BYTES) {
-          console.warn(`channel doc skipped (${channelTitle}): exceeds ${CONVERT_SOURCE_MAX_BYTES} bytes`);
-        } else {
-          const fileInfo = await telegramApi(token, 'getFile', { file_id: doc.file_id });
-          if (fileInfo?.ok && fileInfo.result?.file_path) {
-            const fileRes = await fetchWithTimeout(`${TG_API_BASE}/file/bot${token}/${fileInfo.result.file_path}`, { env, redirect: 'error', allowPrivate: true }, 60_000);
-            if (fileRes.ok) {
-              const r = await saveIndexedDocument(env, communityId, filename, ext, new Uint8Array(await fileRes.arrayBuffer()), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id });
-              if (r && r.error) console.warn(`channel doc skipped (${channelTitle}): ${r.error}`);
+      if (sink === 'personal') {
+        // Documents
+        if (doc && doc.file_id) {
+          const filename = doc.file_name || 'document.txt';
+          const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+          if (DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) {
+            if (Number(doc.file_size || 0) > CONVERT_SOURCE_MAX_BYTES) {
+              console.warn(`channel doc skipped (${channelTitle}, personal): exceeds limit`);
+            } else {
+              const fileInfo = await telegramApi(token, 'getFile', { file_id: doc.file_id });
+              if (fileInfo?.ok && fileInfo.result?.file_path) {
+                const fileRes = await fetchWithTimeout(`${TG_API_BASE}/file/bot${token}/${fileInfo.result.file_path}`, { env, redirect: 'error', allowPrivate: true }, 60_000);
+                if (fileRes.ok) {
+                  const r = await savePersonalIndexedDocument(env, personalOwner, filename, ext, new Uint8Array(await fileRes.arrayBuffer()), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id });
+                  if (r && r.error) console.warn(`channel doc skipped (${channelTitle}, personal): ${r.error}`);
+                }
+              }
             }
           }
         }
+        const savedP = await savePersonalIndexedLinks(env, personalOwner, urls, channelTitle, text);
+        if (savedP) console.log(`channel ${channelTitle} → personal: indexed ${savedP} link(s)`);
+        // Text-only announcements
+        if (!savedP && !doc && text.length >= 80) {
+          const dateStr = msg.date ? new Date(msg.date * 1000).toISOString().slice(0, 10) : '';
+          const safeName = String(channelTitle).replace(/[^\w-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'channel';
+          const md = `# ${channelTitle}${dateStr ? ` — ${dateStr}` : ''}\n\n${text}`;
+          await savePersonalIndexedDocument(env, personalOwner, `${safeName}_${msg.message_id}.md`, 'md', new TextEncoder().encode(md), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id });
+        }
+        continue;
+      }
+
+      // community sink (existing behavior)
+      await ensureDocumentsTable(env);
+      if (doc && doc.file_id) {
+        try {
+          const filename = doc.file_name || 'document.txt';
+          const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+          if (DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) {
+            if (Number(doc.file_size || 0) > CONVERT_SOURCE_MAX_BYTES) {
+              console.warn(`channel doc skipped (${channelTitle}): exceeds ${CONVERT_SOURCE_MAX_BYTES} bytes`);
+            } else {
+              const fileInfo = await telegramApi(token, 'getFile', { file_id: doc.file_id });
+              if (fileInfo?.ok && fileInfo.result?.file_path) {
+                const fileRes = await fetchWithTimeout(`${TG_API_BASE}/file/bot${token}/${fileInfo.result.file_path}`, { env, redirect: 'error', allowPrivate: true }, 60_000);
+                if (fileRes.ok) {
+                  const r = await saveIndexedDocument(env, communityId, filename, ext, new Uint8Array(await fileRes.arrayBuffer()), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id });
+                  if (r && r.error) console.warn(`channel doc skipped (${channelTitle}): ${r.error}`);
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.error('channel doc index failed', e?.message || e);
+        }
+      }
+
+      const saved = await saveIndexedLinks(env, communityId, urls, channelTitle, text, 'channel');
+      if (saved) console.log(`channel ${channelTitle}: indexed ${saved} link(s)`);
+
+      if (!saved && !doc && text.length >= 80) {
+        try {
+          const dateStr = msg.date ? new Date(msg.date * 1000).toISOString().slice(0, 10) : '';
+          const safeName = String(channelTitle).replace(/[^\w-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'channel';
+          const filename = `${safeName}_${msg.message_id}.md`;
+          const md = `# ${channelTitle}${dateStr ? ` — ${dateStr}` : ''}\n\n${text}`;
+          await saveIndexedDocument(env, communityId, filename, 'md', new TextEncoder().encode(md), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id });
+        } catch (e) {
+          console.error('channel text post index failed', e?.message || e);
+        }
       }
     } catch (e) {
-      console.error('channel doc index failed', e?.message || e);
-    }
-  }
-
-  const urls = extractUrlsFromTelegramMessage(msg, { includeReply: false });
-  const saved = await saveIndexedLinks(env, communityId, [...new Set(urls)], channelTitle, text, 'channel');
-  if (saved) console.log(`channel ${channelTitle}: indexed ${saved} link(s)`);
-
-  // Full-channel copy: a text-only post (announcement, no links, no file)
-  // becomes a searchable markdown document so nothing in the channel is missed.
-  if (!saved && !doc && text.length >= 80) {
-    try {
-      const dateStr = msg.date ? new Date(msg.date * 1000).toISOString().slice(0, 10) : '';
-      const safeName = String(channelTitle).replace(/[^\w-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'channel';
-      const filename = `${safeName}_${msg.message_id}.md`;
-      const md = `# ${channelTitle}${dateStr ? ` — ${dateStr}` : ''}\n\n${text}`;
-      await saveIndexedDocument(env, communityId, filename, 'md', new TextEncoder().encode(md), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id });
-    } catch (e) {
-      console.error('channel text post index failed', e?.message || e);
+      console.error(`channel index failed (${sink})`, e?.message || e);
     }
   }
 }
@@ -7692,6 +7749,65 @@ async function saveIndexedDocument(env, communityId, filename, ext, bytes, uploa
     ).bind(id, communityId, valid.filename, valid.content, uploadedBy, Date.now()).run();
   }
   markMeiliScopeDirty(env, 'community', communityId);
+  return { saved: id };
+}
+
+/** Personal-brain variants of the channel indexers — target = personal|both. */
+async function savePersonalIndexedLinks(env, ownerUserId, urls, attributionName, postText) {
+  const baseTags = ['telegram', 'channel'];
+  let saved = 0;
+  for (const rawUrl of urls) {
+    try {
+      if (await findExistingLink(env, 'personal_links', 'user_id', ownerUserId, rawUrl)) continue;
+      const meta = await enrichLinkFields(env, rawUrl, { title: '', notes: postText || '' });
+      const urlHash = generateUrlHash(rawUrl);
+      const id = 'ixp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+      await ensureLinkMetaColumns(env);
+      await env.DB.prepare(
+        `INSERT INTO personal_links (id, user_id, url, url_hash, title, notes, tags, created_at, image_url, site_name)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(id, ownerUserId, rawUrl, urlHash, meta.title, meta.notes || '',
+        JSON.stringify(baseTags), Date.now(), meta.image_url || null, meta.site_name || null).run();
+      saved++;
+      markMeiliScopeDirty(env, 'personal', ownerUserId);
+    } catch (e) {
+      if (!isUniqueConstraintError(e)) console.error(`personal indexed link failed (${rawUrl})`, e?.message || e);
+    }
+  }
+  return saved;
+}
+
+async function savePersonalIndexedDocument(env, ownerUserId, filename, ext, bytes, uploadedBy, sourceMessage = null) {
+  if (!DOCUMENT_EXTENSIONS.has(ext) && !CONVERTIBLE_EXTENSIONS.has(ext)) return null;
+  if (!bytes || bytes.length > CONVERT_SOURCE_MAX_BYTES) return { error: 'document exceeds 20 MiB' };
+  await ensureDocumentsTable(env);
+  if (sourceMessage?.chatId != null && sourceMessage?.messageId != null) {
+    const duplicate = await env.DB.prepare(
+      `SELECT id FROM uploaded_documents
+       WHERE scope = 'personal' AND user_id = ? AND source_chat_id = ? AND source_message_id = ? LIMIT 1`
+    ).bind(ownerUserId, String(sourceMessage.chatId), String(sourceMessage.messageId)).first().catch(() => null);
+    if (duplicate) return { duplicate: true, id: duplicate.id };
+  }
+  let valid;
+  if (CONVERTIBLE_EXTENSIONS.has(ext)) {
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    const converted = await convertDocumentToMarkdown(env, ext, btoa(bin));
+    valid = converted.error ? { error: converted.error } : validateDocumentInput({ scope: 'personal', filename, content: converted.markdown });
+  } else {
+    valid = validateDocumentInput({ scope: 'personal', filename, content: new TextDecoder().decode(bytes) });
+  }
+  if (valid?.error) return valid;
+  if (!valid || !valid.content) return null;
+  const id = 'doc_ixp_' + Date.now().toString(36) + '_' + randomToken().slice(0, 4);
+  await env.DB.prepare(
+    `INSERT INTO uploaded_documents
+     (id, scope, user_id, filename, content, uploaded_by, created_at, source_chat_id, source_message_id)
+     VALUES (?, 'personal', ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(id, ownerUserId, valid.filename, valid.content, uploadedBy, Date.now(),
+    sourceMessage?.chatId == null ? null : String(sourceMessage.chatId),
+    sourceMessage?.messageId == null ? null : String(sourceMessage.messageId)).run();
+  markMeiliScopeDirty(env, 'personal', ownerUserId);
   return { saved: id };
 }
 
@@ -8542,11 +8658,22 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      }
      const communityIdArg = (parts[1] || '').trim();
      const channelIdArg = (parts[2] || '').trim() || (msg.reply_to_message?.sender_chat?.id ? String(msg.reply_to_message.sender_chat.id) : '');
+     const targetArg = (parts[3] || '').trim().toLowerCase();
+     if (targetArg && !CHANNEL_TARGETS.has(targetArg)) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Target must be ${codeHtml('community')}, ${codeHtml('personal')} or ${codeHtml('both')}.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if ((targetArg === 'personal' || targetArg === 'both') && !isGod) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} ${codeHtml('personal')}/${codeHtml('both')} targets are GOD rank only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const channelTarget = targetArg || 'community';
      if (!communityIdArg || !channelIdArg) {
        await sendTelegramFormatted(token, chatId, [
          `${boldHtml('📢 Link a channel for auto-indexing')}`,
          '',
-         `Usage: ${codeHtml('/channel_link <community_id> <channel_id>')}`,
+         `Usage: ${codeHtml('/channel_link <community_id> <channel_id> [community|personal|both]}')}`,
+         `${codeHtml('personal')}/${codeHtml('both')} are GOD rank only.`,
          `Or: forward a channel post here, reply to it with ${codeHtml('/channel_link <community_id>')}`,
          '',
          'Requires: community owner/GOD, and this bot added as ADMIN of the channel.',
@@ -8590,19 +8717,20 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        `SELECT id, community_id FROM community_bots WHERE platform = 'telegram' AND group_id = ?`
      ).bind(cid).first();
      if (existingBinding) {
-       await env.DB.prepare('UPDATE community_bots SET community_id = ?, group_name = ? WHERE id = ?')
-         .bind(communityIdArg, channelTitle, existingBinding.id).run();
+       await env.DB.prepare('UPDATE community_bots SET community_id = ?, group_name = ?, channel_target = COALESCE(?, channel_target) WHERE id = ?')
+         .bind(communityIdArg, channelTitle, channelTarget, existingBinding.id).run();
      } else {
        const id = 'cb_' + Date.now().toString(36) + '_' + randomToken().slice(0, 6);
        await env.DB.prepare(
-         `INSERT INTO community_bots (id, community_id, platform, bot_username, group_id, group_name, created_by, created_at, scope, user_id, bot_token)
-          VALUES (?, ?, 'telegram', ?, ?, ?, ?, ?, 'community', NULL, NULL)`
-       ).bind(id, communityIdArg, me?.result?.username || null, cid, channelTitle, athenaUser.id, Date.now()).run();
+         `INSERT INTO community_bots (id, community_id, platform, bot_username, group_id, group_name, created_by, created_at, scope, user_id, bot_token, channel_target)
+          VALUES (?, ?, 'telegram', ?, ?, ?, ?, ?, 'community', NULL, NULL, ?)`
+       ).bind(id, communityIdArg, me?.result?.username || null, cid, channelTitle, athenaUser.id, Date.now(), channelTarget).run();
      }
      await sendTelegramFormatted(token, chatId, [
        `${boldHtml('✅')} Channel ${boldHtml(escHtml(channelTitle))} linked to ${boldHtml(escHtml(community.name || communityIdArg))}.`,
        '',
-       `${boldHtml('From now on')} every new post is copied into the community brain automatically — links, captions, documents (pdf/docx/md/…), and text-only announcements. Video/audio/apk are skipped.`,
+       `${boldHtml('Target:')} ${codeHtml(channelTarget)}${channelTarget !== 'community' ? italicHtml(' (GOD personal brain included)') : ''}`,
+       `${boldHtml('From now on')} every new post is copied automatically — links, captions, documents (pdf/docx/md/…), and text-only announcements. Video/audio/apk are skipped.`,
        '',
        `${boldHtml('Copy the existing history too')} (everything already in the channel):`,
        `1. On this server run: ${codeHtml('node scripts/gen-session.js')}`,
@@ -8610,6 +8738,42 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        `   • chat_id = ${codeHtml(cid)} · progress: ${codeHtml('/index_status')} · stop: ${codeHtml('/index_stop')}`,
        `${italicHtml('The session string is encrypted at rest and auto-deleted when the backfill finishes.')}`
      ].join('\n'), forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /channel_target — GOD switches where a linked channel lands ----
+   if (cmd === '/channel_target' || cmd === '/channeltarget') {
+     if (!athenaUser) {
+       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (!isGod) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const cidArg = (parts[1] || '').trim();
+     const tArg = (parts[2] || '').trim().toLowerCase();
+     if (!cidArg || !CHANNEL_TARGETS.has(tArg)) {
+       await sendTelegramFormatted(token, chatId,
+         `Usage: ${codeHtml('/channel_target <channel_id> <community|personal|both>')}\nCurrent: reply with just ${codeHtml('/channel_target <channel_id>')}`,
+         forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     await ensureBotBindingColumns(env);
+     const row = await env.DB.prepare(
+       `SELECT id, group_name, created_by, channel_target FROM community_bots WHERE platform = 'telegram' AND group_id = ? AND community_id IS NOT NULL`
+     ).bind(cidArg.startsWith('-') ? cidArg : `-100${cidArg.replace(/^-100/, '')}`).first();
+     if (!row) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No linked channel ${codeHtml(cidArg)}. Link it first with ${codeHtml('/channel_link')}.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     // personal/both write into the linking GOD's brain; the SELECT above must
+     // expose created_by for that ownership check.
+     await env.DB.prepare('UPDATE community_bots SET channel_target = ? WHERE id = ?').bind(tArg, row.id).run();
+     await sendTelegramFormatted(token, chatId,
+       `${boldHtml('✅')} ${escHtml(row.group_name || cidArg)} now indexes into: ${codeHtml(tArg)}` +
+       (tArg !== 'community' ? `\n${italicHtml('Personal content lands in the GOD account that ran /channel_link.')}` : ''),
+       forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
