@@ -2757,6 +2757,9 @@ const TELEGRAM_COMMAND_MENU = [
   { command: 'userbot_disconnect', description: 'GOD: stop + delete session' },
   { command: 'clone', description: 'Clone this chat (live + history)' },
     { command: 'dumpsmart', description: 'Multi-link: primary only' },
+    { command: 'forcetags', description: 'GOD: tag all untagged links' },
+    { command: 'transfers', description: 'GOD: clone sessions list' },
+    { command: 'clone_del', description: 'GOD: delete a clone session' },
 ];
 
 async function ensureTelegramWebhook(token, workerOrigin, env) {
