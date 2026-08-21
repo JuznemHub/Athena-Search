@@ -3787,6 +3787,13 @@ async function convertDocumentToMarkdown(env, ext, base64) {
   }
 }
 
+/** Tag columns so an entire clone/backfill session can be deleted precisely. */
+async function ensureTransferColumns(env) {
+  for (const t of ['links', 'personal_links', 'uploaded_documents']) {
+    try { await env.DB.prepare(`ALTER TABLE ${t} ADD COLUMN transfer_id TEXT`).run(); } catch (_) {}
+  }
+}
+
 async function ensureDocumentsTable(env) {
   await env.DB.prepare(
     `CREATE TABLE IF NOT EXISTS uploaded_documents (
@@ -7351,6 +7358,7 @@ function helpTextForSection(section) {
       `${italicHtml('In-chat shortcuts:')} ${codeHtml('/follow [target]')} ${italicHtml('and')} ${codeHtml('/backfill')} ${italicHtml('— auto-detect chat/topic/community, reuse the connected session.')}`,
       `${boldHtml('Why a session?')} Bots only see messages after they are added as admin. A user session is your account reading the chat like Telegram Desktop does — connect it once and both live cloning and history backfill reuse it; nothing is asked twice.`,
       `${boldHtml('Progress & errors:')} backfills show a live progress bar; ${codeHtml('/userbot_status')} lists per-chat counters and the last errors.`,
+      `${boldHtml('Undo a bad clone:')} ${codeHtml('/transfers')} → ${codeHtml('/clone_del <session_id> [files]')} removes everything that session imported (vault media too with "files").`,
       `/topic_link ${codeHtml('<community_id> [target]')} — clone this topic (run inside it)`,
       `/topic_list · /topic_unlink ${codeHtml('<thread_id>')} · /topic_target ${codeHtml('<thread_id> <target>')}`,
       '',
@@ -7715,7 +7723,7 @@ async function capturePostIntoSinks(env, sinks, ctx) {
             if (fileInfo?.ok && fileInfo.result?.file_path) {
               const fileRes = await fetchWithTimeout(`${TG_API_BASE}/file/bot${token}/${fileInfo.result.file_path}`, { env, redirect: 'error', allowPrivate: true }, 60_000);
               if (fileRes.ok) {
-                const r = await savePersonalIndexedDocument(env, personalOwner, filename, ext, new Uint8Array(await fileRes.arrayBuffer()), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id });
+                const r = await savePersonalIndexedDocument(env, personalOwner, filename, ext, new Uint8Array(await fileRes.arrayBuffer()), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id }, `live:${normalizeTgChatId(msg.chat.id)}`);
                 if (r && r.error) console.warn(`post doc skipped (${channelTitle}, personal): ${r.error}`);
               }
             }
@@ -7796,7 +7804,7 @@ async function ensureTopicBindingTable(env) {
 }
 
 /** Shared by channel indexing and history backfill. Returns {error?} or {saved} or null on skip. */
-async function saveIndexedDocument(env, communityId, filename, ext, bytes, uploadedBy, sourceMessage = null) {
+async function saveIndexedDocument(env, communityId, filename, ext, bytes, uploadedBy, sourceMessage = null, transferId = null) {
   if (!DOCUMENT_EXTENSIONS.has(ext) && !CONVERTIBLE_EXTENSIONS.has(ext)) return null;
   if (!bytes || bytes.length > CONVERT_SOURCE_MAX_BYTES) return { error: 'document exceeds 20 MiB' };
   await ensureDocumentsTable(env);
@@ -7834,12 +7842,16 @@ async function saveIndexedDocument(env, communityId, filename, ext, bytes, uploa
        VALUES (?, 'community', ?, ?, ?, ?, ?)`
     ).bind(id, communityId, valid.filename, valid.content, uploadedBy, Date.now()).run();
   }
+  if (transferId) {
+    await ensureTransferColumns(env);
+    await env.DB.prepare('UPDATE uploaded_documents SET transfer_id = ? WHERE id = ?').bind(transferId, id).run().catch(() => {});
+  }
   markMeiliScopeDirty(env, 'community', communityId);
   return { saved: id };
 }
 
 /** Personal-brain variants of the channel indexers — target = personal|both. */
-async function savePersonalIndexedLinks(env, ownerUserId, urls, attributionName, postText) {
+async function savePersonalIndexedLinks(env, ownerUserId, urls, attributionName, postText, transferId = null) {
   const baseTags = ['telegram', 'channel'];
   let saved = 0;
   for (const rawUrl of urls) {
@@ -7855,6 +7867,10 @@ async function savePersonalIndexedLinks(env, ownerUserId, urls, attributionName,
       ).bind(id, ownerUserId, rawUrl, urlHash, meta.title, meta.notes || '',
         JSON.stringify(baseTags), Date.now(), meta.image_url || null, meta.site_name || null).run();
       saved++;
+      if (transferId) {
+        await ensureTransferColumns(env);
+        await env.DB.prepare('UPDATE personal_links SET transfer_id = ? WHERE id = ?').bind(transferId, id).run().catch(() => {});
+      }
       markMeiliScopeDirty(env, 'personal', ownerUserId);
     } catch (e) {
       if (!isUniqueConstraintError(e)) console.error(`personal indexed link failed (${rawUrl})`, e?.message || e);
@@ -7863,7 +7879,7 @@ async function savePersonalIndexedLinks(env, ownerUserId, urls, attributionName,
   return saved;
 }
 
-async function savePersonalIndexedDocument(env, ownerUserId, filename, ext, bytes, uploadedBy, sourceMessage = null) {
+async function savePersonalIndexedDocument(env, ownerUserId, filename, ext, bytes, uploadedBy, sourceMessage = null, transferId = null) {
   if (!DOCUMENT_EXTENSIONS.has(ext) && !CONVERTIBLE_EXTENSIONS.has(ext)) return null;
   if (!bytes || bytes.length > CONVERT_SOURCE_MAX_BYTES) return { error: 'document exceeds 20 MiB' };
   await ensureDocumentsTable(env);
@@ -7893,12 +7909,16 @@ async function savePersonalIndexedDocument(env, ownerUserId, filename, ext, byte
   ).bind(id, ownerUserId, valid.filename, valid.content, uploadedBy, Date.now(),
     sourceMessage?.chatId == null ? null : String(sourceMessage.chatId),
     sourceMessage?.messageId == null ? null : String(sourceMessage.messageId)).run();
+  if (transferId) {
+    await ensureTransferColumns(env);
+    await env.DB.prepare('UPDATE uploaded_documents SET transfer_id = ? WHERE id = ?').bind(transferId, id).run().catch(() => {});
+  }
   markMeiliScopeDirty(env, 'personal', ownerUserId);
   return { saved: id };
 }
 
 /** Shared insert path for indexed links (channel posts + history backfill). */
-async function saveIndexedLinks(env, communityId, urls, attributionName, postText, source /* 'channel'|'backfill' */) {
+async function saveIndexedLinks(env, communityId, urls, attributionName, postText, source /* 'channel'|'backfill' */, transferId = null) {
   const baseTags = ['telegram', source === 'backfill' ? 'backfill' : 'channel'];
   let saved = 0;
   for (const rawUrl of urls) {
@@ -7926,6 +7946,10 @@ async function saveIndexedLinks(env, communityId, urls, attributionName, postTex
         ).bind(id, communityId, rawUrl, urlHash, meta.title, meta.notes || '', JSON.stringify(baseTags), attributionName, Date.now()).run();
       }
       saved++;
+      if (transferId) {
+        await ensureTransferColumns(env);
+        await env.DB.prepare('UPDATE links SET transfer_id = ? WHERE id = ?').bind(transferId, id).run().catch(() => {});
+      }
       // tagging: post #hashtags win, else AI describe (same as group dumps)
       const userTags = normalizeTagList(extractHashtags(postText || ''));
       let finalTags = null;
@@ -8202,7 +8226,7 @@ async function runHistoryIndexJob(env, job, token) {
         if (text.startsWith('/')) continue;
         const urls = urlsFromGramjsMessage(message);
         if (urls.length) {
-          const saved = await saveIndexedLinks(env, job.community_id, urls, 'history backfill', text, 'backfill');
+          const saved = await saveIndexedLinks(env, job.community_id, urls, 'history backfill', text, 'backfill', job.id);
           savedLinks += saved || 0;
         }
         // Media vault: keep the ORIGINAL file on the VPS for every media type
@@ -8238,7 +8262,7 @@ async function runHistoryIndexJob(env, job, token) {
             const filename = `${safeName}_${message.id}.md`;
             const when = message.date ? new Date(message.date * 1000).toISOString().slice(0, 10) : '';
             const md = `# History backfill${when ? ` — ${when}` : ''}\n\n${text}`;
-            const r = await saveIndexedDocument(env, job.community_id, filename, 'md', new TextEncoder().encode(md), `backfill:${job.chat_id}`, { chatId: job.chat_id, messageId: message.id });
+            const r = await saveIndexedDocument(env, job.community_id, filename, 'md', new TextEncoder().encode(md), `backfill:${job.chat_id}`, { chatId: job.chat_id, messageId: message.id }, job.id);
             if (r?.saved) savedDocs++;
           } catch (e) {
             console.error('[index] text post failed', e?.message || e);
@@ -8256,7 +8280,7 @@ async function runHistoryIndexJob(env, job, token) {
             try {
               const buf = await client.downloadMedia(message, {});
               if (buf && buf.length) {
-                const r = await saveIndexedDocument(env, job.community_id, filename, ext, new Uint8Array(buf), `backfill:${job.chat_id}`, { chatId: job.chat_id, messageId: message.id });
+                const r = await saveIndexedDocument(env, job.community_id, filename, ext, new Uint8Array(buf), `backfill:${job.chat_id}`, { chatId: job.chat_id, messageId: message.id }, job.id);
                 if (r?.saved) savedDocs++;
               }
               await sleep(400);
@@ -9734,6 +9758,83 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
+   // ---- /transfers — GOD: recent clone/backfill sessions with ids ----
+   if (cmd === '/transfers' || cmd === '/clone_sessions') {
+     if (!isGod) { await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId); return new Response('OK', { status: 200, headers: corsHeaders }); }
+     await ensureIndexTables(env);
+     await ensureTransferColumns(env);
+     const { results } = await env.DB.prepare(
+       'SELECT id, chat_id, status, processed, saved_links, saved_docs, saved_files, created_at FROM index_jobs ORDER BY created_at DESC LIMIT 10'
+     ).all();
+     if (!results?.length) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No clone/backfill sessions yet.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const lines = results.map((j) => `• ${codeHtml(j.id)}\n  ${escHtml(j.chat_id)} · ${j.status} · ${j.processed || 0} msgs · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_files ? ` · ${j.saved_files} files` : ''}`);
+     await sendTelegramFormatted(token, chatId,
+       `${boldHtml('🗂 Clone sessions')}\n\n${lines.join('\n\n')}\n\n${italicHtml('Delete one:')} ${codeHtml('/clone_del <id> [files]')}${italicHtml(' — add "files" to also wipe its vault media')}`,
+       forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /clone_del — GOD: delete one transfer session's imported data ----
+   if (cmd === '/clone_del' || cmd === '/clonedel') {
+     if (!isGod) { await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId); return new Response('OK', { status: 200, headers: corsHeaders }); }
+     await ensureUserbotTables(env);
+     await ensureIndexTables(env);
+     await ensureTransferColumns(env);
+     const target = (parts[1] || '').trim();
+     const withFiles = (parts[2] || '').toLowerCase() === 'files';
+     if (!target) {
+       await sendTelegramFormatted(token, chatId,
+         `Usage:\n${codeHtml('/clone_del <job_id> [files]')} — delete that session's imports\n${codeHtml('/clone_del <chat_id> [files]')} — delete ALL sessions for a chat\n${codeHtml('/transfers')} — list ids`,
+         forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     let transferIds;
+     let jobIds;
+     if (target.startsWith('ij_')) {
+       transferIds = [target]; jobIds = [target];
+     } else {
+       const cid = normalizeTgChatId(target);
+       const { results } = await env.DB.prepare('SELECT id FROM index_jobs WHERE chat_id = ?').bind(cid).all();
+       jobIds = (results || []).map((r) => r.id);
+       transferIds = [...jobIds, `live:${cid}`];
+     }
+     if (!transferIds.length) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Nothing found for ${codeHtml(target)}. See ${codeHtml('/transfers')}.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const ph = transferIds.map(() => '?').join(',');
+     const args = [...transferIds];
+     const d1 = await env.DB.prepare(`DELETE FROM links WHERE transfer_id IN (${ph})`).bind(...args).run().catch(() => ({ changes: 0 }));
+     const d2 = await env.DB.prepare(`DELETE FROM personal_links WHERE transfer_id IN (${ph})`).bind(...args).run().catch(() => ({ changes: 0 }));
+     const d3 = await env.DB.prepare(`DELETE FROM uploaded_documents WHERE transfer_id IN (${ph})`).bind(...args).run().catch(() => ({ changes: 0 }));
+     // vault files for the whole chat when asked
+     let filesWiped = false;
+     if (withFiles && MEDIA_VAULT_DIR) {
+       try {
+         const fsSpec = 'node:fs/promises';
+         const { rm } = await import(fsSpec);
+         const dir = `${MEDIA_VAULT_DIR}/${String(jobIds[0] ? target : transferIds.find(t => t.startsWith('live:'))?.slice(5) || target).replace(/[^\w-]+/g, '_')}`;
+         await rm(dir, { recursive: true, force: true });
+         filesWiped = true;
+       } catch (_) {}
+     }
+     if (jobIds.length) {
+       await env.DB.prepare(`DELETE FROM index_jobs WHERE id IN (${jobIds.map(() => '?').join(',')})`).bind(...jobIds).run().catch(() => {});
+     }
+     // meili dirty for affected scopes
+     try {
+       const cidForMeili = target.startsWith('ij_') ? null : normalizeTgChatId(target);
+       if (cidForMeili) markMeiliScopeDirty(env, 'community', cidForMeili);
+     } catch (_) {}
+     await sendTelegramFormatted(token, chatId,
+       `${boldHtml('🗑 Deleted session')} ${codeHtml(target)}\n• links removed: ${d1?.changes || 0}\n• personal links: ${d2?.changes || 0}\n• documents: ${d3?.changes || 0}${filesWiped ? '\n• vault media folder wiped' : ''}\n${italicHtml(withFiles ? '' : 'Vault media files were kept — repeat with "files" to wipe them.')}`,
+       forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
    // ---- /userbot_status — accounts, follows, live counters, recent errors ----
    if (cmd === '/userbot_status' || cmd === '/userbotstatus') {
      if (!isSelfHosted(env)) {
@@ -9794,7 +9895,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No backfill jobs yet. ${codeHtml('/index_start')} to begin.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
-     const lines = results.map((j) => `${j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'error' ? '❌' : '⏸'} ${codeHtml(j.chat_id)} — ${escHtml(j.status)}: ${j.processed || 0} scanned · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.error ? `\n   ${escHtml(j.error)}` : ''}`);
+     const lines = results.map((j) => `${j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'error' ? '❌' : '⏸'} ${codeHtml(j.chat_id)} — ${escHtml(j.status)}: ${j.processed || 0} scanned · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs\n   ${codeHtml(j.id)} · delete: /clone_del ${codeHtml(j.id)}${j.error ? `\n   ${escHtml(j.error)}` : ''}`);
      await sendTelegramFormatted(token, chatId, `${boldHtml('🗂 Backfill jobs')}\n\n${lines.join('\n\n')}`, forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
