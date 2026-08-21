@@ -8188,10 +8188,11 @@ async function runHistoryIndexJob(env, job, token) {
     if (!sessionString || !apiHash) { await patch({ status: 'error', error: 'session decrypt failed (STORAGE_KEY rotated?)' }); return; }
     const client = new TelegramClient(new StringSession(sessionString), Number(sess.api_id) || 0, apiHash, { connectionRetries: 3 });
     await client.connect();
-    // Prime the entity cache — fresh sessions cannot resolve raw -100… ids.
-    await primeEntity(client, job.chat_id);
     let offsetId = job.offset_id || 0;
     let processed = job.processed || 0;
+    job.saved_files = Number(job.saved_files || 0);
+    job.skipped_media = Number(job.skipped_media || 0);
+    job.urls_seen = Number(job.urls_seen || 0);
     // Approximate total for the progress bar: latest message id in the chat.
     try {
       const head = await client.getMessages(job.chat_id, { limit: 1 });
@@ -8221,9 +8222,18 @@ async function runHistoryIndexJob(env, job, token) {
           continue;
         }
         if (/input entity/i.test(String(e?.message))) {
-          e.message = `The session account cannot see ${job.chat_id}. Join this channel/group with that account, then retry.`;
-        }
-        throw e;
+          log('entity cache cold — priming once, then retrying');
+          const ok = await primeEntity(client, job.chat_id, 60_000);
+          if (!ok) {
+            e.message = `The session account cannot see ${job.chat_id}. Join this channel/group with that account, then retry.`;
+            throw e;
+          }
+          messages = await client.getMessages(job.chat_id, {
+            limit: INDEX_BATCH,
+            offsetId,
+            ...(job.thread_id ? { replyTo: Number(job.thread_id) } : {})
+          });
+        } else { throw e; }
       }
       if (!messages || !messages.length) { await patch({ status: 'done' }); log('done (end of history)'); break; }
       if (job.min_id && offsetId && offsetId < Number(job.min_id)) { await patch({ status: 'done' }); log('done (reached min_id)'); break; }
@@ -8302,7 +8312,8 @@ async function runHistoryIndexJob(env, job, token) {
           }
         }
       }
-      await patch({ offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs });
+      await patch({ offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs, saved_files: job.saved_files || 0, skipped_media: job.skipped_media || 0, urls_seen: job.urls_seen || 0 });
+      log(`batch done · total ${processed} · +${messages.length} · urls ${job.urls_seen || 0}`);
       if (processed - lastProgress >= 50) lastProgress = processed;
       await pushProgress(false, processed);
       await sleep(INDEX_BATCH_DELAY_MS);
