@@ -7323,6 +7323,7 @@ function helpTextForSection(section) {
       `/group_copy ${codeHtml('on|off')} — also save text-only posts (owner)`,
       `${boldHtml('🧬 Clone any chat')} ${italicHtml('(userbot mode — one command)')}`,
       `${codeHtml('/clone')} ${italicHtml('inside a channel/group/topic → live + history, auto-detected')}`,
+      `${codeHtml('/clone <chat_id>')} ${italicHtml('in my DM — for channels you cannot type in; or forward a post and reply /clone')}`,
       `${codeHtml('/clone personal')} / ${codeHtml('/clone both')} ${italicHtml('— GOD targets')}`,
       `${boldHtml('🤖 Userbot accounts')} ${italicHtml('(self-host, GOD)')}`,
       `/userbot_connect ${codeHtml('<api_id> <api_hash> <session>')} — persistent session`,
@@ -9222,11 +9223,26 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      // overlap free. Works in channels/groups/topics where the userbot account
      // is a member — no bot-admin, no group binding required.
      if (cmd === '/clone' || cmd === '/follow' || cmd === '/backfill') {
+       // Remote mode (DM): /clone <chat_id> [thread_id] [target|community…]
+       // or reply-to a forwarded channel post. For channels you cannot type in.
+       let remoteChatId = '';
+       let remoteThread = '';
        if (dmOnly) {
-         await sendTelegramFormatted(token, chatId,
-           `${boldHtml('🧬 /clone')} ${italicHtml('— open the channel/group/topic and send it there.')}\n\n${codeHtml('/clone')} ${italicHtml('→ community brain (from binding) · live + history')}\n${codeHtml('/clone personal')} ${italicHtml('→ your personal brain (GOD)')}\n${codeHtml('/clone both')} ${italicHtml('→ both (GOD)')}\n${codeHtml('/clone <community_id> [target]')} ${italicHtml('→ explicit community')}`,
-           forumThreadId);
-         return new Response('OK', { status: 200, headers: corsHeaders });
+         const fwd = msg.reply_to_message?.forward_from_chat?.id
+           ?? msg.reply_to_message?.forward_from_chat
+           ?? msg.forward_from_chat?.id;
+         for (const a of parts.slice(1)) {
+           const t = a.trim();
+           if (/^-?\d{8,}$/.test(t)) remoteChatId = t;
+           else if (/^\d{1,7}$/.test(t)) remoteThread = t;
+         }
+         if (!remoteChatId && fwd != null) remoteChatId = String(fwd);
+         if (!remoteChatId) {
+           await sendTelegramFormatted(token, chatId,
+             `${boldHtml('🧬 /clone from my DM')}\n\n${boldHtml('Easiest:')} forward any post from the channel here, then ${boldHtml('reply')} to it with ${codeHtml('/clone [target]')}\n\n${boldHtml('Or by id:')} ${codeHtml('/clone <chat_id> [thread_id] [target|community_id]')}\n${italicHtml('chat ids look like -100… (forward a post to @userinfobot to see one)')}`,
+             forumThreadId);
+           return new Response('OK', { status: 200, headers: corsHeaders });
+         }
        }
        if (!athenaUser) {
          await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
@@ -9241,22 +9257,28 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
          return new Response('OK', { status: 200, headers: corsHeaders });
        }
 
-       // Parse args: one may be a target word, one may be a community id.
+       // Parse args: target word and/or community id (in-chat mode).
        let targetArg = '';
        let communityIdArg = '';
-       for (const a of parts.slice(1)) {
-         const t = a.trim();
-         if (!t) continue;
-         if (CHANNEL_TARGETS.has(t.toLowerCase())) targetArg = t.toLowerCase();
-         else if (/^c_/.test(t) || t.length > 8) communityIdArg = t;
+       if (!dmOnly) {
+         for (const a of parts.slice(1)) {
+           const t = a.trim();
+           if (!t) continue;
+           if (CHANNEL_TARGETS.has(t.toLowerCase())) targetArg = t.toLowerCase();
+           else if (/^c_/.test(t) || t.length > 8) communityIdArg = t;
+         }
        }
        if ((targetArg === 'personal' || targetArg === 'both') && !isGod) {
          await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} ${codeHtml('personal')}/${codeHtml('both')} targets are GOD rank only.`, forumThreadId);
          return new Response('OK', { status: 200, headers: corsHeaders });
        }
 
-       const threadArg = msg.is_topic_message && msg.message_thread_id != null ? String(msg.message_thread_id) : '';
-       const chatIdN = normalizeTgChatId(chatId);
+       let threadArg = msg.is_topic_message && msg.message_thread_id != null ? String(msg.message_thread_id) : '';
+       let chatIdN = normalizeTgChatId(chatId);
+       if (dmOnly && remoteChatId) {
+         chatIdN = normalizeTgChatId(remoteChatId);
+         if (remoteThread) threadArg = remoteThread;
+       }
 
        // Community resolution: explicit arg → topic binding → group binding →
        // GOD fallback to personal.
@@ -9268,7 +9290,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        if (!communityIdArg && !targetArg && isGod) targetArg = 'personal';
        if (!communityIdArg && !targetArg) {
          await sendTelegramFormatted(token, chatId,
-           `${boldHtml('⚠️')} No community bound here. GOD can use ${codeHtml('/clone personal')} or ${codeHtml('/clone both')}; otherwise pass the community: ${codeHtml('/clone <community_id>')}`,
+           `${boldHtml('⚠️')} No community bound here. GOD can use ${codeHtml('/clone personal')} or ${codeHtml('/clone both')}; otherwise pass the community: ${codeHtml('/clone <community_id>')}${dmOnly ? ` or ${codeHtml('/clone <chat_id> <community_id>')}` : ''}`,
            forumThreadId);
          return new Response('OK', { status: 200, headers: corsHeaders });
        }
