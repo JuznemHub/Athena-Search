@@ -580,6 +580,7 @@ export default {
 
       return new Response('Athena API', { status: 200, headers: corsHeaders });
     } catch (err) {
+      console.error('[athena] worker fetch failed:', err?.stack || err);
       return Response.json({ success: false, error: err.message }, { status: 500, headers: corsHeaders });
     }
   }
@@ -7938,7 +7939,7 @@ async function ensureIndexTables(env) {
     `CREATE TABLE IF NOT EXISTS telegram_index_sessions (
       id TEXT PRIMARY KEY, user_id TEXT NOT NULL, community_id TEXT NOT NULL,
       chat_id TEXT NOT NULL, api_id TEXT, api_hash_enc TEXT, session_enc TEXT NOT NULL,
-      created_at INTEGER NOT NULL`
+      created_at INTEGER NOT NULL)`
   ).run();
   await env.DB.prepare(
     `CREATE TABLE IF NOT EXISTS index_jobs (
@@ -7946,7 +7947,7 @@ async function ensureIndexTables(env) {
       status TEXT NOT NULL, offset_id INTEGER NOT NULL DEFAULT 0,
       processed INTEGER NOT NULL DEFAULT 0, saved_links INTEGER NOT NULL DEFAULT 0,
       saved_docs INTEGER NOT NULL DEFAULT 0, progress_chat_id TEXT,
-      error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL`
+      error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`
   ).run();
 }
 
@@ -7982,17 +7983,30 @@ function urlsFromGramjsMessage(message) {
 async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg, threadArg = '', communityName = '' }) {
   await ensureUserbotTables(env);
   await ensureIndexTables(env);
-  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN thread_id TEXT').run(); } catch (_) {}
-  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN progress_msg_id BIGINT').run().catch(() => {}); } catch (_) {}
+  // Normalize bare channel ids (Telegram web apps often show them without -100)
+  let cid = String(chatIdArg || '').trim();
+  if (/^\d{9,}$/.test(cid)) cid = `-100${cid}`;
+  // One active backfill per chat — a second /index_start would double-index
+  const active = await env.DB.prepare(
+    "SELECT id FROM index_jobs WHERE chat_id = ? AND status IN ('queued','running')"
+  ).bind(cid).first();
+  if (active) {
+    await sendTelegramFormatted(token, chatId,
+      `${boldHtml('⏳')} A backfill for ${codeHtml(cid)} is already running. Progress: ${codeHtml('/index_status')} · cancel: ${codeHtml('/index_stop')}`,
+      forumThreadId).catch(() => {});
+    return { ok: false, reason: 'already running', jobId: active.id };
+  }
+  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN thread_id TEXT').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] thread_id alter:', e?.message); }
+  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN progress_msg_id BIGINT').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] progress_msg_id alter:', e?.message); }
   const jobId = 'ij_' + Date.now().toString(36) + '_' + randomToken().slice(0, 6);
   await env.DB.prepare(
     `INSERT INTO index_jobs (id, community_id, chat_id, user_id, status, offset_id, progress_chat_id, created_at, updated_at, thread_id)
      VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?)`
-  ).bind(jobId, communityIdArg, chatIdArg, athenaUser.id, chatId, Date.now(), Date.now(), threadArg || null).run();
-  runInBackground(env, runHistoryIndexJob(env, { id: jobId, community_id: communityIdArg, chat_id: chatIdArg, thread_id: threadArg || null, offset_id: 0, processed: 0, saved_links: 0, saved_docs: 0, progress_chat_id: chatId }, token));
+  ).bind(jobId, communityIdArg, cid, athenaUser.id, chatId, Date.now(), Date.now(), threadArg || null).run();
+  runInBackground(env, runHistoryIndexJob(env, { id: jobId, community_id: communityIdArg, chat_id: cid, thread_id: threadArg || null, offset_id: 0, processed: 0, saved_links: 0, saved_docs: 0, progress_chat_id: chatId }, token));
   await sendTelegramFormatted(token, chatId,
     `${boldHtml('▶️')} Backfill started for ${codeHtml(chatIdArg)}${threadArg ? ` topic ${codeHtml('#' + threadArg)}` : ''} → ${boldHtml(escHtml(communityName || communityIdArg))}.\n${italicHtml('Live progress below ·')} ${codeHtml('/index_stop')} ${italicHtml('to cancel.')}`,
-    forumThreadId);
+    forumThreadId).catch(() => {});
   return { ok: true, jobId };
 }
 
@@ -8056,6 +8070,19 @@ async function runHistoryIndexJob(env, job, token) {
     if (!sessionString || !apiHash) { await patch({ status: 'error', error: 'session decrypt failed (STORAGE_KEY rotated?)' }); return; }
     const client = new TelegramClient(new StringSession(sessionString), Number(sess.api_id) || 0, apiHash, { connectionRetries: 3 });
     await client.connect();
+    // Prime the entity cache — a fresh session cannot resolve raw -100… ids.
+    // Page through dialogs until the target chat is seen (or exhausted).
+    try {
+      const deadline = Date.now() + 90_000;
+      let offsetPeer;
+      while (Date.now() < deadline) {
+        const dialogs = await client.getDialogs({ limit: 200, offsetPeer });
+        if (!dialogs?.length) break;
+        const hit = dialogs.find((d) => String(d.id) === String(BigInt(job.chat_id)));
+        if (hit) break;
+        offsetPeer = dialogs[dialogs.length - 1];
+      }
+    } catch (_) {}
     let offsetId = job.offset_id || 0;
     let processed = job.processed || 0;
     // Approximate total for the progress bar: latest message id in the chat.
@@ -8085,6 +8112,9 @@ async function runHistoryIndexJob(env, job, token) {
           await patch({ error: `flood-wait ${e.seconds}s` });
           await sleep(Math.min(e.seconds * 1000, 300_000));
           continue;
+        }
+        if (/input entity/i.test(String(e?.message))) {
+          e.message = `The session account cannot see ${job.chat_id}. Join this channel/group with that account, then retry.`;
         }
         throw e;
       }
@@ -9219,7 +9249,8 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
          await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(communityIdArg)} not found.`, forumThreadId);
          return new Response('OK', { status: 200, headers: corsHeaders });
        }
-       return startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatId, threadArg, communityName: community0.name || communityIdArg });
+       await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatId, threadArg, communityName: community0.name || communityIdArg });
+       return new Response('OK', { status: 200, headers: corsHeaders });
      }
 
      if (!dmOnly) {
@@ -9306,7 +9337,8 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
             session_enc = excluded.session_enc, enabled = 1, last_error = NULL, updated_at = excluded.updated_at`
        ).bind(apiIdArg.trim(), apiHashEnc, sessionEnc, Date.now()).run();
      }
-     return startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg, threadArg, communityName: community.name || communityIdArg });
+     await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg, threadArg, communityName: community.name || communityIdArg });
+     return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
    // ---- /userbot_connect — GOD: persistent live-clone session (self-host) ----
@@ -12719,6 +12751,14 @@ async function userbotConnectInner(env) {
   }
   const client = new TelegramClient(new StringSession(sessionString), Number(st.api_id) || 0, apiHash, { connectionRetries: 5 });
   await client.connect();
+  try {
+    let offsetPeer;
+    for (let i = 0; i < 6; i++) {
+      const dialogs = await client.getDialogs({ limit: 200, offsetPeer });
+      if (!dialogs?.length) break;
+      offsetPeer = dialogs[dialogs.length - 1];
+    }
+  } catch (_) {}
   client.addEventHandler(async (update) => {
     let chatId = null;
     try {
