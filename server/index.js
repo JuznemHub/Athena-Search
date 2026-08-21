@@ -183,7 +183,7 @@ const server = http.createServer(async (req, res) => {
     const buf = Buffer.from(await response.arrayBuffer());
     res.end(buf);
   } catch (err) {
-    console.error('[athena] request failed:', err);
+    console.error('[athena] request failed:', err?.stack || err);
     if (!res.headersSent) {
       res.statusCode = 500;
       res.setHeader('content-type', 'application/json');
