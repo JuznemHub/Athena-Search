@@ -13388,8 +13388,7 @@ export async function startUserbotAccount(env, label = 'main') {
     ping();
     const keepalive = setInterval(ping, 4 * 60_000);
     keepalive.unref?.();
-    acc.keepalive = keepalive;
-    USERBOT_ACCOUNTS.set(label, { client, startedAt: Date.now() });
+    USERBOT_ACCOUNTS.set(label, { client, keepalive, startedAt: Date.now() });
     console.log(`[userbot:${label}] connected`);
     return { ok: true };
   } finally {
