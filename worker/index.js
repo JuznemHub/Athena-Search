@@ -7358,7 +7358,7 @@ function helpTextForSection(section) {
       `${italicHtml('In-chat shortcuts:')} ${codeHtml('/follow [target]')} ${italicHtml('and')} ${codeHtml('/backfill')} ${italicHtml('— auto-detect chat/topic/community, reuse the connected session.')}`,
       `${boldHtml('Why a session?')} Bots only see messages after they are added as admin. A user session is your account reading the chat like Telegram Desktop does — connect it once and both live cloning and history backfill reuse it; nothing is asked twice.`,
       `${boldHtml('Progress & errors:')} backfills show a live progress bar; ${codeHtml('/userbot_status')} lists per-chat counters and the last errors.`,
-      `${boldHtml('🏷 Tags:')} clones auto-tag via AI, context fallback when AI is down. ${codeHtml('/forcetags')} retags every untagged link.`,
+      `${boldHtml('🏷 Tags:')} clones auto-tag via AI, context fallback when AI is down. ${codeHtml('/forcetags [community|personal|both]')} retags untagged links.`,
       `${boldHtml('Undo a bad clone:')} ${codeHtml('/transfers')} → ${codeHtml('/clone_del <session_id> [files]')} removes everything that session imported (vault media too with "files").`,
       `/topic_link ${codeHtml('<community_id> [target]')} — clone this topic (run inside it)`,
       `/topic_list · /topic_unlink ${codeHtml('<thread_id>')} · /topic_target ${codeHtml('<thread_id> <target>')}`,
@@ -9770,20 +9770,40 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      await ensureAiConfigTable(env);
      const cfgFt = await getInstanceAiConfig(env);
      const BATCH = 150;
-     const think = await sendTelegramFormatted(token, chatId, `${boldHtml('🏷')} Scanning for untagged links…`, forumThreadId);
+     // Scope: /forcetags [community|personal|both|<community_id>] (default both)
+     let scopeArg = '';
+     let scopeCommunity = '';
+     for (const a of parts.slice(1)) {
+       const t = a.trim();
+       if (['community', 'personal', 'both'].includes(t.toLowerCase())) scopeArg = t.toLowerCase();
+       else if (/^c_/.test(t)) scopeCommunity = t;
+     }
+     scopeArg = scopeArg || 'both';
+     const think = await sendTelegramFormatted(token, chatId, `${boldHtml('🏷')} Scanning (${scopeArg}${scopeCommunity ? ` · ${scopeCommunity}` : ''})…`, forumThreadId);
      const thinkId = think?.message_id;
      const targets = [];
      const pick = async (table, col) => {
        await ensureSearchColumns(env);
+       const extra = (table === 'links' && scopeCommunity) ? ` AND community_id = '${scopeCommunity.replace(/'/g, '')}'` : '';
        const { results } = await env.DB.prepare(
          `SELECT id, url, title, notes, search_blob FROM ${table}
-          WHERE COALESCE(tags,'') IN ('', '[]', 'null') OR metadata_version IS NULL OR metadata_version < 1
+          WHERE COALESCE(tags,'') IN ('', '[]', 'null') OR metadata_version IS NULL OR metadata_version < 1${extra}
           ORDER BY created_at DESC LIMIT ${BATCH}`
        ).all();
        for (const r of results || []) targets.push({ table, col, row: r });
      };
-     await pick('links', 'community_id');
-     await pick('personal_links', 'user_id');
+     if (scopeArg !== 'personal') {
+       if (scopeCommunity) await pick('links', scopeCommunity);
+       else {
+         const { results: cids } = await env.DB.prepare('SELECT DISTINCT community_id AS id FROM links').all();
+         for (const row of cids || []) await pick('links', row.id);
+       }
+     }
+     if (scopeArg !== 'community') {
+       const godRow = await env.DB.prepare("SELECT id FROM users WHERE id LIKE 'telegram_%' ORDER BY created_at ASC LIMIT 1").first().catch(() => null);
+       const godId = isGodTgId(tgUserId, env) ? `telegram_${tgUserId}` : (godRow?.id || '');
+       if (godId) await pick('personal_links', godId);
+     }
      if (!targets.length) {
        if (thinkId) await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: thinkId, text: `${boldHtml('✅')} Every link already has tags.`, parse_mode: 'HTML' }).catch(() => {});
        return new Response('OK', { status: 200, headers: corsHeaders });
@@ -13070,6 +13090,7 @@ async function ensureUserbotTables(env) {
 }
 
 const USERBOT_ACCOUNTS = new Map(); // label -> { client, startedAt }
+let gramjsEvents = null; // telegram/events module cache
 const USERBOT_STARTING = new Set();
 const USERBOT_STATS = new Map(); // chat_id -> {msgs, links, docs, lastAt}
 
@@ -13224,20 +13245,29 @@ export async function startUserbotAccount(env, label = 'main') {
         offsetPeer = dialogs[dialogs.length - 1];
       }
     } catch (_) {}
-    client.addEventHandler(async (update) => {
+    const DEBUG_UB = String(process.env?.ATHENA_USERBOT_DEBUG || '') === '1';
+    const handler = async (message) => {
       let chatId = null;
       try {
-        const message = update.message;
         if (!message) return;
         chatId = gramjsChatId(message);
+        // peerId fallback when the entity cache lacks the marked id
+        if (!chatId) {
+          const peer = message.peerId;
+          const cidNum = Number(peer?.channelId ?? 0);
+          if (peer?.className === 'PeerChannel' && cidNum) chatId = `-100${cidNum}`;
+          else if (peer?.className === 'PeerChat' && peer.chatId) chatId = String(-peer.chatId);
+        }
         if (!chatId) return;
         const variants = [chatId];
-        if (/^\d{9,}$/.test(chatId)) variants.push(`-100${chatId}`);
+        if (/^-100\d+$/.test(chatId)) variants.push(chatId.slice(4)); // bare channel id
+        else if (/^\d{9,}$/.test(chatId)) variants.push(`-100${chatId}`);
         let follow = null;
         for (const v of variants) {
           follow = await env.DB.prepare('SELECT * FROM userbot_follows WHERE chat_id = ? AND label = ?').bind(v, label).first();
           if (follow) break;
         }
+        if (DEBUG_UB) console.log(`[userbot:${label}] msg from ${chatId} → ${follow ? 'FOLLOWED' : 'not followed'}`);
         if (!follow) return;
         userbotStat(follow.chat_id, 'msgs');
         await captureGramjsMessage(env, follow, message);
@@ -13245,7 +13275,13 @@ export async function startUserbotAccount(env, label = 'main') {
         if (e && typeof e.seconds === 'number') await sleep(Math.min(e.seconds * 1000, 300_000));
         else await userbotLogError(env, label, chatId, e);
       }
-    });
+    };
+    try {
+      const events = gramjsEvents ||= await import('telegram/events/index.js');
+      client.addEventHandler(handler, new events.NewMessage({}));
+    } catch (_) {
+      client.addEventHandler(handler); // fallback: raw updates
+    }
     USERBOT_ACCOUNTS.set(label, { client, startedAt: Date.now() });
     console.log(`[userbot:${label}] connected`);
     return { ok: true };
