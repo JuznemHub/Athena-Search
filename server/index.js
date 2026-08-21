@@ -215,14 +215,14 @@ server.listen(PORT, HOST, () => {
     ).all();
     for (const j of stuck || []) {
       console.log(`[index] resuming interrupted job ${j.id} (${j.chat_id})`);
-      runInBackground(env, runHistoryIndexJob(env, {
+      runHistoryIndexJob(env, {
         id: j.id, community_id: j.community_id, chat_id: j.chat_id, thread_id: j.thread_id || null,
         userbot_label: j.userbot_label || null, min_id: j.min_id || null, max_id: j.max_id || null,
         offset_id: Number(j.offset_id || 0), processed: Number(j.processed || 0),
         saved_links: Number(j.saved_links || 0), saved_docs: Number(j.saved_docs || 0),
         saved_files: Number(j.saved_files || 0), skipped_media: Number(j.skipped_media || 0),
         urls_seen: Number(j.urls_seen || 0), progress_chat_id: j.progress_chat_id,
-      }, process.env.TELEGRAM_BOT_TOKEN || ''));
+      }, process.env.TELEGRAM_BOT_TOKEN || '').catch((e) => console.error('[index] resume run failed:', e.message));
     }
   } catch (err) {
     console.error('[index] resume failed:', err.message);
