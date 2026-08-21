@@ -7203,6 +7203,7 @@ function helpTextForSection(section) {
       `• ${boldHtml('banned')} — left/kicked from that community's TG group ${italicHtml('(other communities OK)')}`,
       '',
       `${italicHtml('Tip:')} open a forum topic and /id shows topic id for /topic.`,
+      `${italicHtml('Tip:')} clone channels/groups/topics into your brain — see ${boldHtml('📡 Channels')} in /help.`,
     ].join('\n');
   }
   if (section === 'personal') {
@@ -7300,7 +7301,8 @@ function helpTextForSection(section) {
       `${codeHtml('1)')} Add the bot to the channel as admin:`,
       `   ${italicHtml('Channel → Manage Channel → Administrators → Add Bot')}`,
       `${codeHtml('2)')} Link it to a community ${italicHtml('(owner/GOD, in the linked group or bot DM)')}:`,
-      `   /channel_link ${codeHtml('<community_id> <channel_id>')}`,
+      `   /channel_link ${codeHtml('<community_id> <channel_id> [community|personal|both]')}`,
+      `   • ${italicHtml('target personal/both are GOD rank only — content lands in the GOD brain')}`,
       `   • ${italicHtml('channel_id: forward a channel post to')} ${codeHtml('@userinfobot')} ${italicHtml('(channel ids start with -100)')}`,
       `   • ${italicHtml('or forward a channel post to the bot and reply to it:')} /channel_link ${codeHtml('<community_id>')}`,
       `${codeHtml('3)')} Done — every new post's links and files land in that community brain.`,
@@ -7324,8 +7326,9 @@ function helpTextForSection(section) {
       `${codeHtml('1)')} Get ${codeHtml('api_id + api_hash')}: ${linkHtml('https://my.telegram.org', 'my.telegram.org')} → ${boldHtml('API development tools')}`,
       `${codeHtml('2)')} On the server run: ${codeHtml('node scripts/gen-session.js')} — prints your session string`,
       `${codeHtml('3)')} In the bot DM ${italicHtml('(private chat — the string is a live account key)')}:`,
-      `   /index_start ${codeHtml('<community_id> <chat_id> <api_id> <api_hash> <session_string>')}`,
+      `   /index_start ${codeHtml('<community_id> <chat_id> <api_id> <api_hash> <session_string> [thread_id]')}`,
       `   • ${codeHtml('chat_id')} — the group/channel to backfill ${italicHtml('(forward a post to')} ${codeHtml('@userinfobot')}${italicHtml(')')}`,
+      `   • ${codeHtml('thread_id')} — optional; backfill only that forum topic`,
       `${codeHtml('4)')} /index_status — progress · /index_stop — cancel + delete session`,
       '',
        `${italicHtml('The')} /index_start ${italicHtml('message self-deletes; the session is stored encrypted')} ${italicHtml('(needs')} ${codeHtml('STORAGE_KEY')}${italicHtml(') and deleted when the job finishes; stopped jobs resume.')}`,
