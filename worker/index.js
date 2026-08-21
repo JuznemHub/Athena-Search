@@ -6584,6 +6584,14 @@ function extractUrlsFromTelegramMessage(msg, { includeReply = false } = {}) {
 
   collectFrom(msg?.entities, msg?.text || '');
   collectFrom(msg?.caption_entities, msg?.caption || '');
+  // Inline keyboard buttons — dump channels hide most links behind buttons.
+  try {
+    for (const row of msg?.reply_markup?.inline_keyboard || []) {
+      for (const btn of row || []) {
+        if (btn?.url) urls.add(String(btn.url).replace(/[),.;]+$/g, ''));
+      }
+    }
+  } catch (_) {}
   // Only when explicitly requested (e.g. /delete reply) — never for plain dumps
   if (includeReply && msg?.reply_to_message) {
     const r = msg.reply_to_message;
@@ -8015,6 +8023,16 @@ function urlsFromGramjsMessage(message) {
   try {
     for (const e of message.entities || []) {
       if (e?.className === 'MessageEntityTextUrl' && e.url) out.add(e.url);
+    }
+  } catch (_) {}
+  // Inline / URL buttons under the post
+  try {
+    const rm = message.replyMarkup;
+    const rows = rm?.rows || [];
+    for (const row of rows) {
+      for (const b of row?.buttons || []) {
+        if (b?.className === 'KeyboardButtonUrl' && b.url) out.add(String(b.url));
+      }
     }
   } catch (_) {}
   for (const m of text.matchAll(/https?:\/\/[^\s<>"')\]]+/g)) out.add(m[0]);
