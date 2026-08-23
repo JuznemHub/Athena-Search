@@ -1,0 +1,49 @@
+name: Patch clone preview
+on:
+  push:
+    branches: [feat/unified-clone-help]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Rewrite preview
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const p = 'worker/index_legacy.js';
+          let s = fs.readFileSync(p, 'utf8');
+          const marker = '    // Preview → confirm flow: show stats then wait for Yes';
+          const start = s.indexOf(marker);
+          if (start < 0) throw new Error('preview marker not found');
+          const endMarker = "    return new Response('OK', { status: 200, headers: corsHeaders });";
+          const end = s.indexOf(endMarker, start);
+          if (end < 0) throw new Error('preview end not found');
+          const replacement = `    const scopeLabel = targetArg==='personal' ? 'personal' : targetArg==='both' ? 'personal + community' : escHtml(communityName||communityIdArg||'community');
+          const modeLabel = threadArg ? 'this topic only' : (previewStats.isForum ? 'all forum topics, topic-by-topic' : 'whole chat');
+          const lines = [
+            \`${boldHtml('🔍 Clone confirmation')} \${codeHtml(chatIdN)}\${threadArg?\` · topic \${codeHtml('#'+threadArg)}\`:''} → \${boldHtml(scopeLabel)}\`,
+            \`${boldHtml('Mode:')} history backfill + live indexing\`,
+            \`${boldHtml('Scope:')} \${modeLabel}\`,
+            \`${boldHtml('Safety:')} source messages are read only; Athena does not delete or modify them.\`,
+            '',
+            italicHtml('Confirm to start. Athena will backfill the selected history through the connected userbot and keep indexing new posts automatically afterwards.'),
+            '',
+            \`${codeHtml('/clone_stop')} to stop · \${codeHtml('/delete '+chatIdN)} to remove Athena's cloned data later.\`,
+          ];
+          await sendTelegramFormatted(token, chatId, lines.join('\\n'), forumThreadId).catch(()=>{});
+          await telegramApi(token,'sendMessage',{chat_id: chatId, text: 'Confirm clone? This starts history backfill + live indexing.', reply_markup:{inline_keyboard:[[{text:'✅ Yes, clone', callback_data:\`clone:yes:\${pendingId}\`},{text:'❌ Cancel', callback_data:\`clone:no:\${pendingId}\`}]]}, message_thread_id: forumThreadId||undefined}).catch(()=>{});
+`;
+          s = s.slice(0, start) + replacement + s.slice(end);
+          s = s.replaceAll('/index_stop', '/clone_stop');
+          fs.writeFileSync(p, s);
+          NODE
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add worker/index_legacy.js
+          git commit -m 'fix(clone): remove misleading preview estimates' || exit 0
+          git push
