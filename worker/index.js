@@ -47,7 +47,7 @@ async function binding(DB, chatId) {
   return DB.prepare(`SELECT * FROM community_bots WHERE platform='telegram' AND group_id=? ORDER BY created_at DESC LIMIT 1`)
     .bind(String(chatId)).first().catch(() => null);
 }
-async function botClone(update, env) {
+async function _botClone(update, env) { // kept for future bot-mode, delegated to legacy for now
   const msg = update.message || update.edited_message;
   const token = env.TELEGRAM_BOT_TOKEN;
   const chatId = String(msg.chat.id);
@@ -174,7 +174,7 @@ async function intercept(update, env) {
   const msg = update.message;
   if (!msg?.text || !env.TELEGRAM_BOT_TOKEN) return null;
   switch (command(msg.text)) {
-    case '/clone': return botClone(update, env);
+    case '/clone': return null; // delegate to legacy for preview/topic-wise flow + /del handling
     case '/uclone': return uclone(update, env);
     case '/userbotconnect': return userbotConnect(update, env);
     case '/uclone_del': return ucloneDel(update, env);
