@@ -1,4 +1,6 @@
 import legacy from './index_legacy.js';
+export * from './index_legacy.js';
+const _WORKER_VERSION = "version: '1.0.53'";
 
 const TARGETS = new Set(['community', 'personal', 'both']);
 

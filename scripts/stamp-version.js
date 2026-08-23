@@ -15,17 +15,21 @@ if (!version) {
   process.exit(1);
 }
 
+const workerFiles = ['worker/index.js', 'worker/index_legacy.js'].filter(f => {
+  try { return /version: '[0-9]+\.[0-9]+\.[0-9]+'/.test(readFileSync(resolve(root, f), 'utf8')); } catch (_) { return false; }
+});
+if (!workerFiles.length) workerFiles.push('worker/index.js');
 const targets = [
   {
     file: resolve(root, 'public/index.html'),
     pattern: /\?v=[0-9]+\.[0-9]+\.[0-9]+/g,
     stamp: `?v=${version}`,
   },
-  {
-    file: resolve(root, 'worker/index.js'),
+  ...workerFiles.map(f => ({
+    file: resolve(root, f),
     pattern: /version: '[0-9]+\.[0-9]+\.[0-9]+'/,
     stamp: `version: '${version}'`,
-  },
+  })),
   {
     file: resolve(root, 'README.md'),
     pattern: /badge\/version-[0-9]+\.[0-9]+\.[0-9]+-blueviolet/,
