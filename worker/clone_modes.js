@@ -3,8 +3,10 @@
  *
  * Bot mode is deliberately limited to live indexing: Telegram's Bot API does
  * not expose arbitrary chat history. Historical backfill is therefore handled
- * by /uclone (GramJS user session). Keeping this distinction explicit avoids
- * promising a backfill the Bot API cannot perform.
+ * by /uclone (GramJS user session).
+ *
+ * The command layer keeps the public UX small while reusing Athena's existing
+ * backfill/live pipelines underneath.
  */
 
 function targetOf(parts) {
@@ -26,7 +28,6 @@ function topicArgFrom(parts, currentMessage) {
     return String(currentMessage.message_thread_id);
   }
   const nums = parts.slice(1).filter((x) => /^\d{1,9}$/.test(String(x || '').trim()));
-  // A numeric token in a DM is a topic only when a chat id is also present.
   return nums.length >= 2 ? String(nums[nums.length - 1]) : '';
 }
 
@@ -75,48 +76,33 @@ async function handleBotClone(ctx) {
   if (!remoteChatId) {
     return send('Usage: /clone <chat_id> <community|personal|both>\nRun it inside a group to use the current chat automatically.');
   }
-
   const chat = await telegramApi(token, 'getChat', { chat_id: remoteChatId });
   if (!chat?.ok) return send(`Cannot access ${remoteChatId}: ${chat?.description || 'Telegram rejected the chat.'}`);
   if (chat.result?.type === 'private') return send('Bot cloning is for channels and groups. Use /uclone for historical cloning with a user account.');
-
   const admin = await botIsAdmin(telegramApi, token, remoteChatId);
   if (!admin.ok) return send(admin.error);
-
   const binding = await resolveBotBinding(DB, remoteChatId);
   if (!binding?.community_id) {
-    if (chat.result?.type === 'channel') {
-      return send(`Channel is ready, but it is not linked to a community.\nRun /channel_link <community_id> ${remoteChatId} first.`);
-    }
+    if (chat.result?.type === 'channel') return send(`Channel is ready, but it is not linked to a community.\nRun /channel_link <community_id> ${remoteChatId} first.`);
     return send(`This chat is not linked to a community yet.\nLink/verify the group first, then run /clone ${remoteChatId} community.`);
   }
-
   const target = targetOf(parts);
-  if ((target === 'personal' || target === 'both') && !isGod) {
-    return send('personal and both targets are GOD-only.');
-  }
-
+  if ((target === 'personal' || target === 'both') && !isGod) return send('personal and both targets are GOD-only.');
   await ensureTables(DB);
   const now = Date.now();
   const isChannel = chat.result?.type === 'channel';
   const forum = chat.result?.is_forum ? 1 : 0;
-
-  // Existing channel capture has an explicit channel_target. Groups use scope.
   if (isChannel) {
-    await DB.prepare('UPDATE community_bots SET channel_target = ? WHERE id = ?')
-      .bind(target, binding.id).run().catch(() => {});
+    await DB.prepare('UPDATE community_bots SET channel_target = ? WHERE id = ?').bind(target, binding.id).run().catch(() => {});
   } else if (target !== 'both') {
-    await DB.prepare('UPDATE community_bots SET scope = ? WHERE id = ?')
-      .bind(target, binding.id).run().catch(() => {});
+    await DB.prepare('UPDATE community_bots SET scope = ? WHERE id = ?').bind(target, binding.id).run().catch(() => {});
   }
-
   await DB.prepare(`
     INSERT INTO bot_clone_targets (chat_id, community_id, target, status, forum, created_by, created_at, updated_at)
     VALUES (?, ?, ?, 'live', ?, ?, ?, ?)
     ON CONFLICT(chat_id) DO UPDATE SET community_id=excluded.community_id,
       target=excluded.target, status='live', forum=excluded.forum, updated_at=excluded.updated_at
   `).bind(remoteChatId, binding.community_id, target, forum, athenaUser?.id || String(ctx.tgUserId || ''), now, now).run();
-
   const targetText = target === 'both' ? 'community + GOD personal' : target;
   return send(
     `✅ Live indexing enabled\n\n` +
@@ -132,22 +118,17 @@ async function startUserbotClone(ctx) {
   const { DB, token, chatId, parts, athenaUser, isGod, send, userbotAccounts, ensureUserbotTables,
     startUserbotAccount, primeEntity, startBackfillJob, getForumTopicsViaUserbot, isForumEnabled,
     normalizeTgChatId } = ctx;
-
   if (!ctx.isSelfHosted) return send('Userbot cloning is available only on the self-hosted server.');
   if (!athenaUser) return send('Login with Telegram first.');
-
   const target = targetOf(parts);
   if ((target === 'personal' || target === 'both') && !isGod) return send('personal and both targets are GOD-only.');
-
   const remoteChatId = chatArgFrom(parts, chatId);
   if (!remoteChatId) return send('Usage: /uclone <chat_id> <community|personal|both> [topic_id]');
   const normalizedChat = normalizeTgChatId(remoteChatId);
-
   await ensureUserbotTables(DB);
   const accountRows = await DB.prepare('SELECT label FROM userbot_accounts WHERE enabled = 1 ORDER BY label').all();
   const accounts = accountRows?.results || [];
   if (!accounts.length) return send('No userbot account connected. GOD: /userbotconnect <api_id> <api_hash> <session_string> <community_id>');
-
   let communityId = '';
   const explicitCommunity = parts.find((x) => /^c_/.test(String(x || '')));
   if (explicitCommunity) communityId = explicitCommunity;
@@ -160,8 +141,7 @@ async function startUserbotClone(ctx) {
     communityId = binding?.community_id || '';
   }
   if (!communityId && target === 'community') return send('No community is configured for this userbot. Connect it with /userbotconnect ... <community_id>.');
-  if (communityId && !(await ctx.ensureOwnerOrAdmin(communityId, athenaUser.id, DB)) && !isGod) return send('Community owner/GOD only.');
-
+  if (communityId && !(await ctx.ensureOwnerOrAdmin(communityId, athenaUser.id)) && !isGod) return send('Community owner/GOD only.');
   let label = accounts[0].label;
   let acc = userbotAccounts.get(label);
   if (!acc) {
@@ -170,19 +150,15 @@ async function startUserbotClone(ctx) {
     acc = userbotAccounts.get(label);
   }
   if (!acc) return send('Userbot account is not available.');
-
   const visible = await primeEntity(acc.client, normalizedChat, 45_000);
   if (!visible) return send(`The userbot account cannot see ${normalizedChat}. Join that chat with the account and retry.`);
-
   const topicArg = topicArgFrom(parts, ctx.msg);
   const isForum = !topicArg && await isForumEnabled(token, normalizedChat, ctx.env).catch(() => false);
   let topics = [];
   if (isForum) topics = await getForumTopicsViaUserbot(ctx.env, normalizedChat).catch(() => []);
-
   const jobs = topics.length
     ? topics.map((t) => ({ threadArg: String(t.id), title: t.title || `#${t.id}` }))
     : [{ threadArg: topicArg, title: topicArg ? `#${topicArg}` : 'whole chat' }];
-
   for (const job of jobs) {
     const followChatId = job.threadArg ? `${normalizedChat}:${job.threadArg}` : normalizedChat;
     await DB.prepare(`
@@ -197,7 +173,6 @@ async function startUserbotClone(ctx) {
       communityName: communityId || 'personal', userbotLabel: label
     });
   }
-
   return send(
     `🧬 Userbot clone started\n${normalizedChat}\nTarget: ${target}\n` +
     (jobs.length > 1 ? `Topics: ${jobs.length} — each topic has its own live follow + backfill.` : `Scope: ${jobs[0].title}`)
@@ -213,17 +188,13 @@ async function userbotConnect(ctx) {
   const apiHash = parts[2] || '';
   const session = parts.slice(3, -1).join(' ');
   const communityId = parts[parts.length - 1] || '';
-  if (!apiId || !apiHash || !session || !/^c_/.test(communityId)) {
-    return send('Usage: /userbotconnect <api_id> <api_hash> <session_string> <community_id>');
-  }
+  if (!apiId || !apiHash || !session || !/^c_/.test(communityId)) return send('Usage: /userbotconnect <api_id> <api_hash> <session_string> <community_id>');
   const community = await DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityId).first().catch(() => null);
   if (!community) return send(`Community ${communityId} does not exist.`);
   await ensureUserbotTables(DB);
   const sessionEnc = await encryptSecret(env, session.trim());
   const apiHashEnc = await encryptSecret(env, apiHash.trim());
-  if (!String(sessionEnc).startsWith('enc:v1:') || !String(apiHashEnc).startsWith('enc:v1:')) {
-    return send('STORAGE_KEY is required; refusing to store a user session unencrypted.');
-  }
+  if (!String(sessionEnc).startsWith('enc:v1:') || !String(apiHashEnc).startsWith('enc:v1:')) return send('STORAGE_KEY is required; refusing to store a user session unencrypted.');
   await DB.prepare(`
     INSERT INTO userbot_accounts (label, api_id, api_hash_enc, session_enc, enabled, updated_at)
     VALUES ('main', ?, ?, ?, 1, ?)
@@ -241,7 +212,7 @@ async function userbotConnect(ctx) {
 }
 
 async function deleteUserbotClone(ctx) {
-  const { DB, parts, send, isGod, ensureTransferColumns, normalizeTgChatId, MEDIA_VAULT_DIR, env } = ctx;
+  const { DB, parts, send, isGod, ensureTransferColumns, normalizeTgChatId, MEDIA_VAULT_DIR } = ctx;
   if (!isGod) return send('GOD rank only.');
   const chat = chatArgFrom(parts, '');
   if (!chat) return send('Usage: /uclone_del <chat_id> [topic_id]');
@@ -293,19 +264,18 @@ async function stats(ctx) {
   const lines = ['📊 ATHENA CLONING STATUS', '', 'BOT MODE'];
   const botRows = await DB.prepare(`SELECT chat_id, community_id, target, status, forum, updated_at FROM bot_clone_targets ORDER BY updated_at DESC`).all().catch(() => ({ results: [] }));
   for (const r of botRows.results || []) {
-    const link = await DB.prepare(`SELECT COUNT(*)::int AS n FROM links WHERE transfer_id = ?`).bind(`live:${r.chat_id}`).first().catch(() => ({ n: 0 }));
-    const doc = await DB.prepare(`SELECT COUNT(*)::int AS n FROM uploaded_documents WHERE transfer_id = ?`).bind(`live:${r.chat_id}`).first().catch(() => ({ n: 0 }));
+    const link = await DB.prepare(`SELECT COUNT(*) AS n FROM links WHERE transfer_id = ?`).bind(`live:${r.chat_id}`).first().catch(() => ({ n: 0 }));
+    const doc = await DB.prepare(`SELECT COUNT(*) AS n FROM uploaded_documents WHERE transfer_id = ?`).bind(`live:${r.chat_id}`).first().catch(() => ({ n: 0 }));
     const topics = await DB.prepare(`SELECT thread_id FROM telegram_topic_bindings WHERE chat_id = ? ORDER BY thread_id`).bind(r.chat_id).all().catch(() => ({ results: [] }));
     lines.push(`• ${r.chat_id} · ${r.status} · target=${r.target} · links=${link?.n || 0} · files=${doc?.n || 0}`);
     if (r.forum) lines.push(`  topics tracked: ${(topics.results || []).map((t) => t.thread_id).join(', ') || 'waiting for posts'}`);
   }
-
   lines.push('', 'USERBOT MODE');
   const follows = await DB.prepare(`SELECT chat_id, label, community_id, target FROM userbot_follows ORDER BY created_at DESC`).all().catch(() => ({ results: [] }));
   for (const f of follows.results || []) {
     const base = String(f.chat_id).split(':')[0];
-    const link = await DB.prepare(`SELECT COUNT(*)::int AS n FROM links WHERE transfer_id LIKE ?`).bind(`live:${base}%`).first().catch(() => ({ n: 0 }));
-    const doc = await DB.prepare(`SELECT COUNT(*)::int AS n FROM uploaded_documents WHERE transfer_id LIKE ?`).bind(`live:${base}%`).first().catch(() => ({ n: 0 }));
+    const link = await DB.prepare(`SELECT COUNT(*) AS n FROM links WHERE transfer_id LIKE ?`).bind(`live:${base}%`).first().catch(() => ({ n: 0 }));
+    const doc = await DB.prepare(`SELECT COUNT(*) AS n FROM uploaded_documents WHERE transfer_id LIKE ?`).bind(`live:${base}%`).first().catch(() => ({ n: 0 }));
     lines.push(`• ${f.chat_id} · ${f.label} · target=${f.target || 'community'} · links=${link?.n || 0} · files=${doc?.n || 0}`);
   }
   if (!botRows.results?.length && !follows.results?.length) lines.push('• No active clones.');
