@@ -9495,7 +9495,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         if (topics.length) {
           // If user said "all" as target, clone every topic topic-wise
           if (targetArg === 'all' || communityIdArg === 'all') {
-            let created = 0;
+            let _created = 0;
             for (const t of topics) {
               try {
                 await env.DB.prepare(
@@ -9508,7 +9508,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
                   `INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at)
                    VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(chat_id) DO NOTHING`
                 ).bind(chatIdN+':'+String(t.id), (await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled=1 LIMIT 1').first())?.label || 'main', communityIdArg || 'personal', targetArg === 'all' ? 'community' : (targetArg || 'community'), athenaUser.id, Date.now()).run().catch(()=>{});
-                created++;
+                _created++;
               } catch(e) { console.error('topic clone all failed', e?.message); }
             }
             await sendTelegramFormatted(token, chatId,
@@ -11425,15 +11425,15 @@ Rules:
       const chatArg = normalizeTgChatId(delParts[0]);
       const threadArg = delParts[1] && /^\d{1,10}$/.test(delParts[1]) && !/^c_/.test(delParts[1]) ? delParts[1] : '';
       const withFiles = delParts.includes('files');
-      let transferIds = [];
-      let jobIds = [];
+      let transferIds;
+      let jobIds;
       if (threadArg) {
         // Topic delete: find jobs for this chat+thread
         const { results } = await env.DB.prepare('SELECT id FROM index_jobs WHERE chat_id = ? AND thread_id = ?').bind(chatArg, threadArg).all().catch(() => ({ results: [] }));
         jobIds = (results || []).map(r => r.id);
         transferIds = [...jobIds];
         // live topic docs are tagged live:chat:thread? Currently live:<chat> only; also check docs with source containing thread
-        const { results: tdocs } = await env.DB.prepare("SELECT id FROM telegram_topic_bindings WHERE chat_id = ? AND thread_id = ?").bind(chatArg, threadArg).all().catch(() => ({ results: [] }));
+        const { results: _tdocs } = await env.DB.prepare("SELECT id FROM telegram_topic_bindings WHERE chat_id = ? AND thread_id = ?").bind(chatArg, threadArg).all().catch(() => ({ results: [] }));
         // Also include any live transfer for this chat+thread combo via source_chat+source_message lookup is too broad; just use transferIds
       } else {
         const { results } = await env.DB.prepare('SELECT id FROM index_jobs WHERE chat_id = ?').bind(chatArg).all().catch(() => ({ results: [] }));
