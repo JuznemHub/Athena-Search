@@ -252,3 +252,18 @@ CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON document_chunks USING gin(tsv);
 -- idx_chunks_embedding (ivfflat) is created in ensureChunksTable, which first
 -- upgrades a TEXT fallback column to VECTOR once the pgvector extension exists.
 -- Keeping it here crashes startup when the column is still TEXT.
+
+-- pending clone confirmations (preview → yes) - added for clone preview feature
+CREATE TABLE IF NOT EXISTS pending_clones (
+  id TEXT PRIMARY KEY,
+  chat_id TEXT NOT NULL,
+  thread_id TEXT,
+  community_id TEXT,
+  target TEXT,
+  requester_tg_id TEXT NOT NULL,
+  requester_user_id TEXT NOT NULL,
+  stats_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pending_clones_expiry ON pending_clones(expires_at);
