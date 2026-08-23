@@ -30,7 +30,7 @@ After linking, every NEW channel post is live-indexed automatically.
 STEP 3 — Clone old history
 /clone <channel_id> community
 
-Athena will confirm the operation, then backfill the channel history through the connected userbot. New posts continue indexing while/after the backfill.
+Athena will start the history backfill through the connected userbot and keep live indexing enabled. New posts continue indexing while/after the backfill.
 
 Targets:
 • community — community brain
@@ -121,16 +121,10 @@ Quick recipe:
 5. Run /clone <chat_id> community.
 6. Check /stats.
 7. Use /clone_stop or /delete when needed.`;
-
 function parts(text) { return String(text || '').trim().split(/\s+/).filter(Boolean); }
 function command(text) { return parts(text)[0]?.split('@')[0]?.toLowerCase() || ''; }
 function targetOf(args) { return args.find((x) => TARGETS.has(String(x).toLowerCase()))?.toLowerCase() || 'community'; }
-function normalizeChatId(id) {
-  const s = String(id || '').trim();
-  if (/^-100\d+$/.test(s)) return s;
-  if (/^\d+$/.test(s) && s.length >= 9) return `-100${s}`;
-  return s;
-}
+function normalizeChatId(id) { const s=String(id||'').trim(); if(/^-100\d+$/.test(s)) return s; if(/^\d+$/.test(s)&&s.length>=9) return `-100${s}`; return s; }
 function ownerIds(env) { const raw=String(env.TG_OWNER_IDS||'').trim(); return raw ? new Set(raw.split(',').map(x=>x.trim()).filter(Boolean)) : null; }
 function isGod(id,env) { const ids=ownerIds(env); return !ids || ids.has(String(id||'')); }
 async function tg(token,method,body){ const r=await fetch(`https://api.telegram.org/bot${token}/${method}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})}); return r.json().catch(()=>({ok:false,description:'Invalid Telegram response'})); }
@@ -145,9 +139,9 @@ async function unifiedClone(update,env){
   const target=targetOf(args); if((target==='personal'||target==='both')&&!isGod(msg.from?.id,env)) return reply(token,msg.chat.id,'personal and both targets are GOD-only.'); await ensureTables(env.DB);
   const def=await env.DB.prepare(`SELECT community_id FROM userbot_clone_defaults WHERE label='main'`).first().catch(()=>null); const b=await binding(env.DB,normalizeChatId(remote)); const community=def?.community_id||b?.community_id||'';
   const numeric=args.filter(x=>/^\d{1,9}$/.test(x)&&x!==remote); const topic=numeric.length?numeric[0]:''; if(!community&&target==='community') return reply(token,msg.chat.id,'No community is configured for this clone. Connect the userbot with /userbotconnect ... <community_id>, or provide the community_id in the clone command.');
-  const extra=[remote]; if(topic) extra.push(topic); extra.push(target); if(community) extra.push(community); const first=cloneUpdate(update,`/clone ${extra.join(' ')}`); const mode=topic?`topic #${topic} only`:'the whole chat (forum chats are handled topic-by-topic)';
+  const extra=[remote]; if(topic) extra.push(topic); extra.push(target); if(community) extra.push(community); const first=cloneUpdate(update,`/clone ${extra.join(' ')}`);
   const originalFetch=globalThis.fetch; let response;
-  globalThis.fetch=async(input,init={})=>{ try{ const url=typeof input==='string'?input:input?.url; if(url&&/api\.telegram\.org\/bot/.test(url)&&init?.body){ const payload=typeof init.body==='string'?JSON.parse(init.body):null; if(payload?.chat_id!=null&&payload?.text!=null){ const text=String(payload.text||''); if(text.includes('Clone preview')||text.trim()==='Confirm clone?'){ payload.text=`🔍 Clone confirmation\n\nMode: history backfill + live indexing\nScope: ${mode}\nTarget: ${target}\n\nSource messages are read only; Athena does not delete or modify them.\n\nConfirm to start. New posts continue indexing automatically after/during the backfill.\n\n/clone_stop to stop · /delete ${normalizeChatId(remote)} to remove Athena's cloned data.`; init={...init,body:JSON.stringify(payload)}; } } } }catch(_){} return originalFetch(input,init); };
+  globalThis.fetch=async(input,init={})=>{ try{ const url=typeof input==='string'?input:input?.url; if(url&&/api\.telegram\.org\/bot/.test(url)&&init?.body){ const payload=typeof init.body==='string'?JSON.parse(init.body):null; if(payload?.chat_id!=null&&payload?.text!=null){ const text=String(payload.text||''); if(text.includes('Clone preview')||text.trim()==='Confirm clone?'){ return new Response(JSON.stringify({ok:true,result:{message_id:0,chat:{id:payload.chat_id}}}),{status:200,headers:{'content-type':'application/json'}}); } } } }catch(_){} return originalFetch(input,init); };
   try{ response=await legacyFetch(first,env); }finally{ globalThis.fetch=originalFetch; }
   const yes=structuredClone(update); yes.message.text='yes'; yes.message.caption=undefined; yes.message.entities=[]; await new Promise(r=>setTimeout(r,50)); await legacyFetch(yes,env).catch(()=>{}); return response;
 }
