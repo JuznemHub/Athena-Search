@@ -7290,111 +7290,35 @@ function helpTextForSection(section) {
     return [
       `${boldHtml('📡 ATHENA — TELEGRAM CLONING')}`,
       '',
-      `${boldHtml('Athena has two cloning modes:')}`,
-      `${codeHtml('1) /clone')} — ${italicHtml('normal user-facing clone. Uses the connected userbot for history and keeps live indexing afterwards.')}`,
-      `${codeHtml('2) /uclone')} — ${italicHtml('explicit userbot clone. Same history engine, useful when you want to make the userbot path explicit.')}`,
+      `${boldHtml('Two modes:')} ${codeHtml('/clone')} ${italicHtml('(normal)')} · ${codeHtml('/uclone')} ${italicHtml('(explicit userbot)')}`,
       '',
-      `${boldHtml('━━━━━━━━ CHANNELS ━━━━━━━━')}`,
-      '',
-      `${boldHtml('STEP 1 — Add Athena to the channel')}`,
-      `• ${italicHtml('Open Channel → Manage Channel → Administrators → Add Athena.')}`,
-      `• ${italicHtml('Make Athena an Administrator with permission to post/read channel posts as required by Telegram.')}`,
-      '',
-      `${boldHtml('STEP 2 — Link the channel to a community')}`,
-      `${italicHtml('Run this as the community GOD/owner:')}`,
-      `${codeHtml('/channel_link <community_id> <channel_id>')}`,
-      `${italicHtml('Example:')}`,
+      `${boldHtml('━ CHANNELS ━')}`,
+      `${boldHtml('1. Add Athena')} → Channel → Manage → Administrators → Add Athena (admin).`,
+      `${boldHtml('2. Link')} ${codeHtml('/channel_link <community_id> <channel_id>')} ${italicHtml('(GOD/owner)')}`,
       `${codeHtml('/channel_link c_abc123 -1002290798043')}`,
-      `${italicHtml('To find a channel ID, forward a channel post to @userinfobot. Channel IDs normally start with -100.')}`,
-      `${italicHtml('After linking, every NEW channel post is live-indexed automatically.')}`,
+      `${italicHtml('Find ID: forward channel post to @userinfobot (IDs start -100). New posts live-indexed.')}`,
+      `${boldHtml('3. History')} ${codeHtml('/clone <channel_id> community')} ${italicHtml('(backfill via userbot, live stays on)')}`,
+      `${boldHtml('Targets:')} ${codeHtml('community')} ${codeHtml('personal')} ${codeHtml('both')} ${italicHtml('(personal/both GOD-only)')}`,
       '',
-      `${boldHtml('STEP 3 — Clone old history')}`,
-      `${codeHtml('/clone <channel_id> community')}`,
-      `${italicHtml('Athena will start the history backfill through the connected userbot and keep live indexing enabled. New posts continue indexing while/after the backfill.')}`,
+      `${boldHtml('━ GROUPS ━')}`,
+      `${italicHtml('Add Athena as admin, then:')}`,
+      `• Normal: ${codeHtml('/clone <group_id> community')}`,
+      `• Forum: ${codeHtml('/clone <group_id> community')} ${italicHtml('(auto topic-by-topic)')}`,
+      `• One topic: ${codeHtml('/clone <group_id> <topic_id> community')} ${italicHtml('(or /clone inside topic)')}`,
       '',
-      `${boldHtml('Targets:')}`,
-      `• ${codeHtml('community')} — ${italicHtml('community brain')}`,
-      `• ${codeHtml('personal')} — ${italicHtml('GOD only, personal brain')}`,
-      `• ${codeHtml('both')} — ${italicHtml('GOD only, both brains')}`,
+      `${boldHtml('━ USERBOT ━')}`,
+      `${boldHtml('DM Athena (GOD):')} ${codeHtml('/userbotconnect <api_id> <api_hash> <session> <community_id>')}`,
+      `${italicHtml('Account must member every chat. Session = secret — never group, revoke in Settings→Devices.')}`,
+      `${boldHtml('Explicit:')} ${codeHtml('/uclone <chat_id> community')} ${codeHtml('/uclone <chat_id> <topic_id> community')}`,
+      `${codeHtml('/uclone_del <chat_id>')} ${codeHtml('/uclone_del <chat_id> <topic_id>')}`,
       '',
-      `${boldHtml('━━━━━━━━ GROUPS ━━━━━━━━')}`,
+      `${boldHtml('━ CONTROL ━')}`,
+      `${codeHtml('/stats')} ${italicHtml('(counters/topics/live)')} · ${codeHtml('/clone_stop [chat_id]')} · ${codeHtml('/delete <chat_id> [topic_id]')}`,
+      `${codeHtml('/channel_link <community_id> <channel_id>')} · ${codeHtml('/channel_unlink <channel_id>')}`,
       '',
-      `${italicHtml('Add Athena to the group and make it an Administrator.')}`,
-      '',
-      `${boldHtml('Normal group:')}`,
-      `${codeHtml('/clone <group_id> community')}`,
-      `${italicHtml('This clones the whole group history and keeps new messages indexed live.')}`,
-      '',
-      `${boldHtml('Forum group:')}`,
-      `${codeHtml('/clone <group_id> community')}`,
-      `${italicHtml('Athena detects forum topics automatically and backfills them topic-by-topic.')}`,
-      '',
-      `${boldHtml('One topic only:')}`,
-      `${codeHtml('/clone <group_id> <topic_id> community')}`,
-      `${italicHtml('From inside a topic you can also simply run /clone with the target.')}`,
-      '',
-      `${italicHtml('The same group pipeline handles links, URLs, supported files/documents and substantial text posts.')}`,
-      '',
-      `${boldHtml('━━━━━━━━ USERBOT SETUP ━━━━━━━━')}`,
-      '',
-      `${italicHtml('History requires a Telegram user account because the Bot API cannot retrieve arbitrary old chat history.')}`,
-      '',
-      `${boldHtml('GOD setup — DM Athena:')}`,
-      `${codeHtml('/userbotconnect <api_id> <api_hash> <session_string> <community_id>')}`,
-      `${italicHtml('Example:')}`,
-      `${codeHtml('/userbotconnect 123456 abcdef... YOUR_SESSION c_abc123')}`,
-      `${italicHtml('The userbot account must itself be a member of every channel/group you want to clone. For channels, add that user account to the channel as well.')}`,
-      `${italicHtml('The session string is a live account credential. NEVER send it in a group. Revoke it from Telegram Settings → Devices if compromised.')}`,
-      '',
-      `${boldHtml('━━━━━━━━ USERBOT COMMANDS ━━━━━━━━')}`,
-      '',
-      `${codeHtml('/uclone <chat_id> community')}`,
-      `${codeHtml('/uclone <chat_id> <topic_id> community')}`,
-      '',
-      `${codeHtml('/uclone_del <chat_id>')}`,
-      `${codeHtml('/uclone_del <chat_id> <topic_id>')}`,
-      '',
-      `${italicHtml('Use /uclone when you specifically want the explicit userbot command. /clone is the recommended normal command.')}`,
-      '',
-      `${boldHtml('━━━━━━━━ CONTROL ━━━━━━━━')}`,
-      '',
-      `${codeHtml('/stats')}`,
-      `${italicHtml('Shows active channels/groups, live state, targets, topics and indexing counters.')}`,
-      '',
-      `${codeHtml('/clone_stop [chat_id]')}`,
-      `${italicHtml('Stops cloning/backfill for a chat.')}`,
-      '',
-      `${codeHtml('/delete <chat_id>')}`,
-      `${italicHtml('Deletes all Athena data cloned from that chat.')}`,
-      '',
-      `${codeHtml('/delete <chat_id> <topic_id>')}`,
-      `${italicHtml('Deletes data for one cloned forum topic.')}`,
-      '',
-      `${boldHtml('━━━━━━━━ CHANNEL MANAGEMENT ━━━━━━━━')}`,
-      '',
-      `${codeHtml('/channel_link <community_id> <channel_id>')}`,
-      `${italicHtml('Connect a channel to a community and start live indexing.')}`,
-      '',
-      `${codeHtml('/channel_unlink <channel_id>')}`,
-      `${italicHtml('Stops live indexing for that channel. It does NOT automatically delete existing indexed data; use /delete if you want that removed.')}`,
-      '',
-      `${boldHtml('━━━━━━━━ IMPORTANT ━━━━━━━━')}`,
-      '',
-      `• ${italicHtml('/clone does NOT delete, edit or alter messages in the source Telegram chat.')}`,
-      `• ${italicHtml('History is read through the connected userbot account.')}`,
-      `• ${italicHtml('Live indexing continues after history backfill.')}`,
-      `• ${italicHtml('Forum groups are handled topic-by-topic automatically.')}`,
-      `• ${italicHtml('personal/both are GOD-only.')}`,
-      `• ${italicHtml('If the userbot cannot see a chat, add that account to the channel/group and run /clone again.')}`,
-      '',
-      `${boldHtml('Quick recipe:')}`,
-      `${codeHtml('1.')} ${italicHtml('Add Athena as admin.')}`,
-      `${codeHtml('2.')} ${codeHtml('/channel_link <community_id> <channel_id>')} ${italicHtml('for channels.')}`,
-      `${codeHtml('3.')} ${italicHtml('Connect the userbot once with /userbotconnect.')}`,
-      `${codeHtml('4.')} ${italicHtml('Make sure the userbot account can access the source chat.')}`,
-      `${codeHtml('5.')} ${italicHtml('Run')} ${codeHtml('/clone <chat_id> community')}${italicHtml('.')}`,
-      `${codeHtml('6.')} ${italicHtml('Check')} ${codeHtml('/stats')}${italicHtml('.')}`,
-      `${codeHtml('7.')} ${italicHtml('Use')} ${codeHtml('/clone_stop')} ${italicHtml('or')} ${codeHtml('/delete')} ${italicHtml('when needed.')}`,
+      `${boldHtml('━ NOTES ━')}`,
+      `• /clone ${italicHtml('never edits source. Forum = topic-wise. If userbot cannot see, add it and retry.')}`,
+      `${boldHtml('Recipe:')} ${codeHtml('/channel_link')} → ${codeHtml('/userbotconnect')} → ${codeHtml('/clone')} → ${codeHtml('/stats')} → ${codeHtml('/clone_stop|/delete')}`,
     ].join('\n');
   }
   return [
@@ -9193,7 +9117,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
    // Owner/GOD only. The bot must already be an admin of the channel; the
    // check runs server-side via this bot's own token, so a channel cannot be
    // linked by anyone who merely knows its id.
-   if (cmd === '/channel_link' || cmd === '/channellink') {
+   if (cmd === '/channel_link' || cmd === '/channellink' || cmd === '/channel-link') {
      if (!athenaUser) {
        await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
@@ -9239,15 +9163,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Invalid channel ID (use -100…).`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
-     // Userbot mode makes this command unnecessary — point the way.
      await ensureUserbotTables(env);
-     const ubCount = (await env.DB.prepare('SELECT COUNT(*) AS n FROM userbot_accounts WHERE enabled = 1').first())?.n || 0;
-     if (ubCount > 0) {
-       await sendTelegramFormatted(token, chatId,
-         `${boldHtml('💡')} You have a userbot connected — no bot-admin needed.\nRun in my DM: ${codeHtml('/clone ' + cid + (targetArg ? ' ' + targetArg : ''))}\n${italicHtml('(or forward any post from that channel and reply with /clone)')}`,
-         forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
      // Validate: channel exists, bot is admin — with THIS bot's token.
      const me = await telegramApi(token, 'getMe', {});
      const botId = me?.result?.id;
@@ -9481,7 +9397,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
-   if (cmd === '/channel_unlink') {
+   if (cmd === '/channel_unlink' || cmd === '/channel-unlink') {
      if (!athenaUser) {
        await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
