@@ -7404,7 +7404,7 @@ function helpTextForSection(section) {
     `• ${boldHtml('🌐 Global')} — /start /help /id /rank`,
     `• ${boldHtml('👤 Personal')} — dual mode, dump, search, AI ${italicHtml('(GOD)')}`,
     `• ${boldHtml('👥 Community')} — verify, join, admins, topics`,
-    `• ${boldHtml('📡 Channels')} — index channels + backfill history`,
+    `• ${boldHtml('📡 ATHENA — TELEGRAM CLONING')} — channels / groups / topics (history + live)`,
     '',
     `${boldHtml('Member quick start:')}`,
     `1. Join the community Telegram group`,
