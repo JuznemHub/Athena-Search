@@ -7201,7 +7201,7 @@ function helpMenuKeyboard() {
       { text: '👤 Personal', callback_data: 'help:personal' }
     ], [
       { text: '👥 Community', callback_data: 'help:community' },
-      { text: '📡 Channels', callback_data: 'help:channels' }
+      { text: '📡 ATHENA — TELEGRAM CLONING', callback_data: 'help:channels' }
     ]]
   };
 }
@@ -7215,7 +7215,7 @@ function helpBackKeyboard() {
       { text: '👤 Personal', callback_data: 'help:personal' }
     ], [
       { text: '👥 Community', callback_data: 'help:community' },
-      { text: '📡 Channels', callback_data: 'help:channels' }
+      { text: '📡 ATHENA — TELEGRAM CLONING', callback_data: 'help:channels' }
     ]]
   };
 }
@@ -7288,23 +7288,37 @@ function helpTextForSection(section) {
   }
   if (section === 'channels') {
     return [
-      `${boldHtml('📡 Channels & history indexing')}`,
+      `${boldHtml('📡 ATHENA — TELEGRAM CLONING')}`,
       '',
-      `${boldHtml('🧬 Clone any chat — one command')}`,
-      `${codeHtml('/clone')} — inside a channel/group/topic → auto live + history`,
-      `${codeHtml('/clone <chat_id>')} — in DM, or forward a post and reply /clone`,
-      `${codeHtml('/clone <chat_id> <min> <max>')} — id range only`,
-      `${italicHtml('Preview (topics/msgs/links) → Yes → topic-wise backfill if forum, else whole chat')}`,
-      `${boldHtml('Progress:')} ${codeHtml('/index_status')} · ${codeHtml('/index_stop')} stop · ${codeHtml('/del <chat_id>')} delete`,
-      `${italicHtml('Every new post auto-indexes after backfill — no extra step')}`,
+      `${boldHtml('Two modes:')} ${codeHtml('/clone')} ${italicHtml('(normal)')} · ${codeHtml('/uclone')} ${italicHtml('(explicit userbot)')}`,
       '',
-      `${boldHtml('Setup (GOD once):')} ${codeHtml('/userbot_add <label> <api_id> <api_hash> <session>')}`,
-      `${codeHtml('/userbot_status')} · ${codeHtml('/userbot_unfollow <chat_id>')} — status / stop live`,
-      `${italicHtml('Channel shortcut:')} ${codeHtml('/channel_link <community_id> <channel_id>')} ${italicHtml('(bot = channel admin)')}`,
-      `${codeHtml('/index')} — status overview`,
+      `${boldHtml('━ CHANNELS ━')}`,
+      `${boldHtml('1. Add Athena')} → Channel → Manage → Administrators → Add Athena (admin).`,
+      `${boldHtml('2. Link')} ${codeHtml('/channel_link <community_id> <channel_id>')} ${italicHtml('(GOD/owner)')}`,
+      `${codeHtml('/channel_link c_abc123 -1002290798043')}`,
+      `${italicHtml('Find ID: forward channel post to @userinfobot (IDs start -100). New posts live-indexed.')}`,
+      `${boldHtml('3. History')} ${codeHtml('/clone <channel_id> community')} ${italicHtml('(backfill via userbot, live stays on)')}`,
+      `${boldHtml('Targets:')} ${codeHtml('community')} ${codeHtml('personal')} ${codeHtml('both')} ${italicHtml('(personal/both GOD-only)')}`,
       '',
-      `${boldHtml('Cleanup:')} ${codeHtml('/del <chat_id> [thread] [files]')} / ${codeHtml('/delete')} · ${codeHtml('/transfers')} list · ${codeHtml('/forcetags')} retag`,
-      `${italicHtml('⚠️ Session = account key — revoke in Telegram Settings → Devices.')}`,
+      `${boldHtml('━ GROUPS ━')}`,
+      `${italicHtml('Add Athena as admin, then:')}`,
+      `• Normal: ${codeHtml('/clone <group_id> community')}`,
+      `• Forum: ${codeHtml('/clone <group_id> community')} ${italicHtml('(auto topic-by-topic)')}`,
+      `• One topic: ${codeHtml('/clone <group_id> <topic_id> community')} ${italicHtml('(or /clone inside topic)')}`,
+      '',
+      `${boldHtml('━ USERBOT ━')}`,
+      `${boldHtml('DM Athena (GOD):')} ${codeHtml('/userbotconnect <api_id> <api_hash> <session> <community_id>')}`,
+      `${italicHtml('Account must member every chat. Session = secret — never group, revoke in Settings→Devices.')}`,
+      `${boldHtml('Explicit:')} ${codeHtml('/uclone <chat_id> community')} ${codeHtml('/uclone <chat_id> <topic_id> community')}`,
+      `${codeHtml('/uclone_del <chat_id>')} ${codeHtml('/uclone_del <chat_id> <topic_id>')}`,
+      '',
+      `${boldHtml('━ CONTROL ━')}`,
+      `${codeHtml('/stats')} ${italicHtml('(counters/topics/live)')} · ${codeHtml('/clone_stop [chat_id]')} · ${codeHtml('/delete <chat_id> [topic_id]')}`,
+      `${codeHtml('/channel_link <community_id> <channel_id>')} · ${codeHtml('/channel_unlink <channel_id>')}`,
+      '',
+      `${boldHtml('━ NOTES ━')}`,
+      `• /clone ${italicHtml('never edits source. Forum = topic-wise. If userbot cannot see, add it and retry.')}`,
+      `${boldHtml('Recipe:')} ${codeHtml('/channel_link')} → ${codeHtml('/userbotconnect')} → ${codeHtml('/clone')} → ${codeHtml('/stats')} → ${codeHtml('/clone_stop|/delete')}`,
     ].join('\n');
   }
   return [
@@ -7314,7 +7328,7 @@ function helpTextForSection(section) {
     `• ${boldHtml('🌐 Global')} — /start /help /id /rank`,
     `• ${boldHtml('👤 Personal')} — dual mode, dump, search, AI ${italicHtml('(GOD)')}`,
     `• ${boldHtml('👥 Community')} — verify, join, admins, topics`,
-    `• ${boldHtml('📡 Channels')} — index channels + backfill history`,
+    `• ${boldHtml('📡 ATHENA — TELEGRAM CLONING')} — channels / groups / topics (history + live)`,
     '',
     `${boldHtml('Member quick start:')}`,
     `1. Join the community Telegram group`,
@@ -7472,7 +7486,12 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
     if (section === 'menu') {
       await editTelegramMessage(token, chatId, msgId, helpTextForSection('menu'), helpMenuKeyboard(), threadId, 'HTML');
     } else if (section === 'global' || section === 'personal' || section === 'community' || section === 'channels') {
-      await editTelegramMessage(token, chatId, msgId, helpTextForSection(section), helpBackKeyboard(), threadId, 'HTML');
+      const full = helpTextForSection(section);
+      const parts = chunkTelegramHtml(full);
+      await editTelegramMessage(token, chatId, msgId, parts[0] || full, helpBackKeyboard(), threadId, 'HTML');
+      for (let i = 1; i < parts.length; i++) {
+        await sendTelegramMessage(token, chatId, parts[i], threadId, 'HTML');
+      }
     }
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
@@ -9098,7 +9117,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
    // Owner/GOD only. The bot must already be an admin of the channel; the
    // check runs server-side via this bot's own token, so a channel cannot be
    // linked by anyone who merely knows its id.
-   if (cmd === '/channel_link' || cmd === '/channellink') {
+   if (cmd === '/channel_link' || cmd === '/channellink' || cmd === '/channel-link') {
      if (!athenaUser) {
        await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
@@ -9144,15 +9163,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Invalid channel ID (use -100…).`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
-     // Userbot mode makes this command unnecessary — point the way.
      await ensureUserbotTables(env);
-     const ubCount = (await env.DB.prepare('SELECT COUNT(*) AS n FROM userbot_accounts WHERE enabled = 1').first())?.n || 0;
-     if (ubCount > 0) {
-       await sendTelegramFormatted(token, chatId,
-         `${boldHtml('💡')} You have a userbot connected — no bot-admin needed.\nRun in my DM: ${codeHtml('/clone ' + cid + (targetArg ? ' ' + targetArg : ''))}\n${italicHtml('(or forward any post from that channel and reply with /clone)')}`,
-         forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
      // Validate: channel exists, bot is admin — with THIS bot's token.
      const me = await telegramApi(token, 'getMe', {});
      const botId = me?.result?.id;
@@ -9386,7 +9397,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
-   if (cmd === '/channel_unlink') {
+   if (cmd === '/channel_unlink' || cmd === '/channel-unlink') {
      if (!athenaUser) {
        await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
