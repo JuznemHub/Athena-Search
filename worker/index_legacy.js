@@ -184,6 +184,11 @@ export default {
         if (!update) {
           return new Response('Bad Request', { status: 400, headers: corsHeaders });
         }
+        try {
+          const _u = update.message || update.channel_post || update.edited_message || update.callback_query || update.my_chat_member || {};
+          const _t = String(_u.text || '');
+          console.log(`[webhook] id=${update.update_id} type=${update.message ? 'msg' : update.channel_post ? 'chn' : update.edited_message ? 'edt' : update.callback_query ? 'cb' : update.my_chat_member ? 'mcm' : '?'} chat=${_u.chat?.id ?? '?'} mid=${_u.message_id ?? '?'} from=${_u.from?.id ?? '?'} text=${JSON.stringify(_t.slice(0, 50))}`);
+        } catch (_) {}
         return await handleTelegramWebhook(update, env, corsHeaders);
       }
 
@@ -616,6 +621,8 @@ function safeEqual(a, b) {
 }
 
 async function webhookRequestIsAuthentic(request, env) {
+  // Internal shim (worker/index.js -> legacy) uses athena.internal without Telegram header
+  try { if (new URL(request.url).hostname === 'athena.internal') return true; } catch {}
   const expected = await webhookSecret(env);
   if (!expected) return false;
   const got = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
@@ -2729,37 +2736,28 @@ async function verifyTelegramBotToken(token, expectedUsername) {
 // Command menu registered with setMyCommands — what users see in Telegram's
 // "/" autocomplete. Staff-only commands stay out of everyone's menu on
 // purpose; /help lists them per rank.
+// Hidden but still handled (kept for compat, not in autocomplete):
+// group_copy, channel_target, channel_link/channel_unlink, topic_link,
+// topic_unlink, topic_list, topic_target, userbot_add, userbot_del,
+// userbot_follow, userbot_unfollow, userbot_disconnect, forcetags,
+// transfers/clone_sessions, clone_del, index, index_start, index_status,
+// index_stop, dumpsmart/dumpall, personal/community/mode, /perosnal alias
+// and all staff/admin/clear/sync/backup/community_verify handlers.
 const TELEGRAM_COMMAND_MENU = [
   { command: 'start', description: 'Welcome / status' },
   { command: 'help', description: 'Help menu' },
   { command: 'search', description: 'Search the active brain' },
-  { command: 'export', description: 'Telegram bot export / history guide' },
   { command: 'ai', description: 'Ask AI over your brain' },
-  { command: 'personal', description: 'Dump → personal brain (GOD)' },
-  { command: 'community', description: 'Dump → community brain' },
-  { command: 'mode', description: 'Show / switch dump mode' },
+  { command: 'export', description: 'Telegram bot export / history guide' },
   { command: 'id', description: 'Chat / user / topic ids' },
   { command: 'rank', description: 'Your ranks' },
   { command: 'community_join', description: 'Join a community' },
   { command: 'community_list', description: 'Your communities' },
   { command: 'edit', description: 'Edit title/notes of a link' },
   { command: 'delete', description: 'Delete a saved link' },
-  { command: 'dumpall', description: 'Multi-link posts: save all' },
-  { command: 'channel_target', description: 'GOD: channel → community/personal/both' },
-  { command: 'group_copy', description: 'Owner: group full-copy on/off' },
-  { command: 'topic_link', description: 'Clone this forum topic into a brain' },
-  { command: 'topic_list', description: 'Linked topics in this group' },
-  { command: 'topic_target', description: 'GOD: topic → community/personal/both' },
-  { command: 'userbot_add', description: 'GOD: add userbot account' },
-  { command: 'userbot_del', description: 'GOD: remove account(s)' },
-  { command: 'userbot_follow', description: 'Follow a chat for live cloning' },
-  { command: 'userbot_status', description: 'Userbot connection + follows' },
-  { command: 'userbot_disconnect', description: 'GOD: stop + delete session' },
   { command: 'clone', description: 'Clone this chat (live + history)' },
-    { command: 'dumpsmart', description: 'Multi-link: primary only' },
-    { command: 'forcetags', description: 'GOD: tag all untagged links' },
-    { command: 'transfers', description: 'GOD: clone sessions list' },
-    { command: 'clone_del', description: 'GOD: delete a clone session' },
+  { command: 'stats', description: 'Clone stats for this chat' },
+  { command: 'userbot_status', description: 'Userbot connection + follows' },
 ];
 
 async function ensureTelegramWebhook(token, workerOrigin, env) {
@@ -6089,17 +6087,18 @@ async function ensureTelegramSearchTable(env) {
   await env.DB.prepare('DELETE FROM telegram_search_sessions WHERE expires_at < ?').bind(Date.now()).run().catch(() => {});
 }
 
-function telegramSearchKeyboard(sessionId, page, total) {
+function searchRichButtonRow(sessionId, page, total) {
   const pages = Math.max(1, Math.ceil(total / TG_SEARCH_PAGE_SIZE));
   const nav = [];
-  if (page > 0) nav.push({ text: '◀ Previous', callback_data: `search:prev:${sessionId}` });
-  if (page < pages - 1) nav.push({ text: 'Next page ▶', callback_data: `search:next:${sessionId}` });
-  return {
-    inline_keyboard: [
-      ...(nav.length ? [nav] : []),
-      [{ text: '✖ Close', callback_data: `search:close:${sessionId}` }]
-    ]
-  };
+  if (page > 0) nav.push({ label: '◀ Previous', data: `search:prev:${sessionId}` });
+  if (page < pages - 1) nav.push({ label: 'Next page ▶', data: `search:next:${sessionId}` });
+  nav.push({ label: '✖ Close', data: `search:close:${sessionId}` });
+  return richButtonRow(nav);
+}
+
+function richSearchRowHtml(row) {
+  const inner = telegramSearchRowHtml(row).replace(/\n/g, '<br>');
+  return '<li>' + inner + '</li>';
 }
 
 function telegramSearchRowHtml(row) {
@@ -6145,11 +6144,11 @@ async function getTelegramSearchPage(env, session) {
   const start = total ? page * TG_SEARCH_PAGE_SIZE + 1 : 0;
   const end = Math.min(total, page * TG_SEARCH_PAGE_SIZE + hits.length);
   const label = session.scope === 'personal' ? 'Personal' : 'Community';
-  const header = `${boldHtml(`🔍 ${label} Search`)} · ${start}–${end} of ${total}`;
+  const header = richHeading(3, `🔍 ${label} Search · ${start}–${end} of ${total}`);
   const html = hits.length
-    ? `${header}\n${italicHtml(`Query: ${session.query}`)}\n\n${hits.map(telegramSearchRowHtml).join('\n\n')}`
-    : `${header}\n\n${escHtml(session.query ? 'No matching saved items.' : 'Enter a search query.')}`;
-  return { html, keyboard: telegramSearchKeyboard(session.id, page, total), page, total };
+    ? `${header}\n<p><i>${escHtml(session.query)}</i></p>\n<ol>${hits.map(richSearchRowHtml).join('')}</ol>`
+    : `${header}\n<p>${escHtml(session.query ? 'No matching saved items.' : 'Enter a search query.')}</p>`;
+  return { html, keyboard: null, page, total };
 }
 
 async function startTelegramSearch(env, token, chatId, tgUserId, scope, scopeKey, query, threadId) {
@@ -6171,7 +6170,7 @@ async function startTelegramSearch(env, token, chatId, tgUserId, scope, scopeKey
   ).bind(session.id, session.tg_user_id, session.chat_id, session.scope, session.scope_key,
     session.query, now, now + TG_SEARCH_SESSION_TTL_MS).run();
   const view = await getTelegramSearchPage(env, session);
-  return sendTelegramMessageWithKeyboard(token, chatId, view.html, view.keyboard, threadId, 'HTML');
+  return sendTelegramRichMessage(token, chatId, view.html, threadId, searchRichButtonRow(session.id, view.page, view.total));
 }
 
 async function findTelegramBinding(env, chatId, tgUserId) {
@@ -6382,7 +6381,7 @@ async function deleteCommunityFully(env, communityId) {
   return { ok: true, name: c.name, id: c.id };
 }
 
-async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, athenaUser, chatId, userNotes = '', titleHint = '', threadId = null, fullPost = '') {
+async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, athenaUser, chatId, userNotes = '', titleHint = '', threadId = null, fullPost = '', forcedTags = null, forcedTitle = null) {
   const communityId = binding.community_id;
   if (!communityId) {
     await sendTelegramMessage(token, chatId, 'Group not linked as community. Owner: /community_verify', threadId);
@@ -6418,7 +6417,8 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
     return;
   }
   const meta = await enrichLinkFields(env, rawUrl, { title: titleHint || '', notes: userNotes || '' });
-  if (titleHint && isWeakTitle(meta.title, rawUrl)) meta.title = titleHint;
+  if (forcedTitle && forcedTitle.length && forcedTitle.length <= 160) meta.title = forcedTitle;
+  else if (titleHint && isWeakTitle(meta.title, rawUrl)) meta.title = titleHint;
   const id = 'tg_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   await ensureLinkMetaColumns(env);
 
@@ -6461,7 +6461,9 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
   }
   // tagging: user #hashtags win, else karakeep AI (skip AI if tags already present)
   const fromPost = fullPost || userNotes + ' ' + (titleHint||'');
-  let userTags = normalizeTagList(extractHashtags(fromPost + ' ' + userNotes + ' ' + (titleHint||'')));
+  let userTags = forcedTags && forcedTags.length
+    ? normalizeTagList(forcedTags)
+    : normalizeTagList(extractHashtags(fromPost + ' ' + userNotes + ' ' + (titleHint||'')));
   let reply;
   try {
     if (userTags.length) {
@@ -6504,7 +6506,7 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
     reply = formatSavedLinkReply('community', meta.title, rawUrl, null, meta.notes);
   }
   markMeiliScopeDirty(env, 'community', communityId);
-  await sendTelegramMessage(token, chatId, reply, threadId);
+  await sendTelegramMessage(token, chatId, reply, threadId, null, true);
 }
 
 /** Decrypt a stored bot_token (enc:v1:...) for use; plaintext rows pass through.
@@ -6879,6 +6881,321 @@ function buildMultiLinkNotes(fullText) {
   return { notes, titleHint };
 }
 
+// ---------------------------------------------------------------------------
+// Batch grouping: one post with many links -> links grouped under a shared
+// heading with shared tags. AI decides the grouping when available; a section
+// heuristic covers AI-off time. Every URL still gets saved (scraped as usual),
+// only its title/tags come from the group.
+// ---------------------------------------------------------------------------
+
+/** Split a post into sections delimited by heading lines. A heading is a
+ *  markdown '#', a line ending in ':' or ';', or a short caption line sitting
+ *  directly above a URL. Returns sections that contain URLs. */
+function cleanHeading(t) {
+  let h = String(t || '').replace(/^#{1,6}\s+/, '').trim();
+  // "[date] Sender: Title" or "Sender: Title" -> keep the title part only
+  const midColon = h.match(/^.{0,30}?[:;]\s+(.+)$/u);
+  if (midColon && !/[:;]$/.test(h)) h = midColon[1].trim();
+  h = h.replace(/[:;]\s*$/, '').trim();
+  // strip leading sender-markup like "👤 Name" or "[12:34] Name:"
+  if (h.length > 2) h = h.replace(/^\[[^\]]+\]\s*/, '').trim();
+  return h;
+}
+
+function splitPostSections(postText) {
+  const lines = String(postText || '').split('\n');
+  const sections = [];
+  let cur = null;
+  const isUrlLine = (l) => /^https?:\/\/\S+$/i.test(l.trim());
+  const looksHeading = (t) => {
+    if (!t || isUrlLine(t)) return false;
+    if (/^#{1,6}\s+/.test(t)) return true;
+    if (/[:;]$/.test(t) && t.length <= 120) return true;
+    return false;
+  };
+  const nonEmptyIdx = lines.map((l, i) => (l.trim() ? i : null)).filter((i) => i !== null);
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (!t) continue;
+    if (isUrlLine(lines[i])) {
+      if (!cur) cur = { heading: null, pos: i, urls: [], body: [] };
+      if (!cur.urls.includes(t)) cur.urls.push(t);
+      continue;
+    }
+    const nextIdx = nonEmptyIdx.find((n) => n > i);
+    const nextLine = nextIdx == null ? '' : lines[nextIdx];
+    const shortCaptionAboveUrl = nextLine && isUrlLine(nextLine) && t.length <= 90 && !/^[-•*]/.test(t) && /\p{L}/u.test(t);
+    if (looksHeading(t) || shortCaptionAboveUrl) {
+      if (cur && (cur.urls.length || cur.body.length)) sections.push(cur);
+      cur = { heading: cleanHeading(t), pos: i, urls: [], body: [] };
+    } else {
+      if (!cur) cur = { heading: null, pos: 0, urls: [], body: [] };
+      cur.body.push(t);
+    }
+  }
+  if (cur && (cur.urls.length || cur.body.length)) sections.push(cur);
+  const withUrls = sections.filter((s) => s.urls.length);
+  // Lead-in text before the first URL with no heading -> fold in as context
+  if (withUrls.length === 1 && sections.length > 1) {
+    const lead = sections.slice(0, sections.indexOf(withUrls[0])).flatMap((s) => s.body);
+    if (lead.length) withUrls[0].body = [...lead, ...withUrls[0].body];
+  }
+  return withUrls.length ? withUrls : null;
+}
+
+/** Assign each savable URL to the section whose heading precedes it (by line order). */
+function assignUrlsToSections(urls, postText) {
+  const sections = splitPostSections(postText);
+  if (!sections) return null;
+  const lineOfUrl = (u) => {
+    try {
+      const pos = postText.indexOf(u);
+      if (pos === -1) return -1;
+      return postText.slice(0, pos).split('\n').length - 1;
+    } catch (_) { return -1; }
+  };
+  const groups = [];
+  const unmatched = [];
+  for (const u of urls) {
+    const line = lineOfUrl(u);
+    let placed = false;
+    let best = null;
+    for (const sec of sections) {
+      if (line >= sec.pos) best = sec; else break;
+    }
+    if (best) {
+      let g = groups.find((x) => x.heading === best.heading);
+      if (!g) { g = { heading: best.heading, body: best.body.join('\n').slice(0, 400), urls: [] }; groups.push(g); }
+      if (!g.urls.includes(u)) g.urls.push(u);
+      placed = true;
+    }
+    if (!placed) unmatched.push(u);
+  }
+  if (unmatched.length) {
+    const last = groups[groups.length - 1];
+    if (last) for (const u of unmatched) if (!last.urls.includes(u)) last.urls.push(u);
+    else groups.push({ heading: null, body: '', urls: unmatched });
+  }
+  return groups;
+}
+
+/** Merge sections that share a first keyword or 2+ heading tokens (same category). */
+function mergeSimilarGroups(groups) {
+  const norm = (h) => String(h || '').toLowerCase().replace(/[^\p{L}\p{N} ]/gu, '').trim().split(/\s+/).filter(Boolean);
+  const merged = [];
+  for (const g of groups) {
+    const toks = norm(g.heading);
+    let target = null;
+    if (toks.length) {
+      for (const m of merged) {
+        const mt = norm(m.heading);
+        if (!mt.length) continue;
+        if (mt[0] === toks[0] || mt.filter((t) => toks.includes(t)).length >= 2) { target = m; break; }
+      }
+    }
+    if (target) {
+      for (const u of g.urls) if (!target.urls.includes(u)) target.urls.push(u);
+      if (!target.body && g.body) target.body = g.body;
+    } else {
+      merged.push(g);
+    }
+  }
+  return merged;
+}
+
+/** Derive shared tags without AI: post hashtags + heading words + URL hosts. */
+function heuristicGroupTags(g, fullPost) {
+  const out = [];
+  const push = (t) => {
+    const tag = String(t || '').replace(/^#/, '').trim().toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{N}-]/gu, '').slice(0, 40);
+    if (tag && tag.length >= 2 && !['telegram', 'community', 'personal', 'dump', 'links', 'link'].includes(tag) && !out.includes(tag)) out.push(tag);
+  };
+  for (const h of extractHashtags(String(fullPost || ''))) push(h);
+  if (g.heading) for (const w of g.heading.toLowerCase().replace(/[^\p{L}\p{N} ]/gu, ' ').split(/\s+/).filter(Boolean)) push(w);
+  for (const u of g.urls) {
+    try {
+      const host = new URL(u.startsWith('http') ? u : 'https://' + u).hostname.replace(/^www\./, '');
+      const base = host.replace(/\.(com|net|org|io|so|app|dev|me|co|ai|blog|site|wordpress\.com)$/i, '').split('.').pop() || '';
+      if (base) push(base);
+    } catch (_) {}
+    if (out.length >= 6) break;
+  }
+  return out.slice(0, 6);
+}
+
+/** Heuristic grouping fallback used when AI is unavailable. Returns null when
+ *  there is no structure worth grouping (caller keeps current behavior). */
+function heuristicPlanLinkGroups(urls, postText) {
+  const unique = [...new Set((urls || []).map((u) => u.trim()).filter(Boolean))];
+  if (unique.length <= 1) return null;
+  const savable = [];
+  const related = [];
+  for (const u of unique) {
+    const { kind } = scoreUrlAsPrimary(u, postText);
+    if (['donate', 'social', 'telegram'].includes(kind)) related.push(u);
+    else savable.push(u);
+  }
+  if (savable.length <= 1) return null;
+
+  // A pure URL list (no caption at all) has no shared heading -> no grouping;
+  // keep the current primary+related behavior.
+  const bareList = !/\p{L}{2,}/u.test(String(postText || '')) || /^https?:\/\/\S+$/i.test(String(postText || '').trim());
+  if (bareList && !splitPostSections(postText)) return null;
+
+  let groups = assignUrlsToSections(savable, postText);
+  if (!groups) {
+    // whole post is one category: single group, heading = first short caption line
+    const head = buildMultiLinkNotes(postText).titleHint || null;
+    groups = [{ heading: head, body: String(postText || '').slice(0, 400), urls: savable }];
+  }
+  groups = mergeSimilarGroups(groups);
+  for (const g of groups) g.tags = heuristicGroupTags(g, postText);
+  return { groups, related };
+}
+
+/** AI-first grouping. One call for the whole post: the model assigns every URL
+ *  to a group with a heading + shared tags. Returns { groups, related } or null. */
+async function aiPlanLinkGroups(env, urls, postText, vocab) {
+  const unique = [...new Set((urls || []).map((u) => u.trim()).filter(Boolean))];
+  if (unique.length <= 1) return null;
+  let cfg;
+  try { cfg = await getInstanceAiConfig(env); } catch (_) { return null; }
+  if (!cfg || !cfg.api_key) return null;
+  const baseUrl = cleanApiBase(cfg.base_url);
+  const model = normalizeModelId(cfg.model, baseUrl);
+  if (!baseUrl || !model) return null;
+  let endpoint;
+  try {
+    const ep = resolveChatEndpoint(baseUrl, cfg.mode || 'openai', model);
+    if (!(await isSafeExternalUrl(new URL(ep), env))) return null;
+    endpoint = ep;
+  } catch (_) { return null; }
+
+  const system = [
+    'You organize a list of links from one Telegram post into groups that share a topic.',
+    'Group links that belong to the same category or section of the post.',
+    'Reply with ONLY one JSON object: {"groups":[{"heading":"short heading, max ~8 words","tags":["3-5 short lowercase tags, no #","..."],"urls":["full url","..."]}]}',
+    'Every url from the input list must appear in exactly one group.',
+    'If the whole list is one category, one group is fine.',
+    'If links do not share a heading, put each in its own group; heading may reuse the post section heading or a short descriptive name.',
+    'Reuse an existing tag exactly when it fits; do not invent a synonym.',
+    'Never invent or modify urls.',
+  ].join(' ');
+  const user = [
+    'Post text:\n' + String(postText || '').slice(0, 4000),
+    '\nURLs:\n' + unique.map((u) => '- ' + u).join('\n'),
+    vocab && vocab.length ? '\nExisting tags: ' + vocab.join(', ') : '',
+    '\nJSON:',
+  ].filter(Boolean).join('\n');
+
+  const mode = (cfg.mode || 'openai').toLowerCase();
+  const tryModels = [model, ...(await getFallbackChain(baseUrl, env, cfg.api_key, model))];
+  let lastError = null;
+  for (let mi = 0; mi < tryModels.length; mi++) {
+    const curModel = tryModels[mi];
+    let payload, headers;
+    if (mode === 'anthropic') {
+      headers = { 'Content-Type': 'application/json', 'x-api-key': cfg.api_key, 'anthropic-version': '2023-06-01' };
+      payload = { model: curModel, max_tokens: 900, system, messages: [{ role: 'user', content: user }], stream: false };
+    } else if (endpoint.endsWith('/responses')) {
+      headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + cfg.api_key };
+      payload = { model: curModel, input: system + '\n\n' + user, stream: false };
+    } else {
+      headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + cfg.api_key };
+      payload = { model: curModel, max_tokens: 900, messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ], stream: false, temperature: 0.1 };
+    }
+    try {
+      if (!endpoint.endsWith('/responses')) payload.stream = true;
+      const res = await fetchWithTimeout(endpoint, { method: 'POST', headers, body: JSON.stringify(payload), env }, AI_PROXY_TIMEOUT_MS);
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        const retryable = [429, 500, 502, 503, 401, 402].includes(res.status);
+        console.error('AI batch grouping failed ' + curModel + ' ' + res.status, errText.slice(0, 160));
+        try { recordAiError({ model: curModel, status: res.status, endpoint, message: 'batch grouping: ' + (errText.slice(0, 200) || res.statusText), source: 'grouping' }); } catch (_) {}
+        if (retryable && mi < tryModels.length - 1) { await new Promise((r) => setTimeout(r, 400 * (mi + 1))); continue; }
+        lastError = new Error(res.status + ' ' + errText.slice(0, 120));
+        continue;
+      }
+      const raw = await res.text();
+      const parsed = extractJsonFromAi(raw);
+      if (!parsed || !Array.isArray(parsed.groups)) { lastError = new Error('bad json'); continue; }
+      const groups = [];
+      for (const g of parsed.groups) {
+        if (!g || !Array.isArray(g.urls)) continue;
+        const urlsIn = [...new Set(g.urls.map((u) => String(u).trim()).filter((u) => unique.includes(u)))];
+        if (!urlsIn.length) continue;
+        groups.push({
+          heading: String(g.heading || '').trim().slice(0, 90) || null,
+          tags: normalizeTagList(g.tags || []).slice(0, 6),
+          urls: urlsIn,
+          body: '',
+        });
+      }
+      if (!groups.length) { lastError = new Error('no groups'); continue; }
+      // Any URL the model dropped -> own group so nothing is lost
+      const seen = new Set(groups.flatMap((g) => g.urls));
+      for (const u of unique) if (!seen.has(u)) groups.push({ heading: null, tags: [], urls: [u], body: '' });
+      const used = new Set();
+      const dedup = [];
+      for (const g of groups) {
+        const fresh = g.urls.filter((u) => !used.has(u));
+        if (!fresh.length) continue;
+        fresh.forEach((u) => used.add(u));
+        dedup.push({ ...g, urls: fresh });
+      }
+      return { groups: dedup, related: [] };
+    } catch (e) {
+      lastError = e;
+      if (mi < tryModels.length - 1) continue;
+    }
+  }
+  console.error('AI batch grouping failed for all models:', lastError?.message || 'unknown');
+  return null;
+}
+
+/** Try AI first, fall back to heuristics. Returns { groups, related } or null. */
+async function planBatchGroups(env, urls, postText, vocab) {
+  const unique = [...new Set((urls || []).map((u) => u.trim()).filter(Boolean))];
+  if (unique.length <= 1) return null;
+  const ai = await aiPlanLinkGroups(env, unique, postText, vocab);
+  if (ai && ai.groups.length) return ai;
+  const h = heuristicPlanLinkGroups(unique, postText);
+  return h && h.groups.length ? h : null;
+}
+
+/** Short distinguishing name for a card inside a multi-link group. */
+function shortNameForUrl(rawUrl) {
+  try {
+    const u = new URL(rawUrl.startsWith('http') ? rawUrl : 'https://' + rawUrl);
+    const host = u.hostname.replace(/^www\./, '');
+    const base = host.replace(/\.(com|net|org|io|so|app|dev|me|co|ai|blog|site|wordpress\.com)$/i, '');
+    return base.split('.').pop() || host;
+  } catch (_) { return rawUrl.slice(0, 30); }
+}
+
+/** Per-link card title inside a group: "Heading — site" when the group has
+ *  several links, plain "Heading" for a solo group, null to keep scraped title. */
+function groupCardTitle(g, rawUrl) {
+  if (!g.heading) return null;
+  return g.urls.length > 1 ? g.heading + ' — ' + shortNameForUrl(rawUrl) : g.heading;
+}
+
+/** Clean "AI may wrap JSON in fences / prose" response. */
+function extractJsonFromAi(raw) {
+  let text = String(raw || '').trim();
+  if (!text) return null;
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fence) text = fence[1].trim();
+  const brace = text.indexOf('{');
+  if (brace > 0) text = text.slice(brace);
+  const end = text.lastIndexOf('}');
+  if (end > 0) text = text.slice(0, end + 1);
+  try { return JSON.parse(text); } catch (_) { return null; }
+}
+
 /** Clean display title = host/path only (no "Link from Telegram…") */
 function titleFromUrl(rawUrl) {
   try {
@@ -7107,7 +7424,55 @@ function isAiContextError(error) {
     .test(String(error?.message || error || ''));
 }
 
-async function savePersonalUrl(env, userId, rawUrl, senderName, userNotes = '', titleHint = '') {
+/** Tag + reply for one personal save (called by the dump loop). When
+ *  forcedTags are present (batch grouping) they win and no AI call is made. */
+async function finalizePersonalSave(env, token, chatId, forumThreadId, athenaUser, r, rawUrl, fullPost, forcedTags) {
+  const userTagsPersonal = forcedTags && forcedTags.length
+    ? normalizeTagList(forcedTags)
+    : normalizeTagList(extractHashtags(fullPost));
+  let reply;
+  try {
+    if (userTagsPersonal.length && r.id) {
+      const merged = [...new Set([...['telegram','personal'], ...userTagsPersonal])];
+      await ensureSearchColumns(env);
+      try {
+        await env.DB.prepare('UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ' + AI_METADATA_VERSION + ', search_blob = NULL WHERE id = ?')
+          .bind(r.title, JSON.stringify(merged), r.notes || '', r.id).run();
+        const gp = await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: r.title, notes: r.notes || '', tags: merged });
+        if (gp?.handled && !gp.ok) { await sendTelegramMessage(token, chatId, 'Saved to DB but GitHub sync failed: ' + (gp.error || 'unknown'), forumThreadId); }
+      } catch (_) {}
+      reply = formatSavedLinkReply('personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: userTagsPersonal }, r.notes);
+    } else {
+      const vocab = await recentTagsForScope(env, 'personal', athenaUser.id);
+      const ai = await aiDescribeAndTag(env, rawUrl, { title: r.title, notes: r.notes, content: r.content }, vocab);
+      if (ai && r.id) {
+        const savedTitle = ai.title || r.title;
+        const merged = ai.tags?.length ? [...new Set([...['telegram','personal'], ...ai.tags])] : ['telegram','personal'];
+        await ensureSearchColumns(env);
+        try {
+          await env.DB.prepare('UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ' + AI_METADATA_VERSION + ', search_blob = NULL WHERE id = ?')
+            .bind(savedTitle, JSON.stringify(merged), ai.description || r.notes || '', r.id).run();
+          await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: savedTitle, notes: ai.description || r.notes || '', tags: merged });
+        } catch (_) {}
+        reply = formatSavedLinkReply('personal', savedTitle, rawUrl, ai, r.notes);
+      } else {
+        const fb = fallbackTagsFromMeta(rawUrl, { title: r.title, notes: r.notes, content: r.content });
+        if (fb.length && r.id) {
+          const mergedFb = [...new Set([...['telegram','personal'], ...fb])];
+          try { await env.DB.prepare('UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ' + AI_METADATA_VERSION + ', search_blob = NULL WHERE id = ?').bind(r.title, JSON.stringify(mergedFb), r.notes || '', r.id).run(); await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: r.title, notes: r.notes || '', tags: mergedFb }); } catch (_) {}
+          reply = formatSavedLinkReply('personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: fb }, r.notes);
+        } else {
+          reply = formatSavedLinkReply('personal', r.title, rawUrl, null, r.notes);
+        }
+      }
+    }
+  } catch (_) {
+    reply = formatSavedLinkReply('personal', r.title, rawUrl, null, r.notes);
+  }
+  await sendTelegramMessage(token, chatId, reply, forumThreadId, null, true);
+}
+
+async function savePersonalUrl(env, userId, rawUrl, senderName, userNotes = '', titleHint = '', forcedTitle = null) {
   const urlHash = generateUrlHash(rawUrl);
   const existing = await findExistingLink(env, 'personal_links', 'user_id', userId, rawUrl);
   if (existing) return { duplicate: true, existing };
@@ -7117,8 +7482,10 @@ async function savePersonalUrl(env, userId, rawUrl, senderName, userNotes = '', 
     title: titleHint || '',
     notes: userNotes || ''
   });
-  // Prefer caption title when it's a short project name
-  if (titleHint && titleHint.length >= 2 && titleHint.length <= 80 && isWeakTitle(meta.title, rawUrl)) {
+  // Group heading wins, then caption title when it's a short project name
+  if (forcedTitle && forcedTitle.length >= 2 && forcedTitle.length <= 160) {
+    meta.title = forcedTitle;
+  } else if (titleHint && titleHint.length >= 2 && titleHint.length <= 80 && isWeakTitle(meta.title, rawUrl)) {
     meta.title = titleHint;
   } else if (titleHint && titleHint.length >= 2 && titleHint.length <= 60 && meta.title && !meta.title.toLowerCase().includes(titleHint.toLowerCase())) {
     // keep scraped title if richer (e.g. GitHub full name)
@@ -7194,36 +7561,10 @@ function chunkTelegramText(text, maxLen = TG_MSG_MAX) {
   return chunks;
 }
 
-function helpMenuKeyboard() {
-  return {
-    inline_keyboard: [[
-      { text: '🌐 Global', callback_data: 'help:global' },
-      { text: '👤 Personal', callback_data: 'help:personal' }
-    ], [
-      { text: '👥 Community', callback_data: 'help:community' },
-      { text: '📡 ATHENA — TELEGRAM CLONING', callback_data: 'help:channels' }
-    ]]
-  };
-}
-
-function helpBackKeyboard() {
-  return {
-    inline_keyboard: [[
-      { text: '« Help menu', callback_data: 'help:menu' }
-    ], [
-      { text: '🌐 Global', callback_data: 'help:global' },
-      { text: '👤 Personal', callback_data: 'help:personal' }
-    ], [
-      { text: '👥 Community', callback_data: 'help:community' },
-      { text: '📡 ATHENA — TELEGRAM CLONING', callback_data: 'help:channels' }
-    ]]
-  };
-}
-
 function helpTextForSection(section) {
   if (section === 'global') {
     return [
-      `${boldHtml('🌐 Global')} ${italicHtml('— quick start & ranks')}`,
+      `${boldHtml('🌐 Global')} ${italicHtml('— commands & ranks')}`,
       '',
       `${boldHtml('Commands')}`,
       `/start — welcome & status`,
@@ -7239,16 +7580,16 @@ function helpTextForSection(section) {
       `• ${boldHtml('banned')} — left/kicked from that community's TG group ${italicHtml('(other communities OK)')}`,
       '',
       `${italicHtml('Tip:')} open a forum topic and /id shows topic id for /topic.`,
-      `${italicHtml('Tip:')} clone channels/groups/topics into your brain — see ${boldHtml('📡 Channels')} in /help.`,
+      `${italicHtml('Tip:')} clone channels, groups, or topics — see ${boldHtml('📡 Channels')} in /help.`,
     ].join('\n');
   }
   if (section === 'personal') {
     return [
       `${boldHtml('👤 Personal')} ${italicHtml('(GOD rank only)')}`,
       '',
-      `${boldHtml('Mode')} ${italicHtml('— dual dump target')}`,
+      `${boldHtml('Mode')} ${italicHtml('— dump target')}`,
       `/personal → ${boldHtml('personal brain')} · /community → ${boldHtml('community brain')} · /mode to switch`,
-      `Paste URL in active mode to dump`,
+      `Paste a URL in the active mode to dump it.`,
       '',
       `${boldHtml('Links')}`,
       `• /search ${codeHtml('<query>')} · /ai ${codeHtml('<question>')} · /export — status`,
@@ -7271,19 +7612,19 @@ function helpTextForSection(section) {
       `  ${codeHtml('1)')} Join the Telegram group`,
       `  ${codeHtml('2)')} Login on website ${italicHtml('(same Telegram)')}`,
       `  ${codeHtml('3)')} /community_join ${codeHtml('<id>')}`,
-      `• Paste URL in group/topic to dump · /search ${codeHtml('<query>')} · /ai ${codeHtml('<question>')}`,
+      `• Paste URL in group or topic to dump it · /search ${codeHtml('<query>')} · /ai ${codeHtml('<question>')}`,
       `• /community_list — list · ${codeHtml('/community_list <id|name>')} — details`,
       '',
       `${boldHtml('Moderation')}`,
       `• /delete ${codeHtml('<url>')} · reply /delete — remove link ${italicHtml('(staff)')}`,
-      `  ${codeHtml('/del <chat_id> [thread_id] [files]')} — delete cloned chat/topic (alias)`,
+      `  ${codeHtml('/del <chat_id> [thread_id] [files]')} — delete cloned chat or topic (alias)`,
       `• /edit ${codeHtml('<url|title>')} | notes: … — edit`,
       `• /topic ${codeHtml('<id>|off|here')} — lock to topic · /dumpall on|off`,
       `• /kick ${codeHtml('<@user|id>')} / /clear — remove access ${italicHtml('(rejoin allowed)')}`,
-      `• /admin · /demote — reply to promote/demote ${italicHtml('(owner/GOD)')}`,
+      `• /admin · /demote — reply to promote or demote ${italicHtml('(owner/GOD)')}`,
       '',
       `${boldHtml('Owner:')} /clear_db ${codeHtml('<id>')} · /community_delete ${codeHtml('<id>')} ${italicHtml('(reply YES_DELETE_<token>)')}`,
-      `${italicHtml('Cloning & channels →')} ${boldHtml('📡 Channels')} ${italicHtml('in /help')}`,
+      `${italicHtml('For cloning see')} ${boldHtml('📡 Channels')} ${italicHtml('in /help.')}`,
     ].join('\n');
   }
   if (section === 'channels') {
@@ -7296,28 +7637,31 @@ function helpTextForSection(section) {
       `${boldHtml('1. Add Athena')} → Channel → Manage → Administrators → Add Athena (admin).`,
       `${boldHtml('2. Link')} ${codeHtml('/channel_link <community_id> <channel_id>')} ${italicHtml('(GOD/owner)')}`,
       `${codeHtml('/channel_link c_abc123 -1002290798043')}`,
-      `${italicHtml('Find ID: forward channel post to @userinfobot (IDs start -100). New posts live-indexed.')}`,
+      `${italicHtml('Find ID: forward a channel post to @userinfobot (IDs start -100). New posts index live.')}`,
       `${boldHtml('3. History')} ${codeHtml('/clone <channel_id> community')} ${italicHtml('(backfill via userbot, live stays on)')}`,
-      `${boldHtml('Targets:')} ${codeHtml('community')} ${codeHtml('personal')} ${codeHtml('both')} ${italicHtml('(personal/both GOD-only)')}`,
+      `${boldHtml('Targets:')} ${codeHtml('community')} ${italicHtml('(default)')} · ${codeHtml('personal/both')} ${italicHtml('GOD-only — personal writes to that GOD’s brain')}`,
       '',
       `${boldHtml('━ GROUPS ━')}`,
       `${italicHtml('Add Athena as admin, then:')}`,
       `• Normal: ${codeHtml('/clone <group_id> community')}`,
       `• Forum: ${codeHtml('/clone <group_id> community')} ${italicHtml('(auto topic-by-topic)')}`,
       `• One topic: ${codeHtml('/clone <group_id> <topic_id> community')} ${italicHtml('(or /clone inside topic)')}`,
+      `${codeHtml('/uclone <group_id> [topic_id] personal')} ${italicHtml('(GOD-only — to your brain)')}`,
       '',
       `${boldHtml('━ USERBOT ━')}`,
       `${boldHtml('DM Athena (GOD):')} ${codeHtml('/userbotconnect <api_id> <api_hash> <session> <community_id>')}`,
-      `${italicHtml('Account must member every chat. Session = secret — never group, revoke in Settings→Devices.')}`,
+      `${italicHtml('Session is secret — never share it in a group, revoke it in Settings → Devices.')}`,
       `${boldHtml('Explicit:')} ${codeHtml('/uclone <chat_id> community')} ${codeHtml('/uclone <chat_id> <topic_id> community')}`,
+      `${codeHtml('/uclone <chat_id> [topic_id] personal|both')} ${italicHtml('— personal saves to your brain (GOD-only)')}`,
       `${codeHtml('/uclone_del <chat_id>')} ${codeHtml('/uclone_del <chat_id> <topic_id>')}`,
       '',
       `${boldHtml('━ CONTROL ━')}`,
       `${codeHtml('/stats')} ${italicHtml('(counters/topics/live)')} · ${codeHtml('/clone_stop [chat_id]')} · ${codeHtml('/delete <chat_id> [topic_id]')}`,
+      `${codeHtml('/tag_untagged')} ${italicHtml('(GOD — tag every untagged link, AI first, never touches tagged)')}`,
       `${codeHtml('/channel_link <community_id> <channel_id>')} · ${codeHtml('/channel_unlink <channel_id>')}`,
       '',
       `${boldHtml('━ NOTES ━')}`,
-      `• /clone ${italicHtml('never edits source. Forum = topic-wise. If userbot cannot see, add it and retry.')}`,
+      `• /clone ${italicHtml('never edits source. Forum clones topic by topic. If the userbot cannot see the chat, add it and retry.')}`,
       `${boldHtml('Recipe:')} ${codeHtml('/channel_link')} → ${codeHtml('/userbotconnect')} → ${codeHtml('/clone')} → ${codeHtml('/stats')} → ${codeHtml('/clone_stop|/delete')}`,
     ].join('\n');
   }
@@ -7370,21 +7714,145 @@ function parseTelegramEditPayload(rest, replyMessage = null) {
   return { queryPart, newTitle, newNotes };
 }
 
-async function editTelegramMessage(token, chatId, messageId, text, replyMarkup, threadId = null, parseMode = 'HTML') {
+async function editTelegramMessage(token, chatId, messageId, text, replyMarkup, threadId = null, parseMode = 'HTML', previewLink = false) {
   if (!token || !chatId || !messageId) return { ok: false };
   const payload = {
     chat_id: chatId,
     message_id: messageId,
     // editMessageText is single-message only — prefer full text when short, else truncate cleanly
-    text: (parseMode === 'HTML' ? chunkTelegramHtml(text) : chunkTelegramText(text, TG_MSG_MAX))[0] || String(text).slice(0, TG_MSG_MAX),
-    disable_web_page_preview: true
+    text: (parseMode === 'HTML' ? chunkTelegramHtml(text) : chunkTelegramText(text, TG_MSG_MAX))[0] || String(text).slice(0, TG_MSG_MAX)
   };
+  if (!previewLink) payload.disable_web_page_preview = true;
   if (parseMode) payload.parse_mode = parseMode;
   if (replyMarkup) payload.reply_markup = replyMarkup;
   if (threadId != null && threadId !== '' && !Number.isNaN(Number(threadId))) {
     payload.message_thread_id = Number(threadId);
   }
   return await telegramApi(token, 'editMessageText', payload);
+}
+
+// ---- Rich Messages (Bot API 10.1+) -----------------------------------
+// sendRichMessage / editMessageText(rich_message) accept a Telegram-specific
+// HTML dialect: headings (<h1>-<h6>), lists, tables, blockquote, <details>,
+// footers, and <tg-button>/<tg-button-row> buttons that render INSIDE the
+// message body instead of below it. Cap: 32,768 chars, 500 blocks, 16
+// nesting levels. Every rich send falls back to classic HTML on error.
+
+const TG_RICH_MSG_MAX = 32000;
+
+function richButton(btn) {
+  const type = btn.type || 'callback_data';
+  let attrs = 'type="' + type + '"';
+  if (btn.style) attrs += ' style="' + btn.style + '"';
+  if (btn.data) attrs += ' data="' + escHtml(btn.data) + '"';
+  if (btn.url) attrs += ' url="' + escHtml(btn.url) + '"';
+  return '<tg-button ' + attrs + '>' + escHtml(btn.label) + '</tg-button>';
+}
+
+function richButtonRow(buttons, align = 'left') {
+  if (!buttons || !buttons.length) return '';
+  return '<tg-button-row align="' + align + '">' + buttons.map(richButton).join(' ') + '</tg-button-row>';
+}
+
+function richHeading(level, html) {
+  const lvl = Math.min(6, Math.max(1, Number(level) || 3));
+  return '<h' + lvl + '>' + html + '</h' + lvl + '>';
+}
+
+function richParagraph(html) { return '<p>' + html + '</p>'; }
+
+function richDetails(summaryHtml, bodyHtml, open = false) {
+  return '<details' + (open ? ' open' : '') + '><summary>' + summaryHtml + '</summary>' + '\n' + bodyHtml + '</details>';
+}
+
+// Split long rich HTML only at finished block boundaries so no <table>/<details>
+// tag is left open across chunks.
+function chunkRichHtml(text, maxLen = TG_RICH_MSG_MAX) {
+  const s = String(text || '');
+  if (!s) return [];
+  if (s.length <= maxLen) return [s];
+  const chunks = [];
+  let rest = s;
+  const boundary = /<\/p>|<\/li>|<\/details>|<\/h[1-6]>|<\/blockquote>|<\/table>/g;
+  while (rest.length > maxLen) {
+    boundary.lastIndex = 0;
+    const windowText = rest.slice(0, maxLen);
+    let best = -1;
+    let m;
+    while ((m = boundary.exec(windowText)) !== null) best = m.index + m[0].length;
+    if (best < Math.floor(maxLen * 0.3)) best = maxLen;
+    chunks.push(rest.slice(0, best).trimEnd());
+    rest = rest.slice(best).replace(/^\s+/, '');
+  }
+  if (rest.trim()) chunks.push(rest.trimEnd());
+  return chunks;
+}
+
+// Convert rich HTML back to classic-HTML sendable text (old-API fallback).
+function richHtmlToClassic(richHtml) {
+  return String(richHtml || '')
+    .replace(/<tg-button-row[^>]*>|<\/tg-button-row>|<tg-button[^>]*>|<\/tg-button>/gi, ' ')
+    .replace(/<h[1-6]>|<\/h[1-6]>|<figure>|<\/figure>|<figcaption>|<\/figcaption>/gi, '\n')
+    .replace(/<table[^>]*>|<\/table>|<tr[^>]*>|<\/tr>/gi, '\n')
+    .replace(/<th[^>]*>|<\/th>|<td[^>]*>|<\/td>/gi, ' ')
+    .replace(/<details[^>]*>|<\/details>|<summary>|<\/summary>/gi, '\n')
+    .replace(/<footer>|<\/footer>|<hr\/?>|<aside>|<\/aside>|<cite>|<\/cite>/gi, '\n')
+    .replace(/<ul>|<\/ul>|<ol[^>]*>|<\/ol>|<li>|<\/li>|<blockquote[^>]*>|<\/blockquote>/gi, '\n')
+    .replace(/<p>|<\/p>/gi, '\n')
+    .replace(/<br\/?>/gi, '\n')
+    .replace(/<pre[^>]*>|<\/pre>/gi, '\n')
+    .replace(/<a name="[^"]*"><\/a>/gi, '')
+    .replace(/<input[^>]*>/gi, '')
+    .replace(/<tg-[a-z-]+[^>]*>|<\/tg-[a-z-]+>/gi, '')
+    .replace(/<a href="(?:https?:|mailto:|tel:)[^"]*">/gi, '')
+    .replace(/<\/a>/gi, '')
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+}
+
+async function sendRichFallback(token, chatId, richHtml, buttonsHtml, threadId) {
+  const plain = richHtmlToClassic((richHtml || '') + (buttonsHtml ? '\n' + buttonsHtml : ''));
+  return sendTelegramMessage(token, chatId, plain, threadId, 'HTML');
+}
+
+async function sendTelegramRichMessage(token, chatId, richHtml, threadId = null, buttonsHtml = null) {
+  if (!token) return { ok: false, error: 'No bot token' };
+  try {
+    const bodyParts = chunkRichHtml(richHtml || '');
+    if (!bodyParts.length) return { ok: true };
+    const first = bodyParts[0] + (buttonsHtml ? '\n' + buttonsHtml : '');
+    const parts = [first, ...bodyParts.slice(1)];
+    let last = { ok: true };
+    for (let i = 0; i < parts.length; i++) {
+      const payload = { chat_id: chatId, rich_message: { html: parts[i] } };
+      if (threadId != null && threadId !== '' && !Number.isNaN(Number(threadId))) payload.message_thread_id = Number(threadId);
+      const data = await telegramApi(token, 'sendRichMessage', payload);
+      if (!data.ok) {
+        if (i === 0) return sendRichFallback(token, chatId, richHtml, buttonsHtml, threadId);
+        return { ok: false, error: data.description || 'sendRichMessage failed', raw: data };
+      }
+      last = { ok: true, message_id: data.result?.message_id };
+    }
+    return last;
+  } catch (err) {
+    console.error('sendRichMessage threw:', err?.message || err);
+    return sendRichFallback(token, chatId, richHtml, buttonsHtml, threadId);
+  }
+}
+
+async function editTelegramRichMessage(token, chatId, messageId, richHtml, threadId = null, buttonsHtml = null) {
+  if (!token || !chatId || !messageId) return { ok: false };
+  const body = (richHtml || '') + (buttonsHtml ? '\n' + buttonsHtml : '');
+  const payload = {
+    chat_id: chatId,
+    message_id: messageId,
+    rich_message: { html: chunkRichHtml(body)[0] || body }
+  };
+  if (threadId != null && threadId !== '' && !Number.isNaN(Number(threadId))) payload.message_thread_id = Number(threadId);
+  const data = await telegramApi(token, 'editMessageText', payload);
+  if (!data.ok) {
+    return editTelegramMessage(token, chatId, messageId, richHtmlToClassic(body), null, threadId, 'HTML');
+  }
+  return data;
 }
 
 async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
@@ -7441,7 +7909,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
     session.page = action === 'prev' ? Math.max(0, currentPage - 1) : currentPage + 1;
     await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id });
     const view = await getTelegramSearchPage(env, session);
-    await editTelegramMessage(token, chatId, msgId, view.html, view.keyboard, threadId, 'HTML');
+    await editTelegramRichMessage(token, chatId, msgId, view.html, threadId, searchRichButtonRow(session.id, view.page, view.total));
     await env.DB.prepare('UPDATE telegram_search_sessions SET page = ? WHERE id = ?').bind(view.page, session.id).run().catch(() => {});
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
@@ -7483,15 +7951,72 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
   if (data.startsWith('help:')) {
     await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id });
     const section = data.slice(5); // menu | global | personal | community | channels
-    if (section === 'menu') {
-      await editTelegramMessage(token, chatId, msgId, helpTextForSection('menu'), helpMenuKeyboard(), threadId, 'HTML');
-    } else if (section === 'global' || section === 'personal' || section === 'community' || section === 'channels') {
-      const full = helpTextForSection(section);
-      const parts = chunkTelegramHtml(full);
-      await editTelegramMessage(token, chatId, msgId, parts[0] || full, helpBackKeyboard(), threadId, 'HTML');
-      for (let i = 1; i < parts.length; i++) {
-        await sendTelegramMessage(token, chatId, parts[i], threadId, 'HTML');
+    const back = section !== 'menu';
+    if (section === 'menu' || section === 'global' || section === 'personal' || section === 'community' || section === 'channels') {
+      await editTelegramRichMessage(token, chatId, msgId, richHelpHtml(section), threadId, helpRichButtonRows(back));
+    }
+    return new Response('OK', { status: 200, headers: corsHeaders });
+  }
+
+  // ---- /stats Refresh / Close buttons ----
+  if (data.startsWith('stats:')) {
+    if (!tgUserId) {
+      await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Unknown sender', show_alert: true }).catch(() => {});
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    const action = data.slice(6);
+    await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
+    if (action === 'close') {
+      await editTelegramMessage(token, chatId, msgId, boldHtml('👋 Stats closed.'), null, threadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    if (action === 'refresh') {
+      try {
+        const report = await buildStatsReport(env, token);
+        if (!report.chats || !report.chats.length) {
+          await editTelegramMessage(token, chatId, msgId, 'Nothing cloned yet — run /clone inside the chat or /uclone <chat_id> in DM.', null, threadId);
+        } else {
+          await editTelegramRichMessage(token, chatId, msgId, formatStatsRichReport(report), threadId, statsRichButtons());
+        }
+      } catch (e) {
+        console.error('stats refresh failed', e?.message || e);
+        await editTelegramMessage(token, chatId, msgId, boldHtml('❌') + ' Stats failed: ' + codeHtml(escHtml(String(e?.message || e).slice(0, 160))), null, threadId).catch(() => {});
       }
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    return new Response('OK', { status: 200, headers: corsHeaders });
+  }
+
+  // ---- Main-menu buttons (welcome + quick actions) ----
+  if (data.startsWith('menu:')) {
+    await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
+    const action = data.slice(5);
+    if (action === 'help') {
+      await sendTelegramRichMessage(token, chatId, richHelpHtml('menu'), threadId, helpRichButtonRows());
+    } else if (action === 'stats') {
+      try {
+        const report = await buildStatsReport(env, token);
+        if (!report.chats || !report.chats.length) {
+          await sendTelegramFormatted(token, chatId, 'Nothing cloned yet — run /clone inside the chat or /uclone <chat_id> in DM.', threadId);
+        } else {
+          await sendTelegramRichMessage(token, chatId, formatStatsRichReport(report), threadId, statsRichButtons());
+        }
+      } catch (e) {
+        console.error('menu stats failed', e?.message || e);
+        await sendTelegramFormatted(token, chatId, boldHtml('❌') + ' Stats failed: ' + codeHtml(escHtml(String(e?.message || e).slice(0, 160))), threadId).catch(() => {});
+      }
+    } else if (action === 'search') {
+      await sendTelegramRichMessage(token, chatId, [
+        richHeading(3, '🔍 Search'),
+        '',
+        richParagraph('Usage: /search <query> in this chat or a linked group.<br>Matches links + documents across the active brain<br>(personal DM for GOD · community in a linked group).<br><br>Results paginate with buttons · /ai <question> answers with retrieval.')
+      ].join('\n'), threadId);
+    } else if (action === 'clone') {
+      await sendTelegramRichMessage(token, chatId, [
+        richHeading(3, '🧬 Clone a chat'),
+        '',
+        richParagraph('• /uclone <chat_id> community — channel/group → community (DM)<br>• /uclone <chat_id> <topic_id> community — one forum topic<br>• /uclone <chat_id> personal — GOD-only, to your brain<br>• /uclone_del <chat_id> — remove the follow<br><br>Channel posts index live automatically after clone.')
+      ].join('\n'), threadId);
     }
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
@@ -7686,6 +8211,9 @@ async function capturePostIntoSinks(env, sinks, ctx) {
   const text = String(msg.text || msg.caption || '').trim();
   const urls = [...new Set(extractUrlsFromTelegramMessage(msg, { includeReply: false }))];
   const doc = msg.document;
+  const srcChat = msg.chat && msg.chat.id != null ? String(msg.chat.id) : null;
+  const srcMsgId = msg.message_id != null ? String(msg.message_id) : null;
+  const liveTransfer = srcChat ? `live:${srcChat}` : null;
 
   for (const sink of sinks) {
     try {
@@ -7699,19 +8227,19 @@ async function capturePostIntoSinks(env, sinks, ctx) {
             if (fileInfo?.ok && fileInfo.result?.file_path) {
               const fileRes = await fetchWithTimeout(`${TG_API_BASE}/file/bot${token}/${fileInfo.result.file_path}`, { env, redirect: 'error', allowPrivate: true }, 60_000);
               if (fileRes.ok) {
-                const r = await savePersonalIndexedDocument(env, personalOwner, filename, ext, new Uint8Array(await fileRes.arrayBuffer()), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id }, `live:${normalizeTgChatId(msg.chat.id)}`);
+                const r = await savePersonalIndexedDocument(env, personalOwner, filename, ext, new Uint8Array(await fileRes.arrayBuffer()), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id }, liveTransfer);
                 if (r && r.error) console.warn(`post doc skipped (${channelTitle}, personal): ${r.error}`);
               }
             }
           }
         }
-        const savedP = await savePersonalIndexedLinks(env, personalOwner, urls, channelTitle, text);
+        const savedP = await savePersonalIndexedLinks(env, personalOwner, urls, channelTitle, text, liveTransfer, srcChat, srcMsgId);
         if (savedP) console.log(`${channelTitle} → personal: indexed ${savedP} link(s)`);
         if (!savedP && !doc && text.length >= 80) {
           const dateStr = msg.date ? new Date(msg.date * 1000).toISOString().slice(0, 10) : '';
           const safeName = String(channelTitle).replace(/[^\w-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'chat';
           const md = `# ${channelTitle}${dateStr ? ` — ${dateStr}` : ''}\n\n${text}`;
-          await savePersonalIndexedDocument(env, personalOwner, `${safeName}_${msg.message_id}.md`, 'md', new TextEncoder().encode(md), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id });
+          await savePersonalIndexedDocument(env, personalOwner, `${safeName}_${msg.message_id}.md`, 'md', new TextEncoder().encode(md), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id }, liveTransfer);
         }
         continue;
       }
@@ -7730,7 +8258,7 @@ async function capturePostIntoSinks(env, sinks, ctx) {
               if (fileInfo?.ok && fileInfo.result?.file_path) {
                 const fileRes = await fetchWithTimeout(`${TG_API_BASE}/file/bot${token}/${fileInfo.result.file_path}`, { env, redirect: 'error', allowPrivate: true }, 60_000);
                 if (fileRes.ok) {
-                  const r = await saveIndexedDocument(env, communityId, filename, ext, new Uint8Array(await fileRes.arrayBuffer()), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id });
+                  const r = await saveIndexedDocument(env, communityId, filename, ext, new Uint8Array(await fileRes.arrayBuffer()), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id }, liveTransfer);
                   if (r && r.error) console.warn(`post doc skipped (${channelTitle}): ${r.error}`);
                 }
               }
@@ -7741,7 +8269,7 @@ async function capturePostIntoSinks(env, sinks, ctx) {
         }
       }
 
-      const saved = await saveIndexedLinks(env, communityId, urls, channelTitle, text, 'channel');
+      const saved = await saveIndexedLinks(env, communityId, urls, channelTitle, text, 'channel', liveTransfer, srcChat, srcMsgId);
       if (saved) console.log(`${channelTitle}: indexed ${saved} link(s)`);
 
       if (!saved && !doc && text.length >= 80) {
@@ -7750,7 +8278,7 @@ async function capturePostIntoSinks(env, sinks, ctx) {
           const safeName = String(channelTitle).replace(/[^\w-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'chat';
           const filename = `${safeName}_${msg.message_id}.md`;
           const md = `# ${channelTitle}${dateStr ? ` — ${dateStr}` : ''}\n\n${text}`;
-          await saveIndexedDocument(env, communityId, filename, 'md', new TextEncoder().encode(md), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id });
+          await saveIndexedDocument(env, communityId, filename, 'md', new TextEncoder().encode(md), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id }, liveTransfer);
         } catch (e) {
           console.error('post text index failed', e?.message || e);
         }
@@ -7827,25 +8355,58 @@ async function saveIndexedDocument(env, communityId, filename, ext, bytes, uploa
 }
 
 /** Personal-brain variants of the channel indexers — target = personal|both. */
-async function savePersonalIndexedLinks(env, ownerUserId, urls, attributionName, postText, transferId = null) {
+async function savePersonalIndexedLinks(env, ownerUserId, urls, attributionName, postText, transferId = null, sourceChatId = null, sourceMessageId = null, batchPlan = null) {
   const baseTags = ['telegram', 'channel'];
   let saved = 0;
   for (const rawUrl of urls) {
     try {
+      const _forced = batchPlan && batchPlan.urlMap ? batchPlan.urlMap.get(rawUrl) : null;
       if (await findExistingLink(env, 'personal_links', 'user_id', ownerUserId, rawUrl)) continue;
-      const meta = await enrichLinkFields(env, rawUrl, { title: '', notes: postText || '' });
+      const meta = await enrichLinkFields(env, rawUrl, { title: _forced && _forced.title ? _forced.title : '', notes: postText || '' });
+      if (_forced && _forced.title) meta.title = _forced.title;
       const urlHash = generateUrlHash(rawUrl);
       const id = 'ixp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
       await ensureLinkMetaColumns(env);
-      await env.DB.prepare(
-        `INSERT INTO personal_links (id, user_id, url, url_hash, title, notes, tags, created_at, image_url, site_name)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).bind(id, ownerUserId, rawUrl, urlHash, meta.title, meta.notes || '',
-        JSON.stringify(baseTags), Date.now(), meta.image_url || null, meta.site_name || null).run();
+      const insertSql = sourceChatId
+        ? `INSERT INTO personal_links (id, user_id, url, url_hash, title, notes, tags, created_at, image_url, site_name, source_chat_id, source_message_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        : `INSERT INTO personal_links (id, user_id, url, url_hash, title, notes, tags, created_at, image_url, site_name)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+      const insertArgs = sourceChatId
+        ? [id, ownerUserId, rawUrl, urlHash, meta.title, meta.notes || '', JSON.stringify(baseTags), Date.now(), meta.image_url || null, meta.site_name || null, String(sourceChatId), sourceMessageId == null ? null : String(sourceMessageId)]
+        : [id, ownerUserId, rawUrl, urlHash, meta.title, meta.notes || '', JSON.stringify(baseTags), Date.now(), meta.image_url || null, meta.site_name || null];
+      await env.DB.prepare(insertSql).bind(...insertArgs).run();
       saved++;
       if (transferId) {
         await ensureTransferColumns(env);
         await env.DB.prepare('UPDATE personal_links SET transfer_id = ? WHERE id = ?').bind(transferId, id).run().catch(() => {});
+      }
+      // tags: post #hashtags win, else AI describe, else context fallback (same as community path)
+      const userTags = normalizeTagList(extractHashtags(postText || ''));
+      let finalTags = null;
+      let finalTitle = meta.title;
+      let finalNotes = meta.notes || '';
+      if (_forced && _forced.tags && _forced.tags.length) {
+        finalTags = [...new Set([...baseTags, ..._forced.tags])];
+      } else if (userTags.length) {
+        finalTags = [...new Set([...baseTags, ...userTags])];
+      } else {
+        const vocab = await recentTagsForScope(env, 'personal', ownerUserId);
+        let ai = null;
+        try { ai = await aiDescribeAndTag(env, rawUrl, meta, vocab); } catch (_) {}
+        if (ai) {
+          finalTitle = ai.title || meta.title;
+          finalNotes = ai.description || meta.notes || '';
+          finalTags = ai.tags?.length ? [...new Set([...baseTags, ...ai.tags])] : baseTags;
+        } else {
+          const fb = fallbackTagsFromMeta(rawUrl, { title: meta.title, notes: meta.notes || postText, content: '' });
+          finalTags = [...new Set([...baseTags, ...(fb || [])])];
+        }
+      }
+      if (finalTags) {
+        await ensureSearchColumns(env);
+        await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
+          .bind(finalTitle, JSON.stringify(finalTags), finalNotes, id).run().catch(() => {});
       }
       markMeiliScopeDirty(env, 'personal', ownerUserId);
     } catch (e) {
@@ -7894,26 +8455,30 @@ async function savePersonalIndexedDocument(env, ownerUserId, filename, ext, byte
 }
 
 /** Shared insert path for indexed links (channel posts + history backfill). */
-async function saveIndexedLinks(env, communityId, urls, attributionName, postText, source /* 'channel'|'backfill' */, transferId = null) {
+async function saveIndexedLinks(env, communityId, urls, attributionName, postText, source /* 'channel'|'backfill' */, transferId = null, sourceChatId = null, sourceMessageId = null, batchPlan = null) {
   const baseTags = ['telegram', source === 'backfill' ? 'backfill' : 'channel'];
   let saved = 0;
   for (const rawUrl of urls) {
     try {
+      const _forced = batchPlan && batchPlan.urlMap ? batchPlan.urlMap.get(rawUrl) : null;
       if (await findExistingLink(env, 'links', 'community_id', communityId, rawUrl)) continue;
-      const meta = await enrichLinkFields(env, rawUrl, { title: '', notes: postText || '' });
+      const meta = await enrichLinkFields(env, rawUrl, { title: _forced && _forced.title ? _forced.title : '', notes: postText || '' });
+      if (_forced && _forced.title) meta.title = _forced.title;
       const urlHash = generateUrlHash(rawUrl);
       const id = 'ix_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
       await ensureLinkMetaColumns(env);
       try {
-        await env.DB.prepare(
-          `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
-            added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at, image_url, site_name)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'telegram', ?, 0, 0, ?, ?, ?)`
-        ).bind(
-          id, communityId, rawUrl, urlHash, meta.title, meta.notes || '',
-          JSON.stringify(baseTags), attributionName, attributionName,
-          Date.now(), meta.image_url || null, meta.site_name || null
-        ).run();
+        const insertSql = sourceChatId
+          ? `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
+              added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at, image_url, site_name, source_chat_id, source_message_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'telegram', ?, 0, 0, ?, ?, ?, ?, ?)`
+          : `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
+              added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at, image_url, site_name)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'telegram', ?, 0, 0, ?, ?, ?)`;
+        const insertArgs = sourceChatId
+          ? [id, communityId, rawUrl, urlHash, meta.title, meta.notes || '', JSON.stringify(baseTags), attributionName, attributionName, Date.now(), meta.image_url || null, meta.site_name || null, String(sourceChatId), sourceMessageId == null ? null : String(sourceMessageId)]
+          : [id, communityId, rawUrl, urlHash, meta.title, meta.notes || '', JSON.stringify(baseTags), attributionName, attributionName, Date.now(), meta.image_url || null, meta.site_name || null];
+        await env.DB.prepare(insertSql).bind(...insertArgs).run();
       } catch (error) {
         if (isUniqueConstraintError(error)) continue;
         if (!isMissingLinkMetaColumnError(error)) throw error;
@@ -7931,7 +8496,9 @@ async function saveIndexedLinks(env, communityId, urls, attributionName, postTex
       let finalTags = null;
       let finalTitle = meta.title;
       let finalNotes = meta.notes || '';
-      if (userTags.length) {
+      if (_forced && _forced.tags && _forced.tags.length) {
+        finalTags = [...new Set([...baseTags, ..._forced.tags])];
+      } else if (userTags.length) {
         finalTags = [...new Set([...baseTags, ...userTags])];
       } else {
         const vocab = await recentTagsForScope(env, 'community', communityId);
@@ -7999,23 +8566,188 @@ async function collectClonePreview(env, label, chatIdN){
     try { const acc = USERBOT_ACCOUNTS.get(label); if(acc) { const f = await isForumEnabled(null, chatIdN, env).catch(()=>false); if(f) isForum = true; } } catch(_){}
   }
   let totalMsgs = null;
-  let sampleLinks=0, sampleFiles=0, sampleUrls=0;
+  let sampleLinks=0, sampleFiles=0, sampleUrls=0, sampleSize=0;
+  let estLinks=null, estFiles=null, estUrls=null;
   try {
     const client = USERBOT_ACCOUNTS.get(label)?.client;
     if(client){
-      const head = await client.getMessages(chatIdN, {limit:1});
-      totalMsgs = Number(head?.[0]?.id || 0) || null;
-      const sample = await client.getMessages(chatIdN, {limit:80});
-      for(const m of sample||[]){
+      // Authoritative message count from Telegram — the newest message id is
+      // not the count: deleted messages leave gaps, imported history can start
+      // at an arbitrary id (the old code overstated Msgs by every deletion).
+      try {
+        const { Api } = await import('telegram/tl');
+        const hist = await client.invoke(new Api.messages.GetHistory({ peer: chatIdN, offsetId: 0, offsetDate: 0, addOffset: 0, limit: 1, maxId: 0, minId: 0, hash: 0n }));
+        if (hist && typeof hist.count === 'number') totalMsgs = hist.count;
+      } catch (_) {}
+      if (totalMsgs == null) {
+        const head = await client.getMessages(chatIdN, {limit:1});
+        totalMsgs = Number(head?.[0]?.id || 0) || null;
+      }
+      // Representative sample: probe across the whole history instead of the
+      // newest 80 messages (recent posts can look nothing like the archive —
+      // e.g. a group that posts media now but was link-dense historically).
+      const SAMPLE_TARGET = 240;
+      let sampled = [];
+      if (totalMsgs && totalMsgs <= SAMPLE_TARGET) {
+        sampled = (await client.getMessages(chatIdN, { limit: SAMPLE_TARGET })) || [];
+      } else if (totalMsgs) {
+        const chunks = Math.max(2, Math.min(6, Math.ceil(totalMsgs / 600)));
+        const per = Math.max(1, Math.ceil(SAMPLE_TARGET / chunks));
+        const seen = new Set();
+        for (let i = 0; i < chunks; i++) {
+          const off = Math.floor((totalMsgs * (i + 1)) / (chunks + 1));
+          try {
+            const msgs = (await client.getMessages(chatIdN, { limit: per, addOffset: off })) || [];
+            for (const m of msgs) if (!seen.has(m.id)) { seen.add(m.id); sampled.push(m); }
+          } catch (_) {}
+        }
+      }
+      for (const m of sampled || []) {
         const urls = urlsFromGramjsMessage(m);
         sampleUrls += urls.length; if(urls.length) sampleLinks++;
         if(m.media?.className==='MessageMediaDocument' || m.media?.className==='MessageMediaPhoto') sampleFiles++;
       }
+      sampleSize = (sampled || []).length;
+      if (sampleSize > 0 && totalMsgs) {
+        estLinks = Math.round(sampleLinks * totalMsgs / sampleSize);
+        estFiles = Math.round(sampleFiles * totalMsgs / sampleSize);
+        estUrls  = Math.round(sampleUrls  * totalMsgs / sampleSize);
+      }
     }
   } catch(_){}
-  return { isForum, topics: topics||[], topicCount: (topics||[]).length, totalMsgs, sampleLinks, sampleFiles, sampleUrls };
+  return { isForum, topics: topics||[], topicCount: (topics||[]).length, totalMsgs, sampleLinks, sampleFiles, sampleUrls, sampleSize, estLinks, estFiles, estUrls };
 }
 
+/** Render "~N (est. from M sampled)" for one clone-preview stat. */
+function formatPreviewEst(est, sampleVal, sampleSize) {
+  const shown = est != null ? '~' + est.toLocaleString() : String(sampleVal || 0);
+  const note = sampleSize ? ' (est. from ' + sampleSize + ' msg sample)' : '';
+  return shown + note;
+}
+
+function formatStatsRichReport(report) {
+  const liveMark = (v) => v ? '🟢' : '⚪';
+  const liveNote = (v) => v ? ' (new posts clone automatically)' : '';
+  const out = [];
+  out.push(richHeading(3, '📊 ATHENA — CLONE STATUS'));
+  for (let i = 0; i < report.chats.length; i++) {
+    const c = report.chats[i];
+    const idx = i + 1;
+    const idPart = codeHtml(escHtml(c.id));
+    const typeLabel = c.type || (c.isForum ? 'forum' : 'group');
+    const targetLabel = c.target || 'community';
+    const communitySuffix = c.communityId ? ' → ' + escHtml(c.communityId) : '';
+    const summary = idx + '. ' + escHtml(c.name) + ' (' + idPart + ') · ' + typeLabel
+      + (c.isForum ? ' · ' + (c.topics ? c.topics.length + ' topics' : 'forum') : '')
+      + ' · ' + targetLabel + communitySuffix + ' · ' + liveMark(c.live) + liveNote(c.live);
+    const body = [];
+    const totL = c.total.links || 0;
+    const totF = c.total.files || c.total.docs || 0;
+    const totP = c.total.photos || 0;
+    const totM = c.total.msgs || 0;
+    body.push(richParagraph('• links ' + totL + ' · files ' + totF + ' · photos ' + totP + ' · msgs ' + totM));
+    const tdL = c.today.links || 0;
+    const tdD = c.today.docs || 0;
+    const tdP = c.today.photos || 0;
+    body.push(richParagraph('today ' + tdL + ' links · ' + tdD + ' docs · ' + tdP + ' photos'));
+    const jobsAll = c.jobs?.all || [];
+    if (jobsAll.length) {
+      let doneJobs = jobsAll.filter((j) => j.status === 'done').length;
+      let runningJobs = jobsAll.filter((j) => j.status === 'running' || j.status === 'queued').length;
+      let errJobs = jobsAll.filter((j) => j.status === 'error').length;
+      let sumMsgs = jobsAll.reduce((a, j) => a + Number(j.processed || 0), 0);
+      let sumUrls = jobsAll.reduce((a, j) => a + Number(j.urls_seen || 0), 0);
+      let sumLinks = jobsAll.reduce((a, j) => a + Number(j.saved_links || 0), 0);
+      let sumDocs = jobsAll.reduce((a, j) => a + Number(j.saved_docs || 0), 0);
+      let bfStatus = doneJobs && !runningJobs ? 'done' : runningJobs ? 'running' : errJobs ? 'error' : 'queued';
+      body.push(richParagraph('backfill: ' + bfStatus + ' ' + sumMsgs + ' msgs · ' + sumUrls + ' urls · ' + sumLinks + ' links · ' + sumDocs + ' docs'));
+      for (const j of jobsAll.slice(0, 2)) {
+        if (j.error) body.push(richParagraph('⚠️ ' + codeHtml(escHtml(j.id)) + ' error: ' + escHtml(String(j.error).slice(0, 80))));
+      }
+    } else {
+      body.push(richParagraph('backfill: not run'));
+    }
+    if (c.isForum && c.topics && c.topics.length) {
+      const withClones = c.topics.filter((t) => t.job).length;
+      body.push(richParagraph('topics: ' + withClones + '/' + c.topics.length + ' with clones'));
+      const items = [];
+      for (const t of c.topics.slice(0, 12)) {
+        const titlePart = t.title ? ' · ' + escHtml(t.title) : '';
+        const liveT = t.live?.lastAt ? ' · live ' + Math.max(1, Math.round((Date.now() - (t.live.lastAt || 0)) / 60000)) + 'm ago' : (t.live?.msgs ? ' · live' : '');
+        const j = t.job;
+        const jPart = j ? j.status + (j.processed ? ' ' + j.processed + ' msgs' : '') + (j.saved_links ? ' · ' + j.saved_links + ' links' : '') + (j.saved_docs ? ' · ' + j.saved_docs + ' docs' : '') : 'not started';
+        items.push('<li>' + codeHtml('#' + t.threadId) + titlePart + ' → links ' + t.total.links + ' · docs ' + t.total.docs + ' (today ' + t.today.links + '/' + t.today.docs + ') · ' + jPart + liveT + '</li>');
+      }
+      if (c.topics.length > 12) items.push('<li>… +' + (c.topics.length - 12) + ' more topics</li>');
+      body.push('<ul>' + items.join('') + '</ul>');
+    }
+    if (c.live) {
+      const stat = USERBOT_STATS.get(c.id) || USERBOT_STATS.get(c.id.replace(/^-100/, '')) || null;
+      if (stat) body.push(richParagraph('live: ' + (stat.msgs || 0) + ' msgs · ' + (stat.links || 0) + ' links · ' + (stat.docs || 0) + ' docs'));
+      if (c.topics) {
+        const hot = c.topics.filter((t) => t.live?.lastAt && Date.now() - t.live.lastAt < 3600000).slice(0, 3);
+        for (const h of hot) body.push(richParagraph('live ▸ #' + h.threadId + ' cloned ' + (h.live.links || 0) + ' links · ' + (h.live.docs || 0) + ' docs today'));
+      }
+    }
+    out.push(richDetails(summary, body.join('\n'), true));
+  }
+  return out.join('\n');
+}
+
+function statsRichButtons() {
+  return richButtonRow([
+    { label: '🔄 Refresh', data: 'stats:refresh' },
+    { label: '💻 Clone', data: 'menu:clone' },
+    { label: '❌ Close', data: 'stats:close' }
+  ]);
+}
+
+function welcomeRichButtonRows(websiteUrl) {
+  const rows = [richButtonRow([
+    { label: '📊 Stats', data: 'menu:stats' },
+    { label: '🔍 Search', data: 'menu:search' },
+    { label: '🧬 Clone', data: 'menu:clone' },
+    { label: '🧭 Help', data: 'help:menu' }
+  ])];
+  if (websiteUrl) {
+    rows.push(richButtonRow([{ type: 'url', url: websiteUrl, label: '🌐 Open ' + String(websiteUrl).replace(/^https?:\/\//, '') }]));
+  }
+  return rows.join('\n');
+}
+
+function helpRichButtonRows(back = false) {
+  const rows = [];
+  if (back) rows.push(richButtonRow([{ label: '« Help menu', data: 'help:menu' }]));
+  rows.push(richButtonRow([
+    { label: '🌐 Global', data: 'help:global' },
+    { label: '👤 Personal', data: 'help:personal' }
+  ]));
+  rows.push(richButtonRow([
+    { label: '👥 Community', data: 'help:community' },
+    { label: '📡 Channels', data: 'help:channels' }
+  ]));
+  return rows.join('\n');
+}
+
+function richTextToRich(htmlText) {
+  return String(htmlText || '')
+    .split(/\n{2,}/)
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .map((x) => '<p>' + x.split(/\n/).join('<br>') + '</p>')
+    .join('\n');
+}
+
+function richHelpHtml(section) {
+  const raw = String(helpTextForSection(section) || '');
+  const out = [];
+  const paras = raw.split(/\n{2,}/).map((x) => x.trim()).filter(Boolean);
+  for (let i = 0; i < paras.length; i++) {
+    const inner = paras[i].split(/\n/).join('<br>');
+    out.push(i === 0 ? richHeading(3, inner) : richParagraph(inner));
+  }
+  return out.join('\n');
+}
 async function doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdN, targetArg, stats }){
   const _minId = stats?.minId || stats?.min_id || '';
   const _maxId = stats?.maxId || stats?.max_id || '';
@@ -8289,7 +9021,7 @@ async function runHistoryIndexJob(env, job, token) {
       if (!messages || !messages.length) { await patch({ status: 'done' }); log('done (end of history)'); break; }
       if (job.min_id && offsetId && offsetId < Number(job.min_id)) { await patch({ status: 'done' }); log('done (reached min_id)'); break; }
       for (const message of messages) {
-        offsetId = Math.max(offsetId, Number(message.id || 0));
+        offsetId = offsetId ? Math.min(offsetId, Number(message.id || 0)) : Number(message.id || 0);
         // Explicit id range (/clone <chat> <min> <max>): skip outside it.
         if (job.max_id && Number(message.id || 0) > Number(job.max_id)) continue;
         processed++;
@@ -8313,21 +9045,25 @@ async function runHistoryIndexJob(env, job, token) {
               try {
                 await env.DB.prepare(
                   `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
-                    added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at, image_url, site_name)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'telegram', ?, 0, 0, ?, NULL, NULL)`
+                    added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at, image_url, site_name, source_chat_id, source_message_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'telegram', ?, 0, 0, ?, NULL, NULL, ?, ?)`
                 ).bind(id, job.community_id, rawUrl, urlHash, capTitle, (text || '').slice(0, 3000),
                   JSON.stringify(['telegram', 'backfill']), 'history backfill', 'history backfill',
-                  Date.now()).run();
+                  Date.now(), job.chat_id, message.id != null ? String(message.id) : null).run();
                 savedLinks++; fresh.push({ id, url: rawUrl });
               } catch (error) {
                 if (isUniqueConstraintError(error)) continue;
                 if (!isMissingLinkMetaColumnError(error)) throw error;
                 await env.DB.prepare(
-                  'INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+                  'INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by, created_at, source_chat_id, source_message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
                 ).bind(id, job.community_id, rawUrl, urlHash, capTitle, (text || '').slice(0, 3000),
-                  JSON.stringify(['telegram', 'backfill']), 'history backfill', Date.now()).run();
+                  JSON.stringify(['telegram', 'backfill']), 'history backfill', Date.now(), job.chat_id, message.id != null ? String(message.id) : null).run();
                 savedLinks++; fresh.push({ id, url: rawUrl });
               }
+              try {
+                await ensureTransferColumns(env);
+                await env.DB.prepare('UPDATE links SET transfer_id = ? WHERE id = ?').bind(job.id, id).run().catch(() => {});
+              } catch (_) {}
             } catch (e) {
               console.error(`[index] link insert failed (${rawUrl})`, e?.message || e);
             }
@@ -8399,6 +9135,7 @@ async function runHistoryIndexJob(env, job, token) {
           }
         }
       }
+      job.saved_links = savedLinks; job.saved_docs = savedDocs;
       await patch({ offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs, saved_files: job.saved_files || 0, skipped_media: job.skipped_media || 0, urls_seen: job.urls_seen || 0 });
       log(`batch done · total ${processed} · +${messages.length} · urls ${job.urls_seen || 0}`);
       if (processed - lastProgress >= 50) lastProgress = processed;
@@ -8408,9 +9145,10 @@ async function runHistoryIndexJob(env, job, token) {
     if (processed >= INDEX_MAX_MESSAGES) {
       const conts = Number(job.continuations || 0);
       if (conts < INDEX_AUTO_CONTINUATIONS) {
-        await patch({ status: 'queued', continuations: conts + 1 });
-        log(`cap reached — auto-continuing (chunk ${conts + 2})`);
-        runInBackground(env, runHistoryIndexJob(env, { ...job, status: 'queued' }, token));
+        const nextJob = { ...job, offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs, saved_files: job.saved_files || 0, skipped_media: job.skipped_media || 0, urls_seen: job.urls_seen || 0 };
+        await patch({ status: 'queued', continuations: conts + 1, offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs, skipped_media: job.skipped_media || 0, urls_seen: job.urls_seen || 0 });
+        log(`cap reached — auto-continuing (chunk ${conts + 2}) at offset ${offsetId}`);
+        runInBackground(env, runHistoryIndexJob(env, { ...nextJob, status: 'queued' }, token));
       } else {
         await patch({ status: 'error', error: `stopped after ${conts + 1} chunks (${processed} msgs) — /index_stop then /clone resumes`.slice(0, 300) });
       }
@@ -8440,7 +9178,234 @@ async function runHistoryIndexJob(env, job, token) {
   }
 }
 
+/**
+ * Webhook dedupe: Telegram redelivers an update when our reply is slow
+ * (scrape + AI can exceed the Bot API timeout), causing the same paste to be
+ * saved and then reported as a duplicate — two contradictory replies. Track
+ * update_ids seen in the last 90s and swallow redeliveries.
+ */
+/**
+ * Dedupe key for one webhook delivery. Telegram (or the Cloudflare path) has
+ * been observed delivering the SAME user message twice with two DIFFERENT
+ * update_ids ~1s apart, so update_id alone cannot catch duplicates. The
+ * message identity (chat:from:message_id) is identical across both copies and
+ * unique across genuine repeated sends, so it is the authority; update_id is
+ * kept as a fallback for non-message updates (callbacks, member events).
+ */
+function webhookDedupeKey(update) {
+  if (!update) return null;
+  const m = update.message || update.channel_post || update.edited_message;
+  if (m && m.message_id != null && m.chat?.id != null && m.from?.id != null) {
+    return `m:${m.chat.id}:${m.from.id}:${m.message_id}`;
+  }
+  const cq = update.callback_query;
+  if (cq?.id != null) return `cq:${cq.id}`;
+  const cm = update.chat_member || update.my_chat_member;
+  if (cm?.chat?.id != null && cm.from?.id != null) {
+    return `cmm:${cm.chat.id}:${cm.from.id}:${cm.new_chat_member?.user?.id}:${cm.new_chat_member?.status}`;
+  }
+  if (update.update_id != null) return `u:${update.update_id}`;
+  return null;
+}
+const RECENT_UPDATE_TTL = 10 * 60_000; // covers slow scrape+AI processing
+const recentUpdateKeys = new Map();
+function isRecentWebhookUpdate(update) {
+  const key = webhookDedupeKey(update);
+  if (key == null) return false;
+  const now = Date.now();
+  for (const [k, t] of recentUpdateKeys) if (now - t > RECENT_UPDATE_TTL) recentUpdateKeys.delete(k);
+  if (recentUpdateKeys.has(key)) {
+    try { console.log(`[webhook] DEDUPE swallowed ${key} (id=${update?.update_id})`); } catch (_) {}
+    return true;
+  }
+  recentUpdateKeys.set(key, now);
+  if (recentUpdateKeys.size > 3000) {
+    const oldest = [...recentUpdateKeys.keys()].sort((a, b) => recentUpdateKeys.get(a) - recentUpdateKeys.get(b)).slice(0, 500);
+    for (const k of oldest) recentUpdateKeys.delete(k);
+  }
+  return false;
+}
+
+/** Plain-paste dump path. Runs in background so the webhook ACKs fast and
+ * Telegram does not redeliver the update while scrape/AI are pending. */
+async function dumpPlainUrls(env, p) {
+  const { msg, token, chatId, forumThreadId, binding, athenaUser, isGod, senderName, cmd, text, captionNotes, dumpLinkMode } = p;
+// ---- plain URL dump (current mode) — also photo captions + text_link entities ----
+let urls = extractUrlsFromTelegramMessage(msg);
+if (!urls.length) urls = extractUrls(text);
+if (!urls.length) {
+  if (cmd && cmd.startsWith('/')) {
+    await sendTelegramMessage(token, chatId, 'Unknown command. Try /help', forumThreadId);
+  }
+  return;
+}
+
+const isGroupChat = String(msg.chat?.type || '').includes('group') || chatId.startsWith('-');
+if (!binding) {
+  await sendTelegramMessage(token, chatId,
+    isGroupChat
+      ? 'Group not linked. Bot owner: /community_verify then /community or /personal.'
+      : 'Not linked. Website Settings → Bot: token + /id from this chat.', forumThreadId);
+  return;
+}
+
+// Dump target: dual mode for elevated; regular members in a linked group always dump to community
+let scope = binding.scope || (binding.community_id ? 'community' : 'personal');
+const isElevatedDump = isGod;
+if (isGroupChat && binding.community_id && !isElevatedDump) {
+  scope = 'community';
+}
+if (scope === 'community' && !binding.community_id) {
+  await sendTelegramMessage(token, chatId, 'Community mode but no community linked. /community_verify in group, or /personal.', forumThreadId);
+  return;
+}
+// Topic lock already applied early for all group traffic
+const fullPost = telegramFullPostText(msg);
+const linkMode = (binding.dump_link_mode || dumpLinkMode || 'smart').toLowerCase();
+
+let toSave = urls;
+let titleHint = '';
+let notesForSave;
+let groupPlan = null;
+
+// Batch posts (many links, one message): ask AI to group them under shared
+// headings/tags; heuristics cover AI-off time. Every URL still gets saved.
+if (urls.length > 1) {
+  const vocab = scope === 'community'
+    ? await recentTagsForScope(env, 'community', binding.community_id).catch(() => [])
+    : await recentTagsForScope(env, 'personal', athenaUser?.id || '').catch(() => []);
+  try { groupPlan = await planBatchGroups(env, urls, fullPost, vocab || []); } catch (_) { groupPlan = null; }
+}
+const useGrouping = !!(groupPlan && groupPlan.groups && groupPlan.groups.some((g) => g.urls.length > 1 || (g.heading && g.urls.length >= 1)));
+
+if (useGrouping) {
+  const built = buildMultiLinkNotes(fullPost);
+  notesForSave = built.notes || captionNotes || fullPost;
+  titleHint = built.titleHint;
+  for (const g of groupPlan.groups) {
+    for (const rawUrl of g.urls) {
+      const cardTitle = groupCardTitle(g, rawUrl);
+      if (scope === 'community') {
+        await saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, athenaUser, chatId, notesForSave, titleHint, forumThreadId, fullPost, g.tags || [], cardTitle);
+      } else {
+        if (!athenaUser) {
+          await sendTelegramMessage(token, chatId, 'Personal dump needs Telegram login on the website once.', forumThreadId);
+          continue;
+        }
+        if (!isElevatedDump) {
+          await sendTelegramMessage(token, chatId,
+            'Personal mode is GOD rank only.\n/community_join <id> to use a community.', forumThreadId);
+          continue;
+        }
+        const r = await savePersonalUrl(env, athenaUser.id, rawUrl, senderName, notesForSave, titleHint, cardTitle);
+        if (r.duplicate) {
+          await sendTelegramMessage(token, chatId, 'Website is already added: ' + rawUrl, forumThreadId);
+        } else if (r.error) {
+          await sendTelegramMessage(token, chatId, 'Could not save link: ' + r.error, forumThreadId);
+        } else {
+          await finalizePersonalSave(env, token, chatId, forumThreadId, athenaUser, r, rawUrl, fullPost, g.tags || []);
+        }
+      }
+    }
+  }
+  return;
+}
+
+if (urls.length > 1 && linkMode !== 'all') {
+  const picked = selectPrimaryLinks(urls, fullPost);
+  toSave = picked.primary;
+  const built = buildMultiLinkNotes(fullPost);
+  notesForSave = built.notes;
+  titleHint = built.titleHint;
+} else if (urls.length > 1 && linkMode === 'all') {
+  notesForSave = captionNotes || fullPost;
+} else {
+  notesForSave = isDetailedNotes(fullPost) ? fullPost : captionNotes;
+  const built = buildMultiLinkNotes(fullPost);
+  if (built.titleHint) titleHint = built.titleHint;
+  if (isDetailedNotes(fullPost)) notesForSave = fullPost;
+}
+
+for (const rawUrl of toSave) {
+  if (scope === 'community') {
+    await saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, athenaUser, chatId, notesForSave, titleHint, forumThreadId, fullPost);
+  } else {
+    if (!athenaUser) {
+      await sendTelegramMessage(token, chatId, 'Personal dump needs Telegram login on the website once.', forumThreadId);
+      continue;
+    }
+    if (!isElevatedDump) {
+      await sendTelegramMessage(token, chatId,
+        'Personal mode is GOD rank only.\n/community_join <id> to use a community.', forumThreadId);
+      continue;
+    }
+    const r = await savePersonalUrl(env, athenaUser.id, rawUrl, senderName, notesForSave, titleHint);
+    if (r.duplicate) {
+      await sendTelegramMessage(token, chatId, `Website is already added: ${rawUrl}`, forumThreadId);
+    } else {
+      const userTagsPersonal = normalizeTagList(extractHashtags(fullPost));
+      let reply;
+      try {
+        if (userTagsPersonal.length && r.id) {
+          const merged = [...new Set([...['telegram','personal'], ...userTagsPersonal])];
+          await ensureSearchColumns(env);
+          try {
+            await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
+              .bind(r.title, JSON.stringify(merged), r.notes || '', r.id).run();
+            const gp = await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: r.title, notes: r.notes || '', tags: merged });
+            if (gp?.handled && !gp.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${gp.error||'unknown'}`, forumThreadId); }
+          } catch (_) {}
+          reply = formatSavedLinkReply('personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: userTagsPersonal }, r.notes);
+          reply = formatSavedLinkReply('personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: userTagsPersonal }, r.notes);
+        } else {
+          const vocab = await recentTagsForScope(env, 'personal', athenaUser.id);
+          const ai = await aiDescribeAndTag(env, rawUrl, {
+            title: r.title,
+            notes: r.notes,
+            content: r.content
+          }, vocab);
+          if (ai && r.id) {
+            const savedTitle = ai.title || r.title;
+            const merged = ai.tags?.length
+              ? [...new Set([...['telegram', 'personal'], ...ai.tags])]
+              : ['telegram', 'personal'];
+            await ensureSearchColumns(env);
+            try {
+              await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
+                .bind(savedTitle, JSON.stringify(merged), ai.description || r.notes || '', r.id).run();
+              await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: savedTitle, notes: ai.description || r.notes || '', tags: merged });
+            } catch (_) {}
+          } else {
+            const fb=fallbackTagsFromMeta(rawUrl, {title: r.title, notes: r.notes, content: r.content});
+            if(fb.length && r.id){
+              const mergedFb=[...new Set([...['telegram','personal'], ...fb])];
+              try{ await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`).bind(r.title, JSON.stringify(mergedFb), r.notes||'', r.id).run(); await storeMutateLink(env,'personal',athenaUser.id,r.id,{title:r.title, notes:r.notes||'', tags:mergedFb}); }catch(_){}
+              reply = formatSavedLinkReply('personal', r.title, rawUrl, {title: r.title, description: r.notes||'', tags: fb}, r.notes);
+            } else {
+              reply = formatSavedLinkReply('personal', r.title, rawUrl, null, r.notes);
+            }
+          }
+          if(!reply) reply = formatSavedLinkReply('personal', ai?.title || r.title, rawUrl, ai, r.notes);
+        }
+      } catch (_) {
+        reply = formatSavedLinkReply('personal', r.title, rawUrl, null, r.notes);
+      }
+      await sendTelegramMessage(token, chatId, reply, forumThreadId, null, true);
+    }
+  }
+}
+
+
+}
+
 async function handleTelegramWebhook(update, env, corsHeaders) {
+  // Idempotency: ignore Telegram redeliveries of the same update_id (slow scrape/AI replies trigger retries).
+  if (isRecentWebhookUpdate(update)) return new Response('OK', { status: 200, headers: corsHeaders });
+
+  // Edits re-deliver the full old text hours later — never re-save or reply
+  // for them (a long-ago edited post must not resurface as "Already in community").
+  if (update.edited_message) return new Response('OK', { status: 200, headers: corsHeaders });
+
   await ensureBotBindingColumns(env);
   await ensureCommunityMembersColumns(env);
 
@@ -8906,16 +9871,12 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   if (cmd === '/start') {
     const isPriv = !(String(msg.chat?.type || '').includes('group') || chatId.startsWith('-'));
     if (!athenaUser && isPriv) {
-      await sendTelegramMessage(token, chatId, [
-        'Welcome to Athena.',
+      const websiteForWelcome = await getWebsiteDisplayUrl(env);
+      await sendTelegramRichMessage(token, chatId, [
+        richHeading(3, '👋 Welcome to Athena'),
         '',
-        `1) Login at ${await getWebsiteDisplayUrl(env)} with Telegram`,
-        '2) Join the community Telegram group',
-        '3) /community_join <id>',
-        '',
-        'Then: dump links in the group · /search · /ai · /rank',
-        'Personal mode is GOD rank only (instance host).'
-      ].join('\n'), forumThreadId);
+        richParagraph('1) Login at ' + escHtml(websiteForWelcome) + ' with Telegram<br>2) Join the community Telegram group<br>3) /community_join <id><br><br>Then: dump links in the group · /search · /ai · /rank<br>Personal mode is GOD rank only (instance host).')
+      ].join('\n'), forumThreadId, welcomeRichButtonRows(websiteForWelcome));
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     const scope = binding?.scope || (binding?.community_id ? 'community' : null);
@@ -8924,22 +9885,23 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     else if (userRank === 'owner') roleLine = 'Rank: owner (community creator).';
     else if (userRank === 'admin') roleLine = 'Rank: admin (community staff).';
     else if (userRank === 'member') roleLine = 'Rank: member (community dump/search/ai).';
-    await sendTelegramMessage(token, chatId, [
-      'Welcome to Athena Search bot.',
+    const websiteForWelcome2 = await getWebsiteDisplayUrl(env);
+    await sendTelegramRichMessage(token, chatId, [
+      richHeading(3, '👋 Welcome to Athena Search bot'),
       '',
-      roleLine,
-      binding
+      richParagraph(roleLine),
+      richParagraph(binding
         ? ('Linked · dump mode: ' + (scope || 'personal') + (binding.community_id ? (' · community ' + (binding.group_name || binding.community_id)) : ''))
-        : (isGod ? 'Not linked — Settings → Bot on the website (token + /id).' : 'Join: /community_join <id>'),
+        : (isGod ? 'Not linked — Settings → Bot on the website (token + /id).' : 'Join: /community_join <id>')),
       '',
-      isGod
+      richParagraph(isGod
         ? 'GOD: /personal · group /community_verify · /community · /search · /ai · /help'
         : (isMemberPlus
           ? 'Member+: dump in group · /search · /ai · /community_list · /rank · /help'
-          : 'Login on website → join TG group → /community_join <id>'),
+          : 'Login on website → join TG group → /community_join <id>')),
       '',
-      'Send /help for command menus. /rank shows your rank.'
-    ].join('\n'), forumThreadId);
+      richParagraph('Send /help for command menus. /rank shows your rank.')
+    ].join('\n'), forumThreadId, welcomeRichButtonRows(websiteForWelcome2));
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
@@ -9654,7 +10616,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     const lines = [
       `${boldHtml('🔍 Clone preview')} ${codeHtml(chatIdN)}${threadArg?` topic ${codeHtml('#'+threadArg)}`:''} → ${boldHtml(scopeLabel)}`,
       `${boldHtml('Topics:')} ${previewStats.isForum? previewStats.topicCount+' (forum)':'0 (not a forum)'}`,
-      `${boldHtml('Msgs:')} ${previewStats.totalMsgs||'—'} (est.) · ${boldHtml('Links:')} ${previewStats.sampleLinks} (sample 80) · ${boldHtml('Files:')} ${previewStats.sampleFiles} · ${boldHtml('URLs:')} ${previewStats.sampleUrls}`,
+      `${boldHtml('Msgs:')} ${previewStats.totalMsgs && previewStats.totalMsgs > 0 ? previewStats.totalMsgs.toLocaleString() : '—'} · ${boldHtml('Links:')} ${formatPreviewEst(previewStats.estLinks ?? null, previewStats.sampleLinks, previewStats.sampleSize)} · ${boldHtml('Files:')} ${formatPreviewEst(previewStats.estFiles ?? null, previewStats.sampleFiles, previewStats.sampleSize)} · ${boldHtml('URLs:')} ${formatPreviewEst(previewStats.estUrls ?? null, previewStats.sampleUrls, previewStats.sampleSize)}`,
     ];
     if(previewStats.isForum && previewStats.topics?.length){
       lines.push('', `${boldHtml('Topics list:')}`);
@@ -10031,7 +10993,25 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
-   // ---- /transfers — GOD: recent clone/backfill sessions with ids ----
+   // ---- /tag_untagged — GOD: tag every link with no real tags, AI first, context fallback, never touches tagged rows ----
+  if (cmd === '/tag_untagged' || cmd === '/taguntagged' || cmd === '/tag_missing') {
+    if (!isGod) { await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId); return new Response('OK', { status: 200, headers: corsHeaders }); }
+    await ensureAiConfigTable(env);
+    const cfgU = await getInstanceAiConfig(env);
+    const thinkU = await sendTelegramFormatted(token, chatId, `${boldHtml('🏷')} Tagging every untagged link… (AI ${cfgU?.api_key ? 'on' : 'OFF → context tags'})`, forumThreadId);
+    const thinkIdU = thinkU?.message_id;
+    let totalU = 0;
+    try { const cU = await env.DB.prepare(`SELECT COUNT(*) AS n FROM links WHERE tags IS NULL OR tags = '' OR tags = '[]' OR tags = 'null'`).first(); totalU += Number(cU?.n || 0); } catch (_) {}
+    try { const cU2 = await env.DB.prepare(`SELECT COUNT(*) AS n FROM personal_links WHERE tags IS NULL OR tags = '' OR tags = '[]' OR tags = 'null'`).first(); totalU += Number(cU2?.n || 0); } catch (_) {}
+    if (!totalU) {
+      if (thinkIdU) await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: thinkIdU, text: '✅ Every link already has tags.', parse_mode: 'HTML' }).catch(() => {});
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    runInBackground(env, tagUntaggedLinksInBackground(env, token, chatId, forumThreadId, thinkIdU, totalU, cfgU));
+    return new Response('OK', { status: 200, headers: corsHeaders });
+  }
+
+  // ---- /transfers — GOD: recent clone/backfill sessions with ids ----
    if (cmd === '/transfers' || cmd === '/clone_sessions') {
      if (!isGod) { await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId); return new Response('OK', { status: 200, headers: corsHeaders }); }
      await ensureIndexTables(env);
@@ -10109,7 +11089,26 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
    }
 
    // ---- /userbot_status — the one dashboard: accounts, channels, live + backfill status ----
-   if (cmd === '/userbot_status' || cmd === '/userbotstatus' || cmd === '/indexing') {
+     // ---- /stats — clone dashboard (channel + per-topic) ----
+  if (cmd === '/stats') {
+    try {
+      const report = await buildStatsReport(env, token);
+      if (!report.chats || !report.chats.length) {
+        await sendTelegramFormatted(token, chatId, `Nothing cloned yet — run ${codeHtml('/clone')} inside the chat or ${codeHtml('/uclone <chat_id>')} in DM.`, forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      // Rich message: headings, <details> per chat, buttons INSIDE the body.
+      await sendTelegramRichMessage(token, chatId, formatStatsRichReport(report), forumThreadId, statsRichButtons());
+      return new Response('OK', { status: 200, headers: corsHeaders });
+      
+    } catch (e) {
+      console.error('/stats failed', e?.message || e);
+      await sendTelegramFormatted(token, chatId, `${boldHtml('\u274C')} Stats failed: ${codeHtml(escHtml(String(e?.message || e).slice(0, 200)))}`, forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+  }
+
+  if (cmd === '/userbot_status' || cmd === '/userbotstatus' || cmd === '/indexing') {
      if (!isSelfHosted(env)) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Userbot mode is self-host only.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
@@ -10280,14 +11279,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
    }
 
    if (cmd === '/help') {
-    await sendTelegramMessageWithKeyboard(
-      token,
-      chatId,
-      helpTextForSection('menu'),
-      helpMenuKeyboard(),
-      forumThreadId,
-      'HTML'
-    );
+    await sendTelegramRichMessage(token, chatId, richHelpHtml('menu'), forumThreadId, helpRichButtonRows());
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
@@ -11265,11 +12257,13 @@ Rules:
          if (citedIndices.has(i)) mainSources.push(sourceLine);
        });
 
-       // Only CITED sources are shown — unrelated matches are never appended
-       // (use /search for the full paginated result list).
+       // Only CITED sources are shown — unrelated matches are never appended.
+       // The rest stay one tap away behind a paginated "Next ▶" button that
+       // reuses the /search session machinery (same query, same scope).
        if (mainSources.length) {
          msg += `\n\n${mainSources.join('\n')}`;
        }
+       let aiSessionId = null;
        if (!mainSources.length && docs.length) {
          const allSources = docs.slice(0, 3).map((d) => {
            const t = d.title || titleFromUrl(d.url || '');
@@ -11277,16 +12271,34 @@ Rules:
            return isDoc ? `📄 ${t}` : (d.url ? `🔗 ${t}\n${d.url}` : null);
          }).filter(Boolean);
          if (allSources.length) {
-           msg += `\n\n${boldHtml('📚 Top matches:')}\n${allSources.join('\n')}\n${italicHtml('More: /search ' + q.slice(0, 60))}`;
+           msg += `\n\n${boldHtml('📚 Top matches:')}\n${allSources.join('\n')}`;
          }
        }
+       // Paginate the full candidate list behind the button.
+       try {
+         if (docs.length) {
+           await ensureTelegramSearchTable(env);
+           const now = Date.now();
+           const sid = `ts_${randomToken().slice(0, 12)}`;
+           await env.DB.prepare(
+             `INSERT INTO telegram_search_sessions
+               (id, tg_user_id, chat_id, scope, scope_key, query, page, created_at, expires_at)
+              VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`
+           ).bind(sid, String(tgUserId || ''), String(chatId), scope, String(scopeKey),
+             String(q || '').trim().slice(0, 240), now, now + TG_SEARCH_SESSION_TTL_MS).run();
+           aiSessionId = sid;
+         }
+       } catch (_) {}
+       const aiButtonsHtml = aiSessionId ? searchRichButtonRow(aiSessionId, 0, Number(retrieval.total ?? docs.length)) : null;
 
-        // editMessageText is single-message — long answers continue in
-        // follow-up messages instead of being silently truncated
-        const parts = chunkTelegramHtml(msg);
-        await editTelegramMessage(token, chatId, thinkMsgId, parts[0] || msg, null, forumThreadId);
+        // Rich message editing is single-message — long answers continue in
+        // follow-up messages instead of being silently truncated. The
+        // pagination buttons ("Next ▶") ride inside the main answer message.
+        const richAnswer = richTextToRich(msg);
+        const parts = chunkRichHtml(richAnswer);
+        await editTelegramRichMessage(token, chatId, thinkMsgId, parts[0] || richAnswer, forumThreadId, aiButtonsHtml);
         for (let pi = 1; pi < parts.length; pi++) {
-          await sendTelegramFormatted(token, chatId, parts[pi], forumThreadId);
+          await sendTelegramRichMessage(token, chatId, parts[pi], forumThreadId);
         }
         // Remember the thread so replying to this message is a follow-up.
         try {
@@ -11493,52 +12505,97 @@ Rules:
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
       await ensureTransferColumns(env);
+      await ensureUserbotTables(env);
       const chatArg = normalizeTgChatId(delParts[0]);
+      const bare = chatArg.replace(/^-100/, '');
       const threadArg = delParts[1] && /^\d{1,10}$/.test(delParts[1]) && !/^c_/.test(delParts[1]) ? delParts[1] : '';
       const withFiles = delParts.includes('files');
-      let transferIds;
-      let jobIds;
-      if (threadArg) {
-        // Topic delete: find jobs for this chat+thread
-        const { results } = await env.DB.prepare('SELECT id FROM index_jobs WHERE chat_id = ? AND thread_id = ?').bind(chatArg, threadArg).all().catch(() => ({ results: [] }));
-        jobIds = (results || []).map(r => r.id);
-        transferIds = [...jobIds];
-        // live topic docs are tagged live:chat:thread? Currently live:<chat> only; also check docs with source containing thread
-        const { results: _tdocs } = await env.DB.prepare("SELECT id FROM telegram_topic_bindings WHERE chat_id = ? AND thread_id = ?").bind(chatArg, threadArg).all().catch(() => ({ results: [] }));
-        // Also include any live transfer for this chat+thread combo via source_chat+source_message lookup is too broad; just use transferIds
-      } else {
-        const { results } = await env.DB.prepare('SELECT id FROM index_jobs WHERE chat_id = ?').bind(chatArg).all().catch(() => ({ results: [] }));
-        jobIds = (results || []).map(r => r.id);
-        transferIds = [...jobIds, `live:${chatArg}`];
-        // Also bare id variant (-100 prefix stripped)
-        const bare = chatArg.replace(/^-100/, '');
-        if (bare !== chatArg) {
-          const { results: r2 } = await env.DB.prepare('SELECT id FROM index_jobs WHERE chat_id = ?').bind(bare).all().catch(() => ({ results: [] }));
-          for (const r of r2 || []) if (!transferIds.includes(r.id)) { transferIds.push(r.id); jobIds.push(r.id); }
-          transferIds.push(`live:${bare}`);
+      const chatKeys = [...new Set([chatArg, bare])];
+      const threadLive = threadArg ? chatKeys.map(k => `live:${k}:${threadArg}`) : [];
+      const liveTransfers = [...chatKeys.map(k => `live:${k}`), ...threadLive];
+
+      // 1. Remember the path(s) this chat was cloned into: follows (userbot) and
+      //    bindings (bot-linked channels/groups). Topic follows are keyed chat:thread.
+      const followKeys = threadArg
+        ? chatKeys.map(k => `${k}:${threadArg}`)
+        : chatKeys;
+      let communityIds = new Set();
+      let personalUserIds = new Set();
+      try {
+        const fph = followKeys.map(() => '?').join(',');
+        const { results: follows } = await env.DB.prepare(`SELECT community_id, target, created_by FROM userbot_follows WHERE chat_id IN (${fph})`).bind(...followKeys).all();
+        for (const f of follows || []) {
+          const t = String(f.target || 'community');
+          if (f.community_id) {
+            if (t === 'community' || t === 'both') communityIds.add(f.community_id);
+          }
+          if ((t === 'personal' || t === 'both') && f.created_by) personalUserIds.add(String(f.created_by));
         }
-      }
-      if (!transferIds.length) {
+      } catch (_) {}
+      try {
+        const bph = chatKeys.map(() => '?').join(',');
+        const { results: binds } = await env.DB.prepare(`SELECT community_id, COALESCE(channel_target,'community') AS target, created_by FROM community_bots WHERE platform='telegram' AND group_id IN (${bph}) AND community_id IS NOT NULL`).all().catch(() => ({ results: [] }));
+        for (const b of binds || []) {
+          const t = String(b.target || 'community');
+          if ((t === 'community' || t === 'both') && b.community_id) communityIds.add(b.community_id);
+          if ((t === 'personal' || t === 'both') && b.created_by) personalUserIds.add(String(b.created_by));
+        }
+      } catch (_) {}
+      // Backfill jobs still record the community even if the follow row is gone.
+      try {
+        const jph = chatKeys.map(() => '?').join(',');
+        const { results: jobsMeta } = await env.DB.prepare(`SELECT DISTINCT community_id FROM index_jobs WHERE chat_id IN (${jph}) AND community_id IS NOT NULL`).all().catch(() => ({ results: [] }));
+        for (const j of jobsMeta || []) if (j.community_id) communityIds.add(j.community_id);
+      } catch (_) {}
+
+      // 2. Transfer ids: backfill jobs for this chat/topic + live sessions.
+      const jobQs = threadArg
+        ? `SELECT id FROM index_jobs WHERE chat_id IN (${chatKeys.map(()=>'?').join(',')}) AND thread_id = ?`
+        : `SELECT id FROM index_jobs WHERE chat_id IN (${chatKeys.map(()=>'?').join(',')})`;
+      const jobArgs = threadArg ? [...chatKeys, threadArg] : [...chatKeys];
+      let transferIds = [];
+      let jobIds = [];
+      try {
+        const { results } = await env.DB.prepare(jobQs).bind(...jobArgs).all().catch(() => ({ results: [] }));
+        jobIds = (results || []).map(r => r.id);
+        transferIds = [...jobIds, ...liveTransfers];
+      } catch (_) {}
+      if (!transferIds.length && !communityIds.size && !personalUserIds.size) {
         await sendTelegramMessage(token, chatId, `Nothing found for ${chatArg}${threadArg ? ':' + threadArg : ''}. Try /transfers to see ids.`, forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
       const ph = transferIds.map(() => '?').join(',');
-      const d1 = await env.DB.prepare(`DELETE FROM links WHERE transfer_id IN (${ph})`).bind(...transferIds).run().catch(() => ({ changes: 0 }));
-      const d2 = await env.DB.prepare(`DELETE FROM personal_links WHERE transfer_id IN (${ph})`).bind(...transferIds).run().catch(() => ({ changes: 0 }));
-      const d3 = await env.DB.prepare(`DELETE FROM uploaded_documents WHERE transfer_id IN (${ph})`).bind(...transferIds).run().catch(() => ({ changes: 0 }));
-      // Also delete docs by source_chat for topic granularity
-      let d4 = { changes: 0 };
-      if (threadArg) {
-        // Topic docs have source_message but not easy to filter; keep transfer_id as primary
-      } else if (!threadArg && chatArg.startsWith('-100')) {
-        // For plain chat delete, also remove untagged docs that came from that chat via source_chat_id
-        try {
-          const r = await env.DB.prepare('DELETE FROM uploaded_documents WHERE source_chat_id = ?').bind(chatArg).run();
-          d4 = r;
-          const r2 = await env.DB.prepare('DELETE FROM uploaded_documents WHERE source_chat_id = ?').bind(chatArg.replace(/^-100/, '')).run().catch(() => ({ changes: 0 }));
-          d4.changes = (d4.changes || 0) + (r2.changes || 0);
-        } catch (_) {}
+      const d1 = transferIds.length ? await env.DB.prepare(`DELETE FROM links WHERE transfer_id IN (${ph})`).bind(...transferIds).run().catch(() => ({ changes: 0 })) : { changes: 0 };
+      const d2 = transferIds.length ? await env.DB.prepare(`DELETE FROM personal_links WHERE transfer_id IN (${ph})`).bind(...transferIds).run().catch(() => ({ changes: 0 })) : { changes: 0 };
+      const d3 = transferIds.length ? await env.DB.prepare(`DELETE FROM uploaded_documents WHERE transfer_id IN (${ph})`).bind(...transferIds).run().catch(() => ({ changes: 0 })) : { changes: 0 };
+
+      // 3. Scoped orphan cleanup (chat-scoped, never whole-DB): rows whose
+      //    transfer_id is NULL (early clones) but which carry source provenance.
+      const cIds = [...communityIds];
+      const pIds = [...personalUserIds];
+      let orphanLinks = 0, orphanPersonal = 0, orphanDocs = 0;
+      if (cIds.length) {
+        const cph = cIds.map(() => '?').join(',');
+        const kph = chatKeys.map(() => '?').join(',');
+        const r1 = await env.DB.prepare(`DELETE FROM links WHERE source_chat_id IN (${kph}) AND community_id IN (${cph})`).bind(...chatKeys, ...cIds).run().catch(() => ({ changes: 0 }));
+        orphanLinks = r1.changes || 0;
+        const r3 = await env.DB.prepare(`DELETE FROM uploaded_documents WHERE source_chat_id IN (${kph}) AND scope = 'community' AND community_id IN (${cph})`).bind(...chatKeys, ...cIds).run().catch(() => ({ changes: 0 }));
+        orphanDocs += r3.changes || 0;
       }
+      if (pIds.length) {
+        const pph = pIds.map(() => '?').join(',');
+        const k2 = chatKeys.map(() => '?').join(',');
+        const r2 = await env.DB.prepare(`DELETE FROM personal_links WHERE source_chat_id IN (${k2}) AND user_id IN (${pph})`).bind(...chatKeys, ...pIds).run().catch(() => ({ changes: 0 }));
+        orphanPersonal = r2.changes || 0;
+        const r3b = await env.DB.prepare(`DELETE FROM uploaded_documents WHERE source_chat_id IN (${k2}) AND scope = 'personal' AND user_id IN (${pph})`).bind(...chatKeys, ...pIds).run().catch(() => ({ changes: 0 }));
+        orphanDocs += r3b.changes || 0;
+      }
+      // Docs for this chat regardless of path (chat-scoped, precise).
+      try {
+        const k3 = chatKeys.map(() => '?').join(',');
+        const rd = await env.DB.prepare(`DELETE FROM uploaded_documents WHERE source_chat_id IN (${k3})`).bind(...chatKeys).run().catch(() => ({ changes: 0 }));
+        orphanDocs += rd.changes || 0;
+      } catch (_) {}
       if (withFiles && MEDIA_VAULT_DIR) {
         try {
           const { rm } = await import('node:fs/promises');
@@ -11548,16 +12605,26 @@ Rules:
       }
       if (jobIds.length) {
         await env.DB.prepare(`DELETE FROM index_jobs WHERE id IN (${jobIds.map(() => '?').join(',')})`).bind(...jobIds).run().catch(() => {});
-        // Remove topic binding or follow if deleting topic
         if (threadArg) {
-          await env.DB.prepare('DELETE FROM telegram_topic_bindings WHERE chat_id = ? AND thread_id = ?').bind(chatArg, threadArg).run().catch(() => {});
+          await env.DB.prepare('DELETE FROM telegram_topic_bindings WHERE chat_id IN (' + chatKeys.map(() => '?').join(',') + ') AND thread_id = ?').bind(...chatKeys, threadArg).run().catch(() => {});
+          const fk = chatKeys.map(k => `${k}:${threadArg}`);
+          await env.DB.prepare('DELETE FROM userbot_follows WHERE chat_id IN (' + fk.map(() => '?').join(',') + ')').bind(...fk).run().catch(() => {});
         } else {
-          await env.DB.prepare('DELETE FROM userbot_follows WHERE chat_id = ?').bind(chatArg).run().catch(() => {});
-          await env.DB.prepare('DELETE FROM telegram_topic_bindings WHERE chat_id = ?').bind(chatArg).run().catch(() => {});
+          await env.DB.prepare('DELETE FROM userbot_follows WHERE chat_id IN (' + chatKeys.map(() => '?').join(',') + ')').bind(...chatKeys).run().catch(() => {});
+          await env.DB.prepare('DELETE FROM telegram_topic_bindings WHERE chat_id IN (' + chatKeys.map(() => '?').join(',') + ')').bind(...chatKeys).run().catch(() => {});
         }
       }
+      const scopeTxt = [];
+      if (cIds.length) scopeTxt.push('community: ' + cIds.map(c => escHtml(c.replace(/^c_/, ''))).join(', '));
+      if (pIds.length) scopeTxt.push('personal: ' + pIds.length + ' user(s)');
+      const totalLinks = (d1?.changes || 0) + orphanLinks;
+      const totalPersonal = (d2?.changes || 0) + orphanPersonal;
+      const totalDocs = (d3?.changes || 0) + orphanDocs;
       await sendTelegramMessage(token, chatId,
-        `🗑 Deleted ${threadArg ? 'topic ' + threadArg + ' of ' : ''}${chatArg}\n• links: ${d1?.changes || 0}\n• personal links: ${d2?.changes || 0}\n• documents: ${(d3?.changes || 0) + (d4?.changes || 0)}${withFiles ? '\n• vault files wiped' : ''}`,
+        `🗑 Deleted ${threadArg ? 'topic ' + threadArg + ' of ' : ''}${chatArg}
+• community links: ${totalLinks}
+• personal links: ${totalPersonal}
+• documents: ${totalDocs}${scopeTxt.length ? '\n• path: ' + scopeTxt.join(' · ') : ''}${withFiles ? '\n• vault files wiped' : ''}`,
         forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
@@ -11689,126 +12756,13 @@ Rules:
   }
 
   // ---- plain URL dump (current mode) — also photo captions + text_link entities ----
-  let urls = extractUrlsFromTelegramMessage(msg);
-  if (!urls.length) urls = extractUrls(text);
-  if (!urls.length) {
-    if (cmd && cmd.startsWith('/')) {
-      await sendTelegramMessage(token, chatId, 'Unknown command. Try /help', forumThreadId);
-    }
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-
-  const isGroupChat = String(msg.chat?.type || '').includes('group') || chatId.startsWith('-');
-  if (!binding) {
-    await sendTelegramMessage(token, chatId,
-      isGroupChat
-        ? 'Group not linked. Bot owner: /community_verify then /community or /personal.'
-        : 'Not linked. Website Settings → Bot: token + /id from this chat.', forumThreadId);
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-
-  // Dump target: dual mode for elevated; regular members in a linked group always dump to community
-  let scope = binding.scope || (binding.community_id ? 'community' : 'personal');
-  const isElevatedDump = isGod;
-  if (isGroupChat && binding.community_id && !isElevatedDump) {
-    scope = 'community';
-  }
-  if (scope === 'community' && !binding.community_id) {
-    await sendTelegramMessage(token, chatId, 'Community mode but no community linked. /community_verify in group, or /personal.', forumThreadId);
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-  // Topic lock already applied early for all group traffic
-  const fullPost = telegramFullPostText(msg);
-  const linkMode = (binding.dump_link_mode || dumpLinkMode || 'smart').toLowerCase();
-
-  let toSave = urls;
-  let titleHint = '';
-  let notesForSave;
-
-  if (urls.length > 1 && linkMode !== 'all') {
-    const picked = selectPrimaryLinks(urls, fullPost);
-    toSave = picked.primary;
-    const built = buildMultiLinkNotes(fullPost);
-    notesForSave = built.notes;
-    titleHint = built.titleHint;
-  } else if (urls.length > 1 && linkMode === 'all') {
-    notesForSave = captionNotes || fullPost;
-  } else {
-    notesForSave = isDetailedNotes(fullPost) ? fullPost : captionNotes;
-    const built = buildMultiLinkNotes(fullPost);
-    if (built.titleHint) titleHint = built.titleHint;
-    if (isDetailedNotes(fullPost)) notesForSave = fullPost;
-  }
-
-  for (const rawUrl of toSave) {
-    if (scope === 'community') {
-      await saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, athenaUser, chatId, notesForSave, titleHint, forumThreadId, fullPost);
-    } else {
-      if (!athenaUser) {
-        await sendTelegramMessage(token, chatId, 'Personal dump needs Telegram login on the website once.', forumThreadId);
-        continue;
-      }
-      if (!isElevatedDump) {
-        await sendTelegramMessage(token, chatId,
-          'Personal mode is GOD rank only.\n/community_join <id> to use a community.', forumThreadId);
-        continue;
-      }
-      const r = await savePersonalUrl(env, athenaUser.id, rawUrl, senderName, notesForSave, titleHint);
-      if (r.duplicate) {
-        await sendTelegramMessage(token, chatId, `Website is already added: ${rawUrl}`, forumThreadId);
-      } else {
-        const userTagsPersonal = normalizeTagList(extractHashtags(fullPost));
-        let reply;
-        try {
-          if (userTagsPersonal.length && r.id) {
-            const merged = [...new Set([...['telegram','personal'], ...userTagsPersonal])];
-            await ensureSearchColumns(env);
-            try {
-              await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
-                .bind(r.title, JSON.stringify(merged), r.notes || '', r.id).run();
-              const gp = await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: r.title, notes: r.notes || '', tags: merged });
-              if (gp?.handled && !gp.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${gp.error||'unknown'}`, forumThreadId); }
-            } catch (_) {}
-            reply = formatSavedLinkReply('personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: userTagsPersonal }, r.notes);
-            reply = formatSavedLinkReply('personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: userTagsPersonal }, r.notes);
-          } else {
-            const vocab = await recentTagsForScope(env, 'personal', athenaUser.id);
-            const ai = await aiDescribeAndTag(env, rawUrl, {
-              title: r.title,
-              notes: r.notes,
-              content: r.content
-            }, vocab);
-            if (ai && r.id) {
-              const savedTitle = ai.title || r.title;
-              const merged = ai.tags?.length
-                ? [...new Set([...['telegram', 'personal'], ...ai.tags])]
-                : ['telegram', 'personal'];
-              await ensureSearchColumns(env);
-              try {
-                await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
-                  .bind(savedTitle, JSON.stringify(merged), ai.description || r.notes || '', r.id).run();
-                await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: savedTitle, notes: ai.description || r.notes || '', tags: merged });
-              } catch (_) {}
-            } else {
-              const fb=fallbackTagsFromMeta(rawUrl, {title: r.title, notes: r.notes, content: r.content});
-              if(fb.length && r.id){
-                const mergedFb=[...new Set([...['telegram','personal'], ...fb])];
-                try{ await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`).bind(r.title, JSON.stringify(mergedFb), r.notes||'', r.id).run(); await storeMutateLink(env,'personal',athenaUser.id,r.id,{title:r.title, notes:r.notes||'', tags:mergedFb}); }catch(_){}
-                reply = formatSavedLinkReply('personal', r.title, rawUrl, {title: r.title, description: r.notes||'', tags: fb}, r.notes);
-              } else {
-                reply = formatSavedLinkReply('personal', r.title, rawUrl, null, r.notes);
-              }
-            }
-            if(!reply) reply = formatSavedLinkReply('personal', ai?.title || r.title, rawUrl, ai, r.notes);
-          }
-        } catch (_) {
-          reply = formatSavedLinkReply('personal', r.title, rawUrl, null, r.notes);
-        }
-        await sendTelegramMessage(token, chatId, reply, forumThreadId);
-      }
-    }
-  }
-
+  // ACK first; the scrape + AI + replies run in the background. Keeps the
+  // webhook response fast so Telegram never redelivers the update (which
+  // caused contradictory duplicate replies for one paste).
+  runInBackground(env, dumpPlainUrls(env, {
+    msg, token, chatId, forumThreadId, binding, athenaUser, isGod, senderName,
+    cmd, text, captionNotes, dumpLinkMode
+  }));
   return new Response('OK', { status: 200, headers: corsHeaders });
 }
 
@@ -11818,7 +12772,7 @@ Rules:
  * @param {string} text
  * @param {string|number|null} [threadId] — forum topic (message_thread_id); keep replies in-topic
  */
-async function sendTelegramMessage(token, chatId, text, threadId = null, parseMode = null) {
+async function sendTelegramMessage(token, chatId, text, threadId = null, parseMode = null, previewLink = false) {
   if (!token) return { ok: false, error: 'No bot token' };
   try {
     const parts = parseMode === 'HTML' ? chunkTelegramHtml(text) : chunkTelegramText(text, TG_MSG_MAX);
@@ -11827,9 +12781,9 @@ async function sendTelegramMessage(token, chatId, text, threadId = null, parseMo
     for (let i = 0; i < parts.length; i++) {
       const payload = {
         chat_id: chatId,
-        text: parts[i],
-        disable_web_page_preview: true
+        text: parts[i]
       };
+      if (!previewLink) payload.disable_web_page_preview = true;
       if (parseMode) payload.parse_mode = parseMode;
       if (threadId != null && threadId !== '' && !Number.isNaN(Number(threadId))) {
         payload.message_thread_id = Number(threadId);
@@ -11845,11 +12799,11 @@ async function sendTelegramMessage(token, chatId, text, threadId = null, parseMo
   }
 }
 
-async function sendTelegramFormatted(token, chatId, htmlText, threadId = null) {
-  return sendTelegramMessage(token, chatId, htmlText, threadId, 'HTML');
+async function sendTelegramFormatted(token, chatId, htmlText, threadId = null, previewLink = false) {
+  return sendTelegramMessage(token, chatId, htmlText, threadId, 'HTML', previewLink);
 }
 
-async function sendTelegramMessageWithKeyboard(token, chatId, text, replyMarkup, threadId = null, parseMode = null) {
+async function sendTelegramMessageWithKeyboard(token, chatId, text, replyMarkup, threadId = null, parseMode = null, previewLink = false) {
   if (!token) return { ok: false, error: 'No bot token' };
   try {
     // Keyboard only on first chunk if we must split
@@ -11858,9 +12812,9 @@ async function sendTelegramMessageWithKeyboard(token, chatId, text, replyMarkup,
     for (let i = 0; i < parts.length; i++) {
       const payload = {
         chat_id: chatId,
-        text: parts[i],
-        disable_web_page_preview: true
+        text: parts[i]
       };
+      if (!previewLink) payload.disable_web_page_preview = true;
       if (parseMode) payload.parse_mode = parseMode;
       if (i === 0 && replyMarkup) payload.reply_markup = replyMarkup;
       if (threadId != null && threadId !== '' && !Number.isNaN(Number(threadId))) {
@@ -12839,9 +13793,13 @@ async function ensureLinkMetaColumns(env) {
     `ALTER TABLE personal_links ADD COLUMN image_url TEXT`,
     `ALTER TABLE personal_links ADD COLUMN site_name TEXT`,
     `ALTER TABLE personal_links ADD COLUMN metadata_version INTEGER DEFAULT 0`,
+    `ALTER TABLE personal_links ADD COLUMN source_chat_id TEXT`,
+    `ALTER TABLE personal_links ADD COLUMN source_message_id TEXT`,
     `ALTER TABLE links ADD COLUMN image_url TEXT`,
     `ALTER TABLE links ADD COLUMN site_name TEXT`,
-    `ALTER TABLE links ADD COLUMN metadata_version INTEGER DEFAULT 0`
+    `ALTER TABLE links ADD COLUMN metadata_version INTEGER DEFAULT 0`,
+    `ALTER TABLE links ADD COLUMN source_chat_id TEXT`,
+    `ALTER TABLE links ADD COLUMN source_message_id TEXT`
   ]) {
     try { await env.DB.prepare(sql).run(); } catch (_) {}
   }
@@ -13151,6 +14109,88 @@ async function enrichLinksInBackground(env, scope, key, links) {
   await Promise.all(Array.from({ length: CONCURRENCY }, run));
 }
 
+/** Background full-DB tag sweep for /tag_untagged (GOD). Only rows whose
+ *  tags are empty/[]/null are touched; every tagged link is left alone.
+ *  AI first when the instance AI is configured, else context fallback. */
+async function tagUntaggedLinksInBackground(env, token, chatId, forumThreadId, thinkId, total, cfg) {
+  const BATCH = 200;
+  let done = 0, aiHits = 0, ctxHits = 0, errors = 0;
+  const edit = async () => {
+    const pct = Math.min(100, Math.round((done / Math.max(1, total)) * 100));
+    const filled = Math.round((pct / 100) * 18);
+    const bar = '▮'.repeat(filled) + '▯'.repeat(18 - filled);
+    await telegramApi(token, 'editMessageText', {
+      chat_id: chatId, message_id: thinkId, parse_mode: 'HTML',
+      text: `${boldHtml('🏷 Tag untagged')}\n${codeHtml(bar + ' ' + pct + '%')}\n${done}/${total} · AI ${aiHits} · context ${ctxHits}`
+    }).catch(() => {});
+  };
+  await ensureSearchColumns(env);
+  const emptyTags = `(tags IS NULL OR tags = '' OR tags = '[]' OR tags = 'null')`;
+  // Community table: re-query first BATCH each pass — updated rows drop out, so
+  // the sweep is resumable and never revisits a tagged link.
+  for (;;) {
+    let rows = [];
+    try {
+      const { results } = await env.DB.prepare(`SELECT id, community_id, url, title, notes, search_blob FROM links WHERE ${emptyTags} ORDER BY created_at DESC LIMIT ${BATCH}`).all();
+      rows = results || [];
+    } catch (_) {}
+    if (!rows.length) break;
+    for (const r of rows) {
+      try {
+        const meta = { title: r.title || '', notes: r.notes || '', content: r.search_blob || '' };
+        let tags = null; let title = r.title || ''; let notes = r.notes || '';
+        if (cfg?.api_key) {
+          try {
+            const vocab = await recentTagsForScope(env, 'community', r.community_id);
+            const ai = await aiDescribeAndTag(env, r.url, meta, vocab, cfg);
+            if (ai) { aiHits++; title = ai.title || title; notes = ai.description || notes; tags = ai.tags || []; }
+          } catch (_) {}
+        }
+        if (!tags?.length) { tags = fallbackTagsFromMeta(r.url, meta); ctxHits++; }
+        if (!tags.length) tags = ['untagged'];
+        await env.DB.prepare(`UPDATE links SET tags = ?, title = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
+          .bind(JSON.stringify(tags), title, notes, r.id).run().catch(() => {});
+        markMeiliScopeDirty(env, 'community', r.community_id);
+      } catch (_) { errors++; }
+      done++;
+      if (done % 10 === 0) await edit();
+    }
+  }
+  // Personal table: every user's brain, same filter.
+  for (;;) {
+    let rows = [];
+    try {
+      const { results } = await env.DB.prepare(`SELECT id, user_id, url, title, notes, search_blob FROM personal_links WHERE ${emptyTags} ORDER BY created_at DESC LIMIT ${BATCH}`).all();
+      rows = results || [];
+    } catch (_) {}
+    if (!rows.length) break;
+    for (const r of rows) {
+      try {
+        const meta = { title: r.title || '', notes: r.notes || '', content: r.search_blob || '' };
+        let tags = null; let title = r.title || ''; let notes = r.notes || '';
+        if (cfg?.api_key) {
+          try {
+            const vocab = await recentTagsForScope(env, 'personal', r.user_id);
+            const ai = await aiDescribeAndTag(env, r.url, meta, vocab, cfg);
+            if (ai) { aiHits++; title = ai.title || title; notes = ai.description || notes; tags = ai.tags || []; }
+          } catch (_) {}
+        }
+        if (!tags?.length) { tags = fallbackTagsFromMeta(r.url, meta); ctxHits++; }
+        if (!tags.length) tags = ['untagged'];
+        await env.DB.prepare(`UPDATE personal_links SET tags = ?, title = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
+          .bind(JSON.stringify(tags), title, notes, r.id).run().catch(() => {});
+        markMeiliScopeDirty(env, 'personal', r.user_id);
+      } catch (_) { errors++; }
+      done++;
+      if (done % 10 === 0) await edit();
+    }
+  }
+  await edit();
+  await sendTelegramFormatted(token, chatId,
+    `${boldHtml('✅')} Tagged ${done} untagged link(s): ${aiHits} via AI · ${ctxHits} via context${errors ? ` · ${errors} errors` : ''}.`,
+    forumThreadId);
+}
+
 function queueMissingLinkEnrichment(env, scope, key, rows) {
   const missing = (rows || [])
     .filter(row => row?.url && Number(row.metadata_version || 0) < AI_METADATA_VERSION)
@@ -13413,11 +14453,19 @@ const USERBOT_ACCOUNTS = new Map(); // label -> { client, startedAt }
 const USERBOT_STARTING = new Set();
 const USERBOT_STATS = new Map(); // chat_id -> {msgs, links, docs, lastAt}
 
-function userbotStat(chatId, field) {
-  const s = USERBOT_STATS.get(chatId) || { msgs: 0, links: 0, docs: 0, lastAt: 0 };
+function userbotStat(chatId, field, threadId = null) {
+  const key = String(chatId || '');
+  const s = USERBOT_STATS.get(key) || { msgs: 0, links: 0, docs: 0, lastAt: 0 };
   if (field) s[field] += 1;
   s.lastAt = Date.now();
-  USERBOT_STATS.set(chatId, s);
+  USERBOT_STATS.set(key, s);
+  if (threadId != null && String(threadId).trim() !== '' && !key.includes(':')) {
+    const tKey = `${key}:${String(threadId).trim()}`;
+    const t = USERBOT_STATS.get(tKey) || { msgs: 0, links: 0, docs: 0, lastAt: 0 };
+    if (field) t[field] += 1;
+    t.lastAt = Date.now();
+    USERBOT_STATS.set(tKey, t);
+  }
 }
 
 /** Accepts -100… and bare channel ids — returns a stable key. */
@@ -13495,19 +14543,41 @@ function gramjsChatId(message) {
 async function captureGramjsMessage(env, follow, message) {
   const text = String(message.message || '').trim();
   if (text.startsWith('/')) return;
-  userbotStat(follow.chat_id, 'msgs');
+  const _threadId = message.replyTo?.replyToTopId != null ? String(message.replyTo.replyToTopId) : null;
+  userbotStat(follow.chat_id, 'msgs', _threadId);
   const target = CHANNEL_TARGETS.has(follow.target) ? follow.target : 'community';
   const personalOwner = target === 'community' ? null : String(follow.created_by || '');
   const sinks = sinkTargetsFor(target, personalOwner);
   const urls = urlsFromGramjsMessage(message);
+  try { console.log(`[userbot:${follow.label}] live msg ${follow.chat_id} id=${message.id} links=${urls.length}`); } catch (_) {}
   const acc = USERBOT_ACCOUNTS.get(follow.label);
+
+  const liveSrc = follow.chat_id != null ? String(follow.chat_id) : null;
+  const liveTransfer = follow.chat_id != null ? `live:${follow.chat_id}` : null;
+  const liveMsgId = message.id != null ? String(message.id) : null;
+
+  // Batch posts: group many links in one message under shared heading/tags.
+  let batchPlan = null;
+  if (urls.length > 1) {
+    try {
+      const _vocab = target === 'community'
+        ? await recentTagsForScope(env, 'community', follow.community_id).catch(() => [])
+        : await recentTagsForScope(env, 'personal', personalOwner || '').catch(() => []);
+      const _plan = await planBatchGroups(env, urls, text, _vocab || []);
+      if (_plan && _plan.groups && _plan.groups.some((g) => g.urls.length > 1 || (g.heading && g.urls.length >= 1))) {
+        const urlMap = new Map();
+        for (const g of _plan.groups) for (const u of g.urls) urlMap.set(u, { title: groupCardTitle(g, u), tags: g.tags || [] });
+        batchPlan = { urlMap };
+      }
+    } catch (_) { batchPlan = null; }
+  }
 
   for (const sink of sinks) {
     try {
       if (sink === 'personal') {
         if (urls.length) {
-          const n = await savePersonalIndexedLinks(env, personalOwner, urls, 'userbot', text);
-          if (n) { userbotStat(follow.chat_id, 'links'); for (let i=0;i<n;i++) userbotStat(follow.chat_id); }
+          const n = await savePersonalIndexedLinks(env, personalOwner, urls, 'userbot', text, liveTransfer, liveSrc, liveMsgId, batchPlan);
+          if (n) { for (let i=0;i<n;i++) userbotStat(follow.chat_id, 'links', _threadId); }
         }
         const media = message.media;
         if (media?.className === 'MessageMediaDocument' && media.document) {
@@ -13518,22 +14588,22 @@ async function captureGramjsMessage(env, follow, message) {
           if ((DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) && Number(docu.size || 0) <= CONVERT_SOURCE_MAX_BYTES) {
             const buf = await acc.client.downloadMedia(message, {});
             if (buf?.length) {
-              await savePersonalIndexedDocument(env, personalOwner, filename, ext, new Uint8Array(buf), `userbot:${follow.chat_id}`, { chatId: follow.chat_id, messageId: message.id });
-              userbotStat(follow.chat_id, 'docs');
+              await savePersonalIndexedDocument(env, personalOwner, filename, ext, new Uint8Array(buf), `userbot:${follow.chat_id}`, { chatId: follow.chat_id, messageId: message.id }, liveTransfer);
+              userbotStat(follow.chat_id, 'docs', _threadId);
             }
           }
         }
         if (!urls.length && !message.media && text.length >= 80) {
           const safeName = String(follow.chat_id).replace(/[^\w-]+/g, '_').slice(0, 40);
           const md = `# Userbot clone ${follow.chat_id}\n\n${text}`;
-          await savePersonalIndexedDocument(env, personalOwner, `${safeName}_${message.id}.md`, 'md', new TextEncoder().encode(md), `userbot:${follow.chat_id}`, { chatId: follow.chat_id, messageId: message.id });
+          await savePersonalIndexedDocument(env, personalOwner, `${safeName}_${message.id}.md`, 'md', new TextEncoder().encode(md), `userbot:${follow.chat_id}`, { chatId: follow.chat_id, messageId: message.id }, liveTransfer);
         }
         continue;
       }
       // community sink
       if (urls.length) {
-        const n = await saveIndexedLinks(env, follow.community_id, urls, 'userbot', text, 'channel');
-        if (n) { userbotStat(follow.chat_id, 'links'); for (let i=0;i<n;i++) userbotStat(follow.chat_id); }
+        const n = await saveIndexedLinks(env, follow.community_id, urls, 'userbot', text, 'channel', liveTransfer, liveSrc, liveMsgId, batchPlan);
+        if (n) { for (let i=0;i<n;i++) userbotStat(follow.chat_id, 'links', _threadId); }
       }
       const media = message.media;
       if (media?.className === 'MessageMediaDocument' && media.document) {
@@ -13544,8 +14614,8 @@ async function captureGramjsMessage(env, follow, message) {
         if ((DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) && Number(docu.size || 0) <= CONVERT_SOURCE_MAX_BYTES) {
           const buf = await acc.client.downloadMedia(message, {});
           if (buf?.length) {
-            await saveIndexedDocument(env, follow.community_id, filename, ext, new Uint8Array(buf), `userbot:${follow.chat_id}`, { chatId: follow.chat_id, messageId: message.id });
-            userbotStat(follow.chat_id, 'docs');
+            await saveIndexedDocument(env, follow.community_id, filename, ext, new Uint8Array(buf), `userbot:${follow.chat_id}`, { chatId: follow.chat_id, messageId: message.id }, liveTransfer);
+            userbotStat(follow.chat_id, 'docs', _threadId);
           }
         }
       }
@@ -13613,9 +14683,17 @@ export async function startUserbotAccount(env, label = 'main') {
       }
     } catch (_) {}
     const DEBUG_UB = String(process.env?.ATHENA_USERBOT_DEBUG || '') === '1';
-    const handler = async (message) => {
+    // Raw addEventHandler receives Update objects (UpdateNewMessage /
+    // UpdateNewChannelMessage / UpdateEditChannelMessage / ...): the real post
+    // lives at update.message (an Api.Message). Reading fields off the Update
+    // directly left chatId always null and silently dropped EVERY live post —
+    // unwrap here and use the real Message everywhere below.
+    const handler = async (update) => {
       let chatId = null;
+      let message;
       try {
+        if (!update) return;
+        message = (update.message && update.message.id != null) ? update.message : null;
         if (!message) return;
         chatId = gramjsChatId(message);
         // peerId fallback when the entity cache lacks the marked id
@@ -13624,6 +14702,7 @@ export async function startUserbotAccount(env, label = 'main') {
           const cidNum = Number(peer?.channelId ?? 0);
           if (peer?.className === 'PeerChannel' && cidNum) chatId = `-100${cidNum}`;
           else if (peer?.className === 'PeerChat' && peer.chatId) chatId = String(-peer.chatId);
+          else if (peer?.className === 'PeerUser' && peer.userId) chatId = String(peer.userId);
         }
         if (!chatId) return;
         const variants = [chatId];
@@ -13634,10 +14713,22 @@ export async function startUserbotAccount(env, label = 'main') {
           follow = await env.DB.prepare('SELECT * FROM userbot_follows WHERE chat_id = ? AND label = ?').bind(v, label).first();
           if (follow) break;
         }
+        // Forum topics: also try chatId:threadId when this message is in a topic
+        if (!follow) {
+          const _tid = message?.replyTo?.replyToTopId != null ? String(message.replyTo.replyToTopId) : null;
+          if (_tid) {
+            for (const v of variants) {
+              const tk = `${v}:${_tid}`;
+              const tf = await env.DB.prepare('SELECT * FROM userbot_follows WHERE chat_id = ? AND label = ?').bind(tk, label).first();
+              if (tf) { follow = tf; break; }
+            }
+          }
+        }
         if (DEBUG_UB) console.log(`[userbot:${label}] msg from ${chatId} → ${follow ? 'FOLLOWED' : 'not followed'}`);
         if (!follow) return;
-        userbotStat(follow.chat_id, 'msgs');
-        await captureGramjsMessage(env, follow, message);
+        // scrape + AI-tagging inside saveIndexedLinks can take seconds — run
+        // it detached so it never blocks gramJS's update dispatch loop.
+        runInBackground(env, captureGramjsMessage(env, follow, message));
       } catch (e) {
         if (e && typeof e.seconds === 'number') await sleep(Math.min(e.seconds * 1000, 300_000));
         else await userbotLogError(env, label, chatId, e);
@@ -13647,18 +14738,119 @@ export async function startUserbotAccount(env, label = 'main') {
     // session. A keepalive ping keeps Telegram's update stream warm — without
     // periodic requests the socket can go quiet and stop delivering updates.
     client.addEventHandler(handler);
-    const ping = async () => {
-      try { await client.getDialogs({ limit: 1 }); } catch (_) {}
+
+    // --- liveness watchdog + self-healing reconnect ---
+    // gramJS pings internally but a wedged socket can keep failing its ping
+    // forever (observed: 'Error: TIMEOUT' every ~20s for days) while TCP stays
+    // up — updates stop flowing and live clones go quiet. This watchdog runs a
+    // real request with a short timeout, forces a full reconnect after repeated
+    // failures, and finally marks the session unreachable so the owner can
+    // refresh it via /userbotconnect instead of retrying forever.
+    let pingOk = true;
+    let watchdogTicks = 0;
+    let reconnectCycles = 0;
+    let lastCatchUp = Date.now();
+    let watchdogTimer = undefined;
+    const liveCheck = async () => {
+      let timer;
+      try {
+        const raced = await Promise.race([
+          client.getDialogs({ limit: 1 }).then(() => true).catch(() => false),
+          new Promise((res) => { timer = setTimeout(() => res(false), 10_000); })
+        ]);
+        return !!raced;
+      } finally { if (timer) clearTimeout(timer); }
     };
-    ping();
-    const keepalive = setInterval(ping, 4 * 60_000);
-    keepalive.unref?.();
-    USERBOT_ACCOUNTS.set(label, { client, keepalive, startedAt: Date.now() });
+    const watchdog = async () => {
+      try {
+        pingOk = await liveCheck();
+        if (pingOk) {
+          reconnectCycles = 0;
+          // heal post-wedge gaps: re-scan newest messages of every follow
+          if (Date.now() - lastCatchUp > 10 * 60_000) {
+            lastCatchUp = Date.now();
+            runInBackground(env, catchUpUserbotFollows(env, label));
+          }
+          return;
+        }
+        watchdogTicks++;
+        console.error(`[userbot:${label}] ping failure ${watchdogTicks}`);
+        if (watchdogTicks < 3) return;
+        watchdogTicks = 0;
+        reconnectCycles++;
+        console.error(`[userbot:${label}] wedged — full reconnect #${reconnectCycles}`);
+        try { await client.disconnect(); } catch (_) {}
+        try { await client.connect(); } catch (e) {
+          console.error(`[userbot:${label}] reconnect failed: ${e?.message || e}`);
+        }
+        if (reconnectCycles >= 4) {
+          try {
+            await env.DB.prepare('UPDATE userbot_accounts SET last_error = ?, updated_at = ? WHERE label = ?')
+              .bind('userbot session unreachable — reconnect with /userbotconnect', Date.now(), label).run();
+          } catch (_) {}
+          console.error(`[userbot:${label}] session unreachable — stopping watchdog (refresh via /userbotconnect)`);
+          if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = undefined; }
+        }
+      } catch (_) {}
+    };
+    pingOk = await liveCheck();
+    watchdogTimer = setInterval(watchdog, 60_000);
+    watchdogTimer.unref?.();
+    USERBOT_ACCOUNTS.set(label, { client, keepalive: watchdogTimer, startedAt: Date.now() });
+    // Catch-up runs after the account is registered so it can use the client.
+    runInBackground(env, catchUpUserbotFollows(env, label));
     console.log(`[userbot:${label}] connected`);
     return { ok: true };
   } finally {
     USERBOT_STARTING.delete(label);
   }
+}
+
+/** In-process tracker of the newest message id seen per follow (per boot). */
+const USERBOT_LAST_SEEN = new Map(); // chat_key (chat or chat:thread) -> max message id
+
+/**
+ * Catch-up sweep: while the userbot is connected, periodically re-scan the
+ * newest messages of every followed chat and index anything newer than the
+ * last message seen this boot. Heals gaps left by wedged connections (posts
+ * that never arrived as live updates). Fully idempotent: already-saved URLs
+ * and documents are skipped by the existing dedupe on insert.
+ */
+export async function catchUpUserbotFollows(env, label = 'main') {
+  const acc = USERBOT_ACCOUNTS.get(label);
+  if (!acc?.client) return 0;
+  await ensureUserbotTables(env);
+  const { results } = await env.DB.prepare('SELECT * FROM userbot_follows WHERE label = ?').bind(label).all().catch(() => ({ results: [] }));
+  let indexed = 0;
+  let chats = 0;
+  for (const follow of results || []) {
+    try {
+      const chatKey = String(follow.chat_id || '');
+      if (!chatKey) continue;
+      const base = chatKey.includes(':') ? chatKey.split(':')[0] : chatKey;
+      const thread = chatKey.includes(':') ? chatKey.split(':')[1] : null;
+      const opts = { limit: 12 };
+      if (thread) opts.replyTo = Number(thread);
+      // Resolve the entity so numeric ids keep working right after connect.
+      await acc.client.getEntity(base).catch(() => {});
+      let msgs = null;
+      try { msgs = await acc.client.getMessages(base, opts); }
+      catch (err) { await userbotLogError(env, label, base, err).catch(() => {}); }
+      if (!msgs?.length) continue;
+      chats++;
+      const maxId = Math.max(...msgs.map((m) => Number(m.id || 0)));
+      const lastSeen = USERBOT_LAST_SEEN.get(chatKey) || 0;
+      if (lastSeen && maxId <= lastSeen) continue;
+      for (const m of msgs) {
+        if (Number(m.id || 0) <= lastSeen) continue;
+        try { await captureGramjsMessage(env, follow, m); indexed++; }
+        catch (e) { await userbotLogError(env, label, base, e).catch(() => {}); }
+      }
+      USERBOT_LAST_SEEN.set(chatKey, maxId);
+    } catch (_) {}
+  }
+  try { console.log(`[userbot:${label}] catchup: ${indexed} new from ${chats} chats`); } catch (_) {}
+  return indexed;
 }
 
 /** Boot-time: connect every enabled account. No-op when none configured. */
@@ -13683,6 +14875,386 @@ async function stopUserbotAccount(env, label, deleteRow = true) {
   } else {
     await env.DB.prepare('UPDATE userbot_accounts SET enabled = 0, updated_at = ? WHERE label = ?').bind(Date.now(), label).run().catch(() => {});
   }
+}
+
+
+/** Build a stats dashboard snapshot for /stats. See docs/superpowers/plans/stats-data-notes.md . */
+export async function buildStatsReport(env, token = null) {
+  const todayCutoff = Date.now() - 86400000;
+  await ensureUserbotTables(env).catch(() => {});
+  await ensureIndexTables(env).catch(() => {});
+  await ensureTopicBindingTable(env).catch(() => {});
+  await ensureTransferColumns(env).catch(() => {});
+  await ensureDocumentsTable(env).catch(() => {});
+
+  let follows = [];
+  try {
+    const r = await env.DB.prepare('SELECT chat_id, label, community_id, target, created_by, created_at FROM userbot_follows ORDER BY created_at DESC').all();
+    follows = r.results || r || [];
+  } catch (_) {}
+  // normalize - array or {results:[]}
+  if (!Array.isArray(follows)) follows = follows.results || [];
+
+  let topicBindings = [];
+  try {
+    const r = await env.DB.prepare('SELECT chat_id, thread_id, community_id, target FROM telegram_topic_bindings ORDER BY chat_id, thread_id').all();
+    topicBindings = r.results || r || [];
+  } catch (_) {}
+  if (!Array.isArray(topicBindings)) topicBindings = topicBindings.results || [];
+
+  let jobs = [];
+  try {
+    const r = await env.DB.prepare('SELECT id, community_id, chat_id, thread_id, status, processed, saved_links, saved_docs, saved_files, skipped_media, urls_seen, updated_at, created_at FROM index_jobs ORDER BY updated_at DESC').all();
+    jobs = r.results || r || [];
+  } catch (_) {}
+  if (!Array.isArray(jobs)) jobs = jobs.results || [];
+
+  // Group topic bindings by chat
+  const topicsByChat = new Map();
+  for (const tb of topicBindings) {
+    const k = normalizeTgChatId(tb.chat_id);
+    if (!topicsByChat.has(k)) topicsByChat.set(k, []);
+    topicsByChat.get(k).push(tb);
+  }
+  // Group follows: topic follows have suffix ':threadId'
+  const baseFollows = [];
+  const topicFollowMap = new Map(); // "chat:thread" -> follow
+  for (const f of follows) {
+    const raw = String(f.chat_id || '');
+    if (raw.includes(':')) {
+      topicFollowMap.set(raw, f);
+      // also ensure base chat grouping
+      const base = raw.split(':')[0];
+      if (!topicsByChat.has(normalizeTgChatId(base))) topicsByChat.set(normalizeTgChatId(base), []);
+    } else {
+      baseFollows.push(f);
+    }
+  }
+  // Derive forum chat ids: either isForum via tokens or bindings exist or topic follows
+  const chatIds = new Set();
+  for (const f of baseFollows) chatIds.add(normalizeTgChatId(f.chat_id));
+  for (const k of topicsByChat.keys()) chatIds.add(k);
+  for (const k of topicFollowMap.keys()) chatIds.add(normalizeTgChatId(k.split(':')[0]));
+
+  // Helpers for counts
+  async function countLinksForTransfer(transferIds, communityId, userIdForPersonal, target, todayOnly = false) {
+    if (!transferIds.length && !communityId && !userIdForPersonal) return 0;
+    const cutoffClause = todayOnly ? ' AND created_at > ' + todayCutoff : '';
+    // personal
+    if (target === 'personal' && userIdForPersonal) {
+      if (transferIds.length) {
+        const ph = transferIds.map(() => '?').join(',');
+        try {
+          const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM personal_links WHERE (transfer_id IN (${ph}) OR user_id = ?) ${todayOnly ? 'AND created_at > ?' : ''}`).bind(...transferIds, userIdForPersonal, ...(todayOnly ? [todayCutoff] : [])).first();
+          return Number(r?.c || 0);
+        } catch (_) {}
+      }
+      try {
+        const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM personal_links WHERE user_id = ?${cutoffClause}`).bind(userIdForPersonal).first();
+        return Number(r?.c || 0);
+      } catch (_) { return 0; }
+    }
+    // community / both: count community plus personal for both case
+    let total = 0;
+    if (communityId) {
+      if (transferIds.length) {
+        const ph = transferIds.map(() => '?').join(',');
+        try {
+          const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM links WHERE (transfer_id IN (${ph}) OR community_id = ?) ${todayOnly ? 'AND created_at > ?' : ''}`).bind(...transferIds, communityId, ...(todayOnly ? [todayCutoff] : [])).first();
+          total += Number(r?.c || 0);
+        } catch (_e) {
+          try {
+            const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM links WHERE community_id = ?${cutoffClause}`).bind(communityId).first();
+            total += Number(r?.c || 0);
+          } catch (_) {}
+        }
+      } else {
+        try {
+          const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM links WHERE community_id = ?${cutoffClause}`).bind(communityId).first();
+          total += Number(r?.c || 0);
+        } catch (_) {}
+      }
+    }
+    if (target === 'both' && userIdForPersonal) {
+      if (transferIds.length) {
+        const ph = transferIds.map(() => '?').join(',');
+        try {
+          const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM personal_links WHERE (transfer_id IN (${ph}) OR user_id = ?) ${todayOnly ? 'AND created_at > ?' : ''}`).bind(...transferIds, userIdForPersonal, ...(todayOnly ? [todayCutoff] : [])).first();
+          total += Number(r?.c || 0);
+        } catch (_) {}
+      } else {
+        try {
+          const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM personal_links WHERE user_id = ?${cutoffClause}`).bind(userIdForPersonal).first();
+          total += Number(r?.c || 0);
+        } catch (_) {}
+      }
+    }
+    return total;
+  }
+
+  async function countDocs(chatNorm, communityId, userIdForPersonal, target, todayOnly = false) {
+    const cutoff = todayOnly ? todayCutoff : 0;
+    let total = 0;
+    // docs are per-chat via source_chat_id when present, else transfer fallback is handled via transfer counts in jobs; but we also do source query
+    if (communityId && (target === 'community' || target === 'both')) {
+      try {
+        if (todayOnly) {
+          const r = await env.DB.prepare('SELECT COUNT(*) as c FROM uploaded_documents WHERE scope = ? AND community_id = ? AND source_chat_id = ? AND created_at > ?').bind('community', communityId, chatNorm, cutoff).first();
+          const r2 = await env.DB.prepare('SELECT COUNT(*) as c FROM uploaded_documents WHERE scope = ? AND community_id = ? AND source_chat_id = ? AND created_at > ?').bind('community', communityId, chatNorm.replace(/^-100/, ''), cutoff).first().catch(() => ({ c: 0 }));
+          total += Number(r?.c || 0) + Number(r2?.c || 0);
+        } else {
+          const r = await env.DB.prepare('SELECT COUNT(*) as c FROM uploaded_documents WHERE scope = ? AND community_id = ? AND source_chat_id = ?').bind('community', communityId, chatNorm).first();
+          const r2 = await env.DB.prepare('SELECT COUNT(*) as c FROM uploaded_documents WHERE scope = ? AND community_id = ? AND source_chat_id = ?').bind('community', communityId, chatNorm.replace(/^-100/, '')).first().catch(() => ({ c: 0 }));
+          total += Number(r?.c || 0) + Number(r2?.c || 0);
+        }
+      } catch (_) {}
+      // also bare docs without source_chat for community fallback (when source wasn't set on early rows)
+      try {
+        if (todayOnly) {
+          const r = await env.DB.prepare('SELECT COUNT(*) as c FROM uploaded_documents WHERE scope = ? AND community_id = ? AND created_at > ?').bind('community', communityId, cutoff).first();
+          // only use community-wide when no per-chat count (avoid double); prefer source-specific
+          if (!total) total = Number(r?.c || 0);
+        }
+      } catch (_) {}
+    }
+    if (userIdForPersonal && (target === 'personal' || target === 'both')) {
+      try {
+        if (todayOnly) {
+          const r = await env.DB.prepare('SELECT COUNT(*) as c FROM uploaded_documents WHERE scope = ? AND user_id = ? AND source_chat_id = ? AND created_at > ?').bind('personal', userIdForPersonal, chatNorm, cutoff).first();
+          total += Number(r?.c || 0);
+        } else {
+          const r = await env.DB.prepare('SELECT COUNT(*) as c FROM uploaded_documents WHERE scope = ? AND user_id = ? AND source_chat_id = ?').bind('personal', userIdForPersonal, chatNorm).first();
+          total += Number(r?.c || 0);
+        }
+      } catch (_) {}
+    }
+    return total;
+  }
+
+  async function countPhotos(chatNorm, communityId, userIdForPersonal, target, todayOnly = false) {
+    const cutoff = todayOnly ? todayCutoff : 0;
+    let total = 0;
+    // photos are vault docs with filename like photo-% (from vaultSave) OR MessageMediaPhoto stored as doc note
+    // check uploaded_documents where filename LIKE 'photo-%'
+    const whereToday = todayOnly ? ' AND created_at > ' + cutoff : '';
+    if (communityId && (target === 'community' || target === 'both')) {
+      try {
+        const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM uploaded_documents WHERE scope='community' AND community_id=? AND source_chat_id=? AND filename LIKE 'photo-%'${whereToday}`).bind(communityId, chatNorm).first();
+        total += Number(r?.c || 0);
+        const r2 = await env.DB.prepare(`SELECT COUNT(*) as c FROM uploaded_documents WHERE scope='community' AND community_id=? AND source_chat_id=? AND filename LIKE 'photo-%'${whereToday}`).bind(communityId, chatNorm.replace(/^-100/, '')).first().catch(() => ({ c: 0 }));
+        total += Number(r2?.c || 0);
+      } catch (_) {}
+    }
+    if (userIdForPersonal && (target === 'personal' || target === 'both')) {
+      try {
+        const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM uploaded_documents WHERE scope='personal' AND user_id=? AND source_chat_id=? AND filename LIKE 'photo-%'${whereToday}`).bind(userIdForPersonal, chatNorm).first();
+        total += Number(r?.c || 0);
+      } catch (_) {}
+    }
+    return total;
+  }
+
+  const jobsByChat = new Map();
+  const jobsByChatThread = new Map();
+  for (const j of jobs) {
+    const kn = normalizeTgChatId(j.chat_id);
+    if (!jobsByChat.has(kn)) jobsByChat.set(kn, []);
+    jobsByChat.get(kn).push(j);
+    const kt = kn + ':' + (j.thread_id || '');
+    if (!jobsByChatThread.has(kt)) jobsByChatThread.set(kt, []);
+    jobsByChatThread.get(kt).push(j);
+  }
+
+  const chats = [];
+  for (const chatNorm of chatIds) {
+    const baseFollow = baseFollows.find((f) => normalizeTgChatId(f.chat_id) === chatNorm);
+    const anyFollow = baseFollow || [...topicFollowMap.values()].find((f) => normalizeTgChatId(String(f.chat_id).split(':')[0]) === chatNorm);
+    if (!anyFollow) continue;
+    const communityId = anyFollow.community_id || null;
+    const target = CHANNEL_TARGETS.has(anyFollow.target) ? anyFollow.target : 'community';
+    const personalOwner = target === 'community' ? null : String(anyFollow.created_by || '');
+    const label = anyFollow.label || 'main';
+
+    // jobs for this chat (all threads inclusive)
+    const allJobsForChat = jobsByChat.get(chatNorm) || [];
+    const transferIds = allJobsForChat.map((j) => j.id);
+    // also live prefix
+    const liveIds = [`live:${chatNorm}`, `live:${chatNorm.replace(/^-100/, '')}`];
+
+    // Resolve name via getChat or userbot entity
+    let name = chatNorm;
+    let chatType = 'unknown';
+    let isForum = false;
+    if (token) {
+      try {
+        const ch = await telegramApi(token, 'getChat', { chat_id: chatNorm });
+        if (ch?.ok && ch.result) {
+          name = ch.result.title || (ch.result.username ? '@' + ch.result.username : chatNorm);
+          if (ch.result.type === 'channel') chatType = 'channel';
+          else if (ch.result.type === 'supergroup') chatType = topicsByChat.has(chatNorm) ? 'forum' : 'group';
+          else if (ch.result.type === 'group') chatType = 'group';
+          isForum = !!ch.result.is_forum;
+        }
+      } catch (_) {}
+    }
+    if (name === chatNorm) {
+      const acc = USERBOT_ACCOUNTS.get(label);
+      if (acc?.client) {
+        try {
+          const ent = await acc.client.getEntity(chatNorm);
+          if (ent?.title || ent?.username) name = ent.title || '@' + ent.username;
+          if (ent?.forum) isForum = true;
+          if (ent?.broadcast) chatType = 'channel';
+          else if (ent?.megagroup) chatType = isForum ? 'forum' : 'group';
+        } catch (_) {}
+      }
+    }
+    if (!isForum && topicsByChat.has(chatNorm) && (topicsByChat.get(chatNorm) || []).length) isForum = true;
+    if (chatType === 'unknown') chatType = isForum ? 'forum' : 'group';
+
+    // Counts: links/files/photos, today
+    const totalLinks = await countLinksForTransfer([...transferIds, ...liveIds], communityId, personalOwner, target, false);
+    const todayLinks = await countLinksForTransfer([...transferIds, ...liveIds], communityId, personalOwner, target, true);
+    const totalDocs = await countDocs(chatNorm, communityId, personalOwner, target, false);
+    const todayDocs = await countDocs(chatNorm, communityId, personalOwner, target, true);
+    const totalPhotos = await countPhotos(chatNorm, communityId, personalOwner, target, false);
+    const todayPhotos = await countPhotos(chatNorm, communityId, personalOwner, target, true);
+
+    // Fallback to job aggregates when per-source counts are zero but jobs report saved values
+    let jobLinks = 0, jobDocs = 0, jobFiles = 0, jobSkipped = 0;
+    for (const j of allJobsForChat) {
+      jobLinks += Number(j.saved_links || 0);
+      jobDocs += Number(j.saved_docs || 0);
+      jobFiles += Number(j.saved_files || 0);
+      jobSkipped += Number(j.skipped_media || 0);
+    }
+
+    const totalMsgs = allJobsForChat.reduce((a, j) => a + Number(j.processed || 0), 0);
+
+    // Live flag: ephemeral USERBOT_STATS within 24h OR still connected account for that label
+    const stat = USERBOT_STATS.get(chatNorm) || USERBOT_STATS.get(chatNorm.replace(/^-100/, '')) || null;
+    const topicStatExists = [...USERBOT_STATS.keys()].some((k) => k.startsWith(chatNorm + ':'));
+    const live = (() => {
+      if (stat && stat.lastAt && Date.now() - stat.lastAt < 86400000) return true;
+      if (topicStatExists) {
+        for (const [k, v] of USERBOT_STATS.entries()) if (k.startsWith(chatNorm + ':') && v.lastAt && Date.now() - v.lastAt < 86400000) return true;
+      }
+      return USERBOT_ACCOUNTS.has(label) && stat && Date.now() - stat.lastAt < 86400000;
+    })();
+
+    // Topics breakdown if forum
+    let topics = null;
+    const bindingsForChat = topicsByChat.get(chatNorm) || [];
+    // include topic follows that have no binding yet (DM clone of topic)
+    const topicIds = new Set(bindingsForChat.map((b) => String(b.thread_id)));
+    for (const [k, f] of topicFollowMap.entries()) {
+      if (normalizeTgChatId(k.split(':')[0]) === chatNorm) {
+        const tid = k.split(':')[1];
+        if (!topicIds.has(tid)) {
+          topicIds.add(tid);
+          bindingsForChat.push({ chat_id: chatNorm, thread_id: tid, community_id: f.community_id, target: f.target });
+        }
+      }
+    }
+    if (isForum && bindingsForChat.length) {
+      topics = [];
+      // Try to resolve titles via userbot
+      let titleMap = new Map();
+      try {
+        const titles = await getForumTopicsViaUserbot(env, chatNorm).catch(() => []);
+        for (const t of titles || []) titleMap.set(String(t.id), t.title);
+      } catch (_) {}
+      for (const tb of bindingsForChat) {
+        const tid = String(tb.thread_id);
+        const tJobs = jobsByChatThread.get(chatNorm + ':' + tid) || [];
+        const tTransferIds = tJobs.map((j) => j.id);
+        // Per-topic counts prefer jobs aggregate + doc source; links transfer per-topic is exact when jobs have thread_id
+        let tLinks = 0, tLinksToday = 0;
+        if (tTransferIds.length) {
+          tLinks = await countLinksForTransfer([...tTransferIds, `live:${chatNorm}:${tid}`], tb.community_id || communityId, personalOwner, tb.target || target, false);
+          tLinksToday = await countLinksForTransfer([...tTransferIds, `live:${chatNorm}:${tid}`], tb.community_id || communityId, personalOwner, tb.target || target, true);
+        }
+        let jobTDocs = tJobs.reduce((a, j) => a + Number(j.saved_docs || 0), 0);
+        let jobTLinks = tJobs.reduce((a, j) => a + Number(j.saved_links || 0), 0);
+        if (!tLinks && jobTLinks) tLinks = jobTLinks;
+        const tDocs = jobTDocs;
+        const tStat = USERBOT_STATS.get(`${chatNorm}:${tid}`) || null;
+        topics.push({
+          threadId: tid,
+          title: titleMap.get(tid) || null,
+          target: tb.target || target,
+          total: { links: tLinks, docs: tDocs, files: tJobs.reduce((a, j) => a + Number(j.saved_files || 0), 0), photos: 0 },
+          today: { links: tLinksToday, docs: 0, photos: 0 },
+          live: tStat ? { msgs: tStat.msgs || 0, links: tStat.links || 0, docs: tStat.docs || 0, lastAt: tStat.lastAt || null } : { msgs: 0, links: 0, docs: 0, lastAt: null },
+          job: tJobs[0] ? { id: tJobs[0].id, status: tJobs[0].status, processed: tJobs[0].processed || 0, saved_links: tJobs[0].saved_links || 0, saved_docs: tJobs[0].saved_docs || 0 } : null,
+        });
+      }
+      topics.sort((a, b) => Number(a.threadId) - Number(b.threadId));
+    }
+
+    const running = allJobsForChat.filter((j) => j.status === 'running' || j.status === 'queued').length;
+    const done = allJobsForChat.filter((j) => j.status === 'done').length;
+    const err = allJobsForChat.filter((j) => j.status === 'error').length;
+
+    chats.push({
+      id: chatNorm,
+      name,
+      type: chatType,
+      target,
+      communityId,
+      live,
+      isForum: !!isForum,
+      total: {
+        links: totalLinks || jobLinks,
+        docs: totalDocs || jobDocs,
+        files: jobFiles || totalDocs,
+        photos: totalPhotos,
+        msgs: totalMsgs,
+        skippedMedia: jobSkipped,
+      },
+      today: { links: todayLinks, docs: todayDocs, photos: todayPhotos },
+      topics,
+      jobs: { running, done, error: err, all: allJobsForChat },
+    });
+  }
+
+  // Also include community_bots channel bindings that have no follow yet? Brief says userbot_follows + community_bots (channels)
+  // If a channel is linked via community_bots but not yet followed, show with zero counts so user knows
+  try {
+    const r = await env.DB.prepare("SELECT group_id as chat_id, community_id, COALESCE(channel_target,'community') as target, group_name FROM community_bots WHERE platform='telegram' AND group_id LIKE '-100%'").all().catch(() => ({ results: [] }));
+    const bots = r.results || r || [];
+    const existingIds = new Set(chats.map((c) => String(c.id)));
+    for (const b of (Array.isArray(bots) ? bots : [])) {
+      const cn = normalizeTgChatId(b.chat_id);
+      if (existingIds.has(cn)) continue;
+      let name = b.group_name || cn;
+      let chatType = 'channel';
+      let totalLinks = 0, todayLinks = 0;
+      if (b.community_id) {
+        try {
+          const rr = await env.DB.prepare('SELECT COUNT(*) as c FROM links WHERE community_id=?').bind(b.community_id).first();
+          totalLinks = Number(rr?.c || 0);
+          const rr2 = await env.DB.prepare('SELECT COUNT(*) as c FROM links WHERE community_id=? AND created_at > ?').bind(b.community_id, todayCutoff).first();
+          todayLinks = Number(rr2?.c || 0);
+        } catch (_) {}
+      }
+      chats.push({
+        id: cn,
+        name,
+        type: chatType,
+        target: b.target || 'community',
+        communityId: b.community_id || null,
+        live: false,
+        isForum: false,
+        total: { links: totalLinks, docs: 0, files: 0, photos: 0, msgs: 0, skippedMedia: 0 },
+        today: { links: todayLinks, docs: 0, photos: 0 },
+        topics: null,
+        jobs: { running: 0, done: 0, error: 0, all: [] },
+      });
+    }
+  } catch (_) {}
+
+  return { chats, generatedAt: Date.now() };
 }
 
 export {

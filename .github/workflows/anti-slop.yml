@@ -1,0 +1,51 @@
+name: anti-slop
+
+on:
+  pull_request:
+    types: [opened, synchronize, edited, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  anti-slop:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Anti-slop lint (stop-slop + no-ai-slop rules)
+        run: |
+          set -euo pipefail
+          echo "Running stop-slop vocabulary check on PR diff + body"
+          BODY_FILE="${RUNNER_TEMP}/pr-body.txt"
+          gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}" --jq '.title + "\n" + .body' > "$BODY_FILE" 2>/dev/null || true
+          DIFF_FILE="${RUNNER_TEMP}/pr.diff"
+          # filter vendor bundles — they carry the vocabulary as documentation
+          git diff "origin/${{ github.base_ref }}...HEAD" -- ':!.agents' ':!skills-lock.json' ':!package-lock.json' ':!scripts/anti-slop.sh' > "$DIFF_FILE" || true
+          grep -v 'SLOP_REGEX' "$DIFF_FILE" > "${DIFF_FILE}.filtered" 2>/dev/null || true
+          DIFF_FILE="${DIFF_FILE}.filtered"
+          SLOP_REGEX='(delve|crucial|robust|seamless|leverage|tapestry|meticulous(ly)?|unveil|embark|game-changer|cutting-edge|state-of-the-art|empower|synergy|granular|comprehensive|holistic|best-of-breed|streamline|innovative|forward-thinking|in today.s fast-paced|in conclusion|it.s important to note|whether you.re a seasoned|supercharge|harness the power|effortlessly|dive into|dive deep|elevate|unleash|let.s unlock|beyond just|not only\.\.\.but also)'
+          FAIL=0
+          for F in "$BODY_FILE" "$DIFF_FILE"; do
+            if [ -f "$F" ] && grep -i -E -n "$SLOP_REGEX" "$F" | grep -v 'SLOP_REGEX' | head -n 50; then
+              echo "::warning::Anti-slop hit in $F — rewrite with plain language (stop-slop skill) before merge."
+              FAIL=1
+            fi
+          done
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::Anti-slop check found AI tells. Fix with: apply the 'stop-slop' skill to PR title/body and commit messages."
+            exit 1
+          fi
+          echo "Anti-slop check passed."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Peakoss anti-slop action (auto-close low-quality PRs gate)
+        uses: peakoss/anti-slop-action@v1
+        continue-on-error: true
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          comment: true
