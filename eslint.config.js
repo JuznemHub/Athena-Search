@@ -4,7 +4,8 @@ import { defineConfig } from 'eslint/config';
 
 export default defineConfig([
   {
-    ignores: ['worker/.wrangler/**'],
+    // vendored agent-skill bundles + generated artifacts are not app source
+    ignores: ['worker/.wrangler/**', '.agents/**', 'skills-lock.json'],
   },
 
   // Node: ES modules, full Node globals

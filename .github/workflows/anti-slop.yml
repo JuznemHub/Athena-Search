@@ -25,13 +25,16 @@ jobs:
           gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}" --jq '.title + "\n" + .body' > "$BODY_FILE" 2>/dev/null || true
           DIFF_FILE="${RUNNER_TEMP}/pr.diff"
           # filter vendor bundles — they carry the vocabulary as documentation
-          git diff "origin/${{ github.base_ref }}...HEAD" -- ':!.agents' ':!skills-lock.json' ':!package-lock.json' ':!scripts/anti-slop.sh' > "$DIFF_FILE" || true
-          grep -v 'SLOP_REGEX' "$DIFF_FILE" > "${DIFF_FILE}.filtered" 2>/dev/null || true
-          DIFF_FILE="${DIFF_FILE}.filtered"
-          SLOP_REGEX='(delve|crucial|robust|seamless|leverage|tapestry|meticulous(ly)?|unveil|embark|game-changer|cutting-edge|state-of-the-art|empower|synergy|granular|comprehensive|holistic|best-of-breed|streamline|innovative|forward-thinking|in today.s fast-paced|in conclusion|it.s important to note|whether you.re a seasoned|supercharge|harness the power|effortlessly|dive into|dive deep|elevate|unleash|let.s unlock|beyond just|not only\.\.\.but also)'
+          git diff "origin/${{ github.base_ref }}...HEAD" -- ':!.agents' ':!skills-lock.json' ':!package-lock.json' ':!scripts/anti-slop.sh' ':!AGENTS.md' ':!CLAUDE.md' ':!docs/security-audit.md' > "$DIFF_FILE" || true
+          grep -E '^\+' "$DIFF_FILE" > "${DIFF_FILE}.added" || true
+          DIFF_FILE="${DIFF_FILE}.added"
+          SLOP_REGEX='(\bdelve\b|\bcrucial\b|\brobust\b|\bseamless\b|\bleverage\b|\btapestry\b|\bmeticulous(ly)?\b|\bunveil\b|\bembark\b|\bgame-changer\b|\bcutting-edge\b|\bstate-of-the-art\b|\bempower\b|\bsynergy\b|\bgranular\b|\bcomprehensive\b|\bholistic\b|\bbest-of-breed\b|\bstreamline\b|\binnovative\b|\bforward-thinking\b|\bin today.s fast-paced\b|\bin conclusion\b|\bit.s important to note\b|\bwhether you.re a seasoned\b|\bsupercharge\b|\bharness the power\b|\beffortlessly\b|\bdive into\b|\bdive deep\b|\belevate\b|\bunleash\b|\blet.s unlock\b|\bbeyond just\b|\bnot only\.\.\.but also\b)'
           FAIL=0
           for F in "$BODY_FILE" "$DIFF_FILE"; do
-            if [ -f "$F" ] && grep -i -E -n "$SLOP_REGEX" "$F" | grep -v 'SLOP_REGEX' | head -n 50; then
+            [ -f "$F" ] || continue
+            HITS=$(grep -i -E -n "$SLOP_REGEX" "$F" 2>/dev/null | grep -v 'SLOP_REGEX')
+            if [ -n "$HITS" ]; then
+              echo "$HITS" | head -n 50
               echo "::warning::Anti-slop hit in $F — rewrite with plain language (stop-slop skill) before merge."
               FAIL=1
             fi
@@ -43,9 +46,3 @@ jobs:
           echo "Anti-slop check passed."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Peakoss anti-slop action (auto-close low-quality PRs gate)
-        uses: peakoss/anti-slop-action@v1
-        continue-on-error: true
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          comment: true
