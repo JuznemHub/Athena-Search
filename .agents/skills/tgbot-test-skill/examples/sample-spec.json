@@ -1,0 +1,23 @@
+{
+  "bot": "@BotzHubBot",
+  "delay": 2,
+  "timeout": 15,
+  "tests": [
+    { "name": "start greets user", "send": "/start", "expect": "(?i)welcome" },
+    {
+      "name": "help lists commands",
+      "send": "/help",
+      "expect": "(?i)commands"
+    },
+    {
+      "name": "settings menu",
+      "send": "/settings",
+      "expect_buttons": ["Language", "Close"]
+    },
+    {
+      "name": "open language menu",
+      "click": "Language",
+      "expect": "(?i)choose.*language"
+    }
+  ]
+}

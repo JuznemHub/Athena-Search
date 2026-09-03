@@ -17,3 +17,8 @@ data/
 *.sqlite-wal
 *.sqlite-shm
 node_modules/
+# opencode/agent mirrors — canonical is .agents/skills
+agent/
+.claude/skills/
+.local/
+

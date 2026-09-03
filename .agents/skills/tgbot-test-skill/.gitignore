@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+credentials.json
+client.lock
+results.json
+*.session
+*.session-journal

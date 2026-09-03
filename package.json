@@ -12,7 +12,8 @@
     "build": "node scripts/stamp-version.js",
     "check:version": "node scripts/stamp-version.js --check",
     "check": "npm run lint && npm run check:version",
-    "test:unit": "node scripts/test-retrieval.mjs"
+    "test:unit": "node scripts/test-retrieval.mjs",
+    "lint:slop": "bash scripts/anti-slop.sh"
   },
   "dependencies": {
     "@firecrawl/anydoc": "^0.1.9",
