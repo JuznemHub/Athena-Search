@@ -32,7 +32,7 @@ jobs:
           FAIL=0
           for F in "$BODY_FILE" "$DIFF_FILE"; do
             [ -f "$F" ] || continue
-            HITS=$(grep -i -E -n "$SLOP_REGEX" "$F" 2>/dev/null | grep -v 'SLOP_REGEX')
+            HITS=$(grep -i -E -n "$SLOP_REGEX" "$F" 2>/dev/null | grep -v 'SLOP_REGEX' || true)
             if [ -n "$HITS" ]; then
               echo "$HITS" | head -n 50
               echo "::warning::Anti-slop hit in $F — rewrite with plain language (stop-slop skill) before merge."
