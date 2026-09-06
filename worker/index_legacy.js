@@ -187,7 +187,7 @@ export default {
         try {
           const _u = update.message || update.channel_post || update.edited_message || update.callback_query || update.my_chat_member || {};
           const _t = String(_u.text || '');
-          console.log(`[webhook] id=${update.update_id} type=${update.message ? 'msg' : update.channel_post ? 'chn' : update.edited_message ? 'edt' : update.callback_query ? 'cb' : update.my_chat_member ? 'mcm' : '?'} chat=${_u.chat?.id ?? '?'} mid=${_u.message_id ?? '?'} from=${_u.from?.id ?? '?'} text=${JSON.stringify(_t.slice(0, 50))}`);
+          logInfo('webhook', `id=${update.update_id} type=${update.message ? 'msg' : update.channel_post ? 'chn' : update.edited_message ? 'edt' : update.callback_query ? 'cb' : update.my_chat_member ? 'mcm' : '?'} chat=${_u.chat?.id ?? '?'} mid=${_u.message_id ?? '?'} from=${_u.from?.id ?? '?'}`, _t.slice(0, 50));
         } catch (_) {}
         return await handleTelegramWebhook(update, env, corsHeaders);
       }
@@ -2786,6 +2786,7 @@ const TELEGRAM_GOD_COMMAND_MENU = [
   { command: 'clone_del', description: "Delete a clone's data" },
   { command: 'clear_personal_db', description: 'Wipe personal brain' },
   { command: 'restart', description: 'Restart self-host service' },
+  { command: 'logs', description: 'Recent app log lines' },
 ];
 
 // Set the default menu plus a GOD-scoped menu per owner chat. Best effort.
@@ -7735,157 +7736,155 @@ function chunkTelegramText(text, maxLen = TG_MSG_MAX) {
   return chunks;
 }
 
-function helpTextForSection(section) {
-  if (section === 'god') {
-    return [
-      `${boldHtml('🛡 GOD tools')} ${italicHtml('(instance host)')}`,
-      '',
-      `${boldHtml('Brains & targets')}`,
-      `1. /personal — dump to ${boldHtml('personal brain')} · /community — community brain`,
-      `2. /channel_target ${codeHtml('<channel_id> community|personal|both')} — switch a channel's target`,
-      `3. /dumpall on|off · /dumpsmart — save every link vs smart primary-only`,
-      '',
-      `${boldHtml('Tagging & structure')}`,
-      `4. /forcetags ${codeHtml('[community_id]')} — AI re-tag all links`,
-      `5. /tag_untagged — tag only links with no real tags`,
-      `6. /structure — clean titles/notes/URLs across the whole DB, merge near-dupes`,
-      '',
-      `${boldHtml('Backup & import')}`,
-      `7. /backup — full DB backup (SQL.gz) to this chat`,
-      `8. /import — reply to a backup file to merge it in ${italicHtml('(dedupes links, skips known)')}`,
-      '',
-      `${boldHtml('Channels, cloning & userbot')}`,
-      `9. /channel_link ${codeHtml('<community_id> <channel_id>')} · /channel_unlink ${codeHtml('<channel_id>')}`,
-      `10. /userbotconnect ${codeHtml('<api_id> <api_hash> <session> <community_id>')} — DM only`,
-      `11. /userbot_disconnect · /userbot_del · /transfers · /clone_del ${codeHtml('<transfer_id>')}`,
-      '',
-      `${boldHtml('Instance')}`,
-      `12. /setlogchannel ${codeHtml('<chat_id>')} — log channel`,
-      `13. /clear_personal_db ${italicHtml('(reply YES to confirm)')} · /restart`,
-      '',
-      `${italicHtml('Web Settings → AI keys, bot binding, storage.')}`,
-    ].join('\n');
-  }
+function helpTextForSection(section, isGod = false) {
+  // Returns ready-to-send rich HTML. Command lines use the pattern
+  // "<b>N. /cmd &lt;args&gt;</b> — what it is" + an indented explanation line,
+  // separated by spacer paragraphs, per Telegram rich-message blocks
+  // (heading / paragraph / blockquote / list / pre — all verified live).
+  const cmd = (n, usage, what, extra = '') =>
+    `<p><b>${n}. ${usage}</b>${what ? `<br>${what}` : ''}${extra ? `<br>${extra}` : ''}</p>`;
+  const spacer = '<p></p>';
+
   if (section === 'global') {
     return [
-      `${boldHtml('🌐 Global')} ${italicHtml('— commands & ranks')}`,
-      '',
-      `${boldHtml('Commands')}`,
-      `/start — welcome & status`,
-      `/help — this menu`,
-      `/id — chat id · your user id · topic id`,
-      `/rank — your ranks across communities ${italicHtml('(incl. banned)')}`,
-      '',
-      `${boldHtml('Ranks')}`,
-      `• ${boldHtml('GOD')} — instance host ${codeHtml('TG_OWNER_IDS')} — personal, bot settings, AI credentials`,
-      `• ${boldHtml('owner')} — community creator /community_verify`,
-      `• ${boldHtml('admin')} — promoted with /admin`,
-      `• ${boldHtml('member')} — ${italicHtml('login + join TG group +')} /community_join`,
-      `• ${boldHtml('banned')} — left/kicked from that community's TG group ${italicHtml('(other communities OK)')}`,
-      '',
-      `${italicHtml('Tip:')} open a forum topic and /id shows topic id for /topic.`,
-      `${italicHtml('Tip:')} clone channels, groups, or topics — see ${boldHtml('📡 Channels')} in /help.`,
+      richHeading(3, '🌐 Global commands'),
+      richParagraph('<i>Available everywhere — DM or group.</i>'),
+      spacer,
+      cmd(1, codeHtml('/start'), 'Welcome card: shows your rank, the linked brain, and next steps. Also opens tag searches via deep-links.'),
+      cmd(2, codeHtml('/help'), 'This help. Pick a section below — each panel explains every command in detail.'),
+      cmd(3, codeHtml('/id'), 'Shows the IDs you need for setup: chat ID, your user ID, topic ID (inside a forum topic), and the linked community.'),
+      cmd(4, codeHtml('/rank'), 'Your rank in every community you touch, plus the ban list you can see.'),
+      spacer,
+      richParagraph('<b>Ranks</b>'),
+      '<blockquote><b>GOD</b> — instance host (TG_OWNER_IDS): personal brain, bot settings, AI credentials.<br><b>owner</b> — created the community with /community_verify.<br><b>admin</b> — promoted by the owner.<br><b>member</b> — logged in + in the TG group + /community_join.<br><b>banned</b> — removed from that community (others still work).</blockquote>',
+      spacer,
+      richParagraph(`<i>Tip: paste a link in a linked chat to save it. Tap any ${codeHtml('#tag')} chip to search that tag.</i>`)
     ].join('\n');
   }
+
   if (section === 'personal') {
     return [
-      `${boldHtml('👤 Personal')} ${italicHtml('(GOD rank only)')}`,
-      '',
-      `${boldHtml('Mode')} ${italicHtml('— dump target')}`,
-      `/personal → ${boldHtml('personal brain')} · /community → ${boldHtml('community brain')} · /mode to switch`,
-      `Paste a URL in the active mode to dump it.`,
-      '',
-      `${boldHtml('Links')}`,
-      `• /search ${codeHtml('<query>')} · /ai ${codeHtml('<question>')} · /export — status`,
-      `• /delete ${codeHtml('<url>')} or reply /delete · ${codeHtml('/del <chat_id>')} — delete cloned chat`,
-      `• /edit ${codeHtml('<url>')} | title: … | notes: …`,
-      `• /dumpall on|off · /dumpsmart — multi-link mode ${italicHtml('(default: smart)')}`,
-      '',
-      `${italicHtml('Setup: website Settings → Bot (GOD: token + DM /id).')}`,
+      richHeading(3, '👤 Personal brain'),
+      richParagraph('<i>GOD rank only — your private second brain, separate from every community.</i>'),
+      spacer,
+      cmd(1, `${codeHtml('/personal')} · ${codeHtml('/community')}`, 'Switch where dumps go. Personal saves links only you can search; community shares them with members.'),
+      cmd(2, `${codeHtml('/search')} ${codeHtml('&lt;query&gt;')}`, 'Search titles, notes and documents in the active brain. Results come as pages with prev/next buttons.'),
+      cmd(3, `${codeHtml('/ai')} ${codeHtml('&lt;question&gt;')}`, 'Ask your saved content. Answers cite your links and fall back to "no saved link" when nothing matches.'),
+      cmd(4, codeHtml('/export'), 'Export guide: Bot API export by default, session history backfill optional.'),
+      cmd(5, `${codeHtml('/delete')} ${codeHtml('&lt;url&gt;')}`, 'Delete one saved link. Works as a reply too. Personal mode deletes from your brain.'),
+      cmd(6, `${codeHtml('/edit')} ${codeHtml('&lt;url&gt;')} | title: … | notes: …`, "Rewrite a link's title and notes by hand."),
+      cmd(7, `${codeHtml('/dumpall')} ${codeHtml('on|off')} · ${codeHtml('/dumpsmart')}`, 'Multi-link posts: save every URL separately (all) or the primary one only (smart, default).'),
+      spacer,
+      richParagraph(`<i>Setup: website Settings → Bot — GOD pastes the bot token + ${codeHtml('/id')} from this chat.</i>`)
     ].join('\n');
   }
+
   if (section === 'community') {
     return [
-      `${boldHtml('👥 Community')}`,
-      '',
-      `${boldHtml('Setup')}`,
-      `• /community_verify — link this group ${italicHtml('(creates community; you = owner)')}`,
-      `• /mode — show dump target · ${codeHtml('/mode personal|community')}`,
-      '',
-      `${boldHtml('Members')} ${italicHtml('(login + in TG group + join)')}`,
-      `  ${codeHtml('1)')} Join the Telegram group`,
-      `  ${codeHtml('2)')} Login on website ${italicHtml('(same Telegram)')}`,
-      `  ${codeHtml('3)')} /community_join ${codeHtml('<id>')}`,
-      `• Paste URL in group or topic to dump it · /search ${codeHtml('<query>')} · /ai ${codeHtml('<question>')}`,
-      `• /community_list — list · ${codeHtml('/community_list <id|name>')} — details`,
-      '',
-      `${boldHtml('Moderation')}`,
-      `• /delete ${codeHtml('<url>')} · reply /delete — remove link ${italicHtml('(staff)')}`,
-      `  ${codeHtml('/del <chat_id> [thread_id] [files]')} — delete cloned chat or topic (alias)`,
-      `• /edit ${codeHtml('<url|title>')} | notes: … — edit`,
-      `• /topic ${codeHtml('<id>|off|here')} — lock to topic · /dumpall on|off`,
-      `• /kick ${codeHtml('<@user|id>')} / /clear — remove access ${italicHtml('(rejoin allowed)')}`,
-      `• /admin · /demote — reply to promote or demote ${italicHtml('(owner/GOD)')}`,
-      '',
-      `${boldHtml('Owner:')} /clear_db ${codeHtml('<id>')} · /community_delete ${codeHtml('<id>')} ${italicHtml('(reply YES_DELETE_<token>)')}`,
-      `${italicHtml('For cloning see')} ${boldHtml('📡 Channels')} ${italicHtml('in /help.')}`,
+      richHeading(3, '👥 Community'),
+      richParagraph('<i>One group = one shared brain. Members dump, everyone searches.</i>'),
+      spacer,
+      richParagraph('<b>Setup (owner)</b>'),
+      cmd(1, codeHtml('/community_verify'), 'Run inside the group. Creates the community, registers the bot, and makes you the owner.'),
+      cmd(2, codeHtml('/mode'), 'Show or switch the dump target for this chat.'),
+      spacer,
+      richParagraph('<b>Joining (members)</b>'),
+      '<blockquote>1. Join the community Telegram group<br>2. Login on the website with the same Telegram<br>3. Send ' + codeHtml('/community_join &lt;id&gt;') + ' in the bot DM</blockquote>',
+      spacer,
+      richParagraph('<b>Using</b>'),
+      cmd(3, `${codeHtml('/search')} ${codeHtml('&lt;query&gt;')} · ${codeHtml('/ai')} ${codeHtml('&lt;question&gt;')}`, 'Search and ask over the shared brain — same as personal, but community scope.'),
+      cmd(4, `${codeHtml('/community_list')} ${codeHtml('[id|name]')}`, 'List your communities, or show one community\'s details.'),
+      spacer,
+      richParagraph('<b>Moderation (staff)</b>'),
+      cmd(5, `${codeHtml('/delete')} ${codeHtml('&lt;url&gt;')}`, 'Remove a link from the community brain (reply to a result works too).'),
+      cmd(6, `${codeHtml('/edit')} ${codeHtml('&lt;url&gt;')} | notes: …`, 'Fix a title or notes.'),
+      cmd(7, `${codeHtml('/topic')} ${codeHtml('&lt;id&gt;|off|here')}`, 'Lock the bot to one forum topic; dumps from other topics are ignored.'),
+      cmd(8, `${codeHtml('/kick')} ${codeHtml('&lt;@user|id&gt;')} · ${codeHtml('/clear')}`, 'Remove a member\'s access — they can rejoin later.'),
+      cmd(9, `${codeHtml('/admin')} · ${codeHtml('/demote')}`, 'Promote or demote — reply to the member\'s message. Owner/GOD only.'),
+      spacer,
+      richParagraph(`<b>Owner:</b> ${codeHtml('/clear_db &lt;id&gt;')} wipes the community brain · ${codeHtml('/community_delete &lt;id&gt;')} deletes it (reply ${codeHtml('YES_DELETE_…')} to confirm). <i>Cloning lives in 📡 Channels.</i>`)
     ].join('\n');
   }
+
   if (section === 'channels') {
     return [
-      `${boldHtml('📡 ATHENA — TELEGRAM CLONING')}`,
-      '',
-      `${boldHtml('Two modes:')} ${codeHtml('/clone')} ${italicHtml('(normal)')} · ${codeHtml('/uclone')} ${italicHtml('(explicit userbot)')}`,
-      '',
-      `${boldHtml('━ CHANNELS ━')}`,
-      `${boldHtml('1. Add Athena')} → Channel → Manage → Administrators → Add Athena (admin).`,
-      `${boldHtml('2. Link')} ${codeHtml('/channel_link <community_id> <channel_id>')} ${italicHtml('(GOD/owner)')}`,
-      `${codeHtml('/channel_link c_abc123 -1002290798043')}`,
-      `${italicHtml('Find ID: forward a channel post to @userinfobot (IDs start -100). New posts index live.')}`,
-      `${boldHtml('3. History')} ${codeHtml('/clone <channel_id> community')} ${italicHtml('(backfill via userbot, live stays on)')}`,
-      `${boldHtml('Targets:')} ${codeHtml('community')} ${italicHtml('(default)')} · ${codeHtml('personal/both')} ${italicHtml('GOD-only — personal writes to that GOD’s brain')}`,
-      '',
-      `${boldHtml('━ GROUPS ━')}`,
-      `${italicHtml('Add Athena as admin, then:')}`,
-      `• Normal: ${codeHtml('/clone <group_id> community')}`,
-      `• Forum: ${codeHtml('/clone <group_id> community')} ${italicHtml('(auto topic-by-topic)')}`,
-      `• One topic: ${codeHtml('/clone <group_id> <topic_id> community')} ${italicHtml('(or /clone inside topic)')}`,
-      `${codeHtml('/uclone <group_id> [topic_id] personal')} ${italicHtml('(GOD-only — to your brain)')}`,
-      '',
-      `${boldHtml('━ USERBOT ━')}`,
-      `${boldHtml('DM Athena (GOD):')} ${codeHtml('/userbotconnect <api_id> <api_hash> <session> <community_id>')}`,
-      `${italicHtml('Session is secret — never share it in a group, revoke it in Settings → Devices.')}`,
-      `${boldHtml('Explicit:')} ${codeHtml('/uclone <chat_id> community')} ${codeHtml('/uclone <chat_id> <topic_id> community')}`,
-      `${codeHtml('/uclone <chat_id> [topic_id] personal|both')} ${italicHtml('— personal saves to your brain (GOD-only)')}`,
-      `${codeHtml('/uclone_del <chat_id>')} ${codeHtml('/uclone_del <chat_id> <topic_id>')}`,
-      '',
-      `${boldHtml('━ CONTROL ━')}`,
-      `${codeHtml('/stats')} ${italicHtml('(counters/topics/live)')} · ${codeHtml('/clone_stop [chat_id]')} · ${codeHtml('/delete <chat_id> [topic_id]')}`,
-      `${codeHtml('/tag_untagged')} ${italicHtml('(GOD — tag every untagged link, AI first, never touches tagged)')}`,
-      `${codeHtml('/channel_link <community_id> <channel_id>')} · ${codeHtml('/channel_unlink <channel_id>')}`,
-      '',
-      `${boldHtml('━ NOTES ━')}`,
-      `• /clone ${italicHtml('never edits source. Forum clones topic by topic. If the userbot cannot see the chat, add it and retry.')}`,
-      `${boldHtml('Recipe:')} ${codeHtml('/channel_link')} → ${codeHtml('/userbotconnect')} → ${codeHtml('/clone')} → ${codeHtml('/stats')} → ${codeHtml('/clone_stop|/delete')}`,
+      richHeading(3, '📡 Cloning channels, groups & topics'),
+      richParagraph('<i>Copy any Telegram chat into a brain — history backfill + live follow-up.</i>'),
+      spacer,
+      richParagraph('<b>Channels</b>'),
+      cmd(1, 'Add Athena as admin', 'Channel → Manage → Administrators — give it post access.'),
+      cmd(2, `${codeHtml('/channel_link')} ${codeHtml('&lt;community_id&gt; &lt;channel_id&gt;')}`, 'Links the channel: every new post is indexed live. IDs start with -100 — forward a post to @userinfobot to find one.'),
+      cmd(3, `${codeHtml('/clone')} ${codeHtml('&lt;channel_id&gt; community')}`, 'Backfills history via the userbot, then keeps following live. Targets: community (default), personal/both (GOD only).'),
+      spacer,
+      richParagraph('<b>Groups & forum topics</b>'),
+      cmd(4, `${codeHtml('/clone')} ${codeHtml('&lt;group_id&gt; community')}`, 'Whole group; forums clone topic-by-topic automatically. One topic only: add the topic id — or run /clone inside the topic.'),
+      cmd(5, `${codeHtml('/uclone')} ${codeHtml('&lt;chat_id&gt; [topic_id] community|personal|both')}`, 'Explicit userbot clone — the GOD-only way to fill a personal brain.'),
+      spacer,
+      richParagraph('<b>Userbot (GOD, DM only)</b>'),
+      cmd(6, `${codeHtml('/userbotconnect')} ${codeHtml('&lt;api_id&gt; &lt;api_hash&gt; &lt;session&gt; &lt;community_id&gt;')}`, 'Stores the session powering history backfills. It is a secret — never paste it in a group; revoke it in Telegram Settings → Devices when done.'),
+      cmd(7, `${codeHtml('/userbot_status')} · ${codeHtml('/userbot_disconnect')}`, 'Check the connection and follows, or wipe the session.'),
+      spacer,
+      richParagraph('<b>Control</b>'),
+      cmd(8, `${codeHtml('/stats')} · ${codeHtml('/clone_stop')} ${codeHtml('[chat_id]')} · ${codeHtml('/delete')} ${codeHtml('&lt;chat_id&gt;')}`, 'Live counters, stop a running clone, or delete a cloned chat\'s data.'),
+      cmd(9, `${codeHtml('/tag_untagged')} · ${codeHtml('/forcetags')}`, 'GOD: tag links that have no tags, or force AI re-tagging of everything.'),
+      spacer,
+      richParagraph(`<b>Recipe:</b> ${codeHtml('/channel_link')} → ${codeHtml('/userbotconnect')} → ${codeHtml('/clone')} → ${codeHtml('/stats')} → ${codeHtml('/clone_stop')}`),
+      richParagraph('<i>Cloning never edits the source chat. If the userbot cannot see a chat, add it there first and retry.</i>')
     ].join('\n');
   }
+
+  if (section === 'god') {
+    return [
+      richHeading(3, '🛡 GOD tools'),
+      richParagraph('<i>Instance-host only. These change the whole deployment.</i>'),
+      spacer,
+      richParagraph('<b>Brains & targets</b>'),
+      cmd(1, `${codeHtml('/personal')} · ${codeHtml('/community')} · ${codeHtml('/mode')}`, 'Where your dumps land: private brain or the linked community.'),
+      cmd(2, `${codeHtml('/channel_target')} ${codeHtml('&lt;channel_id&gt; community|personal|both')}`, 'Re-route a linked channel\'s indexing target.'),
+      cmd(3, `${codeHtml('/dumpall')} ${codeHtml('on|off')} · ${codeHtml('/dumpsmart')}`, 'Every URL in a post, or the primary one only.'),
+      spacer,
+      richParagraph('<b>Tagging & structure</b>'),
+      cmd(4, `${codeHtml('/forcetags')} ${codeHtml('[community_id]')}`, 'AI re-tags every link (existing tags can be overwritten).'),
+      cmd(5, codeHtml('/tag_untagged'), 'Tags only rows with no real tags — cheap first pass.'),
+      cmd(6, codeHtml('/structure'), 'One-pass DB cleanup: strips tracking URLs, merges near-duplicate links, cleans titles and notes. Runs in the background with live progress.'),
+      spacer,
+      richParagraph('<b>Backup & import</b>'),
+      cmd(7, codeHtml('/backup'), 'Full database backup (SQL, gzipped) sent to this chat.'),
+      cmd(8, `${codeHtml('/import')} — ${boldHtml('reply to a backup file')}`, 'Merges a backup into this instance: duplicates (same URL or source message) are skipped, the rest is added. Backups without content rows are replayed as a whole database. Background job with progress.'),
+      spacer,
+      richParagraph('<b>Channels, cloning & userbot</b>'),
+      cmd(9, `${codeHtml('/channel_link')} · ${codeHtml('/channel_unlink')} · ${codeHtml('/topic_link')} · ${codeHtml('/topic_list')}`, 'Bind channels and forum topics to brains.'),
+      cmd(10, `${codeHtml('/userbotconnect')} · ${codeHtml('/userbot_del')} · ${codeHtml('/userbot_disconnect')}`, 'Manage the userbot session (DM only — the session string is a secret).'),
+      cmd(11, `${codeHtml('/transfers')} · ${codeHtml('/clone_del')} ${codeHtml('&lt;transfer_id&gt;')}`, 'List clone sessions or delete one clone\'s imported data.'),
+      spacer,
+      richParagraph('<b>Instance</b>'),
+      cmd(12, `${codeHtml('/setlogchannel')} ${codeHtml('&lt;chat_id&gt;')}`, 'Mirror operational events to a log channel.'),
+      cmd(13, `${codeHtml('/logs')} ${codeHtml('[n|clear]')}`, 'Tail the in-app structured log (last n lines, default 30) — no SSH needed.'),
+      cmd(14, `${codeHtml('/clear_personal_db')} · ${codeHtml('/restart')}`, 'Wipe your personal brain (confirm with YES) or restart the self-host service.'),
+      spacer,
+      richParagraph('<i>Website Settings → AI keys, bot binding, storage.</i>')
+    ].join('\n');
+  }
+
+  // menu
+  const sections = [
+    `• ${boldHtml('🌐 Global')} — /start /help /id /rank, ranks explained`,
+    `• ${boldHtml('👤 Personal')} — GOD private brain: dump, search, AI`,
+    `• ${boldHtml('👥 Community')} — setup, joining, moderation`,
+    `• ${boldHtml('📡 Channels')} — cloning channels, groups, topics`
+  ];
+  if (isGod) sections.push(`• ${boldHtml('🛡 GOD tools')} — structure, import, backup, tagging, logs`);
   return [
-    `${boldHtml('Athena')} — ${italicHtml('second brain')}`,
-    '',
-    `${boldHtml('Tap a section below:')}`,
-    `• ${boldHtml('🌐 Global')} — /start /help /id /rank`,
-    `• ${boldHtml('👤 Personal')} — dual mode, dump, search, AI ${italicHtml('(GOD)')}`,
-    `• ${boldHtml('👥 Community')} — verify, join, admins, topics`,
-    `• ${boldHtml('📡 ATHENA — TELEGRAM CLONING')} — channels / groups / topics (history + live)`,
-    '',
-    `${boldHtml('Member quick start:')}`,
-    `1. Join the community Telegram group`,
-    `2. Login on the website with Telegram`,
-    `3. /community_join id — in bot DM`,
-    `4. Paste links → /search query · /ai question`,
-    `5. For Telegram export: /export (Bot API by default; session history is optional)`,
-    '',
-    `${italicHtml('Settings, AI keys and bot setup live on the website.')}`,
+    richHeading(3, '🧭 Athena help'),
+    richParagraph('<i>Your second brain: dump links, search them, ask AI.</i>'),
+    spacer,
+    richParagraph('<b>Pick a section:</b>'),
+    ...sections.map(x => `<p>${x}</p>`),
+    spacer,
+    richParagraph('<b>Quick start (members)</b>'),
+    '<blockquote>1. Join the community Telegram group<br>2. Login on the website with Telegram<br>3. ' + codeHtml('/community_join &lt;id&gt;') + ' in the bot DM<br>4. Paste links → ' + codeHtml('/search') + ' · ' + codeHtml('/ai') + '</blockquote>',
+    spacer,
+    richParagraph('<i>Settings, AI keys and bot setup live on the website. Tap any #tag chip to search it.</i>')
   ].join('\n');
 }
 
@@ -8947,15 +8946,13 @@ function richTextToRich(htmlText) {
 }
 
 function richHelpHtml(section, isGod = false) {
-  const raw = String(helpTextForSection(section) || '');
+  const raw = String(helpTextForSection(section, isGod) || '');
+  if (/^<h3/i.test(raw)) return raw; // panels are rich HTML now
   const out = [];
   const paras = raw.split(/\n{2,}/).map((x) => x.trim()).filter(Boolean);
   for (let i = 0; i < paras.length; i++) {
     const inner = paras[i].split(/\n/).join('<br>');
     out.push(i === 0 ? richHeading(3, inner) : richParagraph(inner));
-  }
-  if (section === 'menu' && isGod) {
-    out.splice(1, 0, richParagraph(`• ${boldHtml('🛡 GOD tools')} — structure, import, backup, tagging, userbot`));
   }
   return out.join('\n');
 }
@@ -9626,6 +9623,14 @@ for (const rawUrl of toSave) {
 
 const TRACKING_PARAMS = new Set(['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'utm_id', 'fbclid', 'gclid', 'msclkid', 'dclid', 'twclid', 'igshid', 'mclid', 'mc_cid', 'mc_eid', 'ref', 'ref_src', 'ref_url', 'referrer', 'spm', 'scm', 'si', 'share_medium', 'share_source', 'share_token', 'share_app_id', 'fb_action_ids', 'fb_action_types', 'action_object_map', 'action_type_map', 'action_ref_map', 'app', 'el']);
 
+/** Fire-and-forget progress edit for long-running GOD jobs. */
+async function editJobProgress(token, chatId, msgId, text) {
+  if (!msgId) return;
+  try {
+    await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: msgId, text, parse_mode: 'HTML' });
+  } catch (_) {}
+}
+
 /** Copy of the URL with known tracking parameters removed. */
 function stripTrackingParams(urlStr) {
   const s = String(urlStr || '');
@@ -9660,7 +9665,7 @@ function cleanTitleText(title) {
   return s;
 }
 
-async function structureDatabase(env) {
+async function structureDatabase(env, { onProgress = null } = {}) {
   const stats = { scanned: 0, urlNormalized: 0, merged: 0, notesCleaned: 0, titlesCleaned: 0, errors: 0 };
   const tables = [
     { name: 'links', scopeCol: 'community_id', cols: 'url, url_hash, title, notes, tags, created_at, upvotes, downvotes' },
@@ -9729,9 +9734,10 @@ async function structureDatabase(env) {
             if (updTitle !== row.title) stats.titlesCleaned++;
             if (updNotes !== row.notes) stats.notesCleaned++;
           }
-        } catch (e) { stats.errors++; console.error('[structure] row failed:', e?.message || e); }
+        } catch (e) { stats.errors++; logError('structure', 'row failed', e?.message || e); }
       }
       if (rows.length < 400) break;
+      if (onProgress) await onProgress(stats);
     }
   }
   return stats;
@@ -9827,7 +9833,7 @@ const IMPORT_LINK_COLUMNS = {
  *  uploaded_documents are deduped by URL identity or source message and
  *  inserted; a dump with none of those rows replays every INSERT with
  *  ON CONFLICT DO NOTHING instead (never deletes anything). */
-async function importBackupSql(env, sqlText) {
+async function importBackupSql(env, sqlText, { onProgress = null } = {}) {
   const report = { linksInserted: 0, linksSkipped: 0, personalInserted: 0, personalSkipped: 0, docsInserted: 0, docsSkipped: 0, wholeDbReplay: false, replayInserted: 0, replayFailed: 0, errors: 0 };
   const statements = splitSqlStatements(String(sqlText || ''));
   const parsed = [];
@@ -9847,12 +9853,15 @@ async function importBackupSql(env, sqlText) {
     // Whole-database merge: replay every INSERT (parents-first order is kept
     // by the backup), skipping conflicts and destructive statements.
     report.wholeDbReplay = true;
+    let done = 0;
     for (const s of statements) {
       if (!/^INSERT\s+INTO/i.test(s)) continue;
       try {
         await env.DB.prepare(/;\s*$/.test(s) ? s : s + ';').run();
         report.replayInserted++;
-      } catch (e) { report.replayFailed++; console.error('[import] replay failed:', e?.message || e, s.slice(0, 120)); }
+      } catch (e) { report.replayFailed++; logError('import', 'replay failed', { err: e?.message || e, stmt: s.slice(0, 120) }); }
+      done++;
+      if (onProgress && done % 250 === 0) await onProgress({ phase: 'replay', done });
     }
     return report;
   }
@@ -9860,12 +9869,30 @@ async function importBackupSql(env, sqlText) {
   await ensureSearchColumns(env);
   await ensureLinkMetaColumns(env);
 
-  // links + personal_links
+  // Preload existing URL identities per scope once — dedupe in memory instead
+  // of one SELECT per row (a 2.5k-link backup becomes 2 queries, not 5k).
+  const identityCache = new Map();
+  const loadIdentities = async (table, scopeCol, scopeId) => {
+    const key = `${table}:${scopeId}`;
+    if (identityCache.has(key)) return identityCache.get(key);
+    const set = new Set();
+    try {
+      const res = await env.DB.prepare(`SELECT url, url_hash FROM ${table} WHERE ${scopeCol} = ?`).bind(String(scopeId)).all();
+      for (const r of (res && res.results) || []) {
+        if (r.url) set.add(`u:${String(r.url)}`);
+        if (r.url_hash) set.add(`h:${String(r.url_hash)}`);
+      }
+    } catch (_) {}
+    identityCache.set(key, set);
+    return set;
+  };
+
   const linkTables = [
     { name: 'links', scopeCol: 'community_id', insertedKey: 'linksInserted', skippedKey: 'linksSkipped' },
     { name: 'personal_links', scopeCol: 'user_id', insertedKey: 'personalInserted', skippedKey: 'personalSkipped' }
   ];
   for (const t of linkTables) {
+    let done = 0;
     for (const row of byTable[t.name]) {
       try {
         const rawUrl = String(row.url || '');
@@ -9873,13 +9900,10 @@ async function importBackupSql(env, sqlText) {
         const url = stripTrackingParams(rawUrl);
         const newHash = generateUrlHash(url);
         const legacy = legacyUrlHash(url);
-        const dup = await env.DB.prepare(
-          `SELECT id FROM ${t.name} WHERE ${t.scopeCol} = ? AND (url_hash = ? OR url_hash = ? OR url = ?) LIMIT 1`
-        ).bind(row[t.scopeCol], newHash, legacy, url).first();
-        if (dup) { report[t.skippedKey]++; continue; }
+        const known = await loadIdentities(t.name, t.scopeCol, row[t.scopeCol]);
+        if (known.has(`h:${newHash}`) || known.has(`h:${legacy}`) || known.has(`u:${url}`)) { report[t.skippedKey]++; continue; }
+        known.add(`h:${newHash}`); known.add(`h:${legacy}`); known.add(`u:${url}`);
         let id = row.id ? String(row.id) : `ix_${randomToken().slice(0, 12)}`;
-        const exists = await env.DB.prepare(`SELECT 1 AS x FROM ${t.name} WHERE id = ?`).bind(id).first();
-        if (exists) id = `ix_${randomToken().slice(0, 12)}`;
         const cols = ['id', t.scopeCol];
         const vals = [id, row[t.scopeCol]];
         for (const c of IMPORT_LINK_COLUMNS[t.name]) {
@@ -9888,35 +9912,41 @@ async function importBackupSql(env, sqlText) {
           cols.push(c);
           vals.push(c === 'url' ? url : c === 'url_hash' ? newHash : c === 'search_blob' ? null : row[c]);
         }
-        await env.DB.prepare(`INSERT INTO ${t.name} (${cols.map(c => `"${c}"`).join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`).bind(...vals).run();
-        report[t.insertedKey]++;
-      } catch (e) { report.errors++; console.error('[import] link failed:', row.url, e?.message || e); }
+        try {
+          await env.DB.prepare(`INSERT INTO ${t.name} (${cols.map(c => `"${c}"`).join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`).bind(...vals).run();
+          report[t.insertedKey]++;
+        } catch (e) {
+          // unique-index race with a concurrent dump → count as skipped dupe
+          if (isUniqueConstraintError(e)) { report[t.skippedKey]++; continue; }
+          throw e;
+        }
+      } catch (e) { report.errors++; logError('import', `link failed ${row.url}`, e?.message || e); }
+      done++;
+      if (onProgress && done % 250 === 0) await onProgress({ phase: t.name, done });
     }
   }
 
-  // uploaded_documents — dedupe by source message, else scope+filename
+  // uploaded_documents — dedupe by source message, else scope+filename, in memory
+  let docSet;
+  try {
+    const res = await env.DB.prepare(`SELECT scope, COALESCE(user_id,'') AS user_id, COALESCE(community_id,'') AS community_id, filename, COALESCE(source_chat_id,'') AS source_chat_id, COALESCE(source_message_id,'') AS source_message_id FROM uploaded_documents`).all();
+    docSet = new Set(((res && res.results) || []).map(r => `${r.source_chat_id || ''}|${r.source_message_id || ''}|${r.scope || 'community'}|${r.filename || ''}`));
+  } catch (_) { docSet = new Set(); }
+  let docDone = 0;
   for (const row of byTable.uploaded_documents) {
     try {
-      let dup = null;
-      if (row.source_chat_id != null && row.source_message_id != null) {
-        dup = await env.DB.prepare(
-          `SELECT id FROM uploaded_documents WHERE COALESCE(source_chat_id,'') = ? AND COALESCE(source_message_id,'') = ? AND COALESCE(scope,'community') = COALESCE(?,'community') LIMIT 1`
-        ).bind(String(row.source_chat_id), String(row.source_message_id), String(row.scope || 'community')).first();
-      }
-      if (!dup) {
-        dup = await env.DB.prepare(
-          `SELECT id FROM uploaded_documents WHERE scope = ? AND COALESCE(${row.scope === 'personal' ? 'user_id' : 'community_id'},'') = ? AND filename = ? LIMIT 1`
-        ).bind(String(row.scope || 'community'), String(row.scope === 'personal' ? row.user_id : row.community_id), String(row.filename || '')).first();
-      }
-      if (dup) { report.docsSkipped++; continue; }
+      const srcKey = `${row.source_chat_id || ''}|${row.source_message_id || ''}|${row.scope || 'community'}|${row.filename || ''}`;
+      const fileKey = `${row.scope || 'community'}|${row.scope === 'personal' ? row.user_id : row.community_id}|${row.filename || ''}`;
+      if (docSet.has(srcKey) || docSet.has(`||${(row.scope || 'community')}|${row.filename || ''}`) || docSet.has(fileKey)) { report.docsSkipped++; continue; }
+      docSet.add(srcKey); docSet.add(fileKey);
       let id = row.id ? String(row.id) : `doc_${randomToken().slice(0, 12)}`;
-      const exists = await env.DB.prepare('SELECT 1 AS x FROM uploaded_documents WHERE id = ?').bind(id).first();
-      if (exists) id = `doc_${randomToken().slice(0, 12)}`;
       const cols = Object.keys(row).filter(c => c !== 'id');
       const vals = cols.map(c => row[c]);
       await env.DB.prepare(`INSERT INTO uploaded_documents ("id", ${cols.map(c => `"${c}"`).join(', ')}) VALUES (?, ${cols.map(() => '?').join(', ')})`).bind(id, ...vals).run();
       report.docsInserted++;
-    } catch (e) { report.docsSkipped++; console.error('[import] doc failed:', row.filename, e?.message || e); }
+    } catch (e) { report.docsSkipped++; logError('import', `doc failed ${row.filename}`, e?.message || e); }
+    docDone++;
+    if (onProgress && docDone % 100 === 0) await onProgress({ phase: 'documents', done: docDone });
   }
   return report;
 }
@@ -12859,6 +12889,32 @@ Rules:
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
+  // ---- /logs (GOD): tail of the in-memory structured log ----
+  if (cmd === '/logs' || cmd === '/log') {
+    if (!isGod) {
+      await sendTelegramFormatted(token, chatId, `${boldHtml('🔒 GOD rank only')}`, forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    const argN = rest.trim().split(/\s+/)[0] || '';
+    if (argN === 'clear') {
+      LOG_RING.length = 0;
+      await sendTelegramFormatted(token, chatId, `${boldHtml('🧹')} Log buffer cleared.`, forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    let n = Math.min(100, Math.max(5, parseInt(argN, 10) || 30));
+    const tail = LOG_RING.slice(-n).reverse();
+    if (!tail.length) {
+      await sendTelegramFormatted(token, chatId, `${italicHtml('Log buffer is empty (recently restarted?).')}`, forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    const lines = [richHeading(3, `📋 Last ${tail.length} log lines`), ''];
+    for (const e of tail) {
+      lines.push(`${codeHtml(e.t.slice(11, 19))} ${boldHtml(e.level.toUpperCase())} ${escHtml(e.component)} — ${escHtml(e.message)}${e.data ? ' ' + escHtml(String(e.data).slice(0, 120)) : ''}`);
+    }
+    await sendTelegramRichMessage(token, chatId, lines.join('\n'), forumThreadId);
+    return new Response('OK', { status: 200, headers: corsHeaders });
+  }
+
   // ---- /db — show storage backend (all ranks) ----
   if (cmd === '/db') {
     const scope = binding?.scope || (binding?.community_id ? 'community' : 'personal');
@@ -12892,25 +12948,36 @@ Rules:
       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒 GOD rank only')}\n/structure cleans titles, notes and URLs across the whole database.`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    await sendTelegramFormatted(token, chatId, `${boldHtml('🧹 Structuring…')} scanning links, personal links and documents.`, forumThreadId);
-    try {
-      const stats = await structureDatabase(env);
-      const lines = [
-        richHeading(3, '🧹 Structure pass complete'),
-        '',
-        richParagraph(`Scanned: <b>${stats.scanned}</b> rows<br>` +
-          `URLs normalized (tracking params stripped): <b>${stats.urlNormalized}</b><br>` +
-          `Near-dupes merged: <b>${stats.merged}</b><br>` +
-          `Notes cleaned: <b>${stats.notesCleaned}</b><br>` +
-          `Titles cleaned: <b>${stats.titlesCleaned}</b>` +
-          (stats.errors ? `<br><i>errors: ${stats.errors}</i>` : '')),
-        '',
-        richParagraph(`<i>Search index refreshes lazily on the next /search.</i>`),
-      ].join('\n');
-      await sendTelegramRichMessage(token, chatId, lines, forumThreadId);
-    } catch (e) {
-      await sendTelegramFormatted(token, chatId, `${boldHtml('❌ Structure failed:')} ${codeHtml(escHtml(String(e?.message || e)).slice(0, 160))}`, forumThreadId);
-    }
+    const statusMsg = await telegramApi(token, 'sendMessage', { chat_id: chatId, text: `${boldHtml('🧹 Structuring…')} scanning links, personal links and documents.`, parse_mode: 'HTML' }).catch(() => null);
+    const statusId = statusMsg?.result?.message_id || null;
+    runInBackground(env, (async () => {
+      try {
+        let lastEdit = 0;
+        const stats = await structureDatabase(env, { onProgress: async (st) => {
+          const now = Date.now();
+          if (statusId && now - lastEdit > 2500) {
+            lastEdit = now;
+            await editJobProgress(token, chatId, statusId, `${boldHtml('🧹 Structuring…')} scanned ${st.scanned}, merged ${st.merged}, cleaned ${st.notesCleaned + st.titlesCleaned}`);
+          }
+        }});
+        const lines = [
+          richHeading(3, '🧹 Structure pass complete'),
+          '',
+          richParagraph(`Scanned: <b>${stats.scanned}</b> rows<br>` +
+            `URLs normalized (tracking params stripped): <b>${stats.urlNormalized}</b><br>` +
+            `Near-dupes merged: <b>${stats.merged}</b><br>` +
+            `Notes cleaned: <b>${stats.notesCleaned}</b><br>` +
+            `Titles cleaned: <b>${stats.titlesCleaned}</b>` +
+            (stats.errors ? `<br><i>errors: ${stats.errors}</i>` : '')),
+          '',
+          richParagraph(`<i>Search index refreshes lazily on the next /search.</i>`),
+        ].join('\n');
+        if (statusId) await telegramApi(token, 'deleteMessage', { chat_id: chatId, message_id: statusId }).catch(() => {});
+        await sendTelegramRichMessage(token, chatId, lines, forumThreadId);
+      } catch (e) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('❌ Structure failed:')} ${codeHtml(escHtml(String(e?.message || e)).slice(0, 160))}`, forumThreadId);
+      }
+    })());
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
@@ -12943,33 +13010,48 @@ Rules:
       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️ Too large:')} ${codeHtml((fileSize / 1048576).toFixed(1) + ' MB')} — import parts up to 200 MB (split a big backup with ${codeHtml('/backup')} parts).`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    await sendTelegramFormatted(token, chatId, `${boldHtml('📥 Importing')} ${codeHtml(escHtml(fileName))}${fileSize ? ` (${(fileSize / 1048576).toFixed(1)} MB)` : ''}…`, forumThreadId);
-    try {
-      const fileResp = await fetch(`https://api.telegram.org/file/bot${token}/${(await telegramApi(token, 'getFile', { file_id: doc.file_id }))?.result?.file_path || ''}`);
-      if (!fileResp.ok) throw new Error(`download failed (${fileResp.status})`);
-      const buf = new Uint8Array(await fileResp.arrayBuffer());
-      let sqlText;
-      if (fileName.toLowerCase().endsWith('.gz') || (buf[0] === 0x1f && buf[1] === 0x8b)) {
-        sqlText = await new Response(new Response(buf).body.pipeThrough(new DecompressionStream('gzip'))).text();
-      } else {
-        sqlText = new TextDecoder().decode(buf);
+    const importStarted = Date.now();
+    const startMsg = await telegramApi(token, 'sendMessage', { chat_id: chatId, text: `${boldHtml('📥 Importing')} ${codeHtml(escHtml(fileName))}${fileSize ? ` (${(fileSize / 1048576).toFixed(1)} MB)` : ''}…`, parse_mode: 'HTML' }).catch(() => null);
+    const statusId = startMsg?.result?.message_id || null;
+    runInBackground(env, (async () => {
+      try {
+        const fileResp = await fetch(`https://api.telegram.org/file/bot${token}/${(await telegramApi(token, 'getFile', { file_id: doc.file_id }))?.result?.file_path || ''}`);
+        if (!fileResp.ok) throw new Error(`download failed (${fileResp.status})`);
+        const buf = new Uint8Array(await fileResp.arrayBuffer());
+        let sqlText;
+        if (fileName.toLowerCase().endsWith('.gz') || (buf[0] === 0x1f && buf[1] === 0x8b)) {
+          sqlText = await new Response(new Response(buf).body.pipeThrough(new DecompressionStream('gzip'))).text();
+        } else {
+          sqlText = new TextDecoder().decode(buf);
+        }
+        let lastEdit = Date.now();
+        const report = await importBackupSql(env, sqlText, { onProgress: async (p) => {
+          const now = Date.now();
+          if (statusId && now - lastEdit > 2500) {
+            lastEdit = now;
+            await editJobProgress(token, chatId, statusId, `${boldHtml('📥 Importing…')} ${escHtml(p.phase)}: ${p.done} rows processed`);
+          }
+        }});
+        const secs = ((Date.now() - importStarted) / 1000).toFixed(1);
+        const lines = [
+          richHeading(3, '📥 Import complete'),
+          '',
+          richParagraph(
+            `Links added: <b>${report.linksInserted}</b> · skipped (dupes): <b>${report.linksSkipped}</b><br>` +
+            `Personal links added: <b>${report.personalInserted}</b> · skipped: <b>${report.personalSkipped}</b><br>` +
+            `Documents added: <b>${report.docsInserted}</b> · skipped: <b>${report.docsSkipped}</b><br>` +
+            (report.wholeDbReplay ? `Whole-database replay: <b>${report.replayInserted}</b> rows, <b>${report.replayFailed}</b> skipped<br>` : '') +
+            (report.errors ? `<i>errors: ${report.errors}</i><br>` : '') +
+            `<i>took ${secs}s</i>`
+          ),
+        ].join('\n');
+        if (statusId) await telegramApi(token, 'deleteMessage', { chat_id: chatId, message_id: statusId }).catch(() => {});
+        await sendTelegramRichMessage(token, chatId, lines, forumThreadId);
+      } catch (e) {
+        if (statusId) await telegramApi(token, 'deleteMessage', { chat_id: chatId, message_id: statusId }).catch(() => {});
+        await sendTelegramFormatted(token, chatId, `${boldHtml('❌ Import failed:')} ${codeHtml(escHtml(String(e?.message || e)).slice(0, 160))}`, forumThreadId);
       }
-      const report = await importBackupSql(env, sqlText);
-      const lines = [
-        richHeading(3, '📥 Import complete'),
-        '',
-        richParagraph(
-          `Links added: <b>${report.linksInserted}</b> · skipped (dupes): <b>${report.linksSkipped}</b><br>` +
-          `Personal links added: <b>${report.personalInserted}</b> · skipped: <b>${report.personalSkipped}</b><br>` +
-          `Documents added: <b>${report.docsInserted}</b> · skipped: <b>${report.docsSkipped}</b><br>` +
-          (report.wholeDbReplay ? `Whole-database replay: <b>${report.replayInserted}</b> rows, <b>${report.replayFailed}</b> skipped<br>` : '') +
-          (report.errors ? `<i>errors: ${report.errors}</i>` : '')
-        ),
-      ].join('\n');
-      await sendTelegramRichMessage(token, chatId, lines, forumThreadId);
-    } catch (e) {
-      await sendTelegramFormatted(token, chatId, `${boldHtml('❌ Import failed:')} ${codeHtml(escHtml(String(e?.message || e)).slice(0, 160))}`, forumThreadId);
-    }
+    })());
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
@@ -13420,12 +13502,15 @@ async function sendTelegramMessage(token, chatId, text, threadId = null, parseMo
         payload.message_thread_id = Number(threadId);
       }
       const data = await telegramApi(token, 'sendMessage', payload);
-      if (!data.ok) return { ok: false, error: data.description || 'sendMessage failed', raw: data };
+      if (!data.ok) {
+        logWarn('tg-send', `sendMessage to ${chatId} failed`, data.description || 'unknown');
+        return { ok: false, error: data.description || 'sendMessage failed', raw: data };
+      }
       last = { ok: true, message_id: data.result?.message_id };
     }
     return last;
   } catch (err) {
-    console.error('Telegram send failed:', err);
+    logError('tg-send', `sendMessage to ${chatId} threw`, err?.message || String(err));
     return { ok: false, error: err.message };
   }
 }
@@ -14842,6 +14927,37 @@ function queueMissingLinkEnrichment(env, scope, key, rows) {
   if (missing.length) runInBackground(env, enrichLinksInBackground(env, scope, key, missing));
   return missing.length;
 }
+
+// ---- Structured logger -----------------------------------------------------
+// Ring buffer + leveled console output. GOD-facing via /logs [n].
+const LOG_LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
+const LOG_RING = [];
+const LOG_RING_MAX = 500;
+let LOG_CONSOLE_MIN = 'info';
+function athenaLog(level, component, message, data = null) {
+  const lvl = LOG_LEVELS[level] || LOG_LEVELS.info;
+  const entry = {
+    t: new Date().toISOString(),
+    level,
+    component: String(component || 'app').slice(0, 24),
+    message: String(message || '').slice(0, 400)
+  };
+  if (data != null) {
+    try { entry.data = typeof data === 'string' ? data.slice(0, 400) : JSON.stringify(data).slice(0, 600); } catch (_) {}
+  }
+  LOG_RING.push(entry);
+  if (LOG_RING.length > LOG_RING_MAX) LOG_RING.shift();
+  if (lvl >= LOG_LEVELS[LOG_CONSOLE_MIN]) {
+    const line = `[${entry.t.slice(11, 23)}][${level.toUpperCase()}][${entry.component}] ${entry.message}${entry.data ? ' ' + entry.data : ''}`;
+    if (level === 'error') console.error(line);
+    else if (level === 'warn') console.warn(line);
+    else console.log(line);
+  }
+  return entry;
+}
+const logInfo = (c, m, d) => athenaLog('info', c, m, d);
+const logWarn = (c, m, d) => athenaLog('warn', c, m, d);
+const logError = (c, m, d) => athenaLog('error', c, m, d);
 
 function runInBackground(env, promise) {
   if (env.__ctx?.waitUntil) env.__ctx.waitUntil(promise);
