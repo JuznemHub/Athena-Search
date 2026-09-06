@@ -2767,26 +2767,43 @@ const TELEGRAM_COMMAND_MENU = [
 // "/" preview shows them where they can actually be used.
 const TELEGRAM_GOD_COMMAND_MENU = [
   { command: 'personal', description: 'Dump to personal brain (GOD)' },
-  { command: 'community', description: 'Dump to community brain' },
-  { command: 'setlogchannel', description: 'Link the log channel' },
-  { command: 'userbotconnect', description: 'Connect userbot session' },
+  { command: 'community', description: 'Active community + link target' },
+  { command: 'dumpsmart', description: 'Multi-link dump mode (default: smart)' },
+  { command: 'dumpall', description: 'Multi-link dump on/off' },
+  { command: 'community_verify', description: 'Link this group (creates community)' },
+  { command: 'topic', description: 'Lock bot replies to a topic' },
+  { command: 'kick', description: 'Remove a member (rejoin allowed)' },
+  { command: 'admin', description: 'Promote a member (reply)' },
+  { command: 'demote', description: 'Demote a member (reply)' },
+  { command: 'uclone', description: 'Clone with explicit userbot' },
+  { command: 'clone_stop', description: 'Stop a running clone' },
+  { command: 'group_copy', description: 'Copy group messages' },
+  { command: 'channel_link', description: 'Link a channel to a community' },
+  { command: 'channel_unlink', description: 'Unlink a channel' },
+  { command: 'channel_target', description: 'Channel dump target' },
+  { command: 'topic_link', description: 'Bind a forum topic to a target' },
+  { command: 'topic_list', description: 'List topic bindings' },
+  { command: 'topic_target', description: 'Topic dump target' },
+  { command: 'index_start', description: 'Backfill a chat into the brain' },
+  { command: 'index_status', description: 'Indexing/backfill status' },
+  { command: 'index_stop', description: 'Stop a running backfill' },
+  { command: 'userbotconnect', description: 'Connect userbot session (GOD)' },
   { command: 'userbot_disconnect', description: 'Disconnect userbot' },
   { command: 'userbot_del', description: 'Delete userbot session' },
-  { command: 'channel_link', description: 'Link channel to brain' },
-  { command: 'channel_unlink', description: 'Unlink channel' },
-  { command: 'topic_link', description: 'Link forum topic to brain' },
-  { command: 'topic_list', description: 'List topic bindings' },
-  { command: 'channel_target', description: 'Switch channel target brain' },
-  { command: 'forcetags', description: 'Force AI re-tag all links' },
-  { command: 'tag_untagged', description: 'Tag every untagged link' },
-  { command: 'structure', description: 'Fix DB structure (titles/notes)' },
-  { command: 'import', description: 'Import a /backup file (reply)' },
-  { command: 'backup', description: 'Backup the database now' },
-  { command: 'transfers', description: 'List clone sessions' },
+  { command: 'transfers', description: 'Recent clone/backfill sessions (GOD)' },
   { command: 'clone_del', description: "Delete a clone's data" },
-  { command: 'clear_personal_db', description: 'Wipe personal brain' },
-  { command: 'restart', description: 'Restart self-host service' },
-  { command: 'logs', description: 'Recent app log lines' },
+  { command: 'forcetags', description: 'AI-tag untagged links (GOD)' },
+  { command: 'tag_untagged', description: 'Tag every untagged link (GOD)' },
+  { command: 'structure', description: 'Tidy the DB (notes + titles)' },
+  { command: 'import', description: 'Restore links from a backup (GOD)' },
+  { command: 'backup', description: 'Back up the database (GOD)' },
+  { command: 'setlogchannel', description: 'Set log channel (GOD)' },
+  { command: 'clear_db', description: 'Wipe a community brain (GOD)' },
+  { command: 'community_delete', description: 'Delete a community (GOD)' },
+  { command: 'clear_personal_db', description: 'Wipe personal brain (GOD)' },
+  { command: 'db', description: 'Storage backend info' },
+  { command: 'logs', description: 'Recent app log lines (GOD)' },
+  { command: 'restart', description: 'Restart the service (GOD)' },
 ];
 
 // Set the default menu plus a GOD-scoped menu per owner chat. Best effort.
@@ -7818,19 +7835,31 @@ function helpTextForSection(section, isGod = false) {
       richParagraph('<b>Channels</b>'),
       cmd(1, 'Add Athena as admin', 'Channel → Manage → Administrators — give it post access.'),
       cmd(2, `${codeHtml('/channel_link')} ${codeHtml('<community_id> <channel_id>')}`, 'Links the channel: every new post is indexed live. IDs start with -100 — forward a post to @userinfobot to find one.'),
-      cmd(3, `${codeHtml('/clone')} ${codeHtml('<channel_id> community')}`, 'Backfills history via the userbot, then keeps following live. Targets: community (default), personal/both (GOD only).'),
+      cmd(3, `${codeHtml('/channel_unlink')} ${codeHtml('<channel_id>')}`, 'Stop indexing a channel.'),
+      cmd(4, `${codeHtml('/channel_target')} ${codeHtml('<channel_id> community|personal|both')}`, 'Re-route where a linked channel saves (personal/both: GOD only).'),
+      cmd(5, `${codeHtml('/group_copy')} ${codeHtml('on|off')}`, 'Whole-group copy mode — index everything posted, not just links.'),
       spacer,
       richParagraph('<b>Groups & forum topics</b>'),
-      cmd(4, `${codeHtml('/clone')} ${codeHtml('<group_id> community')}`, 'Whole group; forums clone topic-by-topic automatically. One topic only: add the topic id — or run /clone inside the topic.'),
-      cmd(5, `${codeHtml('/uclone')} ${codeHtml('<chat_id> [topic_id] community|personal|both')}`, 'Explicit userbot clone — the GOD-only way to fill a personal brain.'),
+      cmd(6, `${codeHtml('/clone')} ${codeHtml('<group_id> community')}`, 'Whole group; forums clone topic-by-topic automatically. One topic only: add the topic id — or run /clone inside the topic.'),
+      cmd(7, `${codeHtml('/topic_link')} ${codeHtml('[community|personal|both]')}`, 'Bind the current forum topic to a brain.'),
+      cmd(8, `${codeHtml('/topic_list')} · ${codeHtml('/topic_unlink')}`, 'List topic bindings or unbind the current one.'),
+      cmd(9, `${codeHtml('/topic_target')} ${codeHtml('community|personal|both')}`, 'Switch the current topic\'s target brain.'),
       spacer,
-      richParagraph('<b>Userbot (GOD, DM only)</b>'),
-      cmd(6, `${codeHtml('/userbotconnect')} ${codeHtml('<api_id> <api_hash> <session> <community_id>')}`, 'Stores the session powering history backfills. It is a secret — never paste it in a group; revoke it in Telegram Settings → Devices when done.'),
-      cmd(7, `${codeHtml('/userbot_status')} · ${codeHtml('/userbot_disconnect')}`, 'Check the connection and follows, or wipe the session.'),
+      richParagraph('<b>Clone control</b>'),
+      cmd(10, `${codeHtml('/clone_stop')} ${codeHtml('[chat_id]')}`, 'Stop a running history backfill.'),
+      cmd(11, `${codeHtml('/stats')}`, 'Live counters for every cloned chat, with refresh.'),
+      cmd(12, `${codeHtml('/transfers')}`, 'List all clone/backfill sessions with their ids.'),
+      cmd(13, `${codeHtml('/clone_del')} ${codeHtml('<transfer_id>')}`, "Delete everything one clone imported."),
+      cmd(14, `${codeHtml('/delete')} ${codeHtml('<chat_id> [topic_id]')}`, 'Delete a cloned chat or topic (alias: ' + codeHtml('/del') + ').'),
       spacer,
-      richParagraph('<b>Control</b>'),
-      cmd(8, `${codeHtml('/stats')} · ${codeHtml('/clone_stop')} ${codeHtml('[chat_id]')} · ${codeHtml('/delete')} ${codeHtml('<chat_id>')}`, 'Live counters, stop a running clone, or delete a cloned chat\'s data.'),
-      cmd(9, `${codeHtml('/tag_untagged')} · ${codeHtml('/forcetags')}`, 'GOD: tag links that have no tags, or force AI re-tagging of everything.'),
+      richParagraph('<b>Userbot</b> — powers history backfill; live indexing needs admin only'),
+      cmd(15, `${codeHtml('/userbotconnect')} ${codeHtml('<api_id> <api_hash> <session> <community_id>')}`, 'GOD, DM only. Stores the session that reads history. It is a secret — never paste it in a group; revoke it in Telegram Settings → Devices when done.'),
+      cmd(16, `${codeHtml('/userbot_status')}`, 'Is the userbot connected, and which chats does it follow.'),
+      cmd(17, `${codeHtml('/userbot_follow')} · ${codeHtml('/userbot_unfollow')}`, 'Add or remove live-follow chats for the userbot.'),
+      cmd(18, `${codeHtml('/userbot_disconnect')} · ${codeHtml('/userbot_del')}`, 'Disconnect, or fully delete the stored session.'),
+      spacer,
+      richParagraph('<b>Legacy backfill</b>'),
+      cmd(19, `${codeHtml('/index_start')} · ${codeHtml('/index_status')} · ${codeHtml('/index_stop')}`, 'Older session-based backfill — /clone is the normal path now.'),
       spacer,
       richParagraph(`<b>Recipe:</b> ${codeHtml('/channel_link')} → ${codeHtml('/userbotconnect')} → ${codeHtml('/clone')} → ${codeHtml('/stats')} → ${codeHtml('/clone_stop')}`),
       richParagraph('<i>Cloning never edits the source chat. If the userbot cannot see a chat, add it there first and retry.</i>')
@@ -7857,14 +7886,12 @@ function helpTextForSection(section, isGod = false) {
       cmd(8, `${codeHtml('/import')} — ${boldHtml('reply to a backup file')}`, 'Merges a backup into this instance: duplicates (same URL or source message) are skipped, the rest is added. Backups without content rows are replayed as a whole database. Background job with progress.'),
       spacer,
       richParagraph('<b>Channels, cloning & userbot</b>'),
-      cmd(9, `${codeHtml('/channel_link')} · ${codeHtml('/channel_unlink')} · ${codeHtml('/topic_link')} · ${codeHtml('/topic_list')}`, 'Bind channels and forum topics to brains.'),
-      cmd(10, `${codeHtml('/userbotconnect')} · ${codeHtml('/userbot_del')} · ${codeHtml('/userbot_disconnect')}`, 'Manage the userbot session (DM only — the session string is a secret).'),
-      cmd(11, `${codeHtml('/transfers')} · ${codeHtml('/clone_del')} ${codeHtml('<transfer_id>')}`, 'List clone sessions or delete one clone\'s imported data.'),
+      richParagraph(`<i>Channel/group/topic cloning and userbot commands live in the ${boldHtml('📡 Channels')} panel — most are GOD/owner gated and non-GOD just get "GOD rank only".</i>`),
       spacer,
       richParagraph('<b>Instance</b>'),
-      cmd(12, `${codeHtml('/setlogchannel')} ${codeHtml('<chat_id>')}`, 'Mirror operational events to a log channel.'),
-      cmd(13, `${codeHtml('/logs')} ${codeHtml('[n|clear]')}`, 'Tail the in-app structured log (last n lines, default 30) — no SSH needed.'),
-      cmd(14, `${codeHtml('/clear_personal_db')} · ${codeHtml('/restart')}`, 'Wipe your personal brain (confirm with YES) or restart the self-host service.'),
+      cmd(7, `${codeHtml('/setlogchannel')} ${codeHtml('<chat_id>')}`, 'Mirror operational events to a log channel.'),
+      cmd(8, `${codeHtml('/logs')} ${codeHtml('[n|clear]')}`, 'Tail the in-app structured log (last n lines, default 30) — no SSH needed.'),
+      cmd(9, `${codeHtml('/db')} · ${codeHtml('/clear_personal_db')} · ${codeHtml('/restart')}`, 'Storage info · wipe your personal brain (confirm with YES) · restart the self-host service.'),
       spacer,
       richParagraph('<i>Website Settings → AI keys, bot binding, storage.</i>')
     ].join('\n');
@@ -9855,8 +9882,10 @@ async function importBackupSql(env, sqlText, { onProgress = null } = {}) {
     }
   }
   const byTable = { links: [], personal_links: [], uploaded_documents: [] };
+  const parentRows = { users: [], communities: [], community_members: [] };
   for (const p of parsed) {
     if (byTable[p.table]) byTable[p.table].push(p.row);
+    else if (parentRows[p.table]) parentRows[p.table].push(p.row);
   }
   const hasContentRows = byTable.links.length + byTable.personal_links.length + byTable.uploaded_documents.length > 0;
 
@@ -9879,6 +9908,25 @@ async function importBackupSql(env, sqlText, { onProgress = null } = {}) {
 
   await ensureSearchColumns(env);
   await ensureLinkMetaColumns(env);
+
+  // Upsert parent rows (users / communities / memberships) so links imported
+  // from other instances satisfy their foreign keys. ON CONFLICT DO NOTHING:
+  // live rows are never overwritten. Uses parameterized statements built from
+  // the parsed row, never string interpolation.
+  report.parentsImported = 0;
+  for (const [table, rowsP] of Object.entries(parentRows)) {
+    for (const row of rowsP) {
+      if (!row.id) continue;
+      try {
+        const cols = Object.keys(row);
+        const res = await env.DB.prepare(
+          `INSERT INTO ${table} (${cols.map(c => `"${c}"`).join(', ')}) VALUES (${cols.map(() => '?').join(', ')}) ON CONFLICT (id) DO NOTHING`
+        ).bind(...cols.map(c => row[c])).run();
+        if (res && res.changes) report.parentsImported++;
+      } catch (_) {}
+    }
+  }
+
   // Backups from older/newer schemas can carry columns this instance doesn't
   // have yet (e.g. transfer_id before the first clone) — intersect with the
   // live table columns so INSERTs never reference missing columns.
@@ -9942,7 +9990,15 @@ async function importBackupSql(env, sqlText, { onProgress = null } = {}) {
           if (isUniqueConstraintError(e)) { report[t.skippedKey]++; continue; }
           throw e;
         }
-      } catch (e) { report.errors++; logError('import', `link failed ${row.url}`, e?.message || e); }
+      } catch (e) {
+        const msg = String(e?.message || e);
+        if (/foreign key/i.test(msg)) {
+          report.orphansSkipped = (report.orphansSkipped || 0) + 1;
+        } else {
+          report.errors++;
+          logError('import', `link failed ${row.url}`, msg);
+        }
+      }
       done++;
       if (onProgress && done % 250 === 0) await onProgress({ phase: t.name, done });
     }
@@ -13070,7 +13126,8 @@ Rules:
           richHeading(3, '📥 Import complete'),
           '',
           richParagraph(
-            `Links added: <b>${report.linksInserted}</b> · skipped (dupes): <b>${report.linksSkipped}</b><br>` +
+            `Links added: <b>${report.linksInserted}</b> · skipped (dupes): <b>${report.linksSkipped}</b>${report.orphansSkipped ? ` · orphans (no matching community/user): <b>${report.orphansSkipped}</b>` : ''}<br>` +
+            (report.parentsImported ? `Communities/users merged from backup: <b>${report.parentsImported}</b><br>` : '') +
             `Personal links added: <b>${report.personalInserted}</b> · skipped: <b>${report.personalSkipped}</b><br>` +
             `Documents added: <b>${report.docsInserted}</b> · skipped: <b>${report.docsSkipped}</b><br>` +
             (report.wholeDbReplay ? `Whole-database replay: <b>${report.replayInserted}</b> rows, <b>${report.replayFailed}</b> skipped<br>` : '') +
