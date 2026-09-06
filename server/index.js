@@ -12,7 +12,7 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import worker, { getInstanceAiConfig, getSteroidMode, syncAiConfigToPeer, syncSteroidToPeer, startUserbotDaemon, ensureIndexTables, runHistoryIndexJob } from '../worker/index.js';
+import worker, { getInstanceAiConfig, getSteroidMode, syncAiConfigToPeer, syncSteroidToPeer, startUserbotDaemon, ensureIndexTables, runHistoryIndexJob, syncInstanceTelegramCommands } from '../worker/index.js';
 import { createAssets } from './assets.js';
 import { startBackups, runBackupOnce } from './backup.js';
 import { PostgresD1, translateSchema } from './pgdb.js';
@@ -200,6 +200,9 @@ server.listen(PORT, HOST, () => {
     console.log('[athena] WARNING: TG_OWNER_IDS is empty — every logged-in user is GOD. Set it before exposing this.');
   }
   startBackups({ connectionString: DATABASE_URL, env: process.env, db: DB });
+
+  // Refresh Telegram "/" command menus (default + GOD scopes) on boot.
+  syncInstanceTelegramCommands(env).catch(() => {});
 
   // Userbot live-clone daemon: connects the stored session (if configured)
   // and mirrors new messages from followed chats. No-op when not set up.
