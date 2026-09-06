@@ -7738,7 +7738,7 @@ function chunkTelegramText(text, maxLen = TG_MSG_MAX) {
 
 function helpTextForSection(section, isGod = false) {
   // Returns ready-to-send rich HTML. Command lines use the pattern
-  // "<b>N. /cmd &lt;args&gt;</b> — what it is" + an indented explanation line,
+  // "<b>N. /cmd <args></b> — what it is" + an indented explanation line,
   // separated by spacer paragraphs, per Telegram rich-message blocks
   // (heading / paragraph / blockquote / list / pre — all verified live).
   const cmd = (n, usage, what, extra = '') =>
@@ -7768,11 +7768,11 @@ function helpTextForSection(section, isGod = false) {
       richParagraph('<i>GOD rank only — your private second brain, separate from every community.</i>'),
       spacer,
       cmd(1, `${codeHtml('/personal')} · ${codeHtml('/community')}`, 'Switch where dumps go. Personal saves links only you can search; community shares them with members.'),
-      cmd(2, `${codeHtml('/search')} ${codeHtml('&lt;query&gt;')}`, 'Search titles, notes and documents in the active brain. Results come as pages with prev/next buttons.'),
-      cmd(3, `${codeHtml('/ai')} ${codeHtml('&lt;question&gt;')}`, 'Ask your saved content. Answers cite your links and fall back to "no saved link" when nothing matches.'),
+      cmd(2, `${codeHtml('/search')} ${codeHtml('<query>')}`, 'Search titles, notes and documents in the active brain. Results come as pages with prev/next buttons.'),
+      cmd(3, `${codeHtml('/ai')} ${codeHtml('<question>')}`, 'Ask your saved content. Answers cite your links and fall back to "no saved link" when nothing matches.'),
       cmd(4, codeHtml('/export'), 'Export guide: Bot API export by default, session history backfill optional.'),
-      cmd(5, `${codeHtml('/delete')} ${codeHtml('&lt;url&gt;')}`, 'Delete one saved link. Works as a reply too. Personal mode deletes from your brain.'),
-      cmd(6, `${codeHtml('/edit')} ${codeHtml('&lt;url&gt;')} | title: … | notes: …`, "Rewrite a link's title and notes by hand."),
+      cmd(5, `${codeHtml('/delete')} ${codeHtml('<url>')}`, 'Delete one saved link. Works as a reply too. Personal mode deletes from your brain.'),
+      cmd(6, `${codeHtml('/edit')} ${codeHtml('<url>')} | title: … | notes: …`, "Rewrite a link's title and notes by hand."),
       cmd(7, `${codeHtml('/dumpall')} ${codeHtml('on|off')} · ${codeHtml('/dumpsmart')}`, 'Multi-link posts: save every URL separately (all) or the primary one only (smart, default).'),
       spacer,
       richParagraph(`<i>Setup: website Settings → Bot — GOD pastes the bot token + ${codeHtml('/id')} from this chat.</i>`)
@@ -7789,20 +7789,20 @@ function helpTextForSection(section, isGod = false) {
       cmd(2, codeHtml('/mode'), 'Show or switch the dump target for this chat.'),
       spacer,
       richParagraph('<b>Joining (members)</b>'),
-      '<blockquote>1. Join the community Telegram group<br>2. Login on the website with the same Telegram<br>3. Send ' + codeHtml('/community_join &lt;id&gt;') + ' in the bot DM</blockquote>',
+      '<blockquote>1. Join the community Telegram group<br>2. Login on the website with the same Telegram<br>3. Send ' + codeHtml('/community_join <id>') + ' in the bot DM</blockquote>',
       spacer,
       richParagraph('<b>Using</b>'),
-      cmd(3, `${codeHtml('/search')} ${codeHtml('&lt;query&gt;')} · ${codeHtml('/ai')} ${codeHtml('&lt;question&gt;')}`, 'Search and ask over the shared brain — same as personal, but community scope.'),
+      cmd(3, `${codeHtml('/search')} ${codeHtml('<query>')} · ${codeHtml('/ai')} ${codeHtml('<question>')}`, 'Search and ask over the shared brain — same as personal, but community scope.'),
       cmd(4, `${codeHtml('/community_list')} ${codeHtml('[id|name]')}`, 'List your communities, or show one community\'s details.'),
       spacer,
       richParagraph('<b>Moderation (staff)</b>'),
-      cmd(5, `${codeHtml('/delete')} ${codeHtml('&lt;url&gt;')}`, 'Remove a link from the community brain (reply to a result works too).'),
-      cmd(6, `${codeHtml('/edit')} ${codeHtml('&lt;url&gt;')} | notes: …`, 'Fix a title or notes.'),
-      cmd(7, `${codeHtml('/topic')} ${codeHtml('&lt;id&gt;|off|here')}`, 'Lock the bot to one forum topic; dumps from other topics are ignored.'),
-      cmd(8, `${codeHtml('/kick')} ${codeHtml('&lt;@user|id&gt;')} · ${codeHtml('/clear')}`, 'Remove a member\'s access — they can rejoin later.'),
+      cmd(5, `${codeHtml('/delete')} ${codeHtml('<url>')}`, 'Remove a link from the community brain (reply to a result works too).'),
+      cmd(6, `${codeHtml('/edit')} ${codeHtml('<url>')} | notes: …`, 'Fix a title or notes.'),
+      cmd(7, `${codeHtml('/topic')} ${codeHtml('<id>|off|here')}`, 'Lock the bot to one forum topic; dumps from other topics are ignored.'),
+      cmd(8, `${codeHtml('/kick')} ${codeHtml('<@user|id>')} · ${codeHtml('/clear')}`, 'Remove a member\'s access — they can rejoin later.'),
       cmd(9, `${codeHtml('/admin')} · ${codeHtml('/demote')}`, 'Promote or demote — reply to the member\'s message. Owner/GOD only.'),
       spacer,
-      richParagraph(`<b>Owner:</b> ${codeHtml('/clear_db &lt;id&gt;')} wipes the community brain · ${codeHtml('/community_delete &lt;id&gt;')} deletes it (reply ${codeHtml('YES_DELETE_…')} to confirm). <i>Cloning lives in 📡 Channels.</i>`)
+      richParagraph(`<b>Owner:</b> ${codeHtml('/clear_db <id>')} wipes the community brain · ${codeHtml('/community_delete <id>')} deletes it (reply ${codeHtml('YES_DELETE_…')} to confirm). <i>Cloning lives in 📡 Channels.</i>`)
     ].join('\n');
   }
 
@@ -7813,19 +7813,19 @@ function helpTextForSection(section, isGod = false) {
       spacer,
       richParagraph('<b>Channels</b>'),
       cmd(1, 'Add Athena as admin', 'Channel → Manage → Administrators — give it post access.'),
-      cmd(2, `${codeHtml('/channel_link')} ${codeHtml('&lt;community_id&gt; &lt;channel_id&gt;')}`, 'Links the channel: every new post is indexed live. IDs start with -100 — forward a post to @userinfobot to find one.'),
-      cmd(3, `${codeHtml('/clone')} ${codeHtml('&lt;channel_id&gt; community')}`, 'Backfills history via the userbot, then keeps following live. Targets: community (default), personal/both (GOD only).'),
+      cmd(2, `${codeHtml('/channel_link')} ${codeHtml('<community_id> <channel_id>')}`, 'Links the channel: every new post is indexed live. IDs start with -100 — forward a post to @userinfobot to find one.'),
+      cmd(3, `${codeHtml('/clone')} ${codeHtml('<channel_id> community')}`, 'Backfills history via the userbot, then keeps following live. Targets: community (default), personal/both (GOD only).'),
       spacer,
       richParagraph('<b>Groups & forum topics</b>'),
-      cmd(4, `${codeHtml('/clone')} ${codeHtml('&lt;group_id&gt; community')}`, 'Whole group; forums clone topic-by-topic automatically. One topic only: add the topic id — or run /clone inside the topic.'),
-      cmd(5, `${codeHtml('/uclone')} ${codeHtml('&lt;chat_id&gt; [topic_id] community|personal|both')}`, 'Explicit userbot clone — the GOD-only way to fill a personal brain.'),
+      cmd(4, `${codeHtml('/clone')} ${codeHtml('<group_id> community')}`, 'Whole group; forums clone topic-by-topic automatically. One topic only: add the topic id — or run /clone inside the topic.'),
+      cmd(5, `${codeHtml('/uclone')} ${codeHtml('<chat_id> [topic_id] community|personal|both')}`, 'Explicit userbot clone — the GOD-only way to fill a personal brain.'),
       spacer,
       richParagraph('<b>Userbot (GOD, DM only)</b>'),
-      cmd(6, `${codeHtml('/userbotconnect')} ${codeHtml('&lt;api_id&gt; &lt;api_hash&gt; &lt;session&gt; &lt;community_id&gt;')}`, 'Stores the session powering history backfills. It is a secret — never paste it in a group; revoke it in Telegram Settings → Devices when done.'),
+      cmd(6, `${codeHtml('/userbotconnect')} ${codeHtml('<api_id> <api_hash> <session> <community_id>')}`, 'Stores the session powering history backfills. It is a secret — never paste it in a group; revoke it in Telegram Settings → Devices when done.'),
       cmd(7, `${codeHtml('/userbot_status')} · ${codeHtml('/userbot_disconnect')}`, 'Check the connection and follows, or wipe the session.'),
       spacer,
       richParagraph('<b>Control</b>'),
-      cmd(8, `${codeHtml('/stats')} · ${codeHtml('/clone_stop')} ${codeHtml('[chat_id]')} · ${codeHtml('/delete')} ${codeHtml('&lt;chat_id&gt;')}`, 'Live counters, stop a running clone, or delete a cloned chat\'s data.'),
+      cmd(8, `${codeHtml('/stats')} · ${codeHtml('/clone_stop')} ${codeHtml('[chat_id]')} · ${codeHtml('/delete')} ${codeHtml('<chat_id>')}`, 'Live counters, stop a running clone, or delete a cloned chat\'s data.'),
       cmd(9, `${codeHtml('/tag_untagged')} · ${codeHtml('/forcetags')}`, 'GOD: tag links that have no tags, or force AI re-tagging of everything.'),
       spacer,
       richParagraph(`<b>Recipe:</b> ${codeHtml('/channel_link')} → ${codeHtml('/userbotconnect')} → ${codeHtml('/clone')} → ${codeHtml('/stats')} → ${codeHtml('/clone_stop')}`),
@@ -7840,7 +7840,7 @@ function helpTextForSection(section, isGod = false) {
       spacer,
       richParagraph('<b>Brains & targets</b>'),
       cmd(1, `${codeHtml('/personal')} · ${codeHtml('/community')} · ${codeHtml('/mode')}`, 'Where your dumps land: private brain or the linked community.'),
-      cmd(2, `${codeHtml('/channel_target')} ${codeHtml('&lt;channel_id&gt; community|personal|both')}`, 'Re-route a linked channel\'s indexing target.'),
+      cmd(2, `${codeHtml('/channel_target')} ${codeHtml('<channel_id> community|personal|both')}`, 'Re-route a linked channel\'s indexing target.'),
       cmd(3, `${codeHtml('/dumpall')} ${codeHtml('on|off')} · ${codeHtml('/dumpsmart')}`, 'Every URL in a post, or the primary one only.'),
       spacer,
       richParagraph('<b>Tagging & structure</b>'),
@@ -7855,10 +7855,10 @@ function helpTextForSection(section, isGod = false) {
       richParagraph('<b>Channels, cloning & userbot</b>'),
       cmd(9, `${codeHtml('/channel_link')} · ${codeHtml('/channel_unlink')} · ${codeHtml('/topic_link')} · ${codeHtml('/topic_list')}`, 'Bind channels and forum topics to brains.'),
       cmd(10, `${codeHtml('/userbotconnect')} · ${codeHtml('/userbot_del')} · ${codeHtml('/userbot_disconnect')}`, 'Manage the userbot session (DM only — the session string is a secret).'),
-      cmd(11, `${codeHtml('/transfers')} · ${codeHtml('/clone_del')} ${codeHtml('&lt;transfer_id&gt;')}`, 'List clone sessions or delete one clone\'s imported data.'),
+      cmd(11, `${codeHtml('/transfers')} · ${codeHtml('/clone_del')} ${codeHtml('<transfer_id>')}`, 'List clone sessions or delete one clone\'s imported data.'),
       spacer,
       richParagraph('<b>Instance</b>'),
-      cmd(12, `${codeHtml('/setlogchannel')} ${codeHtml('&lt;chat_id&gt;')}`, 'Mirror operational events to a log channel.'),
+      cmd(12, `${codeHtml('/setlogchannel')} ${codeHtml('<chat_id>')}`, 'Mirror operational events to a log channel.'),
       cmd(13, `${codeHtml('/logs')} ${codeHtml('[n|clear]')}`, 'Tail the in-app structured log (last n lines, default 30) — no SSH needed.'),
       cmd(14, `${codeHtml('/clear_personal_db')} · ${codeHtml('/restart')}`, 'Wipe your personal brain (confirm with YES) or restart the self-host service.'),
       spacer,
@@ -7882,7 +7882,7 @@ function helpTextForSection(section, isGod = false) {
     ...sections.map(x => `<p>${x}</p>`),
     spacer,
     richParagraph('<b>Quick start (members)</b>'),
-    '<blockquote>1. Join the community Telegram group<br>2. Login on the website with Telegram<br>3. ' + codeHtml('/community_join &lt;id&gt;') + ' in the bot DM<br>4. Paste links → ' + codeHtml('/search') + ' · ' + codeHtml('/ai') + '</blockquote>',
+    '<blockquote>1. Join the community Telegram group<br>2. Login on the website with Telegram<br>3. ' + codeHtml('/community_join <id>') + ' in the bot DM<br>4. Paste links → ' + codeHtml('/search') + ' · ' + codeHtml('/ai') + '</blockquote>',
     spacer,
     richParagraph('<i>Settings, AI keys and bot setup live on the website. Tap any #tag chip to search it.</i>')
   ].join('\n');
@@ -9868,6 +9868,16 @@ async function importBackupSql(env, sqlText, { onProgress = null } = {}) {
 
   await ensureSearchColumns(env);
   await ensureLinkMetaColumns(env);
+  // Backups from older/newer schemas can carry columns this instance doesn't
+  // have yet (e.g. transfer_id before the first clone) — intersect with the
+  // live table columns so INSERTs never reference missing columns.
+  const liveCols = { links: new Set(), personal_links: new Set(), uploaded_documents: new Set() };
+  for (const t of Object.keys(liveCols)) {
+    try {
+      const res = await env.DB.prepare('SELECT column_name AS c FROM information_schema.columns WHERE table_name = ?').bind(t).all();
+      for (const r of (res && res.results) || []) liveCols[t].add(String(r.c));
+    } catch (_) {}
+  }
 
   // Preload existing URL identities per scope once — dedupe in memory instead
   // of one SELECT per row (a 2.5k-link backup becomes 2 queries, not 5k).
@@ -9909,6 +9919,7 @@ async function importBackupSql(env, sqlText, { onProgress = null } = {}) {
         for (const c of IMPORT_LINK_COLUMNS[t.name]) {
           if (c === 'id' || c === t.scopeCol) continue;
           if (!(c in row)) continue;
+          if (liveCols[t.name].size && !liveCols[t.name].has(c)) continue;
           cols.push(c);
           vals.push(c === 'url' ? url : c === 'url_hash' ? newHash : c === 'search_blob' ? null : row[c]);
         }
@@ -9940,7 +9951,8 @@ async function importBackupSql(env, sqlText, { onProgress = null } = {}) {
       if (docSet.has(srcKey) || docSet.has(`||${(row.scope || 'community')}|${row.filename || ''}`) || docSet.has(fileKey)) { report.docsSkipped++; continue; }
       docSet.add(srcKey); docSet.add(fileKey);
       let id = row.id ? String(row.id) : `doc_${randomToken().slice(0, 12)}`;
-      const cols = Object.keys(row).filter(c => c !== 'id');
+      const docLive = liveCols.uploaded_documents;
+      const cols = Object.keys(row).filter(c => c !== 'id' && (!docLive.size || docLive.has(c)));
       const vals = cols.map(c => row[c]);
       await env.DB.prepare(`INSERT INTO uploaded_documents ("id", ${cols.map(c => `"${c}"`).join(', ')}) VALUES (?, ${cols.map(() => '?').join(', ')})`).bind(id, ...vals).run();
       report.docsInserted++;
@@ -10630,8 +10642,18 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        try {
          const chk = await telegramApi(probeTok, 'getChat', { chat_id: cid });
          const ctype = chk?.result?.type || '';
-         if (!chk?.ok || !chk?.result || ctype !== 'channel') {
-           await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} ID ${codeHtml(cid)} is not a channel (type=${escHtml(ctype||'unknown')}). Use channel ID (-100...).`, forumThreadId);
+         if (!chk?.ok || !chk?.result) {
+           const why = chk?.description || 'getChat failed';
+           await sendTelegramFormatted(token, chatId, [
+             `${boldHtml('⚠️')} Can't see chat ${codeHtml(cid)} — ${escHtml(why)}.`,
+             '',
+             `Most common cause: the bot is not an admin there yet.`,
+             `Add Athena as an administrator to the channel ${boldHtml('first')}, then run ${codeHtml('/setlogchannel ' + cid)} again.`
+           ].join('\n'), forumThreadId);
+           return new Response('OK', { status: 200, headers: corsHeaders });
+         }
+         if (ctype !== 'channel') {
+           await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} ID ${codeHtml(cid)} is a ${codeHtml(ctype || 'unknown')}, not a channel. Use the channel ID (-100…).`, forumThreadId);
            return new Response('OK', { status: 200, headers: corsHeaders });
          }
        } catch (e) {
@@ -14515,7 +14537,8 @@ async function ensureLinkMetaColumns(env) {
     `ALTER TABLE links ADD COLUMN site_name TEXT`,
     `ALTER TABLE links ADD COLUMN metadata_version INTEGER DEFAULT 0`,
     `ALTER TABLE links ADD COLUMN source_chat_id TEXT`,
-    `ALTER TABLE links ADD COLUMN source_message_id TEXT`
+    `ALTER TABLE links ADD COLUMN source_message_id TEXT`,
+    `ALTER TABLE links ADD COLUMN transfer_id TEXT`
   ]) {
     try { await env.DB.prepare(sql).run(); } catch (_) {}
   }
