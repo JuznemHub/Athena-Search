@@ -2816,7 +2816,9 @@ async function syncTelegramCommandMenu(env, token) {
     calls.push(telegramApi(token, 'setMyCommands', { commands: TELEGRAM_COMMAND_MENU, scope: { type: 'chat', chat_id: Number(gid) } }));
   }
   const results = await Promise.allSettled(calls);
-  return results.map(r => r.status === 'fulfilled' ? !!r.value?.ok : false);
+  const oks = results.map(r => r.status === 'fulfilled' ? !!r.value?.ok : false);
+  logInfo('tg-menu', `setMyCommands: ${oks.filter(Boolean).length}/${oks.length} ok (default + ${godIds.length} GOD chats)`, oks.some(x => !x) ? JSON.stringify(results.filter(r => r.status === 'rejected').map(r => String(r.reason)).slice(0, 2)) : null);
+  return oks;
 }
 
 export { syncTelegramCommandMenu, ensureTelegramWebhook };
@@ -2833,7 +2835,10 @@ export async function syncInstanceTelegramCommands(env) {
       if (row?.bot_token) token = await decryptBotToken(env, row.bot_token) || '';
     }
     if (/:/.test(token)) await syncTelegramCommandMenu(env, token);
-  } catch (_) {}
+    else logWarn('tg-menu', 'no bot token resolved — command menus not synced');
+  } catch (e) {
+    logError('tg-menu', 'sync failed', e?.message || String(e));
+  }
 }
 
 async function ensureTelegramWebhook(token, workerOrigin, env) {
