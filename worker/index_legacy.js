@@ -417,7 +417,9 @@ export default {
           return deny(corsHeaders, 'Model catalog is GOD rank only', 'GOD_ONLY');
         }
         const qBase = String(url.searchParams.get('base') || '').trim();
-        const qKey = String(url.searchParams.get('key') || '').trim();
+        // Prefer the x-ai-key header — a key in the query string ends up in
+        // reverse-proxy and access logs.
+        const qKey = String(request.headers.get('x-ai-key') || url.searchParams.get('key') || '').trim();
         const inst = await getInstanceAiConfig(env);
         // Testing an unsaved endpoint requires the paired set — mixing a
         // caller's base with the stored key would ship the secret elsewhere.
@@ -5112,15 +5114,28 @@ function normalizeModelId(model, baseUrl) {
   if (/opencode\.ai/i.test(baseUrl || '') || /^opencode/i.test(m)) {
     m = m.replace(/^opencode-go\//i, '').replace(/^opencode\//i, '');
   }
-  // Normalize display names like "Big Pickle" -> "big-pickle"
-  // Handles caps, spaces, underscores pasted from UI/docs
+  // Preserve the ":free"/":nitro"/":extended" suffix — OpenRouter model ids
+  // break without it. Normalize display names ("DeepSeek R1 :free" ->
+  // "deepseek-r1:free"), keeping colons attached to a known suffix.
+  const suffix = /:(free|nitro|extended|thinking|beta)$/i.exec(m)?.[1]?.toLowerCase() || '';
+  if (suffix) m = m.slice(0, m.length - suffix.length - 1);
   if (/[A-Z\s]/.test(m)) {
     m = m.toLowerCase().replace(/[\s_]+/g, '-').replace(new RegExp('[^a-z0-9/.-]', 'g'), '');
     m = m.replace(/-+/g, '-').replace(/^-|-$/g, '');
   } else {
     m = m.trim().replace(/-+/g, '-');
   }
-  return m;
+  return suffix ? `${m}:${suffix}` : m;
+}
+
+// OpenRouter asks for optional attribution headers; harmless for others.
+function aiUpstreamHeaders(baseUrl, apiKey) {
+  const h = { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` };
+  if (/openrouter\.ai/i.test(String(baseUrl || ''))) {
+    h['HTTP-Referer'] = 'https://athena-search.app';
+    h['X-Title'] = 'Athena Search';
+  }
+  return h;
 }
 
 /** Time-to-first-byte budget for the upstream model call; a cold model is slow. */
@@ -5195,19 +5210,19 @@ async function callAiChatShared(env, { baseUrl, apiKey, mode, model, system, use
       } else if (curEndpoint.endsWith('/responses')) {
         res = await fetchWithTimeout(curEndpoint, {
           method: 'POST', env, redirect: 'error', allowPrivate: true,
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+          headers: aiUpstreamHeaders(base, key),
           body: JSON.stringify({ model: curModel, input: system ? `${system}\n\n${userMsg}` : userMsg })
         }, AI_PROXY_TIMEOUT_MS);
       } else {
         res = await fetchWithTimeout(curEndpoint, {
           method: 'POST', env, redirect: 'error', allowPrivate: true,
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+          headers: aiUpstreamHeaders(base, key),
           body: JSON.stringify({ model: curModel, messages: [{ role: 'system', content: system || '' }, { role: 'user', content: userMsg }], temperature, max_tokens: maxTokens })
         }, AI_PROXY_TIMEOUT_MS);
       }
       if (!res.ok) {
         const text = await res.text().catch(() => '');
-        const retryable = res.status === 429 || res.status === 503 || res.status === 502 || res.status === 500 || res.status === 401 || res.status === 402;
+        const retryable = [429, 503, 502, 500, 401, 402, 404].includes(res.status) || (res.status === 400 && /model|no endpoints|not a valid/i.test(text || ''));
         const retryAfter = parseInt(res.headers.get('retry-after') || res.headers.get('Retry-After') || '0', 10);
         if (retryable && mi < tryModels.length - 1) {
           const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 400 * (mi + 1);
@@ -5370,21 +5385,22 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
                 const input = effectiveMessages ? effectiveMessages.map(m => `${m.role}: ${m.content}`).join('\n\n') : (effectiveSystem ? `${effectiveSystem}\n\n${effectiveUser}` : effectiveUser);
                 curRes = await fetchWithTimeout(endpoint, {
                   method: 'POST', env, redirect: 'error', allowPrivate: true,
-                  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+                  headers: aiUpstreamHeaders(baseUrl, apiKey),
                   body: JSON.stringify({ model: curModel, input })
                 }, AI_PROXY_TIMEOUT_MS);
               } else {
                 const msgs = effectiveMessages || [...(effectiveSystem ? [{ role: 'system', content: effectiveSystem }] : []), { role: 'user', content: effectiveUser }];
                 curRes = await fetchWithTimeout(endpoint, {
                   method: 'POST', env, redirect: 'error', allowPrivate: true,
-                  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+                  headers: aiUpstreamHeaders(baseUrl, apiKey),
                   body: JSON.stringify({ model: curModel, messages: msgs, temperature: body.temperature ?? 0.2, max_tokens: maxTok, ...(doStream ? { stream: true } : {}) })
                 }, AI_PROXY_TIMEOUT_MS);
               }
 
               if (!curRes.ok) {
                 const text = await curRes.text();
-                const isRetryable = curRes.status===429 || curRes.status===503 || curRes.status===502 || curRes.status===500 || curRes.status===401 || curRes.status===402;
+                const isRetryable = [429, 503, 502, 500, 401, 402, 404].includes(curRes.status)
+                  || (curRes.status === 400 && /model|no endpoints|not a valid/i.test(text || ''));
                 const retryAfter = parseInt(curRes.headers.get('retry-after')||curRes.headers.get('Retry-After')||'0',10);
                 const waitMs = Number.isFinite(retryAfter) && retryAfter>0 ? retryAfter*1000 : 400*(mi+1);
                 if (doStream && ai < streamAttempts.length-1) {
@@ -5465,7 +5481,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
             let j; try { j = JSON.parse(p); } catch (_) { continue; }
             const d = j.choices?.[0]?.delta || {};
             if (d.content) contentBuf += d.content;
-            if (d.reasoning_content) reasonBuf += d.reasoning_content;
+            if (d.reasoning_content || d.reasoning) reasonBuf += (d.reasoning_content || d.reasoning);
           }
           let content = contentBuf || reasonBuf;
           let thinkingOut = reasonBuf || null;
@@ -5473,9 +5489,44 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
             let data = {};
             try { data = JSON.parse(text); } catch (_) {}
             if (mode === 'anthropic') content = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
-            else content = data.choices?.[0]?.message?.content || data.choices?.[0]?.text || data.output_text || '';
+            else content = data.choices?.[0]?.message?.content || data.choices?.[0]?.message?.reasoning_content || data.choices?.[0]?.text || data.output_text || '';
           }
           return Response.json({ success: true, content, thinking: thinkingOut, endpoint, model, usage: null }, { headers: corsHeaders });
+        }
+
+        // Some providers refuse stream:true and return one plain JSON body.
+        // Converting it here prevents the SSE reader from yielding zero deltas
+        // (an empty answer card).
+        if (_upstreamIsPlainJson) {
+          const text = await upstreamRes.text();
+          let data = {};
+          try { data = JSON.parse(text); } catch (_) {}
+          let content = '';
+          let thinking = null;
+          if (mode === 'anthropic') {
+            content = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
+          } else {
+            const msg0 = data.choices?.[0]?.message || {};
+            content = msg0.content || data.choices?.[0]?.text || data.output_text || '';
+            thinking = msg0.reasoning_content || msg0.reasoning || null;
+          }
+          if (!content && thinking) content = thinking;
+          const encoder = new TextEncoder();
+          return new Response(new ReadableStream({
+            start(controller) {
+              if (thinking) controller.enqueue(encoder.encode(`data: ${JSON.stringify({ thinking })}\n\n`));
+              const chunk = 80;
+              if (content) {
+                for (let i = 0; i < content.length; i += chunk) {
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ delta: content.slice(i, i + chunk) })}\n\n`));
+                }
+              } else {
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: 'Provider returned an empty response' })}\n\n`));
+              }
+              controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+              controller.close();
+            }
+          }), { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', ...corsHeaders } });
         }
 
         const reader = upstreamRes.body.getReader();
@@ -5515,11 +5566,11 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
                       contentSeen += d.content;
                       controller.enqueue(encoder.encode(`data: ${JSON.stringify({ delta: d.content })}\n\n`));
                     }
-                    if (d.reasoning_content) {
-                      reasonBuf += d.reasoning_content;
-                      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ thinking: d.reasoning_content })}\n\n`));
+                    if (d.reasoning_content || d.reasoning) {
+                      reasonBuf += (d.reasoning_content || d.reasoning);
+                      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ thinking: (d.reasoning_content || d.reasoning) })}\n\n`));
                     }
-                    if (!d.content && !d.reasoning_content) {
+                    if (!d.content && !d.reasoning_content && !d.reasoning) {
                       const text = j.choices?.[0]?.text || '';
                       if (text) {
                         contentSeen += text;
@@ -6282,7 +6333,7 @@ async function runTagSearch(env, token, chatId, scope, scopeKey, tag, threadId =
   const botUsername = await tagDeeplinkBotUsername(env);
   const scopeCol = scope === 'personal' ? 'user_id' : 'community_id';
   const table = scope === 'personal' ? 'personal_links' : 'links';
-  let rows = [];
+  let rows;
   try {
     const res = await env.DB.prepare(
       `SELECT * FROM ${table} WHERE ${scopeCol} = ? AND tags LIKE ? ORDER BY created_at DESC LIMIT 10`
@@ -9395,7 +9446,7 @@ let urls = extractUrlsFromTelegramMessage(msg);
 if (!urls.length) urls = extractUrls(text);
 if (!urls.length) {
   // Bare "#tag" message → tag search instead of silence.
-  const bareTag = !cmd && /^#[a-zA-Z0-9][\w-]{0,39}$/.test(String(text || '').trim())
+  const bareTag = (!cmd || cmd.startsWith('#')) && /^#[a-zA-Z0-9][\w-]{0,39}$/.test(String(text || '').trim())
     ? text.trim().slice(1).toLowerCase()
     : null;
   if (bareTag && !['telegram', 'community', 'personal', 'dump'].includes(bareTag)) {
@@ -9623,7 +9674,7 @@ async function structureDatabase(env) {
         rows = cursor
           ? (await env.DB.prepare(`SELECT id, ${t.scopeCol} AS scope_id, ${t.cols} FROM ${t.name} WHERE id > ? ORDER BY id LIMIT 400`).bind(cursor).all())?.results || []
           : (await env.DB.prepare(`SELECT id, ${t.scopeCol} AS scope_id, ${t.cols} FROM ${t.name} ORDER BY id LIMIT 400`).all())?.results || [];
-      } catch (e) { stats.errors++; break; }
+      } catch { stats.errors++; break; }
       if (!rows.length) break;
       cursor = rows[rows.length - 1].id;
       for (const row of rows) {
@@ -12505,17 +12556,17 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         }
         scope = arg;
       } else {
-        await sendTelegramMessage(token, chatId,
-          `Current dump mode: ${scope}${binding.community_id ? `\nCommunity: ${binding.group_name || binding.community_id}` : ''}\n/personal or /community to switch.`, forumThreadId);
+        await sendTelegramFormatted(token, chatId,
+          `${boldHtml('Current dump mode:')} ${codeHtml(scope)}${binding.community_id ? `<br>${boldHtml('Community:')} ${escHtml(binding.group_name || binding.community_id)}` : ''}<br>${codeHtml('/personal')} or ${codeHtml('/community')} to switch.`, forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
     }
     await env.DB.prepare(`UPDATE community_bots SET scope = ? WHERE id = ?`).bind(scope, binding.id).run();
     binding.scope = scope;
-    await sendTelegramMessage(token, chatId,
+    await sendTelegramFormatted(token, chatId,
       scope === 'personal'
-        ? 'Mode: PERSONAL. Links you paste save to your personal brain. /search → personal.'
-        : `Mode: COMMUNITY. Links save to community brain${binding.group_name ? ` (${binding.group_name})` : ''}. Members can paste links. /search → community.`, forumThreadId);
+        ? `${boldHtml('Mode: PERSONAL 🧠')} Links you paste save to your personal brain. ${codeHtml('/search')} → personal.`
+        : `${boldHtml('Mode: COMMUNITY 👥')} Links save to the community brain${binding.group_name ? ` (${escHtml(binding.group_name)})` : ''}. Members can paste links. ${codeHtml('/search')} → community.`, forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
@@ -14493,6 +14544,9 @@ async function fetchModelList(baseUrl, env, apiKey) {
   // or keeps a model the endpoint no longer serves.
   let live = null;
   const url = `${root}/models`;
+  const cacheKey = `${root}|${apiKey ? 'k' : 'n'}`;
+  const cachedList = AI_MODEL_LIST_CACHE.get(cacheKey);
+  if (cachedList && cachedList.expires > Date.now()) return cachedList.list;
   try {
     const endpoint = new URL(url.startsWith('http') ? url : `https://${url}`);
     if (await isAllowedAiEndpoint(endpoint, env)) {
@@ -14547,7 +14601,10 @@ async function fetchModelList(baseUrl, env, apiKey) {
       return m ? { ...e, name: e.name || m.name, cost: e.cost || m.cost, limit: e.limit || m.limit } : e;
     });
   }
-  if (live) return live;
+  if (live) {
+    AI_MODEL_LIST_CACHE.set(cacheKey, { list: live, expires: Date.now() + 5 * 60_000 });
+    return live;
+  }
   if (meta) {
     const list = Object.entries(meta).map(([id, m]) => ({ id, ...m }));
     if (list.length) return list;

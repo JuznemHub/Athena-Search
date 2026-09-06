@@ -667,3 +667,40 @@ body::before {
 .ui-locked { opacity: 0.45; filter: grayscale(0.35); pointer-events: none; user-select: none; }
 .mode-pill-locked { opacity: 0.4; cursor: not-allowed !important; }
 .scope-locked { opacity: 0.45; cursor: not-allowed !important; }
+
+/* ===== Responsive refinement pass (desktop / tablet / mobile) ===== */
+
+/* Fluid hero type: scales with viewport instead of jumping at breakpoints. */
+.hero-title {
+  font-size: clamp(1.55rem, 3.6vw + 0.6rem, var(--fs-xl)) !important;
+}
+
+/* Tablets (721–1024px): the base 780px column already fits, but cap it a
+   touch for comfortable line length and give drawers a fixed width instead
+   of sliding to 100% (that behavior stays mobile-only below 720px). */
+@media (min-width: 721px) and (max-width: 1024px) {
+  .main-content { max-width: 680px; }
+  .side-drawer { width: min(400px, 88vw) !important; }
+  .top-bar { padding: 12px 20px; }
+  .mode-pills { max-width: 480px; }
+}
+
+/* Phones: roomier search bar, taller tap targets, and result rows that
+   don't crush the favicon + action row against 320px screens. */
+@media (max-width: 720px) {
+  .search-bar-box { padding: var(--s-2) var(--s-2); border-radius: var(--radius-md, 14px); }
+  .search-bar-box #searchInput { min-height: 44px; }
+  .g-result { padding: var(--s-2) var(--s-2); }
+  .g-title { font-size: 1rem; }
+  .g-cite { white-space: normal; overflow-wrap: anywhere; }
+  .hero-sub { font-size: 0.95rem !important; }
+  /* Bottom scope bar must never overlap the last result on short phones. */
+  .main-content { padding-bottom: max(140px, env(safe-area-inset-bottom) + 110px) !important; }
+  .chat-answer-content table { display: block; overflow-x: auto; }
+  .chat-answer-content pre { overflow-x: auto; }
+}
+
+/* Large desktops: give the SERP a little more air instead of a stretched column. */
+@media (min-width: 1600px) {
+  .main-content { max-width: 820px; }
+}
