@@ -2811,9 +2811,12 @@ async function syncTelegramCommandMenu(env, token) {
   if (!token) return;
   const calls = [telegramApi(token, 'setMyCommands', { commands: TELEGRAM_COMMAND_MENU })];
   const godIds = String(env.TG_OWNER_IDS || '').split(',').map(s => s.trim()).filter(/^-?\d+$/.test.bind(/^-?\d+$/));
+  // Chat scope REPLACES the default menu for that chat, so GOD chats get one
+  // merged list (public commands first, GOD-only appended) — not two racing
+  // calls where the default list can land last and wipe the GOD entries.
+  const godMerged = [...TELEGRAM_COMMAND_MENU, ...TELEGRAM_GOD_COMMAND_MENU.filter(g => !TELEGRAM_COMMAND_MENU.some(c => c.command === g.command))];
   for (const gid of godIds) {
-    calls.push(telegramApi(token, 'setMyCommands', { commands: TELEGRAM_GOD_COMMAND_MENU, scope: { type: 'chat', chat_id: Number(gid) } }));
-    calls.push(telegramApi(token, 'setMyCommands', { commands: TELEGRAM_COMMAND_MENU, scope: { type: 'chat', chat_id: Number(gid) } }));
+    calls.push(telegramApi(token, 'setMyCommands', { commands: godMerged, scope: { type: 'chat', chat_id: Number(gid) } }));
   }
   const results = await Promise.allSettled(calls);
   const oks = results.map(r => r.status === 'fulfilled' ? !!r.value?.ok : false);
