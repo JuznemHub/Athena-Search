@@ -6323,6 +6323,10 @@ async function startTelegramSearch(env, token, chatId, tgUserId, scope, scopeKey
   return sendTelegramRichMessage(token, chatId, view.html, threadId, searchRichButtonRow(session.id, view.page, view.total));
 }
 
+function isPrivChat(msg, chatId) {
+  return !(String(msg?.chat?.type || '').includes('group') || String(chatId).startsWith('-'));
+}
+
 // Tag search: precise match on the tags JSON column, newest first.
 // Used by tag deep-links (t.me/<bot>?start=tag_<tag>) and bare "#tag" messages.
 async function runTagSearch(env, token, chatId, scope, scopeKey, tag, threadId = null) {
@@ -9453,6 +9457,13 @@ if (!urls.length) {
     if (tagScope && tagScopeKey) {
       await runTagSearch(env, token, chatId, tagScope, tagScopeKey, bareTag, forumThreadId);
       return;
+    }
+    if (isPrivChat(msg, chatId)) {
+      await sendTelegramFormatted(token, chatId,
+        isGod
+          ? `${boldHtml('🏷')} Tag search needs your brain linked. Login on the website with Telegram first (then ${codeHtml('#' + bareTag)} works here).`
+          : `${boldHtml('🏷')} Join a community first: ${codeHtml('/community_list')} → ${codeHtml('/community_join <id>')}.`,
+        forumThreadId);
     }
   }
   if (cmd && cmd.startsWith('/')) {
