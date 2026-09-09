@@ -9193,7 +9193,7 @@ async function doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUs
   if(_minId || _maxId){
     await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET label=excluded.label, community_id=excluded.community_id, target=excluded.target, created_by=excluded.created_by`).bind(chatIdN, label, communityIdArg || null, targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
     await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: '', communityName, userbotLabel: label, minId: _minId, maxId: _maxId });
-    await sendTelegramRichMessage(token, chatId, richParagraph(`${boldHtml('🧬 Cloning range')} ${codeHtml(_minId||'0')}→${codeHtml(_maxId||'∞')} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}`) + '\n' + richParagraph(`${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`), forumThreadId).catch(()=>{});
+    await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning range')} ${codeHtml(_minId||'0')}→${codeHtml(_maxId||'∞')} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}\n${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
     return;
   }
   // topic-wise if forum
@@ -9209,13 +9209,18 @@ async function doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUs
         await new Promise(r=>setTimeout(r, 800));
       } catch(e){ console.error('topic clone failed', e?.message); }
     }
-    await sendTelegramRichMessage(token, chatId, richParagraph(`${boldHtml('🧬 Cloning '+started+' topics')} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}`) + '\n' + richParagraph(`${italicHtml('Each topic backfills + live indexing afterwards.')}`) + '\n' + richParagraph(`${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`), forumThreadId).catch(()=>{});
+    await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning '+started+' topics')} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}
+${italicHtml('Each topic backfills + live indexing afterwards.')}
+${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
     return;
   }
   // non-forum: single
   await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET label=excluded.label, community_id=excluded.community_id, target=excluded.target, created_by=excluded.created_by`).bind(chatIdN, label, communityIdArg || null, targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
   await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: '', communityName, userbotLabel: label });
-  await sendTelegramRichMessage(token, chatId, richParagraph(`${boldHtml('🧬 Cloning this chat')} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}`) + '\n' + richParagraph(`• Live: every new post lands automatically<br>• History: backfill running below`) + '\n' + richParagraph(`${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`), forumThreadId).catch(()=>{});
+  await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning this chat')} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}
+• Live: every new post lands automatically
+• History: backfill running below
+${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
 }
 
 const INDEX_BATCH = 100;
@@ -9317,7 +9322,9 @@ function progressBar(done, total, width = 18) {
   return { bar: '▮'.repeat(filled) + '▯'.repeat(width - filled), pct };
 }
 
-/** Full backfill progress card (header + bar + per-type counts). Pure. */
+/** Full backfill progress card (header + bar + per-type counts). Pure. Classic
+ *  HTML: the rich bridge does not exist in this setup, so classic is what
+ *  renders — keep it first-class instead of relying on fallback. */
 function formatBackfillProgress(o) {
   const { bar, pct } = progressBar(o.done, o.total);
   const parts = [`${bar} ${pct}%`, `${o.done}${o.total && o.total >= o.done ? `/${o.total}` : ''} msgs`];
@@ -9329,14 +9336,11 @@ function formatBackfillProgress(o) {
   if (o.urls) parts.push(`${o.urls} urls found`);
   if (o.skipped) parts.push(`${o.skipped} media skipped`);
   const where = o.threadId ? `#${o.threadId}` : (o.chatId || '');
-  return [
-    richParagraph(`${boldHtml('🗂 Backfill')}${o.name ? ` ${boldHtml(escHtml(o.name))}` : ''} ${codeHtml(where)}`),
-    richParagraph(codeHtml(parts.join(' · '))),
-    richParagraph(italicHtml('/index_stop to stop · /del ' + (o.chatId || '') + ' to delete')),
-  ].join('\n');
+  const head = `${boldHtml('🗂 Backfill')}${o.name ? ` ${boldHtml(escHtml(o.name))}` : ''} ${codeHtml(where)}`;
+  return `${head}\n${codeHtml(parts.join(' · '))}\n${italicHtml('/index_stop to stop · /del ' + (o.chatId || '') + ' to delete')}`;
 }
 
-/** Backfill completion card. Pure. */
+/** Backfill completion card. Pure. Classic HTML (see above). */
 function formatBackfillDone(o) {
   const icon = o.status === 'done' ? '✅' : '⏸';
   const where = o.name ? `${boldHtml(escHtml(o.name))} ${codeHtml(o.chatId || '')}` : codeHtml(o.chatId || '');
@@ -9344,13 +9348,8 @@ function formatBackfillDone(o) {
   if (o.dupes) counts.push(`${o.dupes} dupes already saved`);
   if (o.pdfs) counts.push(`${o.pdfs} pdfs`);
   if (o.files) counts.push(`${o.files} files`);
-  const out = [
-    richHeading(3, `${icon} Backfill ${o.status || 'done'}`),
-    richParagraph(where),
-    richParagraph(counts.join(' · ') + ' saved.'),
-  ];
-  if (o.live) out.push(richParagraph(`${o.live.emoji} ${escHtml(o.live.label)}`));
-  return out.join('\n');
+  const live = o.live ? `\n${o.live.emoji} ${escHtml(o.live.label)}` : '';
+  return `${icon} Backfill ${o.status || 'done'}: ${where}\n${counts.join(' · ')} saved.${live}`;
 }
 
 /** Live-follow indicator. Pure. accountConnected = userbot session alive in
@@ -9386,9 +9385,8 @@ async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser,
        VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(jobId, communityIdArg, cid, athenaUser.id, chatId, Date.now(), Date.now(), threadArg || null, minId ? Number(minId) : null, maxId ? Number(maxId) : null, chatName || null).run();
   runInBackground(env, runHistoryIndexJob(env, { id: jobId, community_id: communityIdArg, chat_id: cid, thread_id: threadArg || null, userbot_label: userbotLabel || null, min_id: minId ? Number(minId) : null, max_id: maxId ? Number(maxId) : null, saved_files: 0, skipped_media: 0, offset_id: 0, processed: 0, saved_links: 0, saved_docs: 0, saved_pdfs: 0, dupes_skipped: 0, chat_name: chatName || '', progress_chat_id: chatId }, token));
-  await sendTelegramRichMessage(token, chatId,
-    richParagraph(`${boldHtml('▶️')} Backfill started for ${chatName ? `${boldHtml(escHtml(chatName))} ` : ''}${codeHtml(chatIdArg)}${threadArg ? ` topic ${codeHtml('#' + threadArg)}` : ''} → ${boldHtml(escHtml(communityName || communityIdArg))}.`) +
-    '\n' + richParagraph(`${italicHtml('Live progress below ·')} ${codeHtml('/index_stop')} ${italicHtml('to stop ·')} ${codeHtml('/del '+cid)} ${italicHtml('to delete.')}`),
+  await sendTelegramFormatted(token, chatId,
+    `${boldHtml('▶️')} Backfill started for ${chatName ? `${boldHtml(escHtml(chatName))} ` : ''}${codeHtml(chatIdArg)}${threadArg ? ` topic ${codeHtml('#' + threadArg)}` : ''} → ${boldHtml(escHtml(communityName || communityIdArg))}.\n${italicHtml('Live progress below ·')} ${codeHtml('/index_stop')} ${italicHtml('to stop ·')} ${codeHtml('/del '+cid)} ${italicHtml('to delete.')}`,
     forumThreadId).catch(() => {});
   return { ok: true, jobId };
 }
@@ -9411,9 +9409,9 @@ async function runHistoryIndexJob(env, job, token) {
     try {
       const text = formatBackfillProgress({ name: job.chat_name, chatId: job.chat_id, threadId: job.thread_id, done, total: job.total_messages || 0, links: job.saved_links, dupes: job.dupes_skipped, docs: job.saved_docs, pdfs: job.saved_pdfs, files: job.saved_files, urls: job.urls_seen, skipped: job.skipped_media });
       if (progressMsgId) {
-        await editTelegramRichMessage(token, job.progress_chat_id, progressMsgId, text).catch(() => {});
+        await telegramApi(token, 'editMessageText', { chat_id: job.progress_chat_id, message_id: progressMsgId, text, parse_mode: 'HTML' }).catch(() => {});
       } else {
-        const m = await sendTelegramRichMessage(token, job.progress_chat_id, text);
+        const m = await sendTelegramFormatted(token, job.progress_chat_id, text, null);
         progressMsgId = m?.message_id || null;
         if (progressMsgId) await env.DB.prepare('UPDATE index_jobs SET progress_msg_id = ? WHERE id = ?').bind(progressMsgId, job.id).run().catch(() => {});
       }
@@ -9651,10 +9649,10 @@ async function runHistoryIndexJob(env, job, token) {
     const live = followLiveness(accLive, folRow?.last_seen_at);
     const doneText = formatBackfillDone({ status: finalRow?.status || 'done', name: job.chat_name, chatId: job.chat_id, processed, links: savedLinks, dupes: Number(finalRow?.dupes_skipped ?? job.dupes_skipped ?? 0), docs: savedDocs, pdfs: Number(finalRow?.saved_pdfs ?? job.saved_pdfs ?? 0), files: job.saved_files, live });
     if (progressMsgId) {
-      await editTelegramRichMessage(token, job.progress_chat_id, progressMsgId, doneText).catch(() =>
-        sendTelegramRichMessage(token, job.progress_chat_id, doneText).catch(() => {}));
+      await telegramApi(token, 'editMessageText', { chat_id: job.progress_chat_id, message_id: progressMsgId, text: doneText, parse_mode: 'HTML' }).catch(() =>
+        sendTelegramFormatted(token, job.progress_chat_id, doneText).catch(() => {}));
     } else {
-      await sendTelegramRichMessage(token, job.progress_chat_id, doneText).catch(() => {});
+      await sendTelegramFormatted(token, job.progress_chat_id, doneText).catch(() => {});
     }
     // Session auto-delete when the job finishes cleanly — a stored user
     // session is a live account key; it should not outlive its purpose.
@@ -12015,10 +12013,10 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No clone/backfill sessions yet.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
-     const lines = results.map((j) => `<li>${codeHtml(j.id)}<br>${j.chat_name ? `${boldHtml(escHtml(j.chat_name))} ` : ''}${escHtml(j.chat_id)} · ${j.status} · ${j.processed || 0} msgs · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.dupes_skipped ? ` · ${j.dupes_skipped} dupes` : ''}${j.saved_files ? ` · ${j.saved_files} files` : ''}</li>`);
-       await sendTelegramRichMessage(token, chatId,
-         richHeading(3, '🗂 Clone sessions') + '\n<ul>' + lines.join('') + '</ul>' + '\n' + richParagraph(`${italicHtml('Delete one:')} ${codeHtml('/clone_del <id> [files]')}${italicHtml(' — add "files" to also wipe its vault media')}`),
-         forumThreadId);
+     const lines = results.map((j) => `• ${codeHtml(j.id)}\n  ${j.chat_name ? `${boldHtml(escHtml(j.chat_name))} ` : ''}${escHtml(j.chat_id)} · ${j.status} · ${j.processed || 0} msgs · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.dupes_skipped ? ` · ${j.dupes_skipped} dupes` : ''}${j.saved_files ? ` · ${j.saved_files} files` : ''}`);
+     await sendTelegramFormatted(token, chatId,
+       `${boldHtml('🗂 Clone sessions')}\n\n${lines.join('\n\n')}\n\n${italicHtml('Delete one:')} ${codeHtml('/clone_del <id> [files]')}${italicHtml(' — add "files" to also wipe its vault media')}`,
+       forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
@@ -12180,10 +12178,10 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
          }
        } catch (_) {}
        followLines.push(
-         richDetails(`${boldHtml(escHtml(name))} ${italicHtml(`[${f.target || 'community'}]`)}`,
-           richParagraph(`live: ${liveBits.join(' · ')}${USERBOT_ACCOUNTS.has(f.label) ? ' ' + italicHtml('(active — new posts clone automatically)') : ''}`) +
-           '\n' + richParagraph(bf) +
-           (topicLines.length ? '\n' + richParagraph(`${boldHtml('Topics:')}`) + '\n<ul>' + topicLines.map(t => `<li>${t.replace(/^ {4}/, '')}</li>`).join('') + '</ul>' : ''))
+         `• ${boldHtml(escHtml(name))} ${italicHtml(`[${f.target || 'community'}]`)}\n` +
+         `  live: ${liveBits.join(' · ')}${USERBOT_ACCOUNTS.has(f.label) ? ' ' + italicHtml('(active — new posts clone automatically)') : ''}\n` +
+         `  ${bf}` +
+         (topicLines.length ? `\n  ${boldHtml('Topics:')}\n${topicLines.join('\n')}` : '')
        );
      }
 
@@ -12193,12 +12191,10 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        errLines = (errs || []).map((e) => `• ${new Date(e.t).toISOString().slice(11, 19)} [${escHtml(e.label || '-')}] ${escHtml(String(e.error).slice(0, 110))}`);
      } catch (_) {}
 
-     await sendTelegramRichMessage(token, chatId,
-       richHeading(3, '🤖 Userbot status') +
-       '\n' + richParagraph(`${boldHtml('Accounts')}<br>${accLines.length ? accLines.join('<br>') : italicHtml('none — /userbot_add')}`) +
-       '\n' + richParagraph(`${boldHtml('📡 Channels/chats being indexed')}`) +
-       '\n' + (followLines.length ? followLines.join('\n') : richParagraph(italicHtml('none — run /clone inside a chat, or /clone <chat_id> in DM'))) +
-       (errLines.length ? '\n' + richParagraph(`${boldHtml('⚠️ Recent errors')}<br>${errLines.join('<br>')}`) : ''),
+     await sendTelegramFormatted(token, chatId,
+       `${boldHtml('🤖 Userbot status')}\n${boldHtml('Accounts')}\n${accLines.length ? accLines.join('\n') : italicHtml('none — /userbot_add')}` +
+       `\n\n${boldHtml('📡 Channels/chats being indexed')}\n${followLines.length ? followLines.join('\n\n') : italicHtml('none — run /clone inside a chat, or /clone <chat_id> in DM')}` +
+       (errLines.length ? `\n\n${boldHtml('⚠️ Recent errors')}\n${errLines.join('\n')}` : ''),
        forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
@@ -12232,8 +12228,8 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No backfill jobs yet. ${codeHtml('/clone')} to begin.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
-     const lines = results.map((j) => `<li>${j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'error' ? '❌' : '⏸'} ${j.chat_name ? `${boldHtml(escHtml(j.chat_name))} ` : ''}${codeHtml(j.chat_id)} — ${escHtml(j.status)}: ${j.processed || 0} scanned · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.dupes_skipped ? ` · ${j.dupes_skipped} dupes` : ''}<br>${codeHtml(j.id)} · delete: /clone_del ${codeHtml(j.id)}${j.error ? `<br>${escHtml(j.error)}` : ''}</li>`);
-     await sendTelegramRichMessage(token, chatId, richHeading(3, '🗂 Backfill jobs') + '\n<ul>' + lines.join('') + '</ul>', forumThreadId);
+     const lines = results.map((j) => `• ${codeHtml(j.id)} · ${j.status}\n  ${j.chat_name ? `${boldHtml(escHtml(j.chat_name))} ` : ''}${codeHtml(j.chat_id)} — ${j.processed || 0} scanned · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.dupes_skipped ? ` · ${j.dupes_skipped} dupes` : ''}\n   delete: /clone_del ${codeHtml(j.id)}${j.error ? `\n   ${escHtml(j.error)}` : ''}`);
+     await sendTelegramFormatted(token, chatId, `${boldHtml('🗂 Backfill jobs')}\n\n${lines.join('\n\n')}`, forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
