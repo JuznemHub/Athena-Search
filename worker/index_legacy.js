@@ -9006,7 +9006,9 @@ async function collectClonePreview(env, label, chatIdN){
       // not the count: deleted messages leave gaps, imported history can start
       // at an arbitrary id (the old code overstated Msgs by every deletion).
       try {
-        const { Api } = await import('telegram/tl');
+        // Runtime import like the backfill loader: the bundler cannot
+        // resolve the 'telegram/tl' directory specifier in /app.
+        const { Api } = await import('tele' + 'gram');
         const hist = await client.invoke(new Api.messages.GetHistory({ peer: chatIdN, offsetId: 0, offsetDate: 0, addOffset: 0, limit: 1, maxId: 0, minId: 0, hash: 0n }));
         if (hist && typeof hist.count === 'number') totalMsgs = hist.count;
       } catch (_) {}
@@ -15798,9 +15800,12 @@ async function getForumTopicsViaUserbot(env, chatId) {
     const label = results[0].label;
     const acc = USERBOT_ACCOUNTS.get(label);
     if (!acc?.client) return [];
-    // Use gramjs raw API: channels.GetForumTopics
+    // Use gramjs raw API: channels.GetForumTopics (runtime import — the
+    // bundler cannot resolve the 'telegram/tl' directory specifier in /app).
     const peer = await acc.client.getInputEntity(chatId);
-    const result = await acc.client.invoke(new (await import('telegram/tl')).Api.channels.GetForumTopics({ channel: peer }));
+    const _g = await import('tele' + 'gram');
+    const _Api = _g.Api || _g.tl?.Api;
+    const result = await acc.client.invoke(new _Api.channels.GetForumTopics({ channel: peer }));
     // result.topics is array of ForumTopic objects
     return (result?.topics || []).map(t => ({
       id: String(t.id),

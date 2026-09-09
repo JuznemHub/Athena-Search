@@ -36,7 +36,7 @@ async function unifiedClone(update,env,ctx){
   if(running){ await richSend(`<h3>⏳ Already running</h3><p>Clone for <code>${remote}</code> is already running — progress via /userbot_status.</p>`); return new Response('OK'); }
   const pend=await env.DB.prepare(`SELECT id FROM pending_clones WHERE chat_id=? AND expires_at>?`).bind(normRemote,Date.now()).first().catch(()=>null);
   if(pend){ await richSend(`<h3>⏳ Clone preview ready</h3><p>Preview for <code>${remote}</code> is ready — resuming auto-confirm now, hold on.</p>`);
-    const resume=(async()=>{ const y=structuredClone(update); y.message.text='yes'; y.message.caption=undefined; y.message.entities=[]; try{ await legacyFetch(y,env); }catch(_){ await richSend(`<h3>❌ Clone failed</h3><p>Clone confirm step failed — check /userbot_status or retry.</p>`); } })();
+    const resume=(async()=>{ const y=structuredClone(update); y.message.text='yes'; y.message.caption=undefined; y.message.entities=[]; if(y.message&&y.message.message_id!=null) y.message.message_id=y.message.message_id+1000000; if(y.update_id!=null) y.update_id=y.update_id+1; try{ await legacyFetch(y,env); }catch(_){ await richSend(`<h3>❌ Clone failed</h3><p>Clone confirm step failed — check /userbot_status or retry.</p>`); } })();
     if(ctx&&typeof ctx.waitUntil==='function') ctx.waitUntil(resume.catch(()=>{})); else await resume.catch(()=>{});
     return new Response('OK'); }
   // Forum auto-all: a topic-enabled group clones topic-wise with no extra
@@ -72,16 +72,24 @@ async function unifiedClone(update,env,ctx){
       if(ackId) await editRich(ackId,failHtml); else await richSend(failHtml);
       return;
     }
+    // Fresh ids: the server dedupes webhooks on chat:from:message_id, so a
+    // yes that reuses the /uclone message id is swallowed as a duplicate
+    // and the confirm silently never happens.
+    const freshIds = (u) => {
+      if (u.message && u.message.message_id != null) u.message.message_id = u.message.message_id + 1000000;
+      if (u.update_id != null) u.update_id = u.update_id + 1;
+      return u;
+    };
     if(ackId) await editRich(ackId, ackHtml+`<p><i>Preview ready — confirming…</i></p>`);
     // Honesty gate: only confirm when a preview was actually stored. The
     // forum-all path stores none (it clones directly with visible messages),
     // and a silently-died preview must not get a fake "Confirmed".
     const pendRow=await env.DB.prepare(`SELECT id FROM pending_clones WHERE chat_id=? AND expires_at>?`).bind(normRemote,Date.now()).first().catch(()=>null);
     if(!pendRow){
-      if(ackId) await editRich(ackId, ackHtml+`<p>⚠️ No clone preview was stored — nothing to confirm. If no other clone message arrived, the preview scan failed; check /userbot_status or retry with a topic id.</p>`);
+      if(ackId) await editRich(ackId, ackHtml+`<p>⚠️ No clone preview was stored — nothing to confirm. If a forum topic list arrived above, run ${`/uclone ${remote} all`} or pick one topic id.</p>`);
       return;
     }
-    const yes=structuredClone(update); yes.message.text='yes'; yes.message.caption=undefined; yes.message.entities=[]; await new Promise(r=>setTimeout(r,50));
+    const yes=freshIds(structuredClone(update)); yes.message.text='yes'; yes.message.caption=undefined; yes.message.entities=[]; await new Promise(r=>setTimeout(r,50));
     try{
       await legacyFetch(yes,env);
       // Verify something actually started — the legacy round-trip resolves
