@@ -10,6 +10,7 @@ import {
   detectBackupCommunityId,
   importBackupSql,
   notesForUrl,
+  repairContaminatedNotes,
   fuzzyMatchLinks,
   helpTextForSection,
   isGroundedAiAnswer,
@@ -239,6 +240,42 @@ assert.equal(await detectBackupCommunityId(mockEnvWith(['c_aaa']), `INSERT INTO 
   assert.equal(notesForUrl('https://a.com https://b.com', 'https://a.com', 2), '');
   // Unknown URL -> ''.
   assert.equal(notesForUrl(listMsg, 'https://missing.example/', 3), '');
+}
+
+// repairContaminatedNotes: URL-stripped listicles (cleanNotesText removes
+// every URL, leaving "Name -" dangling lines) shrink to the row's own
+// section. Real shape pasted from the website detail page.
+{
+  const strippedList = [
+    'ChatGPT alternatives',
+    'For writing',
+    'Chatsonic** - **',
+    'ChatABC -',
+    'JasperAI -',
+    'Quillbot -',
+    'For coding',
+    'CodeWhisperer -',
+    'Copilot -',
+    'For research',
+    'Paperpal -',
+    'Perplexity -',
+    'YouChat -',
+    'For design',
+    'Beautiful presentations -',
+    'Slides in minutes -',
+  ].join('\n');
+  const fixed = repairContaminatedNotes(strippedList, 'https://www.beautiful.ai', 'beautiful.ai');
+  assert.ok(fixed.includes('Beautiful presentations'), `own section kept, got: ${fixed}`);
+  assert.ok(!fixed.includes('ChatGPT alternatives'), 'list header cut');
+  assert.ok(!fixed.includes('Chatsonic'), 'foreign section cut');
+  assert.ok(fixed.length < strippedList.length, 'notes actually shrunk');
+  // No self-mention anywhere -> cleared (pure foreign text).
+  assert.equal(repairContaminatedNotes(strippedList, 'https://unknown.example/', 'Unknown tool'), '');
+  // Legit prose untouched (no dangling-dash fingerprint).
+  const prose = 'A thoughtful review of this resume builder. It handles modern templates well and exports clean PDFs for hiring managers.';
+  assert.equal(repairContaminatedNotes(prose, 'https://www.beautiful.ai', 'beautiful.ai'), prose);
+  // Short notes untouched.
+  assert.equal(repairContaminatedNotes('nice tool', 'https://www.beautiful.ai', 'beautiful.ai'), 'nice tool');
 }
 
 console.log('retrieval tests passed');

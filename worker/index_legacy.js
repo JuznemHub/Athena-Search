@@ -8650,6 +8650,59 @@ function shrinkNotesToUrl(notes, url) {
   return snippet && snippet.length < text.length ? snippet : text;
 }
 
+/** Fingerprint of URL-stripped list notes: cleanNotesText removes every URL,
+ *  so a harvested listicle degrades into name lines left dangling with a
+ *  trailing dash ("ChatABC -"). Legit prose almost never does that. */
+function isStrippedListNotes(notes) {
+  const lines = String(notes || '').split('\n').map(l => l.trim()).filter(Boolean);
+  if (lines.length < 4) return false;
+  const dangling = lines.filter(l => /[-–•*]\s*$/.test(l));
+  return dangling.length >= 3 && dangling.length / lines.length >= 0.4;
+}
+
+/** Tokens identifying the row itself: domain parts + strong title words. */
+function selfAnchorTokens(url, title) {
+  const out = new Set();
+  try {
+    const u = String(url || '');
+    const host = new URL(u.startsWith('http') ? u : `https://${u}`).hostname.toLowerCase();
+    for (const p of host.replace(/^www\./, '').split('.')) if (p.length >= 4) out.add(p);
+  } catch (_) {}
+  const t = String(title || '');
+  if (t && !isWeakTitle(t, url)) {
+    for (const w of t.toLowerCase().split(/[^a-z0-9]+/)) if (w.length >= 5) out.add(w);
+  }
+  return [...out];
+}
+
+/** Repair URL-stripped lists: keep the line naming this link (±1), else clear
+ *  (a list that never names the row is pure foreign text). */
+function repairStrippedListNotes(notes, url, title) {
+  const text = String(notes || '');
+  if (!isStrippedListNotes(text)) return text;
+  const anchors = selfAnchorTokens(url, title);
+  const lines = text.split('\n');
+  let hit = -1;
+  if (anchors.length) {
+    hit = lines.map(l => l.toLowerCase()).findIndex(l => anchors.some(a => l.includes(a)));
+  }
+  if (hit < 0) return '';
+  const keep = [];
+  for (let i = Math.max(0, hit - 1); i <= Math.min(lines.length - 1, hit + 1); i++) {
+    if (lines[i].trim()) keep.push(lines[i].trim());
+  }
+  const snippet = keep.join('\n').slice(0, 500);
+  return snippet.length < text.length ? snippet : text;
+}
+
+/** Combined /structure repair: URL evidence first, stripped-list fingerprint
+ *  second, otherwise untouched. */
+function repairContaminatedNotes(notes, url, title) {
+  const shrunk = shrinkNotesToUrl(notes, url);
+  if (shrunk !== notes) return shrunk;
+  return repairStrippedListNotes(notes, url, title);
+}
+
 /** Personal-brain variants of the channel indexers — target = personal|both. */
 async function savePersonalIndexedLinks(env, ownerUserId, urls, attributionName, postText, transferId = null, sourceChatId = null, sourceMessageId = null, batchPlan = null) {
   const baseTags = ['telegram', 'channel'];
@@ -9815,7 +9868,7 @@ async function structureDatabase(env, { onProgress = null } = {}) {
             }
             const upd = {
               url: normUrl, url_hash: normHash,
-              title: cleanTitleText(row.title), notes: cleanNotesText(shrinkNotesToUrl(row.notes, row.url))
+              title: cleanTitleText(row.title), notes: cleanNotesText(repairContaminatedNotes(row.notes, row.url, row.title))
             };
             if (upd.title !== row.title) stats.titlesCleaned++;
             if (upd.notes !== row.notes) stats.notesCleaned++;
@@ -9826,7 +9879,7 @@ async function structureDatabase(env, { onProgress = null } = {}) {
           }
           // Same URL: still clean notes/title
           const updTitle = cleanTitleText(row.title);
-          const updNotes = cleanNotesText(shrinkNotesToUrl(row.notes, row.url));
+          const updNotes = cleanNotesText(repairContaminatedNotes(row.notes, row.url, row.title));
           if (updTitle !== row.title || updNotes !== row.notes) {
             await env.DB.prepare(`UPDATE ${t.name} SET title = ?, notes = ?, search_blob = NULL WHERE id = ?`)
               .bind(updTitle, updNotes, row.id).run();
@@ -16307,6 +16360,7 @@ export {
   detectBackupCommunityId,
   importBackupSql,
   notesForUrl,
+  repairContaminatedNotes,
   ensureIndexTables,
   runHistoryIndexJob,
   buildSearchBlob,
