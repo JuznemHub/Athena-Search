@@ -8966,7 +8966,7 @@ async function ensureIndexJobColumns(env) {
     'thread_id TEXT', 'progress_msg_id BIGINT', 'min_id BIGINT', 'max_id BIGINT',
     'saved_files INTEGER DEFAULT 0', 'skipped_media INTEGER DEFAULT 0',
     'urls_seen INTEGER DEFAULT 0', 'continuations INTEGER DEFAULT 0',
-    'chat_name TEXT', 'saved_pdfs INTEGER DEFAULT 0',
+    'chat_name TEXT', 'saved_pdfs INTEGER DEFAULT 0', 'dupes_skipped INTEGER DEFAULT 0',
   ];
   for (const def of alters) {
     const col = def.split(' ')[0];
@@ -9327,6 +9327,7 @@ function formatBackfillProgress(o) {
   const { bar, pct } = progressBar(o.done, o.total);
   const parts = [`${bar} ${pct}%`, `${o.done}${o.total && o.total >= o.done ? `/${o.total}` : ''} msgs`];
   if (o.links) parts.push(`${o.links} links`);
+  if (o.dupes) parts.push(`${o.dupes} dupes`);
   if (o.docs) parts.push(`${o.docs} docs`);
   if (o.pdfs) parts.push(`${o.pdfs} pdfs`);
   if (o.files) parts.push(`${o.files} files`);
@@ -9342,6 +9343,7 @@ function formatBackfillDone(o) {
   const icon = o.status === 'done' ? '✅' : '⏸';
   const where = o.name ? `${boldHtml(escHtml(o.name))} ${codeHtml(o.chatId || '')}` : codeHtml(o.chatId || '');
   const counts = [`${o.processed} scanned`, `${o.links} links`, `${o.docs} docs`];
+  if (o.dupes) counts.push(`${o.dupes} dupes already saved`);
   if (o.pdfs) counts.push(`${o.pdfs} pdfs`);
   if (o.files) counts.push(`${o.files} files`);
   const live = o.live ? `\n${o.live.emoji} ${escHtml(o.live.label)}` : '';
@@ -9380,7 +9382,7 @@ async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser,
       `INSERT INTO index_jobs (id, community_id, chat_id, user_id, status, offset_id, progress_chat_id, created_at, updated_at, thread_id, min_id, max_id, chat_name)
        VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(jobId, communityIdArg, cid, athenaUser.id, chatId, Date.now(), Date.now(), threadArg || null, minId ? Number(minId) : null, maxId ? Number(maxId) : null, chatName || null).run();
-  runInBackground(env, runHistoryIndexJob(env, { id: jobId, community_id: communityIdArg, chat_id: cid, thread_id: threadArg || null, userbot_label: userbotLabel || null, min_id: minId ? Number(minId) : null, max_id: maxId ? Number(maxId) : null, saved_files: 0, skipped_media: 0, offset_id: 0, processed: 0, saved_links: 0, saved_docs: 0, saved_pdfs: 0, chat_name: chatName || '', progress_chat_id: chatId }, token));
+  runInBackground(env, runHistoryIndexJob(env, { id: jobId, community_id: communityIdArg, chat_id: cid, thread_id: threadArg || null, userbot_label: userbotLabel || null, min_id: minId ? Number(minId) : null, max_id: maxId ? Number(maxId) : null, saved_files: 0, skipped_media: 0, offset_id: 0, processed: 0, saved_links: 0, saved_docs: 0, saved_pdfs: 0, dupes_skipped: 0, chat_name: chatName || '', progress_chat_id: chatId }, token));
   await sendTelegramFormatted(token, chatId,
     `${boldHtml('▶️')} Backfill started for ${chatName ? `${boldHtml(escHtml(chatName))} ` : ''}${codeHtml(chatIdArg)}${threadArg ? ` topic ${codeHtml('#' + threadArg)}` : ''} → ${boldHtml(escHtml(communityName || communityIdArg))}.\n${italicHtml('Live progress below ·')} ${codeHtml('/index_stop')} ${italicHtml('to stop ·')} ${codeHtml('/del '+cid)} ${italicHtml('to delete.')}`,
     forumThreadId).catch(() => {});
@@ -9403,7 +9405,7 @@ async function runHistoryIndexJob(env, job, token) {
     if (!force && now - lastProgressAt < 10_000) return;
     lastProgressAt = now;
     try {
-      const text = formatBackfillProgress({ name: job.chat_name, chatId: job.chat_id, threadId: job.thread_id, done, total: job.total_messages || 0, links: job.saved_links, docs: job.saved_docs, pdfs: job.saved_pdfs, files: job.saved_files, urls: job.urls_seen, skipped: job.skipped_media });
+      const text = formatBackfillProgress({ name: job.chat_name, chatId: job.chat_id, threadId: job.thread_id, done, total: job.total_messages || 0, links: job.saved_links, dupes: job.dupes_skipped, docs: job.saved_docs, pdfs: job.saved_pdfs, files: job.saved_files, urls: job.urls_seen, skipped: job.skipped_media });
       if (progressMsgId) {
         await telegramApi(token, 'editMessageText', { chat_id: job.progress_chat_id, message_id: progressMsgId, text, parse_mode: 'HTML' }).catch(() => {});
       } else {
@@ -9444,11 +9446,20 @@ async function runHistoryIndexJob(env, job, token) {
     if (!sessionString || !apiHash) { await patch({ status: 'error', error: 'session decrypt failed (STORAGE_KEY rotated?)' }); return; }
     const client = new TelegramClient(new StringSession(sessionString), Number(sess.api_id) || 0, apiHash, { connectionRetries: 3 });
     await client.connect();
+    // Resolve the human name via the userbot (Bot API getChat fails for
+    // private chats the bot never saw) and persist it for all surfaces.
+    try {
+      const ent = await client.getEntity(job.chat_id);
+      const nm = ent?.title || (ent?.username ? '@' + ent.username : '');
+      if (nm && nm !== job.chat_name) { job.chat_name = nm; await patch({ chat_name: nm }); }
+    } catch (_) {}
     let offsetId = job.offset_id || 0;
     let processed = job.processed || 0;
     job.saved_files = Number(job.saved_files || 0);
     job.skipped_media = Number(job.skipped_media || 0);
     job.urls_seen = Number(job.urls_seen || 0);
+    job.saved_pdfs = Number(job.saved_pdfs || 0);
+    job.dupes_skipped = Number(job.dupes_skipped || 0);
     // Approximate total for the progress bar: latest message id in the chat.
     try {
       const head = await client.getMessages(job.chat_id, { limit: 1 });
@@ -9510,7 +9521,7 @@ async function runHistoryIndexJob(env, job, token) {
           const fresh = [];
           for (const rawUrl of [...new Set(urls)]) {
             try {
-              if (await findExistingLink(env, 'links', 'community_id', job.community_id, rawUrl)) continue;
+              if (await findExistingLink(env, 'links', 'community_id', job.community_id, rawUrl)) { job.dupes_skipped = (job.dupes_skipped || 0) + 1; continue; }
               const urlHash = generateUrlHash(rawUrl);
               const id = 'ix_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
               await ensureLinkMetaColumns(env);
@@ -9526,7 +9537,7 @@ async function runHistoryIndexJob(env, job, token) {
                   Date.now(), job.chat_id, message.id != null ? String(message.id) : null).run();
                 savedLinks++; fresh.push({ id, url: rawUrl });
               } catch (error) {
-                if (isUniqueConstraintError(error)) continue;
+                if (isUniqueConstraintError(error)) { job.dupes_skipped = (job.dupes_skipped || 0) + 1; continue; }
                 if (!isMissingLinkMetaColumnError(error)) throw error;
                 await env.DB.prepare(
                   'INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by, created_at, source_chat_id, source_message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
@@ -9610,7 +9621,7 @@ async function runHistoryIndexJob(env, job, token) {
         }
       }
       job.saved_links = savedLinks; job.saved_docs = savedDocs;
-      await patch({ offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs, saved_pdfs: job.saved_pdfs || 0, saved_files: job.saved_files || 0, skipped_media: job.skipped_media || 0, urls_seen: job.urls_seen || 0 });
+      await patch({ offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs, saved_pdfs: job.saved_pdfs || 0, dupes_skipped: job.dupes_skipped || 0, saved_files: job.saved_files || 0, skipped_media: job.skipped_media || 0, urls_seen: job.urls_seen || 0 });
       log(`batch done · total ${processed} · +${messages.length} · urls ${job.urls_seen || 0}`);
       if (processed - lastProgress >= 50) lastProgress = processed;
       await pushProgress(false, processed);
@@ -9619,8 +9630,8 @@ async function runHistoryIndexJob(env, job, token) {
     if (processed >= INDEX_MAX_MESSAGES) {
       const conts = Number(job.continuations || 0);
       if (conts < INDEX_AUTO_CONTINUATIONS) {
-        const nextJob = { ...job, offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs, saved_files: job.saved_files || 0, skipped_media: job.skipped_media || 0, urls_seen: job.urls_seen || 0, saved_pdfs: job.saved_pdfs || 0 };
-        await patch({ status: 'queued', continuations: conts + 1, offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs, saved_pdfs: job.saved_pdfs || 0, skipped_media: job.skipped_media || 0, urls_seen: job.urls_seen || 0 });
+        const nextJob = { ...job, offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs, saved_files: job.saved_files || 0, skipped_media: job.skipped_media || 0, urls_seen: job.urls_seen || 0, saved_pdfs: job.saved_pdfs || 0, dupes_skipped: job.dupes_skipped || 0 };
+        await patch({ status: 'queued', continuations: conts + 1, offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs, saved_pdfs: job.saved_pdfs || 0, dupes_skipped: job.dupes_skipped || 0, skipped_media: job.skipped_media || 0, urls_seen: job.urls_seen || 0 });
         log(`cap reached — auto-continuing (chunk ${conts + 2}) at offset ${offsetId}`);
         runInBackground(env, runHistoryIndexJob(env, { ...nextJob, status: 'queued' }, token));
       } else {
@@ -9630,11 +9641,11 @@ async function runHistoryIndexJob(env, job, token) {
       try { await client.disconnect(); } catch (_) {}
       return;
     }
-    const finalRow = await env.DB.prepare('SELECT status, saved_links, saved_docs, saved_pdfs FROM index_jobs WHERE id = ?').bind(job.id).first().catch(() => null);
+    const finalRow = await env.DB.prepare('SELECT status, saved_links, saved_docs, saved_pdfs, dupes_skipped FROM index_jobs WHERE id = ?').bind(job.id).first().catch(() => null);
     const folRow = await env.DB.prepare('SELECT last_seen_at FROM userbot_follows WHERE chat_id = ?').bind(job.chat_id).first().catch(() => null);
     const accLive = job.userbot_label ? USERBOT_ACCOUNTS.has(job.userbot_label) : USERBOT_ACCOUNTS.size > 0;
     const live = followLiveness(accLive, folRow?.last_seen_at);
-    const doneText = formatBackfillDone({ status: finalRow?.status || 'done', name: job.chat_name, chatId: job.chat_id, processed, links: savedLinks, docs: savedDocs, pdfs: Number(finalRow?.saved_pdfs ?? job.saved_pdfs ?? 0), files: job.saved_files, live });
+    const doneText = formatBackfillDone({ status: finalRow?.status || 'done', name: job.chat_name, chatId: job.chat_id, processed, links: savedLinks, dupes: Number(finalRow?.dupes_skipped ?? job.dupes_skipped ?? 0), docs: savedDocs, pdfs: Number(finalRow?.saved_pdfs ?? job.saved_pdfs ?? 0), files: job.saved_files, live });
     if (progressMsgId) {
       await telegramApi(token, 'editMessageText', { chat_id: job.progress_chat_id, message_id: progressMsgId, text: doneText, parse_mode: 'HTML' }).catch(() =>
         sendTelegramFormatted(token, job.progress_chat_id, doneText).catch(() => {}));
@@ -11994,13 +12005,13 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      await ensureIndexTables(env);
      await ensureTransferColumns(env);
      const { results } = await env.DB.prepare(
-       'SELECT id, chat_id, chat_name, status, processed, saved_links, saved_docs, saved_pdfs, saved_files, created_at FROM index_jobs ORDER BY created_at DESC LIMIT 10'
-     ).all();
-     if (!results?.length) {
+       'SELECT id, chat_id, chat_name, status, processed, saved_links, saved_docs, saved_pdfs, dupes_skipped, saved_files, created_at FROM index_jobs ORDER BY created_at DESC LIMIT 10'
+       ).all();
+       if (!results?.length) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No clone/backfill sessions yet.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const lines = results.map((j) => `• ${codeHtml(j.id)}\n  ${j.chat_name ? `${boldHtml(escHtml(j.chat_name))} ` : ''}${escHtml(j.chat_id)} · ${j.status} · ${j.processed || 0} msgs · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.saved_files ? ` · ${j.saved_files} files` : ''}`);
+       }
+       const lines = results.map((j) => `• ${codeHtml(j.id)}\n  ${j.chat_name ? `${boldHtml(escHtml(j.chat_name))} ` : ''}${escHtml(j.chat_id)} · ${j.status} · ${j.processed || 0} msgs · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.dupes_skipped ? ` · ${j.dupes_skipped} dupes` : ''}${j.saved_files ? ` · ${j.saved_files} files` : ''}`);
      await sendTelegramFormatted(token, chatId,
        `${boldHtml('🗂 Clone sessions')}\n\n${lines.join('\n\n')}\n\n${italicHtml('Delete one:')} ${codeHtml('/clone_del <id> [files]')}${italicHtml(' — add "files" to also wipe its vault media')}`,
        forumThreadId);
@@ -12095,7 +12106,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      const { results: accounts } = await env.DB.prepare('SELECT label, enabled, last_error FROM userbot_accounts ORDER BY label').all();
      const { results: follows } = await env.DB.prepare('SELECT chat_id, label, community_id, target, last_seen_at FROM userbot_follows ORDER BY label, chat_id').all();
      const { results: jobs } = await env.DB.prepare(
-       'SELECT id, chat_id, thread_id, status, processed, saved_links, saved_docs, saved_pdfs, saved_files, urls_seen, chat_name, error, updated_at FROM index_jobs ORDER BY updated_at DESC'
+       'SELECT id, chat_id, thread_id, status, processed, saved_links, saved_docs, saved_pdfs, dupes_skipped, saved_files, urls_seen, chat_name, error, updated_at FROM index_jobs ORDER BY updated_at DESC'
      ).all();
 
      const accLines = (accounts || []).map((a) => {
@@ -12127,7 +12138,8 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        } catch (_) {}
        const s = USERBOT_STATS.get(f.chat_id) || USERBOT_STATS.get(String(Number(f.chat_id))) || {};
        const fl = followLiveness(USERBOT_ACCOUNTS.has(f.label), f.last_seen_at);
-       const liveBits = [`${fl.emoji}`, `msgs ${s.msgs || 0}`, `links ${s.links || 0}`, `docs ${s.docs || 0}`];
+       const sActive = (s.msgs || s.links || s.docs) ? [`msgs ${s.msgs || 0}`, `links ${s.links || 0}`, `docs ${s.docs || 0}`] : [];
+       const liveBits = [`${fl.emoji}`, ...sActive];
        if (s.lastAt) liveBits.push(`last ${Math.max(1, Math.round((Date.now() - s.lastAt) / 60000))}m ago`);
        else liveBits.push(italicHtml('waiting for new posts'));
        const jb = jobByChat.get(normalizeTgChatId(f.chat_id));
@@ -12138,6 +12150,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
          bf = `backfill: ${jb.status}${totalBit ? ` (${totalBit})` : ''}${capNote}`;
          if (jb.urls_seen) bf += ` · ${jb.urls_seen} urls`;
          if (jb.saved_links) bf += ` · ${jb.saved_links} links saved`;
+         if (jb.dupes_skipped) bf += ` · ${jb.dupes_skipped} dupes`;
          if (jb.saved_pdfs) bf += ` · ${jb.saved_pdfs} pdfs`;
          if (jb.saved_files) bf += ` · ${jb.saved_files} files`;
          if (jb.error) bf += ` — ${String(jb.error).slice(0, 80)}`;
@@ -12213,7 +12226,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No backfill jobs yet. ${codeHtml('/clone')} to begin.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
-     const lines = results.map((j) => `${j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'error' ? '❌' : '⏸'} ${j.chat_name ? `${boldHtml(escHtml(j.chat_name))} ` : ''}${codeHtml(j.chat_id)} — ${escHtml(j.status)}: ${j.processed || 0} scanned · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}\n   ${codeHtml(j.id)} · delete: /clone_del ${codeHtml(j.id)}${j.error ? `\n   ${escHtml(j.error)}` : ''}`);
+     const lines = results.map((j) => `${j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'error' ? '❌' : '⏸'} ${j.chat_name ? `${boldHtml(escHtml(j.chat_name))} ` : ''}${codeHtml(j.chat_id)} — ${escHtml(j.status)}: ${j.processed || 0} scanned · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.dupes_skipped ? ` · ${j.dupes_skipped} dupes` : ''}\n   ${codeHtml(j.id)} · delete: /clone_del ${codeHtml(j.id)}${j.error ? `\n   ${escHtml(j.error)}` : ''}`);
      await sendTelegramFormatted(token, chatId, `${boldHtml('🗂 Backfill jobs')}\n\n${lines.join('\n\n')}`, forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
