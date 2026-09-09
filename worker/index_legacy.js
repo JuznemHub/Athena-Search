@@ -15088,6 +15088,10 @@ function athenaLog(level, component, message, data = null) {
   if (data != null) {
     try { entry.data = typeof data === 'string' ? data.slice(0, 400) : JSON.stringify(data).slice(0, 600); } catch (_) {}
   }
+  // Redact values that look like secrets (tokens, keys, passwords) before logging
+  const _redact = (s) => String(s).replace(/(?:token|key|secret|password|apikey|api_key)["'\s:=]+[^\s"']+/gi, '$1=***');
+  entry.message = _redact(entry.message);
+  if (entry.data) entry.data = _redact(entry.data);
   LOG_RING.push(entry);
   if (LOG_RING.length > LOG_RING_MAX) LOG_RING.shift();
   if (lvl >= LOG_LEVELS[LOG_CONSOLE_MIN]) {

@@ -69,8 +69,8 @@ const control = createServer((req, res) => {
         captured.length = 0;
         res.writeHead(200); res.end('ok');
       } else { res.writeHead(404); res.end('nope'); }
-    } catch (e) {
-      res.writeHead(500); res.end(String(e && e.stack || e));
+    } catch (_e) {
+      res.writeHead(500); res.end('internal error');
     }
   });
 });
