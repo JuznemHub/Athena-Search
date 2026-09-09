@@ -338,6 +338,7 @@ assert.equal(await detectBackupCommunityId(mockEnvWith(['c_aaa']), `INSERT INTO 
   assert.equal(b2.pct, 100, 'done>total clamps instead of overflowing');
 
   const prog = formatBackfillProgress({ name: 'Pirate Movies', chatId: '-100123', threadId: '', done: 500, total: 1000, links: 120, dupes: 2159, docs: 30, pdfs: 7, files: 4, urls: 200, skipped: 11 });
+  assert.ok(prog.includes('<p>'), 'rich paragraph blocks');
   assert.ok(prog.includes('Pirate Movies'), 'chat name shown');
   assert.ok(prog.includes('-100123'), 'chat id shown');
   assert.ok(prog.includes('7 pdfs'), 'pdf counter shown');
@@ -348,7 +349,8 @@ assert.equal(await detectBackupCommunityId(mockEnvWith(['c_aaa']), `INSERT INTO 
   assert.ok(!progBare.includes('pdfs'), 'zero counters omitted');
 
   const done = formatBackfillDone({ status: 'done', name: 'Pirate Movies', chatId: '-100123', processed: 1000, links: 120, dupes: 2159, docs: 30, pdfs: 7, files: 0, live: { emoji: '🟢', label: 'Live indexing ON' } });
-  assert.ok(done.startsWith('✅'), 'done icon');
+  assert.ok(done.includes('<h3>'), 'rich heading block');
+  assert.ok(done.includes('✅'), 'done icon');
   assert.ok(done.includes('Pirate Movies'), 'name in completion');
   assert.ok(done.includes('7 pdfs'), 'pdfs in completion');
   assert.ok(done.includes('2159 dupes already saved'), 'dupes explained in completion');
