@@ -7892,7 +7892,7 @@ function helpTextForSection(section, isGod = false) {
       spacer,
       richParagraph('<b>Backup & import</b>'),
       cmd(7, codeHtml('/backup'), 'Full database backup (SQL, gzipped) sent to this chat.'),
-      cmd(8, `${codeHtml('/import')} — ${boldHtml('reply to a backup file')}`, 'Merges the backup into your CURRENT brains: community links → the linked community (or ' + codeHtml('/import <community_id>') + '), personal links → your personal brain. Duplicates skipped; runs in the background with progress.'),
+      cmd(8, `${codeHtml('/import')} — ${boldHtml('reply to a backup file')}`, 'Merges the backup into your CURRENT brains: community links → the linked community, the backup’s original community, or ' + codeHtml('/import <community_id>') + ', personal links → your personal brain. Duplicates skipped; runs in the background with progress.'),
       spacer,
       richParagraph('<b>Channels, cloning & userbot</b>'),
       richParagraph(`<i>Channel/group/topic cloning and userbot commands live in the ${boldHtml('📡 Channels')} panel — most are GOD/owner gated and non-GOD just get "GOD rank only".</i>`),
@@ -9871,6 +9871,61 @@ function parseSqlInsert(stmt) {
   return { table, row };
 }
 
+/** Scan a backup SQL dump for the single community its links belong to.
+ *  Returns the community_id when every sampled `links` row names the same
+ *  community (and that community exists locally), else ''. Bounded: skips
+ *  huge dumps and stops after enough rows or a second distinct id. */
+async function detectBackupCommunityId(env, sqlText) {
+  try {
+    if (!sqlText || sqlText.length > 30 * 1024 * 1024) return '';
+    const stmts = splitSqlStatements(String(sqlText));
+    const seen = new Set();
+    let scanned = 0;
+    for (const st of stmts) {
+      if (!/^INSERT\s+INTO\s+"links"/i.test(st)) continue;
+      const p = parseSqlInsert(st);
+      if (!p || p.table !== 'links') continue;
+      const cid = String(p.row?.community_id || '');
+      if (/^c_/.test(cid)) seen.add(cid);
+      if (seen.size > 1) return '';
+      if (++scanned >= 3000) break;
+    }
+    if (seen.size !== 1) return '';
+    const id = [...seen][0];
+    const row = await env.DB.prepare('SELECT id FROM communities WHERE id = ?').bind(id).first().catch(() => null);
+    return row ? id : '';
+  } catch (_) { return ''; }
+}
+
+/** Actionable "no import target" reply: lists communities the user can pick
+ *  with /import <id>. GOD never needs /community_join (it is a no-op for
+ *  them), so GOD is not sent down that dead end. */
+async function sendNoImportTargetMessage(env, token, chatId, forumThreadId, athenaUser, isGod) {
+  let rows = [];
+  try {
+    if (athenaUser) {
+      const r = await env.DB.prepare(
+        `SELECT m.community_id AS id, c.name AS name FROM community_members m LEFT JOIN communities c ON c.id = m.community_id WHERE m.user_id = ? ORDER BY m.community_id LIMIT 10`
+      ).bind(athenaUser.id).all().catch(() => null);
+      rows = (r && r.results) || [];
+    }
+    if (!rows.length && isGod) {
+      const r = await env.DB.prepare('SELECT id, name FROM communities ORDER BY created_at LIMIT 10').all().catch(() => null);
+      rows = (r && r.results) || [];
+    }
+  } catch (_) {}
+  if (rows.length) {
+    const list = rows.map(r => `• ${escHtml(r.name || r.id)} — ${codeHtml(escHtml(String(r.id)))}`).join('<br>');
+    await sendTelegramFormatted(token, chatId, [
+      `${boldHtml('⚠️')} No target community — reply to the backup file again with ${codeHtml('/import <community_id>')}:`,
+      '',
+      list,
+    ].join('\n'), forumThreadId);
+    return;
+  }
+  await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No target community. Link one with ${codeHtml('/community_verify')} / ${codeHtml('/community_join')}, or run ${codeHtml('/import <community_id>')}.`, forumThreadId);
+}
+
 const IMPORT_LINK_COLUMNS = {
   links: ['id', 'url', 'url_hash', 'title', 'notes', 'tags', 'added_by', 'added_by_id', 'created_at', 'upvotes', 'downvotes', 'image_url', 'site_name', 'metadata_version', 'transfer_id', 'source_chat_id', 'source_message_id'],
   personal_links: ['id', 'url', 'url_hash', 'title', 'notes', 'tags', 'created_at', 'image_url', 'site_name', 'metadata_version', 'source_chat_id', 'source_message_id']
@@ -10608,7 +10663,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     if (isGod) {
-      await sendTelegramMessage(token, chatId, `You are GOD already — you don't need to /community_join. You have full access to ${c.name} (${c.id}) and all communities.`, forumThreadId);
+      await sendTelegramMessage(token, chatId, `You are GOD already — you don't need to /community_join. You have full access to ${c.name} (${c.id}) and all communities.\nIn DMs, reply to a backup file with /import ${c.id} to import into this community.`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     if (await isBannedFromCommunity(env, cid, athenaUser)) {
@@ -13112,7 +13167,7 @@ Rules:
         `1. ${codeHtml('/backup')} sends ${codeHtml('athena-<date>.sql.gz')} to this chat`,
         `2. ${boldHtml('Reply')} to that file with ${codeHtml('/import')}`,
         '',
-        `${italicHtml('Everything merges into your CURRENT brains: backup community links → the linked community, personal links → your personal brain. Duplicates (same URL or source message) are skipped, everything else is added. Optional: ' + codeHtml('/import <community_id>') + ' targets another community.')}`,
+        `${italicHtml('Everything merges into your CURRENT brains: backup community links → the linked community (in DMs: the backup’s original community, or ' + codeHtml('/import <community_id>') + '), personal links → your personal brain. Duplicates (same URL or source message) are skipped, everything else is added.')}`,
       ].join('\n'), forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
@@ -13126,25 +13181,17 @@ Rules:
       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️ Too large:')} ${codeHtml((fileSize / 1048576).toFixed(1) + ' MB')} — import parts up to 200 MB (split a big backup with ${codeHtml('/backup')} parts).`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    // Target brains: explicit <community_id> arg, else the linked community,
-    // else the only community that exists. Personal always → the importing GOD.
-    let targetCommunityId = rest.trim().split(/\s+/)[0] || '';
-    if (targetCommunityId && !/^c_/.test(targetCommunityId)) targetCommunityId = '';
-    if (!targetCommunityId) targetCommunityId = binding?.community_id || '';
-    let _targetNote = '';
-    if (!targetCommunityId) {
-      const all = await env.DB.prepare('SELECT id, name FROM communities ORDER BY created_at').all();
-      const list = (all && all.results) || [];
-      if (list.length === 1) { targetCommunityId = list[0].id; _targetNote = list[0].name; }
-    }
-    if (!targetCommunityId) {
-      await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No target community. Link one with ${codeHtml('/community_verify')} / ${codeHtml('/community_join')}, or run ${codeHtml('/import <community_id>')}.`, forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-    const commRow = await env.DB.prepare('SELECT name FROM communities WHERE id = ?').bind(targetCommunityId).first().catch(() => null);
-    if (!commRow) {
-      await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(targetCommunityId)} not found.`, forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
+    // Explicit <community_id> arg wins and is validated now; everything else
+    // resolves after the file downloads (linked community, backup's own
+    // community, memberships). Personal always → the importing GOD.
+    let explicitCommunityId = rest.trim().split(/\s+/)[0] || '';
+    if (explicitCommunityId && !/^c_/.test(explicitCommunityId)) explicitCommunityId = '';
+    if (explicitCommunityId) {
+      const ok = await env.DB.prepare('SELECT id FROM communities WHERE id = ?').bind(explicitCommunityId).first().catch(() => null);
+      if (!ok) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(escHtml(explicitCommunityId))} not found.`, forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
     }
     const importStarted = Date.now();
     const startMsg = await telegramApi(token, 'sendMessage', { chat_id: chatId, text: `${boldHtml('📥 Importing')} ${codeHtml(escHtml(fileName))}${fileSize ? ` (${(fileSize / 1048576).toFixed(1)} MB)` : ''}…`, parse_mode: 'HTML' }).catch(() => null);
@@ -13159,6 +13206,30 @@ Rules:
           sqlText = await new Response(new Response(buf).body.pipeThrough(new DecompressionStream('gzip'))).text();
         } else {
           sqlText = new TextDecoder().decode(buf);
+        }
+        // Resolve the target community now that the backup can be inspected:
+        // explicit arg, else the linked community, else the backup's own
+        // community (same-instance re-import), else the user's only
+        // membership, else the only community that exists.
+        let targetCommunityId = explicitCommunityId || binding?.community_id || '';
+        if (!targetCommunityId) targetCommunityId = await detectBackupCommunityId(env, sqlText);
+        if (!targetCommunityId && athenaUser) {
+          const mem = await env.DB.prepare('SELECT community_id FROM community_members WHERE user_id = ? LIMIT 2').bind(athenaUser.id).all().catch(() => null);
+          const ids = ((mem && mem.results) || []).map(r => String(r.community_id || '')).filter(Boolean);
+          if (ids.length === 1) targetCommunityId = ids[0];
+        }
+        if (!targetCommunityId) {
+          const all = await env.DB.prepare('SELECT id, name FROM communities ORDER BY created_at').all();
+          const list = (all && all.results) || [];
+          if (list.length === 1) targetCommunityId = list[0].id;
+        }
+        const commRow = targetCommunityId
+          ? await env.DB.prepare('SELECT name FROM communities WHERE id = ?').bind(targetCommunityId).first().catch(() => null)
+          : null;
+        if (!targetCommunityId || !commRow) {
+          if (statusId) await telegramApi(token, 'deleteMessage', { chat_id: chatId, message_id: statusId }).catch(() => {});
+          await sendNoImportTargetMessage(env, token, chatId, forumThreadId, athenaUser, isGod);
+          return;
         }
         let lastEdit = Date.now();
         const report = await importBackupSql(env, sqlText, {
@@ -16169,6 +16240,7 @@ export async function buildStatsReport(env, token = null) {
 
 export {
   scrapeViaKage,
+  detectBackupCommunityId,
   ensureIndexTables,
   runHistoryIndexJob,
   buildSearchBlob,

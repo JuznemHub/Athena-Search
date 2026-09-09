@@ -7,6 +7,7 @@ import {
   cleanApiBase,
   compactAiContext,
   dedupeLinkRows,
+  detectBackupCommunityId,
   fuzzyMatchLinks,
   helpTextForSection,
   isGroundedAiAnswer,
@@ -150,5 +151,31 @@ assert.equal(aiWindow.AthenaAI.isGroundedAiAnswer(
   'Here is a general answer: https://untrusted.example/',
   [{ url: 'https://filmygod.buzz/' }]
 ), false);
+
+// detectBackupCommunityId: backup dumps carry the source community per links row.
+const mockEnvWith = (existingIds) => ({
+  DB: {
+    prepare: () => ({
+      bind: (id) => ({
+        first: async () => (existingIds.includes(id) ? { id } : null),
+      }),
+    }),
+  },
+});
+const linkInsert = (cid, url) =>
+  `INSERT INTO "links" ("community_id","id","url","url_hash") VALUES ('${cid}','x_${url}','https://${url}','h_${url}');`;
+const backupSingle = [
+  linkInsert('c_aaa', 'a.com'),
+  linkInsert('c_aaa', 'b.com'),
+  `INSERT INTO "personal_links" ("user_id","id","url") VALUES ('u1','p1','https://c.com');`,
+].join('\n');
+assert.equal(await detectBackupCommunityId(mockEnvWith(['c_aaa']), backupSingle), 'c_aaa');
+// Two distinct communities -> ambiguous -> ''.
+const backupMulti = [linkInsert('c_aaa', 'a.com'), linkInsert('c_bbb', 'b.com')].join('\n');
+assert.equal(await detectBackupCommunityId(mockEnvWith(['c_aaa', 'c_bbb']), backupMulti), '');
+// Single community unknown locally -> ''.
+assert.equal(await detectBackupCommunityId(mockEnvWith(['c_zzz']), backupSingle), '');
+// No links rows at all -> ''.
+assert.equal(await detectBackupCommunityId(mockEnvWith(['c_aaa']), `INSERT INTO "users" ("id") VALUES ('u1');`), '');
 
 console.log('retrieval tests passed');
