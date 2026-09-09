@@ -9106,7 +9106,7 @@ function formatStatsRichReport(report) {
         const liveT = t.live?.lastAt ? ' · live ' + Math.max(1, Math.round((Date.now() - (t.live.lastAt || 0)) / 60000)) + 'm ago' : (t.live?.msgs ? ' · live' : '');
         const j = t.job;
         const jPart = j ? j.status + (j.processed ? ' ' + j.processed + ' msgs' : '') + (j.saved_links ? ' · ' + j.saved_links + ' links' : '') + (j.saved_docs ? ' · ' + j.saved_docs + ' docs' : '') : 'not started';
-        items.push('<li>' + codeHtml('#' + t.threadId) + titlePart + ' → links ' + t.total.links + ' · docs ' + t.total.docs + ' (today ' + t.today.links + '/' + t.today.docs + ') · ' + jPart + liveT + '</li>');
+        items.push('<li>' + codeHtml('#' + t.threadId) + titlePart + ' → links ' + t.total.links + ' · docs ' + t.total.docs + ' · files ' + (t.total.files || 0) + ' (today ' + t.today.links + '/' + t.today.docs + ') · ' + jPart + liveT + '</li>');
       }
       if (c.topics.length > 12) items.push('<li>… +' + (c.topics.length - 12) + ' more topics</li>');
       body.push('<ul>' + items.join('') + '</ul>');
@@ -12016,13 +12016,13 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      await ensureIndexTables(env);
      await ensureTransferColumns(env);
      const { results } = await env.DB.prepare(
-       'SELECT id, chat_id, chat_name, status, processed, saved_links, saved_docs, saved_pdfs, dupes_skipped, saved_files, created_at FROM index_jobs ORDER BY created_at DESC LIMIT 10'
+       'SELECT id, chat_id, thread_id, chat_name, status, processed, saved_links, saved_docs, saved_pdfs, dupes_skipped, saved_files, created_at FROM index_jobs ORDER BY created_at DESC LIMIT 10'
        ).all();
      if (!results?.length) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No clone/backfill sessions yet.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
-     const lines = results.map((j) => `<li>${j.chat_name ? `${boldHtml(escHtml(j.chat_name))} ` : ''}${escHtml(j.chat_id)} · ${j.status} · ${j.processed || 0} msgs · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.dupes_skipped ? ` · ${j.dupes_skipped} dupes` : ''}${j.saved_files ? ` · ${j.saved_files} files` : ''} (${codeHtml(j.id)})</li>`);
+     const lines = results.map((j) => `<li>${j.chat_name ? `${boldHtml(escHtml(j.chat_name))} ` : ''}${escHtml(j.chat_id)}${j.thread_id ? ` topic ${codeHtml('#' + j.thread_id)}` : ''} · ${j.status} · ${j.processed || 0} msgs · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.dupes_skipped ? ` · ${j.dupes_skipped} dupes` : ''}${j.saved_files ? ` · ${j.saved_files} files` : ''} (${codeHtml(j.id)})</li>`);
      await sendTelegramRichMessage(token, chatId,
        `<h3>🗂 Clone sessions</h3><ul>${lines.join('')}</ul><p>${italicHtml('Delete one:')} ${codeHtml('/clone_del <id> [files]')}${italicHtml(' — add "files" to also wipe its vault media')}</p>`,
        forumThreadId);
@@ -12173,15 +12173,21 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
          for (const t of topics || []) {
            const tj = jobsByChatThread.get(normalizeTgChatId(f.chat_id) + ':' + t.thread_id);
            const tStatus = tj ? `${tj.status}${tj.processed ? ` ${tj.processed} msgs` : ''}${tj.saved_links ? ` · ${tj.saved_links} links` : ''}${tj.saved_docs ? ` · ${tj.saved_docs} docs` : ''}${tj.saved_pdfs ? ` · ${tj.saved_pdfs} pdfs` : ''}${tj.saved_files ? ` · ${tj.saved_files} files` : ''} — ${escHtml(String(tj.error || 'ok').slice(0,60))}` : 'not started';
+           // Live arrivals since process start (memory-only): "this topic
+           // got X new links" without waiting for a backfill row.
+           const tLive = USERBOT_STATS.get(f.chat_id + ':' + t.thread_id) || USERBOT_STATS.get(normalizeTgChatId(f.chat_id) + ':' + t.thread_id) || null;
+           const tLiveBit = (tLive && (tLive.msgs || tLive.links || tLive.docs)) ? ` · live +${tLive.msgs || 0} msgs +${tLive.links || 0} links +${tLive.docs || 0} docs` : '';
            // Fallback: if no per-thread job, check if whole-chat job covered it
-           topicLines.push(`<li>${codeHtml('#' + t.thread_id)} [${escHtml(t.target || 'community')}] — ${tStatus}</li>`);
+           topicLines.push(`<li>${codeHtml('#' + t.thread_id)} [${escHtml(t.target || 'community')}] — ${tStatus}${tLiveBit}</li>`);
          }
          // Also bare topic jobs without binding (DM clone)
          for (const [k, j] of jobsByChatThread) {
            if (k.startsWith(normalizeTgChatId(f.chat_id) + ':') && k.split(':')[1]) {
              const tid = k.split(':')[1];
              if (!topics?.some(t => String(t.thread_id) === tid)) {
-               topicLines.push(`<li>${codeHtml('#' + tid)} — ${j.status} ${j.processed || 0} msgs · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.saved_files ? ` · ${j.saved_files} files` : ''}</li>`);
+               const bLive = USERBOT_STATS.get(f.chat_id + ':' + tid) || USERBOT_STATS.get(normalizeTgChatId(f.chat_id) + ':' + tid) || null;
+               const bLiveBit = (bLive && (bLive.msgs || bLive.links || bLive.docs)) ? ` · live +${bLive.msgs || 0} msgs +${bLive.links || 0} links +${bLive.docs || 0} docs` : '';
+               topicLines.push(`<li>${codeHtml('#' + tid)} — ${j.status} ${j.processed || 0} msgs · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.saved_files ? ` · ${j.saved_files} files` : ''}${bLiveBit}</li>`);
              }
            }
          }
@@ -12238,7 +12244,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No backfill jobs yet. ${codeHtml('/clone')} to begin.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
-     const lines = results.map((j) => `<li>${j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'error' ? '❌' : '⏸'} ${j.chat_name ? `${boldHtml(escHtml(j.chat_name))} ` : ''}${codeHtml(j.chat_id)} — ${escHtml(j.status)} · ${j.processed || 0} scanned · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.dupes_skipped ? ` · ${j.dupes_skipped} dupes` : ''} · del: /clone_del ${codeHtml(j.id)}${j.error ? ` — ${escHtml(String(j.error).slice(0, 80))}` : ''}</li>`);
+     const lines = results.map((j) => `<li>${j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'error' ? '❌' : '⏸'} ${j.chat_name ? `${boldHtml(escHtml(j.chat_name))} ` : ''}${codeHtml(j.chat_id)}${j.thread_id ? ` topic ${codeHtml('#' + j.thread_id)}` : ''} — ${escHtml(j.status)} · ${j.processed || 0} scanned · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.dupes_skipped ? ` · ${j.dupes_skipped} dupes` : ''} · del: /clone_del ${codeHtml(j.id)}${j.error ? ` — ${escHtml(String(j.error).slice(0, 80))}` : ''}</li>`);
      await sendTelegramRichMessage(token, chatId, `<h3>🗂 Backfill jobs</h3><ul>${lines.join('')}</ul>`, forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
