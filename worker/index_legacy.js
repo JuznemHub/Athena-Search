@@ -9278,6 +9278,64 @@ function urlsFromGramjsMessage(message) {
  * Create + launch a backfill job using the connected userbot session
  * (userbot_state). One place for both /backfill (in-chat) and /index_start.
  */
+const CHAT_NAME_CACHE = new Map();
+/** Display name for a chat (channel/group title or @username) via Bot API.
+ *  Cached; '' when unresolvable (private chat the bot never saw). */
+async function resolveChatTitle(env, token, chatId) {
+  const key = String(chatId || '');
+  if (!key) return '';
+  if (CHAT_NAME_CACHE.has(key)) return CHAT_NAME_CACHE.get(key);
+  try {
+    const r = await telegramApi(token, 'getChat', { chat_id: key });
+    const ch = r?.result;
+    const name = ch && (ch.title || ch.username) ? (ch.title || ('@' + ch.username)) : '';
+    if (name) CHAT_NAME_CACHE.set(key, name);
+    return name;
+  } catch (_) { return ''; }
+}
+
+function progressBar(done, total, width = 18) {
+  const denom = Math.max(Number(done) || 0, Number(total) || 0);
+  const pct = denom ? Math.min(100, Math.round((Number(done) / denom) * 100)) : 0;
+  const filled = Math.round((pct / 100) * width);
+  return { bar: '▮'.repeat(filled) + '▯'.repeat(width - filled), pct };
+}
+
+/** Full backfill progress card (header + bar + per-type counts). Pure. */
+function formatBackfillProgress(o) {
+  const { bar, pct } = progressBar(o.done, o.total);
+  const parts = [`${bar} ${pct}%`, `${o.done}${o.total && o.total >= o.done ? `/${o.total}` : ''} msgs`];
+  if (o.links) parts.push(`${o.links} links`);
+  if (o.docs) parts.push(`${o.docs} docs`);
+  if (o.pdfs) parts.push(`${o.pdfs} pdfs`);
+  if (o.files) parts.push(`${o.files} files`);
+  if (o.urls) parts.push(`${o.urls} urls found`);
+  if (o.skipped) parts.push(`${o.skipped} media skipped`);
+  const where = o.threadId ? `#${o.threadId}` : (o.chatId || '');
+  const head = `${boldHtml('🗂 Backfill')}${o.name ? ` ${boldHtml(escHtml(o.name))}` : ''} ${codeHtml(where)}`;
+  return `${head}\n${codeHtml(parts.join(' · '))}\n${italicHtml('/index_stop to stop · /del ' + (o.chatId || '') + ' to delete')}`;
+}
+
+/** Backfill completion card. Pure. */
+function formatBackfillDone(o) {
+  const icon = o.status === 'done' ? '✅' : '⏸';
+  const where = o.name ? `${boldHtml(escHtml(o.name))} ${codeHtml(o.chatId || '')}` : codeHtml(o.chatId || '');
+  const counts = [`${o.processed} scanned`, `${o.links} links`, `${o.docs} docs`];
+  if (o.pdfs) counts.push(`${o.pdfs} pdfs`);
+  if (o.files) counts.push(`${o.files} files`);
+  const live = o.live ? `\n${o.live.emoji} ${escHtml(o.live.label)}` : '';
+  return `${icon} Backfill ${o.status || 'done'}: ${where}\n${counts.join(' · ')} saved.${live}`;
+}
+
+/** Live-follow indicator. Pure. accountConnected = userbot session alive in
+ *  memory; lastSeenAtMs = persisted userbot_follows.last_seen_at. */
+function followLiveness(accountConnected, lastSeenAtMs, nowMs = Date.now()) {
+  if (accountConnected) return { emoji: '🟢', label: 'Live indexing ON — new posts clone automatically' };
+  const age = nowMs - Number(lastSeenAtMs || 0);
+  if (lastSeenAtMs && age < 24 * 3600 * 1000) return { emoji: '🟢', label: 'Live indexing ON — follow active, seen recently' };
+  return { emoji: '⚪', label: 'Live idle — follow saved, resumes when the userbot connects' };
+}
+
 async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg, threadArg = '', communityName = '', userbotLabel = '', minId = '', maxId = '' }) {
   await ensureUserbotTables(env);
   await ensureIndexTables(env);
@@ -9302,14 +9360,17 @@ async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser,
   try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN skipped_media INTEGER DEFAULT 0').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] skipped_media alter:', e?.message); }
   try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN urls_seen INTEGER DEFAULT 0').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] urls_seen alter:', e?.message); }
   try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN continuations INTEGER DEFAULT 0').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] continuations alter:', e?.message); }
+  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN chat_name TEXT').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] chat_name alter:', e?.message); }
+  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN saved_pdfs INTEGER DEFAULT 0').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] saved_pdfs alter:', e?.message); }
+  const chatName = await resolveChatTitle(env, token, cid);
   const jobId = 'ij_' + Date.now().toString(36) + '_' + randomToken().slice(0, 6);
   await env.DB.prepare(
-      `INSERT INTO index_jobs (id, community_id, chat_id, user_id, status, offset_id, progress_chat_id, created_at, updated_at, thread_id, min_id, max_id)
-       VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?)`
-    ).bind(jobId, communityIdArg, cid, athenaUser.id, chatId, Date.now(), Date.now(), threadArg || null, minId ? Number(minId) : null, maxId ? Number(maxId) : null).run();
-  runInBackground(env, runHistoryIndexJob(env, { id: jobId, community_id: communityIdArg, chat_id: cid, thread_id: threadArg || null, userbot_label: userbotLabel || null, min_id: minId ? Number(minId) : null, max_id: maxId ? Number(maxId) : null, saved_files: 0, skipped_media: 0, offset_id: 0, processed: 0, saved_links: 0, saved_docs: 0, progress_chat_id: chatId }, token));
+      `INSERT INTO index_jobs (id, community_id, chat_id, user_id, status, offset_id, progress_chat_id, created_at, updated_at, thread_id, min_id, max_id, chat_name)
+       VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(jobId, communityIdArg, cid, athenaUser.id, chatId, Date.now(), Date.now(), threadArg || null, minId ? Number(minId) : null, maxId ? Number(maxId) : null, chatName || null).run();
+  runInBackground(env, runHistoryIndexJob(env, { id: jobId, community_id: communityIdArg, chat_id: cid, thread_id: threadArg || null, userbot_label: userbotLabel || null, min_id: minId ? Number(minId) : null, max_id: maxId ? Number(maxId) : null, saved_files: 0, skipped_media: 0, offset_id: 0, processed: 0, saved_links: 0, saved_docs: 0, saved_pdfs: 0, chat_name: chatName || '', progress_chat_id: chatId }, token));
   await sendTelegramFormatted(token, chatId,
-    `${boldHtml('▶️')} Backfill started for ${codeHtml(chatIdArg)}${threadArg ? ` topic ${codeHtml('#' + threadArg)}` : ''} → ${boldHtml(escHtml(communityName || communityIdArg))}.\n${italicHtml('Live progress below ·')} ${codeHtml('/index_stop')} ${italicHtml('to stop ·')} ${codeHtml('/del '+cid)} ${italicHtml('to delete.')}`,
+    `${boldHtml('▶️')} Backfill started for ${chatName ? `${boldHtml(escHtml(chatName))} ` : ''}${codeHtml(chatIdArg)}${threadArg ? ` topic ${codeHtml('#' + threadArg)}` : ''} → ${boldHtml(escHtml(communityName || communityIdArg))}.\n${italicHtml('Live progress below ·')} ${codeHtml('/index_stop')} ${italicHtml('to stop ·')} ${codeHtml('/del '+cid)} ${italicHtml('to delete.')}`,
     forumThreadId).catch(() => {});
   return { ok: true, jobId };
 }
@@ -9325,27 +9386,12 @@ async function runHistoryIndexJob(env, job, token) {
   // Live progress: edit one message with a bar instead of spamming new ones.
   let progressMsgId = null;
   let lastProgressAt = 0;
-  const renderBar = (done, total) => {
-    // Message ids are not sequential (deleted/legacy gaps), so the "total"
-    // (latest id) is approximate. When done exceeds it, show done as truth.
-    const denom = Math.max(done, total || 0);
-    const pct = denom ? Math.min(100, Math.round((done / denom) * 100)) : 0;
-    const filled = Math.round((pct / 100) * 18);
-    const bar = '▮'.repeat(filled) + '▯'.repeat(18 - filled);
-    const parts = [`${bar} ${pct}%`, `${done}${total && total >= done ? `/${total}` : ''} msgs`];
-    if (job.saved_links) parts.push(`${job.saved_links} links`);
-    if (job.saved_docs) parts.push(`${job.saved_docs} docs`);
-    if (job.saved_files) parts.push(`${job.saved_files} files`);
-    if (job.urls_seen) parts.push(`${job.urls_seen} urls found`);
-    if (job.skipped_media) parts.push(`${job.skipped_media} media skipped`);
-    return parts.join(' · ');
-  };
   const pushProgress = async (force = false, done = 0) => {
     const now = Date.now();
     if (!force && now - lastProgressAt < 10_000) return;
     lastProgressAt = now;
     try {
-      const text = `${boldHtml('🗂 Backfill')} ${job.thread_id ? codeHtml('#' + job.thread_id) : codeHtml(job.chat_id)}\n${codeHtml(renderBar(done, job.total_messages || 0))}\n${italicHtml('/index_stop to stop · /del '+job.chat_id+' to delete')}`;
+      const text = formatBackfillProgress({ name: job.chat_name, chatId: job.chat_id, threadId: job.thread_id, done, total: job.total_messages || 0, links: job.saved_links, docs: job.saved_docs, pdfs: job.saved_pdfs, files: job.saved_files, urls: job.urls_seen, skipped: job.skipped_media });
       if (progressMsgId) {
         await telegramApi(token, 'editMessageText', { chat_id: job.progress_chat_id, message_id: progressMsgId, text, parse_mode: 'HTML' }).catch(() => {});
       } else {
@@ -9457,12 +9503,13 @@ async function runHistoryIndexJob(env, job, token) {
               const id = 'ix_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
               await ensureLinkMetaColumns(env);
               const capTitle = titleFromUrl(rawUrl);
+              const capNotes = notesForUrl(text, rawUrl, urls.length).slice(0, 3000);
               try {
                 await env.DB.prepare(
                   `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
                     added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at, image_url, site_name, source_chat_id, source_message_id)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'telegram', ?, 0, 0, ?, NULL, NULL, ?, ?)`
-                ).bind(id, job.community_id, rawUrl, urlHash, capTitle, (text || '').slice(0, 3000),
+                ).bind(id, job.community_id, rawUrl, urlHash, capTitle, capNotes,
                   JSON.stringify(['telegram', 'backfill']), 'history backfill', 'history backfill',
                   Date.now(), job.chat_id, message.id != null ? String(message.id) : null).run();
                 savedLinks++; fresh.push({ id, url: rawUrl });
@@ -9471,7 +9518,7 @@ async function runHistoryIndexJob(env, job, token) {
                 if (!isMissingLinkMetaColumnError(error)) throw error;
                 await env.DB.prepare(
                   'INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by, created_at, source_chat_id, source_message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-                ).bind(id, job.community_id, rawUrl, urlHash, capTitle, (text || '').slice(0, 3000),
+                ).bind(id, job.community_id, rawUrl, urlHash, capTitle, capNotes,
                   JSON.stringify(['telegram', 'backfill']), 'history backfill', Date.now(), job.chat_id, message.id != null ? String(message.id) : null).run();
                 savedLinks++; fresh.push({ id, url: rawUrl });
               }
@@ -9540,7 +9587,7 @@ async function runHistoryIndexJob(env, job, token) {
               const buf = await client.downloadMedia(message, {});
               if (buf && buf.length) {
                 const r = await saveIndexedDocument(env, job.community_id, filename, ext, new Uint8Array(buf), `backfill:${job.chat_id}`, { chatId: job.chat_id, messageId: message.id }, job.id);
-                if (r?.saved) savedDocs++;
+                if (r?.saved) { savedDocs++; if (ext === 'pdf') job.saved_pdfs = (job.saved_pdfs || 0) + 1; }
               }
               await sleep(400);
             } catch (e) {
@@ -9551,7 +9598,7 @@ async function runHistoryIndexJob(env, job, token) {
         }
       }
       job.saved_links = savedLinks; job.saved_docs = savedDocs;
-      await patch({ offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs, saved_files: job.saved_files || 0, skipped_media: job.skipped_media || 0, urls_seen: job.urls_seen || 0 });
+      await patch({ offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs, saved_pdfs: job.saved_pdfs || 0, saved_files: job.saved_files || 0, skipped_media: job.skipped_media || 0, urls_seen: job.urls_seen || 0 });
       log(`batch done · total ${processed} · +${messages.length} · urls ${job.urls_seen || 0}`);
       if (processed - lastProgress >= 50) lastProgress = processed;
       await pushProgress(false, processed);
@@ -9560,8 +9607,8 @@ async function runHistoryIndexJob(env, job, token) {
     if (processed >= INDEX_MAX_MESSAGES) {
       const conts = Number(job.continuations || 0);
       if (conts < INDEX_AUTO_CONTINUATIONS) {
-        const nextJob = { ...job, offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs, saved_files: job.saved_files || 0, skipped_media: job.skipped_media || 0, urls_seen: job.urls_seen || 0 };
-        await patch({ status: 'queued', continuations: conts + 1, offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs, skipped_media: job.skipped_media || 0, urls_seen: job.urls_seen || 0 });
+        const nextJob = { ...job, offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs, saved_files: job.saved_files || 0, skipped_media: job.skipped_media || 0, urls_seen: job.urls_seen || 0, saved_pdfs: job.saved_pdfs || 0 };
+        await patch({ status: 'queued', continuations: conts + 1, offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs, saved_pdfs: job.saved_pdfs || 0, skipped_media: job.skipped_media || 0, urls_seen: job.urls_seen || 0 });
         log(`cap reached — auto-continuing (chunk ${conts + 2}) at offset ${offsetId}`);
         runInBackground(env, runHistoryIndexJob(env, { ...nextJob, status: 'queued' }, token));
       } else {
@@ -9571,8 +9618,11 @@ async function runHistoryIndexJob(env, job, token) {
       try { await client.disconnect(); } catch (_) {}
       return;
     }
-    const finalRow = await env.DB.prepare('SELECT status, saved_links, saved_docs FROM index_jobs WHERE id = ?').bind(job.id).first();
-    const doneText = `${finalRow?.status === 'done' ? '✅' : '⏸'} Backfill ${finalRow?.status || 'done'}: ${processed} scanned · ${savedLinks} links · ${savedDocs} docs saved.`;
+    const finalRow = await env.DB.prepare('SELECT status, saved_links, saved_docs, saved_pdfs FROM index_jobs WHERE id = ?').bind(job.id).first().catch(() => null);
+    const folRow = await env.DB.prepare('SELECT last_seen_at FROM userbot_follows WHERE chat_id = ?').bind(job.chat_id).first().catch(() => null);
+    const accLive = job.userbot_label ? USERBOT_ACCOUNTS.has(job.userbot_label) : USERBOT_ACCOUNTS.size > 0;
+    const live = followLiveness(accLive, folRow?.last_seen_at);
+    const doneText = formatBackfillDone({ status: finalRow?.status || 'done', name: job.chat_name, chatId: job.chat_id, processed, links: savedLinks, docs: savedDocs, pdfs: Number(finalRow?.saved_pdfs ?? job.saved_pdfs ?? 0), files: job.saved_files, live });
     if (progressMsgId) {
       await telegramApi(token, 'editMessageText', { chat_id: job.progress_chat_id, message_id: progressMsgId, text: doneText, parse_mode: 'HTML' }).catch(() =>
         sendTelegramFormatted(token, job.progress_chat_id, doneText).catch(() => {}));
@@ -15367,6 +15417,18 @@ function runInBackground(env, promise) {
   else Promise.resolve(promise).catch(() => {});
 }
 
+/** Persisted follow heartbeat, throttled to one write per chat per minute
+ *  (capture runs per message — unthrottled this would double DB writes). */
+const FOLLOW_SEEN_AT = new Map();
+async function touchFollowSeen(env, chatId) {
+  const key = String(chatId || '');
+  if (!key) return;
+  const now = Date.now();
+  if ((FOLLOW_SEEN_AT.get(key) || 0) > now - 60_000) return;
+  FOLLOW_SEEN_AT.set(key, now);
+  await env.DB.prepare('UPDATE userbot_follows SET last_seen_at = ? WHERE chat_id = ?').bind(now, key).run().catch(() => {});
+}
+
 /** Collect the tag vocabulary a community/user already uses, newest rows first. */
 async function recentTagsForScope(env, scope, key, limit = 200) {
   const out = [];
@@ -15595,6 +15657,8 @@ async function ensureUserbotTables(env) {
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_userbot_errors_t ON userbot_errors(t)').run().catch(() => {});
   // live-DB migration: older installs created userbot_follows without label
   try { await env.DB.prepare("ALTER TABLE userbot_follows ADD COLUMN label TEXT DEFAULT 'main'").run(); } catch (_) {}
+  // persisted liveness for the 🟢/⚪ follow indicator (memory-only before)
+  try { await env.DB.prepare('ALTER TABLE userbot_follows ADD COLUMN last_seen_at BIGINT').run(); } catch (_) {}
   // one-time migration from the old singleton table
   try {
     const legacy = await env.DB.prepare("SELECT * FROM userbot_state WHERE id = 'singleton' AND enabled = 1").first().catch(() => null);
@@ -15706,6 +15770,7 @@ async function captureGramjsMessage(env, follow, message) {
   if (text.startsWith('/')) return;
   const _threadId = message.replyTo?.replyToTopId != null ? String(message.replyTo.replyToTopId) : null;
   userbotStat(follow.chat_id, 'msgs', _threadId);
+  touchFollowSeen(env, follow.chat_id).catch(() => {});
   const target = CHANNEL_TARGETS.has(follow.target) ? follow.target : 'community';
   const personalOwner = target === 'community' ? null : String(follow.created_by || '');
   const sinks = sinkTargetsFor(target, personalOwner);
@@ -16421,9 +16486,13 @@ export async function buildStatsReport(env, token = null) {
 export {
   scrapeViaKage,
   detectBackupCommunityId,
+  followLiveness,
+  formatBackfillDone,
+  formatBackfillProgress,
   importBackupSql,
   loadLinkNamePattern,
   notesForUrl,
+  progressBar,
   repairContaminatedNotes,
   ensureIndexTables,
   runHistoryIndexJob,

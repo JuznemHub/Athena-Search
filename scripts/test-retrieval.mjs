@@ -8,9 +8,13 @@ import {
   compactAiContext,
   dedupeLinkRows,
   detectBackupCommunityId,
+  followLiveness,
+  formatBackfillDone,
+  formatBackfillProgress,
   importBackupSql,
   loadLinkNamePattern,
   notesForUrl,
+  progressBar,
   repairContaminatedNotes,
   fuzzyMatchLinks,
   helpTextForSection,
@@ -320,6 +324,39 @@ assert.equal(await detectBackupCommunityId(mockEnvWith(['c_aaa']), `INSERT INTO 
   assert.equal(repairContaminatedNotes(pairNotes, 'https://www.hitpaw.com/photo-enhancer.html', 'hitpaw', nameRe), pairNotes);
   // Short notes never trigger, however many names.
   assert.equal(repairContaminatedNotes('Gigapixel Upscale YouCam HitPaw tools', 'https://www.hitpaw.com/x', 'hitpaw', nameRe), 'Gigapixel Upscale YouCam HitPaw tools');
+}
+
+// Clone progress/completion/liveness formatters (pure — safe to unit test).
+{
+  const b0 = progressBar(0, 0);
+  assert.equal(b0.pct, 0);
+  assert.equal(b0.bar.length, 18);
+  const b1 = progressBar(50, 100);
+  assert.equal(b1.pct, 50);
+  assert.ok(b1.bar.startsWith('▮'.repeat(9)));
+  const b2 = progressBar(150, 100);
+  assert.equal(b2.pct, 100, 'done>total clamps instead of overflowing');
+
+  const prog = formatBackfillProgress({ name: 'Pirate Movies', chatId: '-100123', threadId: '', done: 500, total: 1000, links: 120, docs: 30, pdfs: 7, files: 4, urls: 200, skipped: 11 });
+  assert.ok(prog.includes('Pirate Movies'), 'chat name shown');
+  assert.ok(prog.includes('-100123'), 'chat id shown');
+  assert.ok(prog.includes('7 pdfs'), 'pdf counter shown');
+  assert.ok(prog.includes('50%'), 'percent shown');
+  const progBare = formatBackfillProgress({ chatId: '-100123', done: 5, total: 0 });
+  assert.ok(progBare.includes('-100123'), 'works with no name and no total');
+  assert.ok(!progBare.includes('pdfs'), 'zero counters omitted');
+
+  const done = formatBackfillDone({ status: 'done', name: 'Pirate Movies', chatId: '-100123', processed: 1000, links: 120, docs: 30, pdfs: 7, files: 0, live: { emoji: '🟢', label: 'Live indexing ON' } });
+  assert.ok(done.startsWith('✅'), 'done icon');
+  assert.ok(done.includes('Pirate Movies'), 'name in completion');
+  assert.ok(done.includes('7 pdfs'), 'pdfs in completion');
+  assert.ok(done.includes('🟢'), 'live indicator in completion');
+
+  const now = Date.now();
+  assert.equal(followLiveness(true, 0, now).emoji, '🟢', 'connected account is live');
+  assert.equal(followLiveness(false, now - 3600_000, now).emoji, '🟢', 'recently seen follow is live');
+  assert.equal(followLiveness(false, now - 48 * 3600_000, now).emoji, '⚪', 'stale follow is idle');
+  assert.equal(followLiveness(false, 0, now).emoji, '⚪', 'never-seen follow is idle');
 }
 
 console.log('retrieval tests passed');
