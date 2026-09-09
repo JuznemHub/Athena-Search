@@ -30,7 +30,10 @@ async function unifiedClone(update,env,ctx){
   const running=await env.DB.prepare(`SELECT id FROM index_jobs WHERE chat_id=? AND status IN ('queued','running')`).bind(normRemote).first().catch(()=>null);
   if(running) return tg(token,'sendMessage',{chat_id:msg.chat.id,text:`<b>⏳</b> Clone for <code>${remote}</code> is already running — progress via /userbot_status.`,parse_mode:'HTML'}).then(()=>new Response('OK')).catch(()=>new Response('OK'));
   const pend=await env.DB.prepare(`SELECT id FROM pending_clones WHERE chat_id=? AND expires_at>?`).bind(normRemote,Date.now()).first().catch(()=>null);
-  if(pend) return tg(token,'sendMessage',{chat_id:msg.chat.id,text:`<b>⏳</b> Clone preview for <code>${remote}</code> is being prepared — auto-confirm is imminent, hold on.`,parse_mode:'HTML'}).then(()=>new Response('OK')).catch(()=>new Response('OK'));
+  if(pend){ await tg(token,'sendMessage',{chat_id:msg.chat.id,text:`<b>⏳</b> Clone preview for <code>${remote}</code> is ready — resuming auto-confirm now, hold on.`,parse_mode:'HTML'}).catch(()=>{});
+    const resume=(async()=>{ const y=structuredClone(update); y.message.text='yes'; y.message.caption=undefined; y.message.entities=[]; try{ await legacyFetch(y,env); }catch(_){ await tg(token,'sendMessage',{chat_id:msg.chat.id,text:`<b>❌</b> Clone confirm step failed — check /userbot_status or retry.`,parse_mode:'HTML'}).catch(()=>{}); } })();
+    if(ctx&&typeof ctx.waitUntil==='function') ctx.waitUntil(resume.catch(()=>{})); else await resume.catch(()=>{});
+    return new Response('OK'); }
   // Ack BEFORE the blocking preview scan: primeEntity (45s) + history preview
   // run with zero user feedback, and a killed/timed-out webhook otherwise
   // leaves total silence.
