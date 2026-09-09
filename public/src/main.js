@@ -2235,9 +2235,10 @@ document.addEventListener('DOMContentLoaded', () => {
       // Candidate (unsaved) base+key from the form, if both present — the
       // server refuses mixed pairs, so send them together or neither.
       const qs = new URLSearchParams();
-      if (base && key) { qs.set('base', base); qs.set('key', key); }
+      // Key goes in a header, not the URL — query strings land in proxy logs.
+      if (base && key) { qs.set('base', base); }
       if (force) qs.set('refresh', '1');
-      const { res, data } = await api(`/api/ai/models${qs.toString() ? `?${qs}` : ''}`);
+      const { res, data } = await api(`/api/ai/models${qs.toString() ? `?${qs}` : ''}`, key ? { headers: { 'x-ai-key': key } } : {});
       if (!res.ok || data.success === false) {
         if (list) list.innerHTML = `<div class="model-item" style="color:var(--danger-color)">${escapeHtml(data.error || `HTTP ${res.status}`)}</div>`;
         return;

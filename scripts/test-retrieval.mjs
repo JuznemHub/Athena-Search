@@ -31,8 +31,8 @@ assert.equal(resolveChatEndpoint('https://opencode.ai/zen/v1', 'openai', 'gpt-5.
 assert.equal(resolveChatEndpoint('https://opencode.ai/zen/go/v1', 'openai', 'minimax-m3'), 'https://opencode.ai/zen/go/v1/messages');
 assert.equal(resolveChatEndpoint('https://api.openai.com/v1', 'openai', 'gpt-4o-mini'), 'https://api.openai.com/v1/chat/completions');
 assert.equal(resolveChatEndpoint('https://api.anthropic.com', 'anthropic', 'claude-sonnet-4-20250514'), 'https://api.anthropic.com/v1/messages');
-assert.match(helpTextForSection('personal'), /\/search (?:<query>|<code>&lt;query&gt;<\/code>)/);
-assert.match(helpTextForSection('community'), /\/clear_db (?:<id>|<code>&lt;id&gt;<\/code>)/);
+assert.match(helpTextForSection('personal'), /<code>\/search<\/code>\s*<code>&lt;query&gt;<\/code>/);
+assert.match(helpTextForSection('community'), /<code>\/clear_db &lt;id&gt;<\/code>/);
 
 const replyEdit = parseTelegramEditPayload('| title: Correct title | notes: Correct notes', {
   text: 'Saved link https://example.com/item'

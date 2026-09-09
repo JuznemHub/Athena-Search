@@ -11,6 +11,7 @@
     anthropic: { label: 'Anthropic', baseUrl: 'https://api.anthropic.com', mode: 'anthropic', model: 'claude-sonnet-4-20250514' },
     groq: { label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', mode: 'openai', model: 'llama-3.3-70b-versatile' },
     nvidia: { label: 'NVIDIA NIM', baseUrl: 'https://integrate.api.nvidia.com/v1', mode: 'openai', model: 'meta/llama-3.1-8b-instruct' },
+    amd: { label: 'AMD Radeon Cloud', baseUrl: 'https://developer.amd.com.cn/radeon/api/v1', mode: 'openai', model: 'DeepSeek-V4-Flash' },
     deepseek: { label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', mode: 'openai', model: 'deepseek-v4-flash' },
     opencode_go: {
       label: 'OpenCode Zen Go',
@@ -58,13 +59,16 @@
     if (/opencode\.ai/i.test(baseUrl || '') || /^opencode/i.test(m)) {
       m = m.replace(/^opencode-go\//i, '').replace(/^opencode\//i, '');
     }
+    // Keep OpenRouter-style suffixes (":free", ":nitro") intact.
+    const suffix = /:(free|nitro|extended|thinking|beta)$/i.exec(m)?.[1]?.toLowerCase() || '';
+    if (suffix) m = m.slice(0, m.length - suffix.length - 1);
     if (/[A-Z\s]/.test(m)) {
       m = m.toLowerCase().replace(/[\s_]+/g, '-').replace(new RegExp('[^a-z0-9/.-]', 'g'), '');
       m = m.replace(/-+/g, '-').replace(/^-|-$/g, '');
     } else {
       m = m.trim().replace(/-+/g, '-');
     }
-    return m;
+    return suffix ? `${m}:${suffix}` : m;
   }
 
   function isSteroidEnabled() {
@@ -581,7 +585,7 @@ INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on 
     try {
       const token = window.getAthenaSessionToken?.() || localStorage.getItem('athena_session');
       const apiBase = window.getAthenaApiBase?.() || window.location.origin;
-      const res = await fetch(`${apiBase}/api/ai/config?v=1.0.41`, {
+      const res = await fetch(`${apiBase}/api/ai/config`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
         cache: 'no-store'
       });
