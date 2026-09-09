@@ -7861,8 +7861,9 @@ function helpTextForSection(section, isGod = false) {
       cmd(14, `${codeHtml('/delete')} ${codeHtml('<chat_id> [topic_id]')}`, 'Delete a cloned chat or topic (alias: ' + codeHtml('/del') + ').'),
       spacer,
       richParagraph('<b>Userbot</b> — powers history backfill; live indexing needs admin only'),
-      cmd(15, `${codeHtml('/userbotconnect')} ${codeHtml('<api_id> <api_hash> <session> <community_id>')}`, 'GOD, DM only. Stores the session that reads history. It is a secret — never paste it in a group; revoke it in Telegram Settings → Devices when done.'),
-      cmd(16, `${codeHtml('/userbot_status')}`, 'Is the userbot connected, and which chats does it follow.'),
+      cmd(15, `${codeHtml('/uclone')} ${codeHtml('<chat_id> [topic_id] community|personal|both')}`, 'Explicit userbot clone — the GOD-only way to fill your personal brain. Without the userbot, /clone still follows live posts.'),
+      cmd(16, `${codeHtml('/userbotconnect')} ${codeHtml('<api_id> <api_hash> <session> <community_id>')}`, 'GOD, DM only. Stores the session that reads history. It is a secret — never paste it in a group; revoke it in Telegram Settings → Devices when done.'),
+      cmd(17, `${codeHtml('/userbot_status')}`, 'Is the userbot connected, and which chats does it follow.'),
       cmd(17, `${codeHtml('/userbot_follow')} · ${codeHtml('/userbot_unfollow')}`, 'Add or remove live-follow chats for the userbot.'),
       cmd(18, `${codeHtml('/userbot_disconnect')} · ${codeHtml('/userbot_del')}`, 'Disconnect, or fully delete the stored session.'),
       spacer,
@@ -7891,13 +7892,13 @@ function helpTextForSection(section, isGod = false) {
       spacer,
       richParagraph('<b>Backup & import</b>'),
       cmd(7, codeHtml('/backup'), 'Full database backup (SQL, gzipped) sent to this chat.'),
-      cmd(8, `${codeHtml('/import')} — ${boldHtml('reply to a backup file')}`, 'Merges a backup into this instance: duplicates (same URL or source message) are skipped, the rest is added. Backups without content rows are replayed as a whole database. Background job with progress.'),
+      cmd(8, `${codeHtml('/import')} — ${boldHtml('reply to a backup file')}`, 'Merges the backup into your CURRENT brains: community links → the linked community (or ' + codeHtml('/import <community_id>') + '), personal links → your personal brain. Duplicates skipped; runs in the background with progress.'),
       spacer,
       richParagraph('<b>Channels, cloning & userbot</b>'),
       richParagraph(`<i>Channel/group/topic cloning and userbot commands live in the ${boldHtml('📡 Channels')} panel — most are GOD/owner gated and non-GOD just get "GOD rank only".</i>`),
       spacer,
       richParagraph('<b>Instance</b>'),
-      cmd(7, `${codeHtml('/setlogchannel')} ${codeHtml('<chat_id>')}`, 'Mirror operational events to a log channel.'),
+      cmd(7, `${codeHtml('/setlogchannel')} ${codeHtml('<chat_id>')} ${codeHtml('(/setlog)')}`, 'Mirror operational events to a log channel.'),
       cmd(8, `${codeHtml('/logs')} ${codeHtml('[n|clear]')}`, 'Tail the in-app structured log (last n lines, default 30) — no SSH needed.'),
       cmd(9, `${codeHtml('/db')} · ${codeHtml('/clear_personal_db')} · ${codeHtml('/restart')}`, 'Storage info · wipe your personal brain (confirm with YES) · restart the self-host service.'),
       spacer,
@@ -9879,35 +9880,41 @@ const IMPORT_LINK_COLUMNS = {
  *  uploaded_documents are deduped by URL identity or source message and
  *  inserted; a dump with none of those rows replays every INSERT with
  *  ON CONFLICT DO NOTHING instead (never deletes anything). */
-async function importBackupSql(env, sqlText, { onProgress = null } = {}) {
-  const report = { linksInserted: 0, linksSkipped: 0, personalInserted: 0, personalSkipped: 0, docsInserted: 0, docsSkipped: 0, wholeDbReplay: false, replayInserted: 0, replayFailed: 0, errors: 0 };
+async function importBackupSql(env, sqlText, { onProgress = null, targetCommunityId = null, targetUserId = null } = {}) {
+  // Everything merges into the CURRENT brains: backup community links land in
+  // targetCommunityId, backup personal links in targetUserId. No communities
+  // or users are created; duplicate URLs / source messages are skipped.
+  const report = {
+    targetCommunity: targetCommunityId || '', targetUser: targetUserId || '',
+    linksInserted: 0, linksSkipped: 0, personalInserted: 0, personalSkipped: 0,
+    docsInserted: 0, docsSkipped: 0, wholeDbReplay: false, replayInserted: 0, replayFailed: 0, errors: 0
+  };
+  if (!targetCommunityId || !targetUserId) return report;
   const statements = splitSqlStatements(String(sqlText || ''));
   const parsed = [];
-  for (const s of statements) {
-    if (/^INSERT\s+INTO/i.test(s)) {
-      const p = parseSqlInsert(s);
-      if (p) parsed.push(p);
+  for (const st of statements) {
+    if (/^INSERT\s+INTO/i.test(st)) {
+      const parsedRow = parseSqlInsert(st);
+      if (parsedRow) parsed.push(parsedRow);
     }
   }
   const byTable = { links: [], personal_links: [], uploaded_documents: [] };
-  const parentRows = { users: [], communities: [], community_members: [] };
-  for (const p of parsed) {
-    if (byTable[p.table]) byTable[p.table].push(p.row);
-    else if (parentRows[p.table]) parentRows[p.table].push(p.row);
+  for (const pRow of parsed) {
+    if (byTable[pRow.table]) byTable[pRow.table].push(pRow.row);
   }
   const hasContentRows = byTable.links.length + byTable.personal_links.length + byTable.uploaded_documents.length > 0;
 
   if (!hasContentRows) {
-    // Whole-database merge: replay every INSERT (parents-first order is kept
-    // by the backup), skipping conflicts and destructive statements.
+    // Backup with no links/docs at all: replay every INSERT as a whole-db
+    // merge (never deletes; conflicts skipped).
     report.wholeDbReplay = true;
     let done = 0;
-    for (const s of statements) {
-      if (!/^INSERT\s+INTO/i.test(s)) continue;
+    for (const st of statements) {
+      if (!/^INSERT\s+INTO/i.test(st)) continue;
       try {
-        await env.DB.prepare(/;\s*$/.test(s) ? s : s + ';').run();
+        await env.DB.prepare(/;\s*$/.test(st) ? st : st + ';').run();
         report.replayInserted++;
-      } catch (e) { report.replayFailed++; logError('import', 'replay failed', { err: e?.message || e, stmt: s.slice(0, 120) }); }
+      } catch (e) { report.replayFailed++; logError('import', 'replay failed', { err: e?.message || e, stmt: st.slice(0, 120) }); }
       done++;
       if (onProgress && done % 250 === 0) await onProgress({ phase: 'replay', done });
     }
@@ -9917,27 +9924,8 @@ async function importBackupSql(env, sqlText, { onProgress = null } = {}) {
   await ensureSearchColumns(env);
   await ensureLinkMetaColumns(env);
 
-  // Upsert parent rows (users / communities / memberships) so links imported
-  // from other instances satisfy their foreign keys. ON CONFLICT DO NOTHING:
-  // live rows are never overwritten. Uses parameterized statements built from
-  // the parsed row, never string interpolation.
-  report.parentsImported = 0;
-  for (const [table, rowsP] of Object.entries(parentRows)) {
-    for (const row of rowsP) {
-      if (!row.id) continue;
-      try {
-        const cols = Object.keys(row);
-        const res = await env.DB.prepare(
-          `INSERT INTO ${table} (${cols.map(c => `"${c}"`).join(', ')}) VALUES (${cols.map(() => '?').join(', ')}) ON CONFLICT (id) DO NOTHING`
-        ).bind(...cols.map(c => row[c])).run();
-        if (res && res.changes) report.parentsImported++;
-      } catch (_) {}
-    }
-  }
-
-  // Backups from older/newer schemas can carry columns this instance doesn't
-  // have yet (e.g. transfer_id before the first clone) — intersect with the
-  // live table columns so INSERTs never reference missing columns.
+  // Live-columns guard: backups from other schemas may carry columns this
+  // instance doesn't have — drop them instead of failing every row.
   const liveCols = { links: new Set(), personal_links: new Set(), uploaded_documents: new Set() };
   for (const t of Object.keys(liveCols)) {
     try {
@@ -9946,12 +9934,8 @@ async function importBackupSql(env, sqlText, { onProgress = null } = {}) {
     } catch (_) {}
   }
 
-  // Preload existing URL identities per scope once — dedupe in memory instead
-  // of one SELECT per row (a 2.5k-link backup becomes 2 queries, not 5k).
-  const identityCache = new Map();
+  // Preload the target scope's URL identities once — dedupe in memory.
   const loadIdentities = async (table, scopeCol, scopeId) => {
-    const key = `${table}:${scopeId}`;
-    if (identityCache.has(key)) return identityCache.get(key);
     const set = new Set();
     try {
       const res = await env.DB.prepare(`SELECT url, url_hash FROM ${table} WHERE ${scopeCol} = ?`).bind(String(scopeId)).all();
@@ -9960,80 +9944,111 @@ async function importBackupSql(env, sqlText, { onProgress = null } = {}) {
         if (r.url_hash) set.add(`h:${String(r.url_hash)}`);
       }
     } catch (_) {}
-    identityCache.set(key, set);
     return set;
   };
 
+  // Fixed-shape rows: every row becomes the same column vector so inserts can
+  // be batched (chunks of multi-row VALUES).
+  const CHUNK = 25;
+  const batchInsert = async (table, cols, vectors) => {
+    for (let i = 0; i < vectors.length; i += CHUNK) {
+      const chunk = vectors.slice(i, i + CHUNK);
+      const placeholders = chunk.map(() => `(${cols.map(() => '?').join(', ')})`).join(', ');
+      await env.DB.prepare(`INSERT INTO ${table} (${cols.map(c => `"${c}"`).join(', ')}) VALUES ${placeholders}`)
+        .bind(...chunk.flat()).run();
+    }
+  };
+
   const linkTables = [
-    { name: 'links', scopeCol: 'community_id', insertedKey: 'linksInserted', skippedKey: 'linksSkipped' },
-    { name: 'personal_links', scopeCol: 'user_id', insertedKey: 'personalInserted', skippedKey: 'personalSkipped' }
+    { name: 'links', scopeCol: 'community_id', target: targetCommunityId, insertedKey: 'linksInserted', skippedKey: 'linksSkipped' },
+    { name: 'personal_links', scopeCol: 'user_id', target: targetUserId, insertedKey: 'personalInserted', skippedKey: 'personalSkipped' }
   ];
   for (const t of linkTables) {
-    let done = 0;
+    const known = await loadIdentities(t.name, t.scopeCol, t.target);
+    const cols = [t.scopeCol, 'id', 'url', 'url_hash'];
+    for (const c of IMPORT_LINK_COLUMNS[t.name]) {
+      if (c === 'id' || c === t.scopeCol || c === 'url' || c === 'url_hash') continue;
+      if (!(liveCols[t.name].size) || liveCols[t.name].has(c)) cols.push(c);
+    }
+    const vectors = [];
     for (const row of byTable[t.name]) {
+      const rawUrl = String(row.url || '');
+      if (!rawUrl) { report[t.skippedKey]++; continue; }
+      const url = stripTrackingParams(rawUrl);
+      const newHash = generateUrlHash(url);
+      const legacy = legacyUrlHash(url);
+      if (known.has(`h:${newHash}`) || known.has(`h:${legacy}`) || known.has(`u:${url}`)) { report[t.skippedKey]++; continue; }
+      known.add(`h:${newHash}`); known.add(`h:${legacy}`); known.add(`u:${url}`);
+      const vec = [t.target, `ix_${randomToken().slice(0, 12)}`, url, newHash];
+      for (const c of cols.slice(4)) {
+        let v = row[c];
+        if (v == null && ['upvotes', 'downvotes', 'metadata_version'].includes(c)) v = 0;
+        vec.push(c === 'search_blob' ? null : (v ?? null));
+      }
+      vectors.push(vec);
+      report[t.insertedKey]++;
+    }
+    for (let i = 0; i < vectors.length; i += 500) {
+      if (onProgress) await onProgress({ phase: t.name, done: Math.min(vectors.length, i + 500) });
       try {
-        const rawUrl = String(row.url || '');
-        if (!rawUrl || !row[t.scopeCol]) { report[t.skippedKey]++; continue; }
-        const url = stripTrackingParams(rawUrl);
-        const newHash = generateUrlHash(url);
-        const legacy = legacyUrlHash(url);
-        const known = await loadIdentities(t.name, t.scopeCol, row[t.scopeCol]);
-        if (known.has(`h:${newHash}`) || known.has(`h:${legacy}`) || known.has(`u:${url}`)) { report[t.skippedKey]++; continue; }
-        known.add(`h:${newHash}`); known.add(`h:${legacy}`); known.add(`u:${url}`);
-        let id = row.id ? String(row.id) : `ix_${randomToken().slice(0, 12)}`;
-        const cols = ['id', t.scopeCol];
-        const vals = [id, row[t.scopeCol]];
-        for (const c of IMPORT_LINK_COLUMNS[t.name]) {
-          if (c === 'id' || c === t.scopeCol) continue;
-          if (!(c in row)) continue;
-          if (liveCols[t.name].size && !liveCols[t.name].has(c)) continue;
-          cols.push(c);
-          vals.push(c === 'url' ? url : c === 'url_hash' ? newHash : c === 'search_blob' ? null : row[c]);
-        }
-        try {
-          await env.DB.prepare(`INSERT INTO ${t.name} (${cols.map(c => `"${c}"`).join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`).bind(...vals).run();
-          report[t.insertedKey]++;
-        } catch (e) {
-          // unique-index race with a concurrent dump → count as skipped dupe
-          if (isUniqueConstraintError(e)) { report[t.skippedKey]++; continue; }
-          throw e;
-        }
+        await batchInsert(t.name, cols, vectors.slice(i, i + 500));
       } catch (e) {
-        const msg = String(e?.message || e);
-        if (/foreign key/i.test(msg)) {
-          report.orphansSkipped = (report.orphansSkipped || 0) + 1;
-        } else {
-          report.errors++;
-          logError('import', `link failed ${row.url}`, msg);
+        // One bad row must not sink the batch — replay this window row by row.
+        for (const vec of vectors.slice(i, i + 500)) {
+          try {
+            await batchInsert(t.name, cols, [vec]);
+            void vec;
+          } catch (rowErr) {
+            report[t.insertedKey]--;
+            report.errors++;
+            logError('import', 'row failed', String(rowErr?.message || rowErr).slice(0, 140));
+          }
         }
       }
-      done++;
-      if (onProgress && done % 250 === 0) await onProgress({ phase: t.name, done });
     }
   }
 
-  // uploaded_documents — dedupe by source message, else scope+filename, in memory
-  let docSet;
+  // uploaded_documents — remapped to the target scopes, deduped in memory.
+  const docCols = ['id', 'scope', 'community_id', 'user_id', 'filename', 'content', 'uploaded_by', 'created_at', 'source_chat_id', 'source_message_id']
+    .filter(c => !liveCols.uploaded_documents.size || liveCols.uploaded_documents.has(c) || c === 'id');
+  const docSet = new Set();
   try {
-    const res = await env.DB.prepare(`SELECT scope, COALESCE(user_id,'') AS user_id, COALESCE(community_id,'') AS community_id, filename, COALESCE(source_chat_id,'') AS source_chat_id, COALESCE(source_message_id,'') AS source_message_id FROM uploaded_documents`).all();
-    docSet = new Set(((res && res.results) || []).map(r => `${r.source_chat_id || ''}|${r.source_message_id || ''}|${r.scope || 'community'}|${r.filename || ''}`));
-  } catch (_) { docSet = new Set(); }
-  let docDone = 0;
+    const res = await env.DB.prepare(`SELECT scope, COALESCE(community_id,'') AS community_id, COALESCE(user_id,'') AS user_id, filename, COALESCE(source_chat_id,'') AS source_chat_id, COALESCE(source_message_id,'') AS source_message_id FROM uploaded_documents`).all();
+    for (const r of (res && res.results) || []) {
+      docSet.add(`${r.scope === 'personal' ? 'personal' : 'community'}|${r.filename || ''}|${r.source_chat_id || ''}|${r.source_message_id || ''}`);
+    }
+  } catch (_) {}
+  const docVecs = [];
   for (const row of byTable.uploaded_documents) {
+    const isPersonal = String(row.scope || 'community') === 'personal';
+    const srcKey = `${isPersonal ? 'personal' : 'community'}|${row.filename || ''}|${row.source_chat_id || ''}|${row.source_message_id || ''}`;
+    if (docSet.has(srcKey)) { report.docsSkipped++; continue; }
+    docSet.add(srcKey);
+    const vec = docCols.map(c => {
+      if (c === 'id') return `doc_${randomToken().slice(0, 12)}`;
+      if (c === 'scope') return isPersonal ? 'personal' : 'community';
+      if (c === 'community_id') return isPersonal ? null : targetCommunityId;
+      if (c === 'user_id') return isPersonal ? targetUserId : null;
+      return row[c] ?? null;
+    });
+    docVecs.push(vec);
+    report.docsInserted++;
+  }
+  for (let i = 0; i < docVecs.length; i += 250) {
+    if (onProgress && docVecs.length) await onProgress({ phase: 'documents', done: Math.min(docVecs.length, i + 250) });
     try {
-      const srcKey = `${row.source_chat_id || ''}|${row.source_message_id || ''}|${row.scope || 'community'}|${row.filename || ''}`;
-      const fileKey = `${row.scope || 'community'}|${row.scope === 'personal' ? row.user_id : row.community_id}|${row.filename || ''}`;
-      if (docSet.has(srcKey) || docSet.has(`||${(row.scope || 'community')}|${row.filename || ''}`) || docSet.has(fileKey)) { report.docsSkipped++; continue; }
-      docSet.add(srcKey); docSet.add(fileKey);
-      let id = row.id ? String(row.id) : `doc_${randomToken().slice(0, 12)}`;
-      const docLive = liveCols.uploaded_documents;
-      const cols = Object.keys(row).filter(c => c !== 'id' && (!docLive.size || docLive.has(c)));
-      const vals = cols.map(c => row[c]);
-      await env.DB.prepare(`INSERT INTO uploaded_documents ("id", ${cols.map(c => `"${c}"`).join(', ')}) VALUES (?, ${cols.map(() => '?').join(', ')})`).bind(id, ...vals).run();
-      report.docsInserted++;
-    } catch (e) { report.docsSkipped++; logError('import', `doc failed ${row.filename}`, e?.message || e); }
-    docDone++;
-    if (onProgress && docDone % 100 === 0) await onProgress({ phase: 'documents', done: docDone });
+      await batchInsert('uploaded_documents', docCols, docVecs.slice(i, i + 250));
+    } catch (e) {
+      for (const vec of docVecs.slice(i, i + 250)) {
+        try {
+          await batchInsert('uploaded_documents', docCols, [vec]);
+        } catch (rowErr) {
+          report.docsInserted--;
+          report.errors++;
+          logError('import', 'doc failed', String(rowErr?.message || rowErr).slice(0, 140));
+        }
+      }
+    }
   }
   return report;
 }
@@ -13084,6 +13099,10 @@ Rules:
       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒 GOD rank only')}\n/import merges a ${codeHtml('/backup')} file. Reply to the backup document with ${codeHtml('/import')}.`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
+    if (!athenaUser) {
+      await sendTelegramFormatted(token, chatId, `Login on the website with Telegram first — personal links must attach to your user.`, forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
     const srcMsg = msg.reply_to_message || null;
     const doc = srcMsg?.document || srcMsg?.caption_document || null;
     if (!doc) {
@@ -13093,7 +13112,7 @@ Rules:
         `1. ${codeHtml('/backup')} sends ${codeHtml('athena-<date>.sql.gz')} to this chat`,
         `2. ${boldHtml('Reply')} to that file with ${codeHtml('/import')}`,
         '',
-        `${italicHtml('Links/personal links/documents are merged: duplicates (same URL or source message) are skipped, everything else is added. A backup without any links imports the whole database (no deletes).')}`,
+        `${italicHtml('Everything merges into your CURRENT brains: backup community links → the linked community, personal links → your personal brain. Duplicates (same URL or source message) are skipped, everything else is added. Optional: ' + codeHtml('/import <community_id>') + ' targets another community.')}`,
       ].join('\n'), forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
@@ -13105,6 +13124,26 @@ Rules:
     }
     if (fileSize > 200 * 1024 * 1024) {
       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️ Too large:')} ${codeHtml((fileSize / 1048576).toFixed(1) + ' MB')} — import parts up to 200 MB (split a big backup with ${codeHtml('/backup')} parts).`, forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    // Target brains: explicit <community_id> arg, else the linked community,
+    // else the only community that exists. Personal always → the importing GOD.
+    let targetCommunityId = rest.trim().split(/\s+/)[0] || '';
+    if (targetCommunityId && !/^c_/.test(targetCommunityId)) targetCommunityId = '';
+    if (!targetCommunityId) targetCommunityId = binding?.community_id || '';
+    let targetNote = '';
+    if (!targetCommunityId) {
+      const all = await env.DB.prepare('SELECT id, name FROM communities ORDER BY created_at').all();
+      const list = (all && all.results) || [];
+      if (list.length === 1) { targetCommunityId = list[0].id; targetNote = list[0].name; }
+    }
+    if (!targetCommunityId) {
+      await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No target community. Link one with ${codeHtml('/community_verify')} / ${codeHtml('/community_join')}, or run ${codeHtml('/import <community_id>')}.`, forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    const commRow = await env.DB.prepare('SELECT name FROM communities WHERE id = ?').bind(targetCommunityId).first().catch(() => null);
+    if (!commRow) {
+      await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(targetCommunityId)} not found.`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     const importStarted = Date.now();
@@ -13122,17 +13161,22 @@ Rules:
           sqlText = new TextDecoder().decode(buf);
         }
         let lastEdit = Date.now();
-        const report = await importBackupSql(env, sqlText, { onProgress: async (p) => {
-          const now = Date.now();
-          if (statusId && now - lastEdit > 2500) {
-            lastEdit = now;
-            await editJobProgress(token, chatId, statusId, `${boldHtml('📥 Importing…')} ${escHtml(p.phase)}: ${p.done} rows processed`);
-          }
-        }});
+        const report = await importBackupSql(env, sqlText, {
+          onProgress: async (p) => {
+            const now = Date.now();
+            if (statusId && now - lastEdit > 2500) {
+              lastEdit = now;
+              await editJobProgress(token, chatId, statusId, `${boldHtml('📥 Importing…')} ${escHtml(p.phase)}: ${p.done} rows processed`);
+            }
+          },
+          targetCommunityId,
+          targetUserId: athenaUser ? athenaUser.id : null
+        });
         const secs = ((Date.now() - importStarted) / 1000).toFixed(1);
         const lines = [
           richHeading(3, '📥 Import complete'),
           '',
+          richParagraph(`<i>Community → ${escHtml(commRow.name || targetCommunityId)} · personal → your brain</i>`),
           richParagraph(
             `Links added: <b>${report.linksInserted}</b> · skipped (dupes): <b>${report.linksSkipped}</b>${report.orphansSkipped ? ` · orphans (no matching community/user): <b>${report.orphansSkipped}</b>` : ''}<br>` +
             (report.parentsImported ? `Communities/users merged from backup: <b>${report.parentsImported}</b><br>` : '') +
