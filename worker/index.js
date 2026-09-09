@@ -27,26 +27,55 @@ async function unifiedClone(update,env,ctx){
   const def=await env.DB.prepare(`SELECT community_id FROM userbot_clone_defaults WHERE label='main'`).first().catch(()=>null); const b=await binding(env.DB,normalizeChatId(remote)); const community=def?.community_id||b?.community_id||'';
   const numeric=args.filter(x=>/^\d{1,9}$/.test(x)&&x!==remote); const topic=numeric.length?numeric[0]:''; if(!community&&target==='community') return reply(token,msg.chat.id,'No community is configured for this clone. Connect the userbot with /userbotconnect ... <community_id>, or provide the community_id in the clone command.');
   const normRemote=normalizeChatId(remote);
-  const fmtSend=(text)=>tg(token,'sendMessage',{chat_id:msg.chat.id,text,parse_mode:'HTML'}).catch(()=>{});
+  const richOk=(r)=>!!(r&&r.ok&&r.result);
+  const toClassic=(h)=>String(h||'').replace(/<\/?(?:h[1-6]|p|ul|ol|li|details|summary|table|tr|td|th|blockquote|footer|aside|pre|figure|figcaption)[^>]*>/gi,'\n').replace(/<br\s*\/?>/gi,'\n').replace(/<[^>]+>/g,'').replace(/\n{3,}/g,'\n\n').trim();
+  const classicSend=(text)=>tg(token,'sendMessage',{chat_id:msg.chat.id,text,parse_mode:'HTML'}).catch(()=>{});
+  const richSend=(html)=>tg(token,'sendRichMessage',{chat_id:msg.chat.id,rich_message:{html}}).then(r=>richOk(r)?r:classicSend(toClassic(html))).catch(()=>classicSend(toClassic(html)));
+  const editRich=(mid,html)=>{ if(!mid) return Promise.resolve(); return tg(token,'editMessageText',{chat_id:msg.chat.id,message_id:mid,rich_message:{html}}).then(r=>richOk(r)?r:tg(token,'editMessageText',{chat_id:msg.chat.id,message_id:mid,text:toClassic(html),parse_mode:'HTML'})).catch(()=>{}); };
   const running=await env.DB.prepare(`SELECT id FROM index_jobs WHERE chat_id=? AND status IN ('queued','running')`).bind(normRemote).first().catch(()=>null);
-  if(running){ await fmtSend(`<b>⏳ Already running</b> — clone for <code>${remote}</code> is already running, progress via /userbot_status.`); return new Response('OK'); }
+  if(running){ await richSend(`<h3>⏳ Already running</h3><p>Clone for <code>${remote}</code> is already running — progress via /userbot_status.</p>`); return new Response('OK'); }
   const pend=await env.DB.prepare(`SELECT id FROM pending_clones WHERE chat_id=? AND expires_at>?`).bind(normRemote,Date.now()).first().catch(()=>null);
-  if(pend){ await fmtSend(`<b>⏳ Clone preview ready</b> — preview for <code>${remote}</code> is ready, resuming auto-confirm now, hold on.`);
-    const resume=(async()=>{ const y=structuredClone(update); y.message.text='yes'; y.message.caption=undefined; y.message.entities=[]; try{ await legacyFetch(y,env); }catch(_){ await fmtSend(`<b>❌ Clone failed</b> — clone confirm step failed, check /userbot_status or retry.`); } })();
+  if(pend){ await richSend(`<h3>⏳ Clone preview ready</h3><p>Preview for <code>${remote}</code> is ready — resuming auto-confirm now, hold on.</p>`);
+    const resume=(async()=>{ const y=structuredClone(update); y.message.text='yes'; y.message.caption=undefined; y.message.entities=[]; try{ await legacyFetch(y,env); }catch(_){ await richSend(`<h3>❌ Clone failed</h3><p>Clone confirm step failed — check /userbot_status or retry.</p>`); } })();
     if(ctx&&typeof ctx.waitUntil==='function') ctx.waitUntil(resume.catch(()=>{})); else await resume.catch(()=>{});
     return new Response('OK'); }
+  // Forum auto-all: a topic-enabled group clones topic-wise with no extra
+  // arg — Bot API getChat exposes is_forum for visible chats; unknown chats
+  // keep the classic single-chat flow and legacy decides.
+  const wantAll=args.some(x=>String(x).toLowerCase()==='all');
+  let forumAll=false;
+  if(!topic&&!wantAll){ try{ const gc=await tg(token,'getChat',{chat_id:normRemote}); if(gc&&gc.ok&&gc.result&&gc.result.is_forum) forumAll=true; }catch(_){} }
   // Ack BEFORE the blocking preview scan: primeEntity (45s) + history preview
   // run with zero user feedback, and a killed/timed-out webhook otherwise
   // leaves total silence.
   const scopeLabel=target==='personal'?'personal brain':target==='both'?'personal + community':(community||'community');
-  const ackText=`<b>🔄 Clone started</b> for <code>${remote}</code> → <b>${scopeLabel}</b>${topic?` (topic ${topic})`:''}.\n<i>Preview + history scan run in the background — progress via /userbot_status.</i>`;
-  await fmtSend(ackText);
+  const ackHtml=`<h3>🔄 Clone started</h3><p>for <code>${remote}</code> → <b>${scopeLabel}</b>${topic?` (topic ${topic})`:''}${forumAll?' (forum — cloning topic-wise)':''}.</p><p><i>Preview + history scan run in the background — progress via /userbot_status.</i></p>`;
+  const ackRes=await richSend(ackHtml);
+  const ackId=ackRes&&ackRes.result?ackRes.result.message_id:0;
   const task=(async()=>{
-    const extra=[remote]; if(topic) extra.push(topic); extra.push(target); if(community) extra.push(community); const first=cloneUpdate(update,`/clone ${extra.join(' ')}`);
+    const extra=[remote]; if(topic) extra.push(topic); else if(forumAll||wantAll) extra.push('all'); extra.push(target); if(community) extra.push(community); const first=cloneUpdate(update,`/clone ${extra.join(' ')}`);
     const originalFetch=globalThis.fetch; const dmChat=String(msg.chat.id);
     globalThis.fetch=async(input,init={})=>{ try{ const url=typeof input==='string'?input:input?.url; if(url&&/api\.telegram\.org\/bot/.test(url)&&init?.body){ const payload=typeof init.body==='string'?JSON.parse(init.body):null; if(payload?.chat_id!=null&&String(payload.chat_id)===dmChat&&payload?.text!=null){ const text=String(payload.text||''); if(text.includes('Clone preview')||text.trim()==='Confirm clone?'){ return new Response(JSON.stringify({ok:true,result:{message_id:0,chat:{id:payload.chat_id}}}),{status:200,headers:{'content-type':'application/json'}}); } } } }catch(_){} return originalFetch(input,init); };
-    try{ await legacyFetch(first,env); }catch(e){ globalThis.fetch=originalFetch; await fmtSend(`<b>❌ Clone failed</b> — preview failed (${String(e?.message||e).slice(0,120)}). Check /userbot_status or retry.`); return; }finally{ globalThis.fetch=originalFetch; }
-    const yes=structuredClone(update); yes.message.text='yes'; yes.message.caption=undefined; yes.message.entities=[]; await new Promise(r=>setTimeout(r,50)); try{ await legacyFetch(yes,env); }catch(_){ await fmtSend(`<b>❌ Clone failed</b> — confirm step failed, check /userbot_status or retry.`); }
+    // The ack doubles as a live stage card: heartbeat while the preview
+    // scans, stage edits after, 8-minute timeout instead of infinite silence.
+    const t0=Date.now();
+    const beat=setInterval(()=>{ editRich(ackId, ackHtml+`<p><i>Still scanning preview… ${Math.round((Date.now()-t0)/1000)}s elapsed.</i></p>`); },60000);
+    let previewErr=null;
+    try{ await Promise.race([legacyFetch(first,env), new Promise((_,rej)=>setTimeout(()=>rej(new Error('preview-timeout')),8*60*1000))]); }
+    catch(e){ previewErr=e; }
+    finally{ clearInterval(beat); globalThis.fetch=originalFetch; }
+    if(previewErr){
+      const timedOut=previewErr&&previewErr.message==='preview-timeout';
+      const failHtml=timedOut
+        ? `<h3>❌ Clone timed out</h3><p>Preview for <code>${remote}</code> took over 8 minutes — the chat may be huge or unreachable. Retry, or narrow with a topic id.</p>`
+        : `<h3>❌ Clone failed</h3><p>Preview failed (${String(previewErr?.message||previewErr).slice(0,120)}). Check /userbot_status or retry.</p>`;
+      if(ackId) await editRich(ackId,failHtml); else await richSend(failHtml);
+      return;
+    }
+    if(ackId) await editRich(ackId, ackHtml+`<p><i>Preview ready — confirming…</i></p>`);
+    const yes=structuredClone(update); yes.message.text='yes'; yes.message.caption=undefined; yes.message.entities=[]; await new Promise(r=>setTimeout(r,50));
+    try{ await legacyFetch(yes,env); if(ackId) await editRich(ackId, ackHtml+`<p>✅ Confirmed — cloning, per-topic progress below and via /userbot_status.</p>`); }
+    catch(_){ const failHtml=`<h3>❌ Clone failed</h3><p>Confirm step failed — check /userbot_status or retry.</p>`; if(ackId) await editRich(ackId,failHtml); else await richSend(failHtml); }
   })();
   if(ctx&&typeof ctx.waitUntil==='function') ctx.waitUntil(task.catch(()=>{})); else await task.catch(()=>{});
   return new Response('OK');
