@@ -9,6 +9,7 @@ import {
   dedupeLinkRows,
   detectBackupCommunityId,
   importBackupSql,
+  notesForUrl,
   fuzzyMatchLinks,
   helpTextForSection,
   isGroundedAiAnswer,
@@ -207,6 +208,37 @@ assert.equal(await detectBackupCommunityId(mockEnvWith(['c_aaa']), `INSERT INTO 
   const blob = linkInsert.args[colNames.indexOf('search_blob')];
   assert.ok(String(blob).includes('httpsenhancvcom'), `blob matches stripped URL form, got: ${blob}`);
   assert.ok(!String(blob).includes('://'), 'blob is normalized (no URL punctuation)');
+}
+
+// notesForUrl: one message, many links -> each link keeps only its section.
+// Regression: backfill stamped the whole listicle message as every link's
+// notes (enhancv.com and beautiful.ai shared identical "ChatGPT
+// alternatives…" notes).
+{
+  const listMsg = [
+    'ChatGPT alternatives, the best AI tools list:',
+    'For writing:',
+    'Chatsonic - https://chatsonic.com the conversational writer',
+    'For design:',
+    'Enhancv resume builder - https://enhancv.com/ make a standout resume',
+    'Beautiful presentations - https://www.beautiful.ai/ slides in minutes',
+  ].join('\n');
+  const urls = ['https://chatsonic.com', 'https://enhancv.com/', 'https://www.beautiful.ai/'];
+  // Single URL keeps the full text (legacy behavior).
+  assert.equal(notesForUrl(listMsg, 'https://enhancv.com/', 1), listMsg);
+  // Multi URL: enhancv keeps its own line, not the whole list.
+  const enh = notesForUrl(listMsg, 'https://enhancv.com/', urls.length);
+  assert.ok(enh.includes('enhancv'), `enhancv section kept, got: ${enh}`);
+  assert.ok(!enh.includes('chatsonic.com'), 'other link section cut (before)');
+  assert.ok(!enh.includes('beautiful.ai'), 'other link section cut (after)');
+  assert.ok(!enh.includes('ChatGPT alternatives'), 'list header cut');
+  const beau = notesForUrl(listMsg, 'https://www.beautiful.ai/', urls.length);
+  assert.ok(beau.includes('Beautiful presentations'), `beautiful section kept, got: ${beau}`);
+  assert.ok(!beau.includes('enhancv'), 'neighbour section cut');
+  // Bare URL with no descriptive text -> '' (scraper fills it instead).
+  assert.equal(notesForUrl('https://a.com https://b.com', 'https://a.com', 2), '');
+  // Unknown URL -> ''.
+  assert.equal(notesForUrl(listMsg, 'https://missing.example/', 3), '');
 }
 
 console.log('retrieval tests passed');

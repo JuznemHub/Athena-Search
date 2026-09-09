@@ -7892,7 +7892,7 @@ function helpTextForSection(section, isGod = false) {
       richParagraph('<b>Tagging & structure</b>'),
       cmd(4, `${codeHtml('/forcetags')} ${codeHtml('[community_id]')}`, 'AI re-tags every link (existing tags can be overwritten).'),
       cmd(5, codeHtml('/tag_untagged'), 'Tags only rows with no real tags — cheap first pass.'),
-      cmd(6, codeHtml('/structure'), 'One-pass DB cleanup: strips tracking URLs, merges near-duplicate links, cleans titles and notes. Runs in the background with live progress.'),
+      cmd(6, codeHtml('/structure'), 'One-pass DB cleanup: strips tracking URLs, merges near-duplicate links, cleans titles and notes, trims multi-link notes to each link’s own section. Runs in the background with live progress.'),
       spacer,
       richParagraph('<b>Backup & import</b>'),
       cmd(7, codeHtml('/backup'), 'Full database backup (SQL, gzipped) sent to this chat.'),
@@ -8603,6 +8603,54 @@ async function saveIndexedDocument(env, communityId, filename, ext, bytes, uploa
 }
 
 /** Personal-brain variants of the channel indexers — target = personal|both. */
+function notesForUrl(postText, rawUrl, urlCount) {
+  const text = String(postText || '');
+  if (!text || Number(urlCount) <= 1) return text;
+  const needle = String(rawUrl || '').toLowerCase();
+  const idx = text.toLowerCase().indexOf(needle);
+  if (!needle || idx < 0) return '';
+  const URL_RE = /https?:\/\/[^\s<>()[\]{}"']+/gi;
+  // Own line, widened over adjacent lines that carry no URL of their own.
+  const lines = text.split('\n');
+  let pos = 0, hit = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (idx >= pos && idx <= pos + lines[i].length) { hit = i; break; }
+    pos += lines[i].length + 1;
+    hit = i;
+  }
+  const LINE_URL = /https?:\/\/[^\s<>()[\]{}"']+/i;
+  let lo = hit, hi = hit;
+  while (lo - 1 >= 0 && !LINE_URL.test(lines[lo - 1])) lo--;
+  while (hi + 1 < lines.length && !LINE_URL.test(lines[hi + 1])) hi++;
+  let seg = lines.slice(lo, hi + 1).join('\n');
+  // Cut text belonging to neighbouring URLs on the same lines.
+  const base = lo === 0 && hi === lines.length - 1 ? 0 : lines.slice(0, lo).join('\n').length + (lo ? 1 : 0);
+  const rel = idx - base;
+  const others = [...seg.matchAll(URL_RE)].filter(m => !(m.index <= rel && rel < m.index + m[0].length));
+  for (const m of others) {
+    seg = m.index < rel ? seg.slice(m.index + m[0].length) : seg.slice(0, m.index);
+  }
+  seg = seg.trim().slice(0, 800);
+  // A segment that is only the URL (or nothing) carries no information —
+  // callers fall back to scraped metadata instead of stamping shared text.
+  if (!seg.replace(URL_RE, '').replace(/[-*•·|>_\s#]+/g, ' ').trim()) return '';
+  return seg;
+}
+
+/** Repair for rows already contaminated: notes mentioning other URLs than
+ *  the row's own shrink to the relevant snippet; otherwise kept as-is. */
+function shrinkNotesToUrl(notes, url) {
+  const text = String(notes || '');
+  const own = String(url || '');
+  if (!text || !own) return text;
+  const URL_RE = /https?:\/\/[^\s<>()[\]{}"']+/gi;
+  const rest = text.replace(own, '').replace(own.toLowerCase(), '');
+  if (!URL_RE.test(rest)) return text;
+  const snippet = notesForUrl(text, own, 2);
+  return snippet && snippet.length < text.length ? snippet : text;
+}
+
+/** Personal-brain variants of the channel indexers — target = personal|both. */
 async function savePersonalIndexedLinks(env, ownerUserId, urls, attributionName, postText, transferId = null, sourceChatId = null, sourceMessageId = null, batchPlan = null) {
   const baseTags = ['telegram', 'channel'];
   let saved = 0;
@@ -8610,7 +8658,7 @@ async function savePersonalIndexedLinks(env, ownerUserId, urls, attributionName,
     try {
       const _forced = batchPlan && batchPlan.urlMap ? batchPlan.urlMap.get(rawUrl) : null;
       if (await findExistingLink(env, 'personal_links', 'user_id', ownerUserId, rawUrl)) continue;
-      const meta = await enrichLinkFields(env, rawUrl, { title: _forced && _forced.title ? _forced.title : '', notes: postText || '' });
+      const meta = await enrichLinkFields(env, rawUrl, { title: _forced && _forced.title ? _forced.title : '', notes: notesForUrl(postText, rawUrl, urls.length) });
       if (_forced && _forced.title) meta.title = _forced.title;
       const urlHash = generateUrlHash(rawUrl);
       const id = 'ixp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
@@ -8710,7 +8758,7 @@ async function saveIndexedLinks(env, communityId, urls, attributionName, postTex
     try {
       const _forced = batchPlan && batchPlan.urlMap ? batchPlan.urlMap.get(rawUrl) : null;
       if (await findExistingLink(env, 'links', 'community_id', communityId, rawUrl)) continue;
-      const meta = await enrichLinkFields(env, rawUrl, { title: _forced && _forced.title ? _forced.title : '', notes: postText || '' });
+      const meta = await enrichLinkFields(env, rawUrl, { title: _forced && _forced.title ? _forced.title : '', notes: notesForUrl(postText, rawUrl, urls.length) });
       if (_forced && _forced.title) meta.title = _forced.title;
       const urlHash = generateUrlHash(rawUrl);
       const id = 'ix_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
@@ -9767,7 +9815,7 @@ async function structureDatabase(env, { onProgress = null } = {}) {
             }
             const upd = {
               url: normUrl, url_hash: normHash,
-              title: cleanTitleText(row.title), notes: cleanNotesText(row.notes)
+              title: cleanTitleText(row.title), notes: cleanNotesText(shrinkNotesToUrl(row.notes, row.url))
             };
             if (upd.title !== row.title) stats.titlesCleaned++;
             if (upd.notes !== row.notes) stats.notesCleaned++;
@@ -9778,7 +9826,7 @@ async function structureDatabase(env, { onProgress = null } = {}) {
           }
           // Same URL: still clean notes/title
           const updTitle = cleanTitleText(row.title);
-          const updNotes = cleanNotesText(row.notes);
+          const updNotes = cleanNotesText(shrinkNotesToUrl(row.notes, row.url));
           if (updTitle !== row.title || updNotes !== row.notes) {
             await env.DB.prepare(`UPDATE ${t.name} SET title = ?, notes = ?, search_blob = NULL WHERE id = ?`)
               .bind(updTitle, updNotes, row.id).run();
@@ -16258,6 +16306,7 @@ export {
   scrapeViaKage,
   detectBackupCommunityId,
   importBackupSql,
+  notesForUrl,
   ensureIndexTables,
   runHistoryIndexJob,
   buildSearchBlob,
