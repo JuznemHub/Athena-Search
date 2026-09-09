@@ -26,11 +26,16 @@ async function unifiedClone(update,env){
   const target=targetOf(args); if((target==='personal'||target==='both')&&!isGod(msg.from?.id,env)) return reply(token,msg.chat.id,'personal and both targets are GOD-only.'); await ensureTables(env.DB);
   const def=await env.DB.prepare(`SELECT community_id FROM userbot_clone_defaults WHERE label='main'`).first().catch(()=>null); const b=await binding(env.DB,normalizeChatId(remote)); const community=def?.community_id||b?.community_id||'';
   const numeric=args.filter(x=>/^\d{1,9}$/.test(x)&&x!==remote); const topic=numeric.length?numeric[0]:''; if(!community&&target==='community') return reply(token,msg.chat.id,'No community is configured for this clone. Connect the userbot with /userbotconnect ... <community_id>, or provide the community_id in the clone command.');
+  // Ack BEFORE the blocking preview scan: primeEntity (45s) + history preview
+  // run with zero user feedback, and a killed/timed-out webhook otherwise
+  // leaves total silence.
+  const scopeLabel=target==='personal'?'personal brain':target==='both'?'personal + community':(community||'community');
+  await reply(token,msg.chat.id,`🔄 Clone started for ${remote} → ${scopeLabel}${topic?` (topic ${topic})`:''}. Preview + history scan can take a few minutes — progress via /userbot_status.`);
   const extra=[remote]; if(topic) extra.push(topic); extra.push(target); if(community) extra.push(community); const first=cloneUpdate(update,`/clone ${extra.join(' ')}`);
   const originalFetch=globalThis.fetch; let response;
   globalThis.fetch=async(input,init={})=>{ try{ const url=typeof input==='string'?input:input?.url; if(url&&/api\.telegram\.org\/bot/.test(url)&&init?.body){ const payload=typeof init.body==='string'?JSON.parse(init.body):null; if(payload?.chat_id!=null&&payload?.text!=null){ const text=String(payload.text||''); if(text.includes('Clone preview')||text.trim()==='Confirm clone?'){ return new Response(JSON.stringify({ok:true,result:{message_id:0,chat:{id:payload.chat_id}}}),{status:200,headers:{'content-type':'application/json'}}); } } } }catch(_){} return originalFetch(input,init); };
-  try{ response=await legacyFetch(first,env); }finally{ globalThis.fetch=originalFetch; }
-  const yes=structuredClone(update); yes.message.text='yes'; yes.message.caption=undefined; yes.message.entities=[]; await new Promise(r=>setTimeout(r,50)); await legacyFetch(yes,env).catch(()=>{}); return response;
+  try{ response=await legacyFetch(first,env); }catch(e){ globalThis.fetch=originalFetch; await reply(token,msg.chat.id,`❌ Clone preview failed (${String(e?.message||e).slice(0,120)}). Check /userbot_status or retry.`); return response; }finally{ globalThis.fetch=originalFetch; }
+  const yes=structuredClone(update); yes.message.text='yes'; yes.message.caption=undefined; yes.message.entities=[]; await new Promise(r=>setTimeout(r,50)); try{ await legacyFetch(yes,env); }catch(_){ await reply(token,msg.chat.id,'❌ Clone confirm step failed — check /userbot_status or retry.'); } return response;
 }
 async function uclone(update,env){ return unifiedClone(update,env); }
 async function cloneStop(update,env){ const msg=update.message,args=parts(msg.text).slice(1),chat=args.find(x=>/^-?\d{5,}$/.test(x))||(String(msg.chat.id).startsWith('-')?String(msg.chat.id):''); if(!chat) return reply(env.TELEGRAM_BOT_TOKEN,msg.chat.id,'Usage: /clone_stop <chat_id>'); return legacyFetch(cloneUpdate(update,`/index_stop ${normalizeChatId(chat)}`),env); }
