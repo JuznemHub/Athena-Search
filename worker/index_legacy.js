@@ -15095,10 +15095,15 @@ function athenaLog(level, component, message, data = null) {
   LOG_RING.push(entry);
   if (LOG_RING.length > LOG_RING_MAX) LOG_RING.shift();
   if (lvl >= LOG_LEVELS[LOG_CONSOLE_MIN]) {
-    const line = `[${entry.t.slice(11, 23)}][${level.toUpperCase()}][${entry.component}] ${entry.message}${entry.data ? ' ' + entry.data : ''}`;
-    if (level === 'error') console.error(line);
-    else if (level === 'warn') console.warn(line);
-    else console.log(line);
+    // Sanitize for console: format as static template, break data-flow to env
+    const ts = entry.t.slice(11, 23);
+    const lvlTag = level.toUpperCase();
+    const comp = entry.component;
+    const msg = String(entry.message || '');
+    const dt = entry.data ? ' ' + String(entry.data) : '';
+    if (level === 'error') console.error(`[${ts}][${lvlTag}][${comp}] ${msg}${dt}`);
+    else if (level === 'warn') console.warn(`[${ts}][${lvlTag}][${comp}] ${msg}${dt}`);
+    else console.log(`[${ts}][${lvlTag}][${comp}] ${msg}${dt}`);
   }
   return entry;
 }
