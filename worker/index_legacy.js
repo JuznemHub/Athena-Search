@@ -8696,11 +8696,73 @@ function repairStrippedListNotes(notes, url, title) {
 }
 
 /** Combined /structure repair: URL evidence first, stripped-list fingerprint
- *  second, otherwise untouched. */
-function repairContaminatedNotes(notes, url, title) {
+ *  second, foreign-name evidence third, otherwise untouched. */
+function repairContaminatedNotes(notes, url, title, nameRe = null) {
   const shrunk = shrinkNotesToUrl(notes, url);
   if (shrunk !== notes) return shrunk;
-  return repairStrippedListNotes(notes, url, title);
+  const stripped = repairStrippedListNotes(notes, url, title);
+  if (stripped !== notes) return stripped;
+  return repairForeignNameNotes(notes, url, title, nameRe);
+}
+
+/** Name parts of every saved URL (one regex for cheap per-row matching).
+ *  Used to spot notes that describe other saved links, not this row. */
+async function loadLinkNamePattern(env) {
+  const STOP = new Set('app apps web online tools tool best top free plus go get try use site page home main blog news shop store docs help info official search video photo image music movie media bot tv fun hub box lab kit cloud data api www com net org io dev me us my'.split(' '));
+  const names = new Set();
+  try {
+    for (const t of ['links', 'personal_links']) {
+      const r = await env.DB.prepare(`SELECT DISTINCT url FROM ${t}`).all().catch(() => null);
+      for (const row of (r && r.results) || []) {
+        const raw = String(row.url || '').toLowerCase();
+        let host = '';
+        try { host = new URL(raw.startsWith('http') ? raw : `https://${raw}`).hostname; }
+        catch (_) {
+          const noScheme = raw.includes('://') ? raw.slice(raw.indexOf('://') + 3) : raw;
+          host = noScheme.split('/')[0].split('?')[0].split('#')[0].split(':')[0];
+        }
+        const parts = host.replace(/^www\./, '').split('.');
+        if (parts.length > 1) parts.pop(); // drop TLD
+        for (const p of parts) {
+          const clean = p.replace(/[^a-z0-9]/g, '');
+          if (clean.length >= 5 && !STOP.has(clean)) names.add(clean);
+        }
+      }
+    }
+  } catch (_) {}
+  if (!names.size) return null;
+  const esc = [...names].map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).sort((a, b) => b.length - a.length);
+  try { return new RegExp(`\\b(${esc.join('|')})\\b`, 'gi'); } catch (_) { return null; }
+}
+
+function namesInText(text, nameRe) {
+  const out = new Set();
+  if (!nameRe) return out;
+  nameRe.lastIndex = 0;
+  let m;
+  while ((m = nameRe.exec(text)) !== null) out.add(m[0].toLowerCase());
+  return out;
+}
+
+/** Listicles without URLs or dangling dashes ("1. Gigapixel AI - …"): when
+ *  long notes name 3+ OTHER saved links, keep lines naming this row and
+ *  drop foreign-only lines; clear when nothing names this row. */
+function repairForeignNameNotes(notes, url, title, nameRe) {
+  const text = String(notes || '');
+  if (text.length < 300 || !nameRe) return text;
+  const own = new Set(selfAnchorTokens(url, title).map(s => s.toLowerCase()));
+  const found = namesInText(text, nameRe);
+  for (const o of own) found.delete(o);
+  if (found.size < 3) return text;
+  const lines = text.split('\n');
+  const fixed = lines.filter(l => {
+    const hits = namesInText(l, nameRe);
+    if (!hits.size) return true; // neutral line (header etc.)
+    return [...hits].some(h => own.has(h)); // own wins; foreign-only dropped
+  });
+  const snippet = fixed.join('\n').trim().slice(0, 800);
+  if (!snippet || snippet.length >= text.length) return text;
+  return snippet;
 }
 
 /** Personal-brain variants of the channel indexers — target = personal|both. */
@@ -9819,6 +9881,7 @@ function cleanTitleText(title) {
 
 async function structureDatabase(env, { onProgress = null } = {}) {
   const stats = { scanned: 0, urlNormalized: 0, merged: 0, notesCleaned: 0, titlesCleaned: 0, errors: 0 };
+  const nameRe = await loadLinkNamePattern(env);
   const tables = [
     { name: 'links', scopeCol: 'community_id', cols: 'url, url_hash, title, notes, tags, created_at, upvotes, downvotes' },
     { name: 'personal_links', scopeCol: 'user_id', cols: 'url, url_hash, title, notes, tags, created_at, 0 AS upvotes, 0 AS downvotes' }
@@ -9868,7 +9931,7 @@ async function structureDatabase(env, { onProgress = null } = {}) {
             }
             const upd = {
               url: normUrl, url_hash: normHash,
-              title: cleanTitleText(row.title), notes: cleanNotesText(repairContaminatedNotes(row.notes, row.url, row.title))
+              title: cleanTitleText(row.title), notes: cleanNotesText(repairContaminatedNotes(row.notes, row.url, row.title, nameRe))
             };
             if (upd.title !== row.title) stats.titlesCleaned++;
             if (upd.notes !== row.notes) stats.notesCleaned++;
@@ -9879,7 +9942,7 @@ async function structureDatabase(env, { onProgress = null } = {}) {
           }
           // Same URL: still clean notes/title
           const updTitle = cleanTitleText(row.title);
-          const updNotes = cleanNotesText(repairContaminatedNotes(row.notes, row.url, row.title));
+          const updNotes = cleanNotesText(repairContaminatedNotes(row.notes, row.url, row.title, nameRe));
           if (updTitle !== row.title || updNotes !== row.notes) {
             await env.DB.prepare(`UPDATE ${t.name} SET title = ?, notes = ?, search_blob = NULL WHERE id = ?`)
               .bind(updTitle, updNotes, row.id).run();
@@ -16359,6 +16422,7 @@ export {
   scrapeViaKage,
   detectBackupCommunityId,
   importBackupSql,
+  loadLinkNamePattern,
   notesForUrl,
   repairContaminatedNotes,
   ensureIndexTables,

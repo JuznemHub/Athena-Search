@@ -9,6 +9,7 @@ import {
   dedupeLinkRows,
   detectBackupCommunityId,
   importBackupSql,
+  loadLinkNamePattern,
   notesForUrl,
   repairContaminatedNotes,
   fuzzyMatchLinks,
@@ -276,6 +277,49 @@ assert.equal(await detectBackupCommunityId(mockEnvWith(['c_aaa']), `INSERT INTO 
   assert.equal(repairContaminatedNotes(prose, 'https://www.beautiful.ai', 'beautiful.ai'), prose);
   // Short notes untouched.
   assert.equal(repairContaminatedNotes('nice tool', 'https://www.beautiful.ai', 'beautiful.ai'), 'nice tool');
+}
+
+// repairContaminatedNotes v3: enumerated listicles with no URLs and no
+// dangling dashes ("1. Gigapixel AI - …"). Long notes naming 3+ OTHER saved
+// links keep lines naming this row; foreign-only lines drop.
+{
+  const fakeEnv = {
+    DB: {
+      prepare: (sql) => {
+        const rows = /personal_links/.test(sql) ? [] : [
+          { url: 'https://www.hitpaw.com/photo-enhancer.html' },
+          { url: 'https://gigapixel.ai/upscale' },
+          { url: 'https://upscale.media/tools' },
+          { url: 'https://youcam.com/enhance' },
+        ];
+        return {
+          all: async () => ({ results: rows }),
+          bind: () => ({
+            all: async () => ({ results: rows }),
+          }),
+        };
+      },
+    },
+  };
+  const nameRe = await loadLinkNamePattern(fakeEnv);
+  assert.ok(nameRe, 'name pattern builds');
+  const enumNotes = [
+    'Top AI image scalers ranked this week after testing every option twice daily:',
+    '1. Gigapixel AI - Upscales photos up to 600 percent without quality loss, works with vectors and compressed images, face enhancement included free',
+    '2. Upscale.media - Supports PNG JPG and WEBP formats everywhere, removes JPEG artifacts completely, generates high resolution images up to four times daily',
+    '3. YouCam Enhance - One click restoration for old family portraits with automatic retouching and background cleanup tools for everyone using it',
+    '4. HitPaw photo enhancer - Simple enhancement for portraits and landscapes with automatic retouching modes for beginners learning every single day',
+  ].join('\n');
+  const fixed = repairContaminatedNotes(enumNotes, 'https://www.hitpaw.com/photo-enhancer.html', 'hitpaw.com/photo-enhancer.html', nameRe);
+  assert.ok(fixed.includes('HitPaw'), `own section kept, got: ${fixed}`);
+  assert.ok(!fixed.includes('Gigapixel'), 'foreign section dropped');
+  assert.ok(!fixed.includes('Upscale'), 'foreign section dropped');
+  assert.ok(fixed.length < enumNotes.length, 'notes actually shrunk');
+  // Only 2 foreign names -> untouched (legit comparisons name a couple tools).
+  const pairNotes = 'A long comparison of two upscalers after weeks of testing every photo twice daily. Gigapixel AI gives sharper faces overall, while Upscale.media is faster for batch jobs and cheaper monthly plans for everyone involved here today! ' + 'x'.repeat(120);
+  assert.equal(repairContaminatedNotes(pairNotes, 'https://www.hitpaw.com/photo-enhancer.html', 'hitpaw', nameRe), pairNotes);
+  // Short notes never trigger, however many names.
+  assert.equal(repairContaminatedNotes('Gigapixel Upscale YouCam HitPaw tools', 'https://www.hitpaw.com/x', 'hitpaw', nameRe), 'Gigapixel Upscale YouCam HitPaw tools');
 }
 
 console.log('retrieval tests passed');
