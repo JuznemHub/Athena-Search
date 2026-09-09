@@ -8074,6 +8074,7 @@ async function sendTelegramRichMessage(token, chatId, richHtml, threadId = null,
       if (threadId != null && threadId !== '' && !Number.isNaN(Number(threadId))) payload.message_thread_id = Number(threadId);
       const data = await telegramApi(token, 'sendRichMessage', payload);
       if (!data.ok) {
+        console.error('sendRichMessage failed, falling back to classic:', data.description || JSON.stringify(data).slice(0, 300));
         if (i === 0) return sendRichFallback(token, chatId, richHtml, buttonsHtml, threadId);
         return { ok: false, error: data.description || 'sendRichMessage failed', raw: data };
       }
@@ -10496,10 +10497,19 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
           return new Response('OK', {status:200, headers: corsHeaders});
         }
         await sendTelegramFormatted(token, chatId, `${boldHtml('✅ Confirmed — cloning started.')} ${codeHtml(pend.chat_id)}`, forumThreadId).catch(()=>{});
-        await doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUser, communityIdArg: pend.community_id||'', chatIdN: pend.chat_id, targetArg: pend.target||'', stats });
+        try {
+          await doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUser, communityIdArg: pend.community_id||'', chatIdN: pend.chat_id, targetArg: pend.target||'', stats });
+        } catch (cloneErr) {
+          console.error('doCloneAfterConfirm failed:', cloneErr?.message || cloneErr);
+          await sendTelegramFormatted(token, chatId, `${boldHtml('❌ Clone failed:')} ${escHtml(String(cloneErr?.message || cloneErr).slice(0, 200))}`, forumThreadId).catch(()=>{});
+        }
         return new Response('OK', {status:200, headers: corsHeaders});
       }
-    }catch(_){}
+    }catch(handlerErr){
+      console.error('pending-clone yes/no handler failed:', handlerErr?.message || handlerErr);
+      await sendTelegramFormatted(token, chatId, `${boldHtml('❌ Clone confirm failed:')} ${escHtml(String(handlerErr?.message || handlerErr).slice(0, 200))}`, forumThreadId).catch(()=>{});
+      return new Response('OK', {status:200, headers: corsHeaders});
+    }
   }
   // Persist Bot API id whenever we see a logged-in Telegram user (needed for join + owner match)
   if (athenaUser?.id && tgUserId && isLikelyTelegramBotApiId(tgUserId)) {

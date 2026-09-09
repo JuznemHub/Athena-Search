@@ -73,8 +73,28 @@ async function unifiedClone(update,env,ctx){
       return;
     }
     if(ackId) await editRich(ackId, ackHtml+`<p><i>Preview ready — confirming…</i></p>`);
+    // Honesty gate: only confirm when a preview was actually stored. The
+    // forum-all path stores none (it clones directly with visible messages),
+    // and a silently-died preview must not get a fake "Confirmed".
+    const pendRow=await env.DB.prepare(`SELECT id FROM pending_clones WHERE chat_id=? AND expires_at>?`).bind(normRemote,Date.now()).first().catch(()=>null);
+    if(!pendRow){
+      if(ackId) await editRich(ackId, ackHtml+`<p>⚠️ No clone preview was stored — nothing to confirm. If no other clone message arrived, the preview scan failed; check /userbot_status or retry with a topic id.</p>`);
+      return;
+    }
     const yes=structuredClone(update); yes.message.text='yes'; yes.message.caption=undefined; yes.message.entities=[]; await new Promise(r=>setTimeout(r,50));
-    try{ await legacyFetch(yes,env); if(ackId) await editRich(ackId, ackHtml+`<p>✅ Confirmed — cloning, per-topic progress below and via /userbot_status.</p>`); }
+    try{
+      await legacyFetch(yes,env);
+      // Verify something actually started — the legacy round-trip resolves
+      // even when the confirm matched nothing.
+      let started=null;
+      for(let i=0;i<6&&!started;i++){
+        await new Promise(r=>setTimeout(r,2000));
+        started=await env.DB.prepare(`SELECT id FROM index_jobs WHERE chat_id=? AND created_at>? LIMIT 1`).bind(normRemote,t0).first().catch(()=>null)
+          || await env.DB.prepare(`SELECT chat_id FROM userbot_follows WHERE (chat_id=? OR chat_id LIKE ?) AND created_at>? LIMIT 1`).bind(normRemote,normRemote+':%',t0).first().catch(()=>null);
+      }
+      if(started){ if(ackId) await editRich(ackId, ackHtml+`<p>✅ Confirmed — cloning, per-topic progress below and via /userbot_status.</p>`); }
+      else if(ackId) await editRich(ackId, ackHtml+`<p>⚠️ Confirm landed but no clone started — the preview may have expired. Check /userbot_status or retry.</p>`);
+    }
     catch(_){ const failHtml=`<h3>❌ Clone failed</h3><p>Confirm step failed — check /userbot_status or retry.</p>`; if(ackId) await editRich(ackId,failHtml); else await richSend(failHtml); }
   })();
   if(ctx&&typeof ctx.waitUntil==='function') ctx.waitUntil(task.catch(()=>{})); else await task.catch(()=>{});
