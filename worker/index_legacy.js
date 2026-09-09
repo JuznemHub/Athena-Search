@@ -8955,6 +8955,25 @@ async function ensureIndexTables(env) {
       saved_docs INTEGER NOT NULL DEFAULT 0, progress_chat_id TEXT,
       error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`
   ).run();
+  await ensureIndexJobColumns(env);
+}
+
+/** Idempotent index_jobs migrations — called from ensureIndexTables so every
+ *  reader (status commands included) is safe even before any backfill ran. */
+async function ensureIndexJobColumns(env) {
+  if (ensureIndexJobColumns._done) return;
+  const alters = [
+    'thread_id TEXT', 'progress_msg_id BIGINT', 'min_id BIGINT', 'max_id BIGINT',
+    'saved_files INTEGER DEFAULT 0', 'skipped_media INTEGER DEFAULT 0',
+    'urls_seen INTEGER DEFAULT 0', 'continuations INTEGER DEFAULT 0',
+    'chat_name TEXT', 'saved_pdfs INTEGER DEFAULT 0',
+  ];
+  for (const def of alters) {
+    const col = def.split(' ')[0];
+    try { await env.DB.prepare(`ALTER TABLE index_jobs ADD COLUMN ${def}`).run(); }
+    catch (e) { if (!/exists/i.test(String(e?.message))) console.error(`[backfill] ${col} alter:`, e?.message); }
+  }
+  ensureIndexJobColumns._done = true;
 }
 
 async function ensurePendingCloneTable(env){
@@ -9169,10 +9188,12 @@ async function doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUs
   const labelRow = await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled=1 ORDER BY label LIMIT 1').first().catch(()=>null);
   const label = labelRow?.label || 'main';
   const communityName = communityIdArg ? (await env.DB.prepare('SELECT name FROM communities WHERE id=?').bind(communityIdArg).first().catch(()=>null))?.name || communityIdArg : communityIdArg;
+  const cloneChatName = await resolveChatTitle(env, token, chatIdN);
+  const cloneWhere = `${cloneChatName ? `${boldHtml(escHtml(cloneChatName))} ` : ''}${codeHtml(chatIdN)}`;
   if(_minId || _maxId){
     await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET label=excluded.label, community_id=excluded.community_id, target=excluded.target, created_by=excluded.created_by`).bind(chatIdN, label, communityIdArg || null, targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
     await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: '', communityName, userbotLabel: label, minId: _minId, maxId: _maxId });
-    await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning range')} ${codeHtml(_minId||'0')}→${codeHtml(_maxId||'∞')} ${codeHtml(chatIdN)} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}\n${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
+    await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning range')} ${codeHtml(_minId||'0')}→${codeHtml(_maxId||'∞')} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}\n${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
     return;
   }
   // topic-wise if forum
@@ -9188,7 +9209,7 @@ async function doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUs
         await new Promise(r=>setTimeout(r, 800));
       } catch(e){ console.error('topic clone failed', e?.message); }
     }
-    await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning '+started+' topics')} ${codeHtml(chatIdN)} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}
+    await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning '+started+' topics')} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}
 ${italicHtml('Each topic backfills + live indexing afterwards.')}
 ${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
     return;
@@ -9196,7 +9217,7 @@ ${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, f
   // non-forum: single
   await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET label=excluded.label, community_id=excluded.community_id, target=excluded.target, created_by=excluded.created_by`).bind(chatIdN, label, communityIdArg || null, targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
   await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: '', communityName, userbotLabel: label });
-  await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning this chat')} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}
+  await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning this chat')} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}
 • Live: every new post lands automatically
 • History: backfill running below
 ${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
@@ -9352,16 +9373,7 @@ async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser,
       forumThreadId).catch(() => {});
     return { ok: false, reason: 'already running', jobId: active.id };
   }
-  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN thread_id TEXT').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] thread_id alter:', e?.message); }
-  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN progress_msg_id BIGINT').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] progress_msg_id alter:', e?.message); }
-  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN min_id BIGINT').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] min_id alter:', e?.message); }
-  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN max_id BIGINT').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] max_id alter:', e?.message); }
-  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN saved_files INTEGER DEFAULT 0').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] saved_files alter:', e?.message); }
-  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN skipped_media INTEGER DEFAULT 0').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] skipped_media alter:', e?.message); }
-  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN urls_seen INTEGER DEFAULT 0').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] urls_seen alter:', e?.message); }
-  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN continuations INTEGER DEFAULT 0').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] continuations alter:', e?.message); }
-  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN chat_name TEXT').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] chat_name alter:', e?.message); }
-  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN saved_pdfs INTEGER DEFAULT 0').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] saved_pdfs alter:', e?.message); }
+  await ensureIndexJobColumns(env);
   const chatName = await resolveChatTitle(env, token, cid);
   const jobId = 'ij_' + Date.now().toString(36) + '_' + randomToken().slice(0, 6);
   await env.DB.prepare(
@@ -11982,13 +11994,13 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      await ensureIndexTables(env);
      await ensureTransferColumns(env);
      const { results } = await env.DB.prepare(
-       'SELECT id, chat_id, status, processed, saved_links, saved_docs, saved_files, created_at FROM index_jobs ORDER BY created_at DESC LIMIT 10'
+       'SELECT id, chat_id, chat_name, status, processed, saved_links, saved_docs, saved_pdfs, saved_files, created_at FROM index_jobs ORDER BY created_at DESC LIMIT 10'
      ).all();
      if (!results?.length) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No clone/backfill sessions yet.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
-     const lines = results.map((j) => `• ${codeHtml(j.id)}\n  ${escHtml(j.chat_id)} · ${j.status} · ${j.processed || 0} msgs · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_files ? ` · ${j.saved_files} files` : ''}`);
+     const lines = results.map((j) => `• ${codeHtml(j.id)}\n  ${j.chat_name ? `${boldHtml(escHtml(j.chat_name))} ` : ''}${escHtml(j.chat_id)} · ${j.status} · ${j.processed || 0} msgs · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.saved_files ? ` · ${j.saved_files} files` : ''}`);
      await sendTelegramFormatted(token, chatId,
        `${boldHtml('🗂 Clone sessions')}\n\n${lines.join('\n\n')}\n\n${italicHtml('Delete one:')} ${codeHtml('/clone_del <id> [files]')}${italicHtml(' — add "files" to also wipe its vault media')}`,
        forumThreadId);
@@ -12081,9 +12093,9 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      await ensureUserbotTables(env);
      await ensureIndexTables(env);
      const { results: accounts } = await env.DB.prepare('SELECT label, enabled, last_error FROM userbot_accounts ORDER BY label').all();
-     const { results: follows } = await env.DB.prepare('SELECT chat_id, label, community_id, target FROM userbot_follows ORDER BY label, chat_id').all();
+     const { results: follows } = await env.DB.prepare('SELECT chat_id, label, community_id, target, last_seen_at FROM userbot_follows ORDER BY label, chat_id').all();
      const { results: jobs } = await env.DB.prepare(
-       'SELECT id, chat_id, status, processed, saved_links, saved_docs, error, updated_at FROM index_jobs ORDER BY updated_at DESC'
+       'SELECT id, chat_id, thread_id, status, processed, saved_links, saved_docs, saved_pdfs, saved_files, urls_seen, chat_name, error, updated_at FROM index_jobs ORDER BY updated_at DESC'
      ).all();
 
      const accLines = (accounts || []).map((a) => {
@@ -12114,7 +12126,8 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
          if (ch?.ok && (ch.result?.title || ch.result?.username)) name = ch.result.title ? `${ch.result.title}` : `@${ch.result.username}`;
        } catch (_) {}
        const s = USERBOT_STATS.get(f.chat_id) || USERBOT_STATS.get(String(Number(f.chat_id))) || {};
-       const liveBits = [`msgs ${s.msgs || 0}`, `links ${s.links || 0}`, `docs ${s.docs || 0}`];
+       const fl = followLiveness(USERBOT_ACCOUNTS.has(f.label), f.last_seen_at);
+       const liveBits = [`${fl.emoji}`, `msgs ${s.msgs || 0}`, `links ${s.links || 0}`, `docs ${s.docs || 0}`];
        if (s.lastAt) liveBits.push(`last ${Math.max(1, Math.round((Date.now() - s.lastAt) / 60000))}m ago`);
        else liveBits.push(italicHtml('waiting for new posts'));
        const jb = jobByChat.get(normalizeTgChatId(f.chat_id));
@@ -12125,6 +12138,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
          bf = `backfill: ${jb.status}${totalBit ? ` (${totalBit})` : ''}${capNote}`;
          if (jb.urls_seen) bf += ` · ${jb.urls_seen} urls`;
          if (jb.saved_links) bf += ` · ${jb.saved_links} links saved`;
+         if (jb.saved_pdfs) bf += ` · ${jb.saved_pdfs} pdfs`;
          if (jb.saved_files) bf += ` · ${jb.saved_files} files`;
          if (jb.error) bf += ` — ${String(jb.error).slice(0, 80)}`;
        }
@@ -12134,7 +12148,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
          const { results: topics } = await env.DB.prepare('SELECT thread_id, target FROM telegram_topic_bindings WHERE chat_id = ? ORDER BY thread_id').bind(f.chat_id).all();
          for (const t of topics || []) {
            const tj = jobsByChatThread.get(normalizeTgChatId(f.chat_id) + ':' + t.thread_id);
-           const tStatus = tj ? `${tj.status}${tj.processed ? ` ${tj.processed} msgs` : ''}${tj.saved_links ? ` · ${tj.saved_links} links` : ''}${tj.saved_docs ? ` · ${tj.saved_docs} docs` : ''} — ${escHtml(String(tj.error || 'ok').slice(0,60))}` : 'not started';
+           const tStatus = tj ? `${tj.status}${tj.processed ? ` ${tj.processed} msgs` : ''}${tj.saved_links ? ` · ${tj.saved_links} links` : ''}${tj.saved_docs ? ` · ${tj.saved_docs} docs` : ''}${tj.saved_pdfs ? ` · ${tj.saved_pdfs} pdfs` : ''} — ${escHtml(String(tj.error || 'ok').slice(0,60))}` : 'not started';
            // Fallback: if no per-thread job, check if whole-chat job covered it
            topicLines.push(`    ${codeHtml('#' + t.thread_id)} [${escHtml(t.target || 'community')}] — ${tStatus}`);
          }
@@ -12199,7 +12213,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No backfill jobs yet. ${codeHtml('/clone')} to begin.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
-     const lines = results.map((j) => `${j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'error' ? '❌' : '⏸'} ${codeHtml(j.chat_id)} — ${escHtml(j.status)}: ${j.processed || 0} scanned · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs\n   ${codeHtml(j.id)} · delete: /clone_del ${codeHtml(j.id)}${j.error ? `\n   ${escHtml(j.error)}` : ''}`);
+     const lines = results.map((j) => `${j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'error' ? '❌' : '⏸'} ${j.chat_name ? `${boldHtml(escHtml(j.chat_name))} ` : ''}${codeHtml(j.chat_id)} — ${escHtml(j.status)}: ${j.processed || 0} scanned · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}\n   ${codeHtml(j.id)} · delete: /clone_del ${codeHtml(j.id)}${j.error ? `\n   ${escHtml(j.error)}` : ''}`);
      await sendTelegramFormatted(token, chatId, `${boldHtml('🗂 Backfill jobs')}\n\n${lines.join('\n\n')}`, forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
