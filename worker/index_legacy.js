@@ -9992,7 +9992,7 @@ async function importBackupSql(env, sqlText, { onProgress = null, targetCommunit
       if (onProgress) await onProgress({ phase: t.name, done: Math.min(vectors.length, i + 500) });
       try {
         await batchInsert(t.name, cols, vectors.slice(i, i + 500));
-      } catch (e) {
+      } catch (_e) {
         // One bad row must not sink the batch — replay this window row by row.
         for (const vec of vectors.slice(i, i + 500)) {
           try {
@@ -10038,7 +10038,7 @@ async function importBackupSql(env, sqlText, { onProgress = null, targetCommunit
     if (onProgress && docVecs.length) await onProgress({ phase: 'documents', done: Math.min(docVecs.length, i + 250) });
     try {
       await batchInsert('uploaded_documents', docCols, docVecs.slice(i, i + 250));
-    } catch (e) {
+    } catch (_e) {
       for (const vec of docVecs.slice(i, i + 250)) {
         try {
           await batchInsert('uploaded_documents', docCols, [vec]);
@@ -13131,11 +13131,11 @@ Rules:
     let targetCommunityId = rest.trim().split(/\s+/)[0] || '';
     if (targetCommunityId && !/^c_/.test(targetCommunityId)) targetCommunityId = '';
     if (!targetCommunityId) targetCommunityId = binding?.community_id || '';
-    let targetNote = '';
+    let _targetNote = '';
     if (!targetCommunityId) {
       const all = await env.DB.prepare('SELECT id, name FROM communities ORDER BY created_at').all();
       const list = (all && all.results) || [];
-      if (list.length === 1) { targetCommunityId = list[0].id; targetNote = list[0].name; }
+      if (list.length === 1) { targetCommunityId = list[0].id; _targetNote = list[0].name; }
     }
     if (!targetCommunityId) {
       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No target community. Link one with ${codeHtml('/community_verify')} / ${codeHtml('/community_join')}, or run ${codeHtml('/import <community_id>')}.`, forumThreadId);
