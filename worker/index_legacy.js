@@ -7547,6 +7547,10 @@ async function searchAllLinks(env, scope, key, query, limit = null) {
   await backfillDocumentSearchBlobs(env, scope, col, key);
 
   const terms = expandServerSearchTerms(q);
+  // Bare-URL queries carry a trailing slash that stored URLs often lack
+  // ("https://enhancv.com/" vs "https://enhancv.com") — match both forms.
+  const bare = q.replace(/\/+$/, '');
+  if (bare && bare !== q && bare.length >= 2 && !terms.includes(bare)) terms.push(bare);
   if (!terms.length) return [];
   const clauses = terms.map(() => `(
     lower(COALESCE(title,'')) LIKE ? OR
@@ -10025,6 +10029,8 @@ async function importBackupSql(env, sqlText, { onProgress = null, targetCommunit
       if (c === 'id' || c === t.scopeCol || c === 'url' || c === 'url_hash') continue;
       if (!(liveCols[t.name].size) || liveCols[t.name].has(c)) cols.push(c);
     }
+    // search_blob is computed fresh below (never trusted from the dump).
+    if ((!liveCols[t.name].size || liveCols[t.name].has('search_blob')) && !cols.includes('search_blob')) cols.push('search_blob');
     const vectors = [];
     for (const row of byTable[t.name]) {
       const rawUrl = String(row.url || '');
@@ -10037,8 +10043,12 @@ async function importBackupSql(env, sqlText, { onProgress = null, targetCommunit
       const vec = [t.target, `ix_${randomToken().slice(0, 12)}`, url, newHash];
       for (const c of cols.slice(4)) {
         let v = row[c];
-        if (v == null && ['upvotes', 'downvotes', 'metadata_version'].includes(c)) v = 0;
-        vec.push(c === 'search_blob' ? null : (v ?? null));
+        // Searchable immediately: stamp the blob at import time instead of
+        // NULL (lazy backfill only covers a few hundred rows per search,
+        // so bulk imports stayed invisible to /search for dozens of queries).
+        if (c === 'search_blob') v = buildSearchBlob({ title: row.title, url, notes: row.notes, tags: row.tags });
+        else if (v == null && ['upvotes', 'downvotes', 'metadata_version'].includes(c)) v = 0;
+        vec.push(v ?? null);
       }
       vectors.push(vec);
       report[t.insertedKey]++;
@@ -13243,6 +13253,12 @@ Rules:
           targetCommunityId,
           targetUserId: athenaUser ? athenaUser.id : null
         });
+        // Imported rows bypass the normal save path — mark the search index
+        // scopes dirty so Meilisearch resyncs instead of serving pre-import hits.
+        try {
+          markMeiliScopeDirty(env, 'community', targetCommunityId);
+          if (athenaUser) markMeiliScopeDirty(env, 'personal', athenaUser.id);
+        } catch (_) {}
         const secs = ((Date.now() - importStarted) / 1000).toFixed(1);
         const lines = [
           richHeading(3, '📥 Import complete'),
@@ -16241,6 +16257,7 @@ export async function buildStatsReport(env, token = null) {
 export {
   scrapeViaKage,
   detectBackupCommunityId,
+  importBackupSql,
   ensureIndexTables,
   runHistoryIndexJob,
   buildSearchBlob,

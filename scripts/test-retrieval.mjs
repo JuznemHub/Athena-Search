@@ -8,6 +8,7 @@ import {
   compactAiContext,
   dedupeLinkRows,
   detectBackupCommunityId,
+  importBackupSql,
   fuzzyMatchLinks,
   helpTextForSection,
   isGroundedAiAnswer,
@@ -177,5 +178,35 @@ assert.equal(await detectBackupCommunityId(mockEnvWith(['c_aaa', 'c_bbb']), back
 assert.equal(await detectBackupCommunityId(mockEnvWith(['c_zzz']), backupSingle), '');
 // No links rows at all -> ''.
 assert.equal(await detectBackupCommunityId(mockEnvWith(['c_aaa']), `INSERT INTO "users" ("id") VALUES ('u1');`), '');
+
+// importBackupSql stamps search_blob at import time so rows are findable
+// without waiting for the lazy backfill (regression: bulk imports were
+// invisible to /search, e.g. a trailing-slash URL query missing its row).
+{
+  const inserts = [];
+  const fakeDb = {
+    prepare: (sql) => ({
+      bind: (...args) => ({
+        all: async () => ({ results: [] }),
+        first: async () => null,
+        run: async () => { inserts.push({ sql, args }); return {}; },
+      }),
+    }),
+  };
+  const dump = `INSERT INTO "links" ("community_id","id","url","url_hash","title","notes","tags") VALUES ('c_old','l1','https://enhancv.com/','h1','Enhancv resume builder','make a resume','["jobs"]');`;
+  const rep = await importBackupSql({ DB: fakeDb }, dump, { targetCommunityId: 'c_new', targetUserId: 'u_new' });
+  assert.equal(rep.linksInserted, 1);
+  const linkInsert = inserts.find(i => /INSERT INTO links/.test(i.sql));
+  assert.ok(linkInsert, 'links INSERT captured');
+  const blobIdx = linkInsert.sql.indexOf('"search_blob"') >= 0
+    ? linkInsert.sql.split(',').findIndex(c => c.includes('search_blob'))
+    : -1;
+  assert.ok(blobIdx >= 0, 'search_blob column present');
+  // Values vector layout: (scope,target,id,url,hash,...cols) — find blob by column order.
+  const colNames = linkInsert.sql.slice(linkInsert.sql.indexOf('(') + 1, linkInsert.sql.indexOf(')')).split(',').map(c => c.replace(/"/g, '').trim());
+  const blob = linkInsert.args[colNames.indexOf('search_blob')];
+  assert.ok(String(blob).includes('httpsenhancvcom'), `blob matches stripped URL form, got: ${blob}`);
+  assert.ok(!String(blob).includes('://'), 'blob is normalized (no URL punctuation)');
+}
 
 console.log('retrieval tests passed');
