@@ -9492,7 +9492,10 @@ function formatTopicProgressLine(j) {
 
 /** Aggregated forum-clone progress card: ONE realtime message with a progress
  *  bar per topic. Jobs push their counters to index_jobs via patch(); this
- *  card (and /userbot_status) renders from that — no per-topic message spam. */
+ *  card (and /userbot_status) renders from that — no per-topic message spam.
+ *  Rendered through classic parse_mode HTML, so keep it to <b>/<code>/<i> and
+ *  plain newlines — a <p> wrapper makes Telegram reject the whole card
+ *  ("can't parse entities: Unsupported start tag p") and it never shows. */
 function formatForumCloneCard(o) {
   const lines = [];
   const head = `${boldHtml('📇 Forum clone')} ${codeHtml(o.chatId)}${o.chatName && o.chatName !== o.chatId ? ` ${boldHtml(escHtml(o.chatName))}` : ''} — ${o.topics || 0} topics`;
@@ -9501,8 +9504,8 @@ function formatForumCloneCard(o) {
   const counts = { running: 0, queued: 0, done: 0, stopped: 0, error: 0 };
   for (const tid of o.topicIds || []) {
     const j = byThread.get(String(tid));
-    if (j) { counts[j.status] = (counts[j.status] || 0) + 1; lines.push(`<p>• ${codeHtml('#' + tid)} ${formatTopicProgressLine(j)}</p>`); }
-    else { counts.queued++; lines.push(`<p>• ${codeHtml('#' + tid)} ⏳ ${italicHtml('not started')}</p>`); }
+    if (j) { counts[j.status] = (counts[j.status] || 0) + 1; lines.push(`• ${codeHtml('#' + tid)} ${formatTopicProgressLine(j)}`); }
+    else { counts.queued++; lines.push(`• ${codeHtml('#' + tid)} ⏳ ${italicHtml('not started')}`); }
   }
   const tail = [];
   if (counts.running) tail.push(`${boldHtml('▶️ ' + counts.running + ' running')}`);
@@ -9611,7 +9614,7 @@ async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser,
        VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(jobId, communityIdArg, cid, athenaUser.id, chatId, Date.now(), Date.now(), threadArg || null, minId ? Number(minId) : null, maxId ? Number(maxId) : null, chatName || null).run();
   runInBackground(env, runHistoryIndexJob(env, { id: jobId, community_id: communityIdArg, chat_id: cid, thread_id: threadArg || null, userbot_label: userbotLabel || null, min_id: minId ? Number(minId) : null, max_id: maxId ? Number(maxId) : null, saved_files: 0, skipped_media: 0, offset_id: 0, processed: 0, saved_links: 0, saved_docs: 0, saved_pdfs: 0, dupes_skipped: 0, chat_name: chatName || '', progress_chat_id: chatId, silent_progress: silentProgress }, token));
-  await sendTelegramFormatted(token, chatId,
+  if (!silentProgress) await sendTelegramFormatted(token, chatId,
     `${boldHtml('▶️')} Backfill started for ${chatName ? `${boldHtml(escHtml(chatName))} ` : ''}${codeHtml(chatIdArg)}${threadArg ? ` topic ${codeHtml('#' + threadArg)}` : ''} → ${boldHtml(escHtml(communityName || communityIdArg))}.\n${italicHtml('Live progress below ·')} ${codeHtml('/index_stop')} ${italicHtml('to stop ·')} ${codeHtml('/del '+cid)} ${italicHtml('to delete.')}`,
     forumThreadId).catch(() => {});
   return { ok: true, jobId };
