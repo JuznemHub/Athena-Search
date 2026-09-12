@@ -9303,36 +9303,17 @@ async function doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUs
     await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning range')} ${codeHtml(_minId||'0')}→${codeHtml(_maxId||'∞')} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}\n${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
     return;
   }
-  // topic-wise if forum
+  // topic-wise if forum — ONE topic at a time: start topic N, wait for it to
+  // finish, then the next. Running all topics concurrently tripped the shared
+  // userbot session's flood limit (GetReplies) and stalled every read for
+  // 8-21s — the "Cloning 0 topics after 19 flood-waits" crawl.
   if(stats?.isForum && stats.topics?.length){
-    let started = 0;
-    let failed = 0;
-    let firstErr = '';
-    for(const t of stats.topics){
-      const thr = String(t.id);
-      try {
-        await env.DB.prepare(`INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id) DO UPDATE SET community_id=excluded.community_id, target=excluded.target`).bind('tb_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), chatIdN, thr, communityIdArg || 'personal', targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
-        await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET label=excluded.label, community_id=excluded.community_id, target=excluded.target, created_by=excluded.created_by`).bind(chatIdN+':'+thr, label, communityIdArg || null, targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
-        const jobRes = await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: thr, communityName, userbotLabel: label, silentProgress: true });
-        // An already-running topic still counts toward the clone (it is being indexed).
-        if (jobRes && jobRes.ok) started++;
-        else if (jobRes && jobRes.ok === false && jobRes.reason === 'already running') started++;
-        else failed++;
-        await new Promise(r=>setTimeout(r, 800));
-      } catch(e){
-        failed++;
-        if(!firstErr) firstErr = String(e?.message || e).slice(0, 160);
-        console.error('topic clone failed', e?.message || e);
-      }
-    }
-    const failLine = (failed && started) ? ` · ${boldHtml(failed + ' failed to start')}` : '';
-    const errLine = (failed && !started) ? `\n${boldHtml('❌ Nothing started — ' + (firstErr ? escHtml(firstErr) : 'no topic could be queued, see /userbot_status or logs'))}` : '';
-    await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning ' + started + ' topics')}${failLine} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}${errLine}
-${italicHtml('Each topic backfills + live indexing afterwards.')}
-${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
-    // Draw the aggregated card whenever topics were requested, so partial or
-    // failing starts stay visible instead of a silent "0 topics" drop.
-    if (stats.topics.length) await startForumCloneCard(env, { token, chatId: chatIdN, chatName: cloneChatName || chatIdN, progressChatId: chatId, forumThreadId });
+    const topicIds = stats.topics.map((t) => String(t.id));
+    const banner = `${boldHtml('🧬 Cloning ' + topicIds.length + ' topics')} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}
+${italicHtml('One topic at a time — the next starts after the current finishes.')}
+${codeHtml('/index_stop')} to stop · ${codeHtml('/del ' + chatIdN)} to delete `;
+    await sendTelegramFormatted(token, chatId, banner, forumThreadId).catch(()=>{});
+    runInBackground(env, startForumCloneSequential(env, { token, chatId: chatIdN, chatName: cloneChatName || chatIdN, progressChatId: chatId, forumThreadId, topicIds, communityIdArg, targetArg, athenaUser, label, communityName }));
     return;
   }
   // One topic was requested but the userbot could not enumerate topics (the
@@ -9666,6 +9647,63 @@ async function startForumCloneCard(env, { token, chatId, chatName = '', progress
     }
   })();
   runInBackground(env, loop);
+}
+
+/** Sequential forum clone: start topic N, wait for it to finish, then start
+ *  topic N+1 — one history read at a time on the shared userbot session, so it
+ *  never trips Telegram's flood limit (the "Sleeping for 14s on flood wait"
+ *  stall from many concurrent topic jobs). Drives the ONE live card after each
+ *  start/progress/done and honors /index_stop. */
+async function startForumCloneSequential(env, { token, chatId, chatName = '', progressChatId, forumThreadId = null, topicIds = [], communityIdArg = '', targetArg = 'community', athenaUser, label, communityName = '' }) {
+  const key = normalizeTgChatId(chatId) + '|' + String(progressChatId || '') + '|' + String(forumThreadId || '');
+  if (!token || FORUM_CLONE_CARDS.has(key)) return { started: 0, failed: 0 };
+  const state = { msgId: null };
+  FORUM_CLONE_CARDS.set(key, state);
+  const keyboard = cloneCardKeyboard(chatId);
+  const richButtons = cloneCardButtonsRich(chatId);
+  const render = (jobs) => ({
+    classic: formatForumCloneCard({ chatId, chatName, topics: topicIds.length, topicIds, jobs }),
+    rich: formatForumCloneCardRich({ chatId, chatName, topicIds, jobs }) + (richButtons ? '\n' + richButtons : '')
+  });
+  const anyStopping = async () => !!(await env.DB.prepare("SELECT id FROM index_jobs WHERE chat_id = ? AND status = 'stopping'").bind(normalizeTgChatId(chatId)).first().catch(() => null));
+  let started = 0, failed = 0, firstErr = '';
+  try {
+    for (let i = 0; i < (topicIds || []).length; i++) {
+      if (await anyStopping()) break; // /index_stop — stop the whole sequence
+      const thr = String(topicIds[i]);
+      try {
+        await env.DB.prepare(`INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id) DO UPDATE SET community_id=excluded.community_id, target=excluded.target`).bind('tb_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), normalizeTgChatId(chatId), thr, communityIdArg || 'personal', targetArg || 'community', athenaUser.id, Date.now()).run().catch(() => {});
+        await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET label=excluded.label, community_id=excluded.community_id, target=excluded.target, created_by=excluded.created_by`).bind(normalizeTgChatId(chatId) + ':' + thr, label, communityIdArg || null, targetArg || 'community', athenaUser.id, Date.now()).run().catch(() => {});
+      } catch (_) {}
+      let jobId = '';
+      try {
+        const jobRes = await startBackfillJob(env, { token, chatId: progressChatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatId, threadArg: thr, communityName, userbotLabel: label, silentProgress: true });
+        // Already-running topics are still part of the clone: wait for the
+        // existing job to drain rather than counting it a failure and moving on.
+        if (jobRes && (jobRes.ok || jobRes.reason === 'already running')) jobId = jobRes.jobId || '';
+      } catch (e) { failed++; if (!firstErr) firstErr = String((e && (e.message || e)) || '').slice(0, 160); console.error('topic clone failed', e && (e.message || e)); continue; }
+      if (!jobId) { failed++; continue; }
+      started++;
+      const t0 = Date.now();
+      for (;;) {
+        const jobs = await forumCardJobs(env, chatId);
+        const v = render(jobs);
+        await editForumCard(state, token, progressChatId, v.rich, v.classic, forumThreadId, keyboard);
+        const row = await env.DB.prepare('SELECT status FROM index_jobs WHERE id = ?').bind(jobId).first().catch(() => null);
+        const st = row && row.status;
+        if (st === 'stopped' || st === 'stopping') break;
+        if (st === 'done' || st === 'error' || !st) break;
+        if (Date.now() - t0 > 30 * 60 * 1000) break;
+        await sleep(6000);
+      }
+    }
+  } finally {
+    const jobs = await forumCardJobs(env, chatId);
+    const v = render(jobs);
+    await editForumCard(state, token, progressChatId, v.rich, v.classic, forumThreadId, keyboard);
+    FORUM_CLONE_CARDS.delete(key);
+  }
+  return { started, failed, firstErr };
 }
 
 /** Live-follow indicator. Pure. accountConnected = userbot session alive in
