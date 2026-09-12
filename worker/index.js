@@ -9,7 +9,25 @@ function targetOf(args) { return args.find((x) => TARGETS.has(String(x).toLowerC
 function normalizeChatId(id) { const s=String(id||'').trim(); if(/^-100\d+$/.test(s)) return s; if(/^\d+$/.test(s)&&s.length>=9) return `-100${s}`; return s; }
 function ownerIds(env) { const raw=String(env.TG_OWNER_IDS||'').trim(); return raw ? new Set(raw.split(',').map(x=>x.trim()).filter(Boolean)) : null; }
 function isGod(id,env) { const ids=ownerIds(env); return !ids || ids.has(String(id||'')); }
-async function tg(token,method,body){ const r=await fetch(`https://api.telegram.org/bot${token}/${method}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})}); return r.json().catch(()=>({ok:false,description:'Invalid Telegram response'})); }
+// Same policy as legacy's telegramApiBaseFor: an explicit TELEGRAM_API_BASE is
+// honored ONLY for loopback/private hosts; bot tokens never leave for a
+// random host. Keeps shim rich/ack calls on the SAME Bot API server legacy
+// uses (a local server is the only one that serves sendRichMessage).
+const SHIM_CLOUD_BASE = 'https://api.telegram.org';
+let shimApiBase = SHIM_CLOUD_BASE;
+function shimBaseFor(env) {
+  const raw = String(env?.TELEGRAM_API_BASE || '').trim().replace(/\/+$/, '');
+  if (!raw) return SHIM_CLOUD_BASE;
+  try {
+    const u = new URL(raw);
+    const host = u.hostname.toLowerCase();
+    const private_ = host === 'localhost' || host === '::1' ||
+      /^127\./.test(host) || /^10\./.test(host) ||
+      /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+    return (u.protocol === 'http:' || u.protocol === 'https:') && private_ ? u.origin : SHIM_CLOUD_BASE;
+  } catch (_) { return SHIM_CLOUD_BASE; }
+}
+async function tg(token,method,body){ const r=await fetch(`${shimApiBase}/bot${token}/${method}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})}); return r.json().catch(()=>({ok:false,description:'Invalid Telegram response'})); }
 async function reply(token,chatId,text,threadId){ const body={chat_id:chatId,text}; if(threadId!=null) body.message_thread_id=threadId; await tg(token,'sendMessage',body).catch(()=>{}); return new Response('OK'); }
 async function ensureTables(DB){ await DB.prepare(`CREATE TABLE IF NOT EXISTS userbot_clone_defaults (label TEXT PRIMARY KEY, community_id TEXT, updated_at BIGINT)`).run().catch(()=>{}); }
 async function binding(DB,chatId){ return DB.prepare(`SELECT * FROM community_bots WHERE platform='telegram' AND group_id=? ORDER BY created_at DESC LIMIT 1`).bind(String(chatId)).first().catch(()=>null); }
@@ -32,9 +50,13 @@ async function unifiedClone(update,env,ctx){
   const classicSend=(text)=>tg(token,'sendMessage',{chat_id:msg.chat.id,text,parse_mode:'HTML'}).catch(()=>{});
   const richSend=(html)=>tg(token,'sendRichMessage',{chat_id:msg.chat.id,rich_message:{html}}).then(r=>richOk(r)?r:classicSend(toClassic(html))).catch(()=>classicSend(toClassic(html)));
   const editRich=(mid,html)=>{ if(!mid) return Promise.resolve(); return tg(token,'editMessageText',{chat_id:msg.chat.id,message_id:mid,rich_message:{html}}).then(r=>richOk(r)?r:tg(token,'editMessageText',{chat_id:msg.chat.id,message_id:mid,text:toClassic(html),parse_mode:'HTML'})).catch(()=>{}); };
-  const running=await env.DB.prepare(`SELECT id FROM index_jobs WHERE chat_id=? AND status IN ('queued','running')`).bind(normRemote).first().catch(()=>null);
-  if(running){ await richSend(`<h3>⏳ Already running</h3><p>Clone for <code>${remote}</code> is already running — progress via /userbot_status.</p>`); return new Response('OK'); }
-  const pend=await env.DB.prepare(`SELECT id FROM pending_clones WHERE chat_id=? AND expires_at>?`).bind(normRemote,Date.now()).first().catch(()=>null);
+  // Per chat+thread, matching startBackfillJob's dedupe: cloning topic #42
+  // must not be blocked just because topic #7 (or the whole chat) already has
+  // an active job; whole-chat clones still see whole-chat jobs.
+  const threadKey = topic || null;
+  const running=await env.DB.prepare(`SELECT id FROM index_jobs WHERE chat_id=? AND status IN ('queued','running') AND ((thread_id IS NULL AND ? IS NULL) OR thread_id=?)`).bind(normRemote,threadKey,threadKey).first().catch(()=>null);
+  if(running){ await richSend(`<h3>⏳ Already running</h3><p>Clone for <code>${remote}</code>${topic?` topic <code>#${topic}</code>`:''} is already running — progress via /userbot_status.</p>`); return new Response('OK'); }
+  const pend=await env.DB.prepare(`SELECT id FROM pending_clones WHERE chat_id=? AND expires_at>? AND ((? IS NULL AND thread_id IS NULL) OR thread_id=?)`).bind(normRemote,Date.now(),threadKey,threadKey).first().catch(()=>null);
   if(pend){ await richSend(`<h3>⏳ Clone preview ready</h3><p>Preview for <code>${remote}</code> is ready — resuming auto-confirm now, hold on.</p>`);
     const resume=(async()=>{ const y=structuredClone(update); y.message.text='yes'; y.message.caption=undefined; y.message.entities=[]; if(y.message&&y.message.message_id!=null) y.message.message_id=y.message.message_id+1000000; if(y.update_id!=null) y.update_id=y.update_id+1; try{ await legacyFetch(y,env); }catch(_){ await richSend(`<h3>❌ Clone failed</h3><p>Clone confirm step failed — check /userbot_status or retry.</p>`); } })();
     if(ctx&&typeof ctx.waitUntil==='function') ctx.waitUntil(resume.catch(()=>{})); else await resume.catch(()=>{});
@@ -111,10 +133,10 @@ async function unifiedClone(update,env,ctx){
     // to the invoked command). Auto-run the all-topics clone now — the user asked
     // for the chat, not for a second command.
     if(forumDetected&&!topic&&!wantAll){
-      console.log(`[uclone] forum detected for ${normRemote} — dispatching all-topics clone`);
-      if(ackId) await editRich(ackId, ackHtml+`<p><i>Forum with multiple topics detected — cloning <b>all topics</b>. Watch the ✅ summary above and /userbot_status for per-topic progress.</i></p>`);
-      const allUpd=freshIds(structuredClone(update)); allUpd.message.text=`/clone ${remote} all ${target}${community?` ${community}`:''}`; allUpd.message.caption=undefined; allUpd.message.entities=[{type:'bot_command',offset:0,length:6}];
-      try{ await legacyFetch(allUpd,env); }catch(e){ console.error('[uclone] all-topics dispatch failed', e?.message); if(ackId) await editRich(ackId, ackHtml+`<p>❌ All-topics clone failed (${String(e?.message||e).slice(0,100)}) — run ${`/uclone ${remote} all`} manually.</p>`); }
+      // Ask permission — never auto-clone every topic. The relabeled topic
+      // list above is the ask: the user picks a topic id or 'all'.
+      console.log(`[uclone] forum detected for ${normRemote} — waiting for the user to pick a topic or 'all'`);
+      if(ackId) await editRich(ackId, ackHtml+`<p><i>📋 Forum with multiple topics detected — the topic list above is ready. Reply <b>a topic id</b> to clone that topic alone, or <b>'all'</b> to clone every topic (per-topic progress bars below).</i></p>`);
       return;
     }
     if(ackId) await editRich(ackId, ackHtml+`<p><i>Preview ready — confirming…</i></p>`);
@@ -138,7 +160,7 @@ async function unifiedClone(update,env,ctx){
           || await env.DB.prepare(`SELECT chat_id FROM userbot_follows WHERE (chat_id=? OR chat_id LIKE ?) AND created_at>? LIMIT 1`).bind(normRemote,normRemote+':%',t0).first().catch(()=>null);
       }
       if(started){ if(ackId) await editRich(ackId, ackHtml+`<p>✅ Confirmed — cloning, per-topic progress below and via /userbot_status.</p>`); }
-      else if(ackId) await editRich(ackId, ackHtml+`<p>⚠️ Confirm landed but no clone started — the preview may have expired. Check /userbot_status or retry.</p>`);
+      else if(ackId) await editRich(ackId, ackHtml+`<p>⚠️ Confirm landed but no clone started within 12s. If an error message appeared above, that is the real reason; otherwise the preview may have expired. Check /userbot_status or retry.</p>`);
     }
     catch(_){ const failHtml=`<h3>❌ Clone failed</h3><p>Confirm step failed — check /userbot_status or retry.</p>`; if(ackId) await editRich(ackId,failHtml); else await richSend(failHtml); }
   })();
@@ -150,4 +172,4 @@ async function cloneStop(update,env){ const msg=update.message,args=parts(msg.te
 async function stats(update,env){ return legacyFetch(cloneUpdate(update,'/stats'),env); }
 async function ucloneDel(update,env){ const msg=update.message,args=parts(msg.text).slice(1),chat=args.find(x=>/^-?\d{5,}$/.test(x)); if(!chat) return reply(env.TELEGRAM_BOT_TOKEN,msg.chat.id,'Usage: /uclone_del <chat_id> [topic_id]'); const topic=args.find(x=>/^\d{1,9}$/.test(x)&&x!==chat); return legacyFetch(cloneUpdate(update,`/delete ${chat}${topic?` ${topic}`:''} files`),env); }
 async function intercept(update,env,ctx){ const msg=update.message; if(!msg?.text||!env.TELEGRAM_BOT_TOKEN) return null; switch(command(msg.text)){ case '/clone':return unifiedClone(update,env,ctx); case '/uclone':return uclone(update,env,ctx); case '/ubclone':return uclone(update,env,ctx); case '/userbotconnect':return userbotConnect(update,env); case '/uclone_del':return ucloneDel(update,env); case '/clone_stop':return cloneStop(update,env); case '/stats':return stats(update,env); default:return null; } }
-export default {async fetch(request,env,ctx){ const url=new URL(request.url); if(request.method==='POST'&&/telegram-webhook$/.test(url.pathname)){ try{const update=await request.clone().json(); const handled=await intercept(update,env,ctx); if(handled)return handled;}catch(_){} } return legacy.fetch(request,env,ctx); }};
+export default {async fetch(request,env,ctx){ shimApiBase = shimBaseFor(env); const url=new URL(request.url); if(request.method==='POST'&&/telegram-webhook$/.test(url.pathname)){ try{const update=await request.clone().json(); const handled=await intercept(update,env,ctx); if(handled)return handled;}catch(_){} } return legacy.fetch(request,env,ctx); }};

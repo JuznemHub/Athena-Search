@@ -8968,6 +8968,7 @@ async function ensureIndexJobColumns(env) {
     'saved_files INTEGER DEFAULT 0', 'skipped_media INTEGER DEFAULT 0',
     'urls_seen INTEGER DEFAULT 0', 'continuations INTEGER DEFAULT 0',
     'chat_name TEXT', 'saved_pdfs INTEGER DEFAULT 0', 'dupes_skipped INTEGER DEFAULT 0',
+    'total_messages INTEGER DEFAULT 0',
   ];
   for (const def of alters) {
     const col = def.split(' ')[0];
@@ -9207,7 +9208,7 @@ async function doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUs
       try {
         await env.DB.prepare(`INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id) DO UPDATE SET community_id=excluded.community_id, target=excluded.target`).bind('tb_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), chatIdN, thr, communityIdArg || 'personal', targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
         await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET label=excluded.label, community_id=excluded.community_id, target=excluded.target, created_by=excluded.created_by`).bind(chatIdN+':'+thr, label, communityIdArg || null, targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
-        await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: thr, communityName, userbotLabel: label });
+        await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: thr, communityName, userbotLabel: label, silentProgress: true });
         started++;
         await new Promise(r=>setTimeout(r, 800));
       } catch(e){ console.error('topic clone failed', e?.message); }
@@ -9215,6 +9216,7 @@ async function doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUs
     await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning '+started+' topics')} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}
 ${italicHtml('Each topic backfills + live indexing afterwards.')}
 ${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
+    if (started) await startForumCloneCard(env, { token, chatId: chatIdN, chatName: cloneChatName || chatIdN, progressChatId: chatId, forumThreadId });
     return;
   }
   // non-forum: single
@@ -9355,6 +9357,100 @@ function formatBackfillDone(o) {
   return `${icon} Backfill ${o.status || 'done'}: ${where}\n${counts.join(' · ')} saved.${live}`;
 }
 
+/** Per-topic backfill progress line (used by the aggregated forum card and
+ *  /userbot_status topic rows). Pure, classic HTML. */
+function formatTopicProgressLine(j) {
+  if (!j) return italicHtml('not started');
+  const { bar, pct } = progressBar(j.processed, j.total_messages);
+  const icon = j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'queued' ? '⏳' : j.status === 'error' ? '❌' : '⏸';
+  let rep = `${bar} ${pct}% · ${j.processed || 0} msgs`;
+  if (j.total_messages && Number(j.total_messages) > Number(j.processed || 0)) rep = `${bar} ${pct}% · ${j.processed || 0}/${j.total_messages} msgs`;
+  if (j.saved_links) rep += ` · ${j.saved_links} links`;
+  if (j.saved_docs) rep += ` · ${j.saved_docs} docs`;
+  if (j.saved_pdfs) rep += ` · ${j.saved_pdfs} pdfs`;
+  if (j.saved_files) rep += ` · ${j.saved_files} files`;
+  if (j.dupes_skipped) rep += ` · ${j.dupes_skipped} dupes`;
+  if (j.status === 'error') rep += ` — ${escHtml(String(j.error || 'failed').slice(0, 70))}`;
+  return `${icon} ${escHtml(j.status)} — ${rep}`;
+}
+
+/** Aggregated forum-clone progress card: ONE realtime message with a progress
+ *  bar per topic. Jobs push their counters to index_jobs via patch(); this
+ *  card (and /userbot_status) renders from that — no per-topic message spam. */
+function formatForumCloneCard(o) {
+  const lines = [];
+  const head = `${boldHtml('📇 Forum clone')} ${codeHtml(o.chatId)}${o.chatName && o.chatName !== o.chatId ? ` ${boldHtml(escHtml(o.chatName))}` : ''} — ${o.topics || 0} topics`;
+  const byThread = new Map();
+  for (const j of o.jobs || []) byThread.set(String(j.thread_id), j);
+  const counts = { running: 0, queued: 0, done: 0, error: 0 };
+  for (const tid of o.topicIds || []) {
+    const j = byThread.get(String(tid));
+    if (j) { counts[j.status] = (counts[j.status] || 0) + 1; lines.push(`<p>• ${codeHtml('#' + tid)} ${formatTopicProgressLine(j)}</p>`); }
+    else { counts.queued++; lines.push(`<p>• ${codeHtml('#' + tid)} ⏳ ${italicHtml('not started')}</p>`); }
+  }
+  const tail = [];
+  if (counts.running) tail.push(`${boldHtml('▶️ ' + counts.running + ' running')}`);
+  if (counts.queued) tail.push(`${counts.queued} queued/not-started`);
+  if (counts.done) tail.push(`${boldHtml('✅ ' + counts.done + ' done')}`);
+  if (counts.error) tail.push(`${boldHtml('❌ ' + counts.error + ' failed')}`);
+  return `${head}\n${lines.join('\n')}\n${tail.length ? italicHtml(tail.join(' · ')) : ''}`;
+}
+
+// chatId(key) -> { msgId } — one live card per forum clone; the watcher edits
+// that single message while any topic job is active, then freezes the final state.
+const FORUM_CLONE_CARDS = new Map();
+
+async function editForumCard(state, token, chatId, html, forumThreadId) {
+  if (state.msgId) {
+    const ok = await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: state.msgId, text: html, parse_mode: 'HTML' }).catch(() => ({ ok: false }));
+    if (ok?.ok) return;
+    state.msgId = null; // deleted/failed — fall through and send fresh
+  }
+  const m = await sendTelegramFormatted(token, chatId, html, forumThreadId).catch(() => null);
+  state.msgId = m?.message_id || null;
+}
+
+async function forumCardTopicIds(env, chatId) {
+  const tids = new Set();
+  const binds = await env.DB.prepare('SELECT thread_id FROM telegram_topic_bindings WHERE chat_id = ?').bind(chatId).all().catch(() => ({ results: [] }));
+  for (const b of binds.results || []) tids.add(String(b.thread_id));
+  const fws = await env.DB.prepare('SELECT chat_id FROM userbot_follows WHERE chat_id LIKE ?').bind(chatId + ':%').all().catch(() => ({ results: [] }));
+  for (const f of fws.results || []) { const tid = String(f.chat_id).split(':')[1] || ''; if (tid) tids.add(tid); }
+  return [...tids].sort((a, b) => Number(a) - Number(b));
+}
+
+async function forumCardJobs(env, chatId) {
+  const r = await env.DB.prepare(`SELECT thread_id, status, processed, total_messages, saved_links, saved_docs, saved_pdfs, saved_files, dupes_skipped, error
+    FROM index_jobs WHERE chat_id = ? ORDER BY thread_id`).bind(chatId).all().catch(() => ({ results: [] }));
+  return (r.results || []).filter((j) => j.thread_id);
+}
+
+/** One watcher per forum clone: renders the aggregated card, edits it every
+ *  ~9s, and freezes the final frame when no topic job is active. */
+async function startForumCloneCard(env, { token, chatId, chatName = '', progressChatId, forumThreadId = null }) {
+  const key = normalizeTgChatId(chatId);
+  if (!token || FORUM_CLONE_CARDS.has(key)) return;
+  const state = { msgId: null };
+  FORUM_CLONE_CARDS.set(key, state);
+  const topicIds = await forumCardTopicIds(env, chatId);
+  const loop = (async () => {
+    try {
+      for (let round = 0; round < 320; round++) {
+        const jobs = await forumCardJobs(env, chatId);
+        await editForumCard(state, token, progressChatId, formatForumCloneCard({ chatId, chatName, topics: topicIds.length, topicIds, jobs }), forumThreadId);
+        const active = jobs.some((j) => j.status === 'queued' || j.status === 'running');
+        if (!active || round === 319) break;
+        await sleep(9000);
+      }
+      const jobs = await forumCardJobs(env, chatId);
+      await editForumCard(state, token, progressChatId, formatForumCloneCard({ chatId, chatName, topics: topicIds.length, topicIds, jobs }), forumThreadId);
+    } finally {
+      FORUM_CLONE_CARDS.delete(key);
+    }
+  })();
+  runInBackground(env, loop);
+}
+
 /** Live-follow indicator. Pure. accountConnected = userbot session alive in
  *  memory; lastSeenAtMs = persisted userbot_follows.last_seen_at. */
 function followLiveness(accountConnected, lastSeenAtMs, nowMs = Date.now()) {
@@ -9364,7 +9460,7 @@ function followLiveness(accountConnected, lastSeenAtMs, nowMs = Date.now()) {
   return { emoji: '⚪', label: 'Live idle — follow saved, resumes when the userbot connects' };
 }
 
-async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg, threadArg = '', communityName = '', userbotLabel = '', minId = '', maxId = '' }) {
+async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg, threadArg = '', communityName = '', userbotLabel = '', minId = '', maxId = '', silentProgress = false }) {
   await ensureUserbotTables(env);
   await ensureIndexTables(env);
   // Normalize bare channel ids (Telegram web apps often show them without -100)
@@ -9389,7 +9485,7 @@ async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser,
       `INSERT INTO index_jobs (id, community_id, chat_id, user_id, status, offset_id, progress_chat_id, created_at, updated_at, thread_id, min_id, max_id, chat_name)
        VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(jobId, communityIdArg, cid, athenaUser.id, chatId, Date.now(), Date.now(), threadArg || null, minId ? Number(minId) : null, maxId ? Number(maxId) : null, chatName || null).run();
-  runInBackground(env, runHistoryIndexJob(env, { id: jobId, community_id: communityIdArg, chat_id: cid, thread_id: threadArg || null, userbot_label: userbotLabel || null, min_id: minId ? Number(minId) : null, max_id: maxId ? Number(maxId) : null, saved_files: 0, skipped_media: 0, offset_id: 0, processed: 0, saved_links: 0, saved_docs: 0, saved_pdfs: 0, dupes_skipped: 0, chat_name: chatName || '', progress_chat_id: chatId }, token));
+  runInBackground(env, runHistoryIndexJob(env, { id: jobId, community_id: communityIdArg, chat_id: cid, thread_id: threadArg || null, userbot_label: userbotLabel || null, min_id: minId ? Number(minId) : null, max_id: maxId ? Number(maxId) : null, saved_files: 0, skipped_media: 0, offset_id: 0, processed: 0, saved_links: 0, saved_docs: 0, saved_pdfs: 0, dupes_skipped: 0, chat_name: chatName || '', progress_chat_id: chatId, silent_progress: silentProgress }, token));
   await sendTelegramFormatted(token, chatId,
     `${boldHtml('▶️')} Backfill started for ${chatName ? `${boldHtml(escHtml(chatName))} ` : ''}${codeHtml(chatIdArg)}${threadArg ? ` topic ${codeHtml('#' + threadArg)}` : ''} → ${boldHtml(escHtml(communityName || communityIdArg))}.\n${italicHtml('Live progress below ·')} ${codeHtml('/index_stop')} ${italicHtml('to stop ·')} ${codeHtml('/del '+cid)} ${italicHtml('to delete.')}`,
     forumThreadId).catch(() => {});
@@ -9408,6 +9504,10 @@ async function runHistoryIndexJob(env, job, token) {
   let progressMsgId = null;
   let lastProgressAt = 0;
   const pushProgress = async (force = false, done = 0) => {
+    // Forum-clone topic jobs are silent: the ONE aggregated forum card (see
+    // startForumCloneCard) renders progress — per-topic cards would flood the
+    // chat (19 topics x edits every 10s trips Telegram rate limits).
+    if (job.silent_progress) return;
     const now = Date.now();
     if (!force && now - lastProgressAt < 10_000) return;
     lastProgressAt = now;
@@ -9472,6 +9572,7 @@ async function runHistoryIndexJob(env, job, token) {
       const head = await client.getMessages(job.chat_id, { limit: 1 });
       job.total_messages = Number(head?.[0]?.id || 0) || null;
     } catch (_) { job.total_messages = null; }
+    if (job.total_messages != null) await patch({ total_messages: job.total_messages }).catch(() => {});
     await pushProgress(true, processed);
     let savedLinks = job.saved_links || 0;
     let savedDocs = job.saved_docs || 0;
@@ -9644,7 +9745,7 @@ async function runHistoryIndexJob(env, job, token) {
       } else {
         await patch({ status: 'error', error: `stopped after ${conts + 1} chunks (${processed} msgs) — /index_stop then /clone resumes`.slice(0, 300) });
       }
-      await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('🧩')} Chunk complete: ${processed} msgs · continuing automatically…`).catch(() => {});
+      if (!job.silent_progress) await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('🧩')} Chunk complete: ${processed} msgs · continuing automatically…`).catch(() => {});
       try { await client.disconnect(); } catch (_) {}
       return;
     }
@@ -9653,11 +9754,14 @@ async function runHistoryIndexJob(env, job, token) {
     const accLive = job.userbot_label ? USERBOT_ACCOUNTS.has(job.userbot_label) : USERBOT_ACCOUNTS.size > 0;
     const live = followLiveness(accLive, folRow?.last_seen_at);
     const doneText = formatBackfillDone({ status: finalRow?.status || 'done', name: job.chat_name, chatId: job.chat_id, processed, links: savedLinks, dupes: Number(finalRow?.dupes_skipped ?? job.dupes_skipped ?? 0), docs: savedDocs, pdfs: Number(finalRow?.saved_pdfs ?? job.saved_pdfs ?? 0), files: job.saved_files, live });
-    if (progressMsgId) {
-      await telegramApi(token, 'editMessageText', { chat_id: job.progress_chat_id, message_id: progressMsgId, text: doneText, parse_mode: 'HTML' }).catch(() =>
-        sendTelegramFormatted(token, job.progress_chat_id, doneText).catch(() => {}));
-    } else {
-      await sendTelegramFormatted(token, job.progress_chat_id, doneText).catch(() => {});
+    // Silent topic jobs render via the aggregated forum card instead.
+    if (!job.silent_progress) {
+      if (progressMsgId) {
+        await telegramApi(token, 'editMessageText', { chat_id: job.progress_chat_id, message_id: progressMsgId, text: doneText, parse_mode: 'HTML' }).catch(() =>
+          sendTelegramFormatted(token, job.progress_chat_id, doneText).catch(() => {}));
+      } else {
+        await sendTelegramFormatted(token, job.progress_chat_id, doneText).catch(() => {});
+      }
     }
     // Session auto-delete when the job finishes cleanly — a stored user
     // session is a live account key; it should not outlive its purpose.
@@ -11524,7 +11628,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         if (topics.length) {
           // If user said "all" as target, clone every topic topic-wise
           if (cloneAllTopics) {
-            let _created = 0;
+            let _started = 0, _failed = 0;
             for (const t of topics) {
               try {
                 await env.DB.prepare(
@@ -11538,16 +11642,20 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
                    VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(chat_id) DO NOTHING`
                 ).bind(chatIdN+':'+String(t.id), (await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled=1 LIMIT 1').first())?.label || 'main', communityIdArg || 'personal', targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
                 // Per-topic history backfill: without this the fanout only
-                // registers live follows and no history is ever indexed.
+                // registers live follows and no history is ever indexed. Topic
+                // jobs are SILENT — the aggregated forum card below renders one
+                // realtime progress bar per topic (per-topic cards flooded).
                 try {
-                  await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: String(t.id), communityName: communityIdArg || 'personal', userbotLabel: (await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled=1 LIMIT 1').first())?.label || 'main' });
-                } catch(e) { console.error('topic backfill start failed', e?.message); }
-                _created++;
-              } catch(e) { console.error('topic clone all failed', e?.message); }
+                  await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: String(t.id), communityName: communityIdArg || 'personal', userbotLabel: (await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled=1 LIMIT 1').first())?.label || 'main', silentProgress: true });
+                  _started++;
+                } catch(e) { console.error('topic backfill start failed', e?.message); _failed++; }
+              } catch(e) { console.error('topic clone all failed', e?.message); _failed++; }
             }
             await sendTelegramFormatted(token, chatId,
-              `${boldHtml('✅ Cloning ' + topics.length + ' topics from ' + escHtml(chatIdN))} — each topic will be indexed separately. Check ${codeHtml('/userbot_status')} for per-topic progress.`,
+              `${boldHtml('✅ Cloning ' + _started + '/' + topics.length + ' topics from ' + escHtml(chatIdN))} — one progress bar per topic below${_failed ? ` · ⚠️ ${boldHtml(_failed + ' failed to start')} (see /userbot_status / logs)` : ''}.`,
               forumThreadId);
+            // ONE realtime card (edited every ~9s) with per-topic progress bars.
+            if (_started) await startForumCloneCard(env, { token, chatId: chatIdN, chatName: chatIdN, progressChatId: chatId, forumThreadId });
             return new Response('OK', { status: 200, headers: corsHeaders });
           }
           const lines = topics.slice(0, 15).map(t => `${codeHtml('/clone ' + chatIdN + ' ' + t.id)} — ${escHtml(t.title)}`);
@@ -12159,24 +12267,35 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
          const ch = await telegramApi(token, 'getChat', { chat_id: f.chat_id });
          if (ch?.ok && (ch.result?.title || ch.result?.username)) name = ch.result.title ? `${ch.result.title}` : `@${ch.result.username}`;
        } catch (_) {}
+       const isTopicFollow = String(f.chat_id || '').includes(':');
+       const baseChatId = isTopicFollow ? normalizeTgChatId(f.chat_id.split(':')[0]) : normalizeTgChatId(f.chat_id);
+       const tidPart = isTopicFollow ? String(f.chat_id.split(':')[1] || '') : '';
+       if (isTopicFollow) name = `${f.chat_id.split(':')[0]}#${tidPart}`;
        const s = USERBOT_STATS.get(f.chat_id) || USERBOT_STATS.get(String(Number(f.chat_id))) || {};
-       const fl = followLiveness(USERBOT_ACCOUNTS.has(f.label), f.last_seen_at);
-       const sActive = (s.msgs || s.links || s.docs) ? [`msgs ${s.msgs || 0}`, `links ${s.links || 0}`, `docs ${s.docs || 0}`] : [];
-       const liveBits = [`${fl.emoji}`, ...sActive];
-       if (s.lastAt) liveBits.push(`last ${Math.max(1, Math.round((Date.now() - s.lastAt) / 60000))}m ago`);
-       else liveBits.push(italicHtml('waiting for new posts'));
-       const jb = jobByChat.get(normalizeTgChatId(f.chat_id));
+       let liveBits = [];
+       if (!isTopicFollow) {
+         const fl = followLiveness(USERBOT_ACCOUNTS.has(f.label), f.last_seen_at);
+         const sActive = (s.msgs || s.links || s.docs) ? [`msgs ${s.msgs || 0}`, `links ${s.links || 0}`, `docs ${s.docs || 0}`] : [];
+         liveBits = [`${fl.emoji}`, ...sActive];
+         if (s.lastAt) liveBits.push(`last ${Math.max(1, Math.round((Date.now() - s.lastAt) / 60000))}m ago`);
+         else liveBits.push(italicHtml('waiting for new posts'));
+       }
+       const jb = isTopicFollow ? jobsByChatThread.get(baseChatId + ':' + tidPart) : jobByChat.get(baseChatId);
        let bf = 'backfill: not run';
        if (jb) {
-         const capNote = jb.processed >= INDEX_MAX_MESSAGES ? ' · cap hit, auto-continuing' : '';
-         const totalBit = jb.processed ? `${jb.processed} msgs` : '';
-         bf = `backfill: ${jb.status}${totalBit ? ` (${totalBit})` : ''}${capNote}`;
-         if (jb.urls_seen) bf += ` · ${jb.urls_seen} urls`;
-         if (jb.saved_links) bf += ` · ${jb.saved_links} links saved`;
-         if (jb.dupes_skipped) bf += ` · ${jb.dupes_skipped} dupes`;
-         if (jb.saved_pdfs) bf += ` · ${jb.saved_pdfs} pdfs`;
-         if (jb.saved_files) bf += ` · ${jb.saved_files} files`;
-         if (jb.error) bf += ` — ${String(jb.error).slice(0, 80)}`;
+         if (isTopicFollow) {
+           bf = 'backfill: ' + formatTopicProgressLine(jb);
+         } else {
+           const capNote = jb.processed >= INDEX_MAX_MESSAGES ? ' · cap hit, auto-continuing' : '';
+           const totalBit = jb.processed ? `${jb.processed} msgs` : '';
+           bf = `backfill: ${jb.status}${totalBit ? ` (${totalBit})` : ''}${capNote}`;
+           if (jb.urls_seen) bf += ` · ${jb.urls_seen} urls`;
+           if (jb.saved_links) bf += ` · ${jb.saved_links} links saved`;
+           if (jb.dupes_skipped) bf += ` · ${jb.dupes_skipped} dupes`;
+           if (jb.saved_pdfs) bf += ` · ${jb.saved_pdfs} pdfs`;
+           if (jb.saved_files) bf += ` · ${jb.saved_files} files`;
+           if (jb.error) bf += ` — ${String(jb.error).slice(0, 80)}`;
+         }
        }
        // Per-topic breakdown for forum groups
        let topicLines = [];
@@ -12184,28 +12303,23 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
          const { results: topics } = await env.DB.prepare('SELECT thread_id, target FROM telegram_topic_bindings WHERE chat_id = ? ORDER BY thread_id').bind(f.chat_id).all();
          for (const t of topics || []) {
            const tj = jobsByChatThread.get(normalizeTgChatId(f.chat_id) + ':' + t.thread_id);
-           const tStatus = tj ? `${tj.status}${tj.processed ? ` ${tj.processed} msgs` : ''}${tj.saved_links ? ` · ${tj.saved_links} links` : ''}${tj.saved_docs ? ` · ${tj.saved_docs} docs` : ''}${tj.saved_pdfs ? ` · ${tj.saved_pdfs} pdfs` : ''}${tj.saved_files ? ` · ${tj.saved_files} files` : ''} — ${escHtml(String(tj.error || 'ok').slice(0,60))}` : 'not started';
-           // Live arrivals since process start (memory-only): "this topic
-           // got X new links" without waiting for a backfill row.
-           const tLive = USERBOT_STATS.get(f.chat_id + ':' + t.thread_id) || USERBOT_STATS.get(normalizeTgChatId(f.chat_id) + ':' + t.thread_id) || null;
-           const tLiveBit = (tLive && (tLive.msgs || tLive.links || tLive.docs)) ? ` · live +${tLive.msgs || 0} msgs +${tLive.links || 0} links +${tLive.docs || 0} docs` : '';
-           // Fallback: if no per-thread job, check if whole-chat job covered it
-           topicLines.push(`<li>${codeHtml('#' + t.thread_id)} [${escHtml(t.target || 'community')}] — ${tStatus}${tLiveBit}</li>`);
+           // Per-topic backfill progress bar (from the job), not live stats.
+           const tStatus = tj ? formatTopicProgressLine(tj) : italicHtml('not started');
+           topicLines.push(`<li>${codeHtml('#' + t.thread_id)} [${escHtml(t.target || 'community')}] — ${tStatus}</li>`);
          }
          // Also bare topic jobs without binding (DM clone)
          for (const [k, j] of jobsByChatThread) {
            if (k.startsWith(normalizeTgChatId(f.chat_id) + ':') && k.split(':')[1]) {
              const tid = k.split(':')[1];
              if (!topics?.some(t => String(t.thread_id) === tid)) {
-               const bLive = USERBOT_STATS.get(f.chat_id + ':' + tid) || USERBOT_STATS.get(normalizeTgChatId(f.chat_id) + ':' + tid) || null;
-               const bLiveBit = (bLive && (bLive.msgs || bLive.links || bLive.docs)) ? ` · live +${bLive.msgs || 0} msgs +${bLive.links || 0} links +${bLive.docs || 0} docs` : '';
-               topicLines.push(`<li>${codeHtml('#' + tid)} — ${j.status} ${j.processed || 0} msgs · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.saved_files ? ` · ${j.saved_files} files` : ''}${bLiveBit}</li>`);
+               topicLines.push(`<li>${codeHtml('#' + tid)} — ${formatTopicProgressLine(j)}</li>`);
              }
            }
          }
        } catch (_) {}
+       const liveMark = isTopicFollow ? '' : `— live: ${liveBits.join(' · ')}${USERBOT_ACCOUNTS.has(f.label) ? ' ' + italicHtml('(active — new posts clone automatically)') : ''}`;
        followLines.push(
-         `<p>• ${boldHtml(escHtml(name))} ${italicHtml(`[${f.target || 'community'}]`)} — live: ${liveBits.join(' · ')}${USERBOT_ACCOUNTS.has(f.label) ? ' ' + italicHtml('(active — new posts clone automatically)') : ''}</p>` +
+         `<p>• ${boldHtml(escHtml(name))} ${italicHtml(`[${f.target || 'community'}]`)} ${liveMark}</p>` +
          `<p>${bf}</p>` +
          (topicLines.length ? `<ul>${topicLines.join('')}</ul>` : '')
        );
