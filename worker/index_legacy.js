@@ -9047,12 +9047,16 @@ async function ensureIndexJobColumns(env) {
     'chat_name TEXT', 'saved_pdfs INTEGER DEFAULT 0', 'dupes_skipped INTEGER DEFAULT 0',
     'total_messages INTEGER DEFAULT 0',
   ];
+  let failedAlter = false;
   for (const def of alters) {
     const col = def.split(' ')[0];
     try { await env.DB.prepare(`ALTER TABLE index_jobs ADD COLUMN ${def}`).run(); }
-    catch (e) { if (!/exists/i.test(String(e?.message))) console.error(`[backfill] ${col} alter:`, e?.message); }
+    catch (e) { if (!/exists/i.test(String(e?.message))) { failedAlter = true; console.error(`[backfill] ${col} alter:`, e?.message); } }
   }
-  ensureIndexJobColumns._done = true;
+  // Only mark done when every column is in place. A transient DDL failure that
+  // got cached here left a missing column forever — the index_jobs INSERT then
+  // threw on every backfill start and a forum clone reported "0 topics".
+  if (!failedAlter) ensureIndexJobColumns._done = true;
 }
 
 async function ensurePendingCloneTable(env){
@@ -9280,20 +9284,33 @@ async function doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUs
   // topic-wise if forum
   if(stats?.isForum && stats.topics?.length){
     let started = 0;
+    let failed = 0;
+    let firstErr = '';
     for(const t of stats.topics){
       const thr = String(t.id);
       try {
         await env.DB.prepare(`INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id) DO UPDATE SET community_id=excluded.community_id, target=excluded.target`).bind('tb_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), chatIdN, thr, communityIdArg || 'personal', targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
         await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET label=excluded.label, community_id=excluded.community_id, target=excluded.target, created_by=excluded.created_by`).bind(chatIdN+':'+thr, label, communityIdArg || null, targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
-        await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: thr, communityName, userbotLabel: label, silentProgress: true });
-        started++;
+        const jobRes = await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: thr, communityName, userbotLabel: label, silentProgress: true });
+        // An already-running topic still counts toward the clone (it is being indexed).
+        if (jobRes && jobRes.ok) started++;
+        else if (jobRes && jobRes.ok === false && jobRes.reason === 'already running') started++;
+        else failed++;
         await new Promise(r=>setTimeout(r, 800));
-      } catch(e){ console.error('topic clone failed', e?.message); }
+      } catch(e){
+        failed++;
+        if(!firstErr) firstErr = String(e?.message || e).slice(0, 160);
+        console.error('topic clone failed', e?.message || e);
+      }
     }
-    await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning '+started+' topics')} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}
+    const failLine = (failed && started) ? ` · ${boldHtml(failed + ' failed to start')}` : '';
+    const errLine = (failed && !started) ? `\n${boldHtml('❌ Nothing started — ' + (firstErr ? escHtml(firstErr) : 'no topic could be queued, see /userbot_status or logs'))}` : '';
+    await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning ' + started + ' topics')}${failLine} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}${errLine}
 ${italicHtml('Each topic backfills + live indexing afterwards.')}
 ${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
-    if (started) await startForumCloneCard(env, { token, chatId: chatIdN, chatName: cloneChatName || chatIdN, progressChatId: chatId, forumThreadId });
+    // Draw the aggregated card whenever topics were requested, so partial or
+    // failing starts stay visible instead of a silent "0 topics" drop.
+    if (stats.topics.length) await startForumCloneCard(env, { token, chatId: chatIdN, chatName: cloneChatName || chatIdN, progressChatId: chatId, forumThreadId });
     return;
   }
   // One topic was requested but the userbot could not enumerate topics (the
@@ -9664,6 +9681,10 @@ async function runHistoryIndexJob(env, job, token) {
       client = new TelegramClient(new StringSession(sessionString), Number(sess.api_id) || 0, apiHash, { connectionRetries: 3 });
       await client.connect();
     }
+    // Only disconnect a client THIS job created. A reused USERBOT_ACCOUNTS
+    // client is shared by live capture and sibling topic jobs; disconnecting it
+    // here killed the next fan-out job and went live clones silent.
+    const reusedClient = !!(liveAcc && liveAcc.client && client === liveAcc.client);
     // Resolve the human name via the userbot (Bot API getChat fails for
     // private chats the bot never saw) and persist it for all surfaces.
     try {
@@ -9868,7 +9889,7 @@ async function runHistoryIndexJob(env, job, token) {
         await patch({ status: 'error', error: `stopped after ${conts + 1} chunks (${processed} msgs) — /index_stop then /clone resumes`.slice(0, 300) });
       }
       if (!job.silent_progress) await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('🧩')} Chunk complete: ${processed} msgs · continuing automatically…`).catch(() => {});
-      try { await client.disconnect(); } catch (_) {}
+      if (!reusedClient) { try { await client.disconnect(); } catch (_) {} }
       return;
     }
     const finalRow = await env.DB.prepare('SELECT status, saved_links, saved_docs, saved_pdfs, dupes_skipped FROM index_jobs WHERE id = ?').bind(job.id).first().catch(() => null);
@@ -9890,7 +9911,7 @@ async function runHistoryIndexJob(env, job, token) {
     if (finalRow?.status === 'done') {
       await env.DB.prepare('DELETE FROM telegram_index_sessions WHERE id = ?').bind(job.id).run().catch(() => {});
     }
-    try { await client.disconnect(); } catch (_) {}
+    if (!reusedClient) { try { await client.disconnect(); } catch (_) {} }
   } catch (e) {
     console.error('[index] job failed', e?.message || e);
     await userbotLogError(env, job.chat_id, e);
