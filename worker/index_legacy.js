@@ -9590,8 +9590,13 @@ async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser,
   // topic would double-index; different topics run side by side.
   const threadKey = threadArg || null;
   const active = await env.DB.prepare(
-    "SELECT id FROM index_jobs WHERE chat_id = ? AND status IN ('queued','running') AND ((thread_id IS NULL AND ? IS NULL) OR thread_id = ?)"
-  ).bind(cid, threadKey, threadKey).first();
+    // thread dedupe: `? IS NULL` leaves the bind param untyped and Postgres
+    // rejects it ("could not determine data type of parameter $2"); compare the
+    // normalized thread text instead so every ? has an inferable type. thread_id
+    // is TEXT, so COALESCE(thread_id,'') = COALESCE($n,'') dedupes whole-chat
+    // (NULL/'') and topic jobs alike.
+    "SELECT id FROM index_jobs WHERE chat_id = ? AND status IN ('queued','running') AND COALESCE(thread_id, '') = COALESCE(?, '')"
+  ).bind(cid, threadKey).first();
   if (active) {
     await sendTelegramFormatted(token, chatId,
       `${boldHtml('⏳')} A backfill for ${codeHtml(cid)}${threadArg ? ` topic ${codeHtml('#' + threadArg)}` : ''} is already running. Progress: ${codeHtml('/index_status')} · cancel: ${codeHtml('/index_stop')}`,

@@ -57,9 +57,9 @@ async function unifiedClone(update,env,ctx){
   // must not be blocked just because topic #7 (or the whole chat) already has
   // an active job; whole-chat clones still see whole-chat jobs.
   const threadKey = topic || null;
-  const running=await env.DB.prepare(`SELECT id FROM index_jobs WHERE chat_id=? AND status IN ('queued','running') AND ((thread_id IS NULL AND ? IS NULL) OR thread_id=?)`).bind(normRemote,threadKey,threadKey).first().catch(()=>null);
+  const running=await env.DB.prepare(`SELECT id FROM index_jobs WHERE chat_id=? AND status IN ('queued','running') AND COALESCE(thread_id, '') = COALESCE(?, '')`).bind(normRemote,threadKey).first().catch(()=>null);
   if(running){ await richSend(`<h3>⏳ Already running</h3><p>Clone for <code>${remote}</code>${topic?` topic <code>#${topic}</code>`:''} is already running — progress via /userbot_status.</p>`); return new Response('OK'); }
-  const pend=await env.DB.prepare(`SELECT id FROM pending_clones WHERE chat_id=? AND expires_at>? AND ((? IS NULL AND thread_id IS NULL) OR thread_id=?)`).bind(normRemote,Date.now(),threadKey,threadKey).first().catch(()=>null);
+  const pend=await env.DB.prepare(`SELECT id FROM pending_clones WHERE chat_id=? AND expires_at>? AND COALESCE(thread_id, '') = COALESCE(?, '')`).bind(normRemote,Date.now(),threadKey).first().catch(()=>null);
   if(pend){ await richSend(`<h3>⏳ Clone preview ready</h3><p>Preview for <code>${remote}</code> is ready — resuming auto-confirm now, hold on.</p>`);
     const resume=(async()=>{ const y=structuredClone(update); y.message.text='yes'; y.message.caption=undefined; y.message.entities=[]; if(y.message&&y.message.message_id!=null) y.message.message_id=y.message.message_id+1000000; if(y.update_id!=null) y.update_id=y.update_id+1; try{ await legacyFetch(y,env); }catch(_){ await richSend(`<h3>❌ Clone failed</h3><p>Clone confirm step failed — check /userbot_status or retry.</p>`); } })();
     if(ctx&&typeof ctx.waitUntil==='function') ctx.waitUntil(resume.catch(()=>{})); else await resume.catch(()=>{});
