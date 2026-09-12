@@ -225,6 +225,7 @@ server.listen(PORT, HOST, () => {
         saved_links: Number(j.saved_links || 0), saved_docs: Number(j.saved_docs || 0),
         saved_files: Number(j.saved_files || 0), skipped_media: Number(j.skipped_media || 0),
         urls_seen: Number(j.urls_seen || 0), progress_chat_id: j.progress_chat_id,
+        silent_progress: !!j.thread_id,
       }, process.env.TELEGRAM_BOT_TOKEN || '').catch((e) => console.error('[index] resume run failed:', e.message));
     }
   } catch (err) {

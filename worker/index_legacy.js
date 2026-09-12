@@ -12237,7 +12237,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      const { results: accounts } = await env.DB.prepare('SELECT label, enabled, last_error FROM userbot_accounts ORDER BY label').all();
      const { results: follows } = await env.DB.prepare('SELECT chat_id, label, community_id, target, last_seen_at FROM userbot_follows ORDER BY label, chat_id').all();
      const { results: jobs } = await env.DB.prepare(
-       'SELECT id, chat_id, thread_id, status, processed, saved_links, saved_docs, saved_pdfs, dupes_skipped, saved_files, urls_seen, chat_name, error, updated_at FROM index_jobs ORDER BY updated_at DESC'
+       'SELECT id, chat_id, thread_id, status, processed, total_messages, saved_links, saved_docs, saved_pdfs, dupes_skipped, saved_files, urls_seen, chat_name, error, updated_at FROM index_jobs ORDER BY updated_at DESC'
      ).all();
 
      const accItems = (accounts || []).map((a) => {
