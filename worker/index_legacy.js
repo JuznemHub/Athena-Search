@@ -9538,6 +9538,39 @@ function formatForumCloneCard(o) {
   return `${head}\n${lines.join('\n')}\n${tail.length ? italicHtml(tail.join(' · ')) : ''}`;
 }
 
+// Rich Body API renderer (Bot API 10.1+ sendRichMessage): headings + <p> topic
+// lines. The Stop/Refresh buttons are appended in-body via <tg-button-row>. Falls
+// back to the classic card if the bot does not support the rich Body API, so the
+// card renders everywhere and never loses its buttons.
+function formatForumCloneCardRich(o) {
+  const byThread = new Map();
+  for (const j of o.jobs || []) byThread.set(String(j.thread_id), j);
+  const counts = { running: 0, queued: 0, done: 0, stopped: 0, error: 0 };
+  const lines = [];
+  for (const tid of o.topicIds || []) {
+    const j = byThread.get(String(tid));
+    if (j) { counts[j.status] = (counts[j.status] || 0) + 1; lines.push(richParagraph(`• ${codeHtml('#' + tid)} ${formatTopicProgressLine(j)}`)); }
+    else { counts.queued++; lines.push(richParagraph(`• ${codeHtml('#' + tid)} ⏳ ${italicHtml('not started')}`)); }
+  }
+  const tail = [];
+  if (counts.running) tail.push(`${boldHtml('▶️ ' + counts.running + ' running')}`);
+  if (counts.queued) tail.push(`${counts.queued} queued`);
+  if (counts.done) tail.push(`${boldHtml('✅ ' + counts.done + ' done')}`);
+  if (counts.stopped) tail.push(`⏸ ${counts.stopped} stopped`);
+  if (counts.error) tail.push(`${boldHtml('❌ ' + counts.error + ' failed')}`);
+  const head = richHeading(3, `📇 Forum clone ${codeHtml(o.chatId)}${o.chatName && o.chatName !== o.chatId ? ' ' + boldHtml(escHtml(o.chatName)) : ''} — ${o.topicIds?.length || 0} topics`);
+  return [head, ...lines, ...(tail.length ? [richParagraph(italicHtml(tail.join(' · ')))] : [])].join('\n');
+}
+
+// In-body <tg-button-row> Stop/Refresh buttons for the rich card.
+function cloneCardButtonsRich(chatId) {
+  const target = normalizeTgChatId(String(chatId || ''));
+  return richButtonRow([
+    { label: '⏹ Stop', data: 'clone_ctrl:stop:' + target },
+    { label: '🔄 Refresh', data: 'clone_ctrl:refresh:' + target }
+  ]);
+}
+
 // chatId(key) -> { msgId } — one live card per forum clone; the watcher edits
 // that single message while any topic job is active, then freezes the final state.
 const FORUM_CLONE_CARDS = new Map();
@@ -9552,10 +9585,17 @@ function cloneCardKeyboard(chatId) {
   ]] };
 }
 
-async function editForumCard(state, token, chatId, html, forumThreadId, replyMarkup) {
+async function editForumCard(state, token, chatId, richHtml, classicHtml, forumThreadId, replyMarkup) {
+  const thread = (forumThreadId != null && forumThreadId !== '' && !Number.isNaN(Number(forumThreadId))) ? Number(forumThreadId) : undefined;
   if (state.msgId) {
-    const res = await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: state.msgId, text: html, parse_mode: 'HTML', ...(replyMarkup ? { reply_markup: replyMarkup } : {}) }).catch(() => ({ ok: false, description: 'network' }));
-    if (res?.ok) return;
+    // Rich body first (headings + in-body <tg-button-row>). Any failure drops to
+    // the classic body + standard inline buttons below, so the card never breaks
+    // and never loses its Stop/Refresh buttons.
+    try {
+      const r = await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: state.msgId, rich_message: { html: richHtml }, ...(thread != null ? { message_thread_id: thread } : {}) }).catch(() => ({ ok: false }));
+      if (r && r.ok) return;
+    } catch (_) {}
+    const res = await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: state.msgId, text: classicHtml, parse_mode: 'HTML', ...(replyMarkup ? { reply_markup: replyMarkup } : {}), ...(thread != null ? { message_thread_id: thread } : {}) }).catch(() => ({ ok: false, description: 'network' }));
     const desc = String(res?.description || '').toLowerCase();
     // Only re-send when the original card is genuinely gone. A "not modified",
     // parse or transient failure must never spawn a fresh message — the contract
@@ -9563,7 +9603,16 @@ async function editForumCard(state, token, chatId, html, forumThreadId, replyMar
     if (!/(not found|message to edit not found|message_id is invalid|message was deleted|deleted)/.test(desc)) return;
     state.msgId = null; // message deleted — send a fresh card
   }
-  const m = await sendTelegramMessageWithKeyboard(token, chatId, html, replyMarkup, forumThreadId, 'HTML').catch(() => null);
+  // Fresh send: rich first (in-body buttons), else classic + standard buttons.
+  let m = null;
+  try {
+    const r = await telegramApi(token, 'sendRichMessage', { chat_id: chatId, rich_message: { html: richHtml }, ...(thread != null ? { message_thread_id: thread } : {}) }).catch(() => ({ ok: false, result: null }));
+    if (r && r.ok && r.result?.message_id != null) m = { message_id: r.result.message_id };
+  } catch (_) {}
+  if (!m) {
+    const s = await sendTelegramMessageWithKeyboard(token, chatId, classicHtml, replyMarkup, forumThreadId, 'HTML').catch(() => null);
+    if (s && s.message_id != null) m = { message_id: s.message_id };
+  }
   state.msgId = m?.message_id || null;
 }
 
@@ -9594,17 +9643,24 @@ async function startForumCloneCard(env, { token, chatId, chatName = '', progress
   FORUM_CLONE_CARDS.set(key, state);
   const topicIds = await forumCardTopicIds(env, chatId);
   const keyboard = cloneCardKeyboard(chatId);
+  const richButtons = cloneCardButtonsRich(chatId);
+  const render = (jobs) => ({
+    classic: formatForumCloneCard({ chatId, chatName, topics: topicIds.length, topicIds, jobs }),
+    rich: formatForumCloneCardRich({ chatId, chatName, topicIds, jobs }) + (richButtons ? '\n' + richButtons : '')
+  });
   const loop = (async () => {
     try {
       for (let round = 0; round < 320; round++) {
         const jobs = await forumCardJobs(env, chatId);
-        await editForumCard(state, token, progressChatId, formatForumCloneCard({ chatId, chatName, topics: topicIds.length, topicIds, jobs }), forumThreadId, keyboard);
+        const v = render(jobs);
+        await editForumCard(state, token, progressChatId, v.rich, v.classic, forumThreadId, keyboard);
         const active = jobs.some((j) => j.status === 'queued' || j.status === 'running');
         if (!active || round === 319) break;
         await sleep(9000);
       }
       const jobs = await forumCardJobs(env, chatId);
-      await editForumCard(state, token, progressChatId, formatForumCloneCard({ chatId, chatName, topics: topicIds.length, topicIds, jobs }), forumThreadId, keyboard);
+      const v = render(jobs);
+      await editForumCard(state, token, progressChatId, v.rich, v.classic, forumThreadId, keyboard);
     } finally {
       FORUM_CLONE_CARDS.delete(key);
     }
