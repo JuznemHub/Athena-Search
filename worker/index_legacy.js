@@ -15649,6 +15649,15 @@ async function enrichLinksInBackground(env, scope, key, links) {
             try { existingTags = Array.isArray(link.tags) ? link.tags : JSON.parse(link.tags || '[]'); } catch (_) {}
             update.tags = [...new Set([...ai.tags, ...existingTags])];
           }
+        } else {
+          // AI down → context tags from the URL/caption, same as the synchronous
+          // save path — clones stay tagged even during a model rate-limit storm.
+          const fb = fallbackTagsFromMeta(link.url, { title: update.title, notes: update.notes, content: meta.content || '' });
+          if (fb.length) {
+            let existingTags = [];
+            try { existingTags = Array.isArray(link.tags) ? link.tags : JSON.parse(link.tags || '[]'); } catch (_) {}
+            update.tags = [...new Set([...fb, ...existingTags])];
+          }
         }
         if (!update.notes && !update.image_url && !update.site_name && !update.tags) continue;
         const metadataVersion = ai?.tags?.length && ai.description ? AI_METADATA_VERSION : 2;
