@@ -8267,7 +8267,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
         return new Response('OK',{status:200, headers:corsHeaders});
       }
       await editTelegramMessage(token, chatId, msgId, `${boldHtml('✅ Confirmed — cloning started.')} ${codeHtml(chatIdN2)}`, null, threadId).catch(()=>{});
-      await doCloneAfterConfirm(env, { token, chatId, forumThreadId: threadId, athenaUser: athenaUser2, communityIdArg, chatIdN: chatIdN2, targetArg: targetArg2, stats });
+      await doCloneAfterConfirm(env, { token, chatId, forumThreadId: threadId, athenaUser: athenaUser2, communityIdArg, chatIdN: chatIdN2, targetArg: targetArg2, stats, threadArg: pend.thread_id||'' });
       return new Response('OK',{status:200, headers:corsHeaders});
     }
   }
@@ -9263,7 +9263,7 @@ function richHelpHtml(section, isGod = false) {
   }
   return out.join('\n');
 }
-async function doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdN, targetArg, stats }){
+async function doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdN, targetArg, stats, threadArg = '' }){
   const _minId = stats?.minId || stats?.min_id || '';
   const _maxId = stats?.maxId || stats?.max_id || '';
   const labelRow = await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled=1 ORDER BY label LIMIT 1').first().catch(()=>null);
@@ -9294,6 +9294,18 @@ async function doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUs
 ${italicHtml('Each topic backfills + live indexing afterwards.')}
 ${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
     if (started) await startForumCloneCard(env, { token, chatId: chatIdN, chatName: cloneChatName || chatIdN, progressChatId: chatId, forumThreadId });
+    return;
+  }
+  // One topic was requested but the userbot could not enumerate topics (the
+  // preview degraded to isForum:false/topics:[]). Do NOT fall through to a
+  // whole-chat clone — that imports every topic's history. Clone that thread.
+  if (threadArg) {
+    const thr = String(threadArg);
+    await env.DB.prepare(`INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id) DO UPDATE SET community_id=excluded.community_id, target=excluded.target`).bind('tb_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), chatIdN, thr, communityIdArg || 'personal', targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
+    await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET label=excluded.label, community_id=excluded.community_id, target=excluded.target, created_by=excluded.created_by`).bind(chatIdN+':'+thr, label, communityIdArg || null, targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
+    await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: thr, communityName, userbotLabel: label, silentProgress: true });
+    await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning topic')} ${codeHtml('#'+thr)} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}\n• Live: every new post in this topic lands automatically\n${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
+    if (chatId) await startForumCloneCard(env, { token, chatId: chatIdN, chatName: cloneChatName || chatIdN, progressChatId: chatId, forumThreadId });
     return;
   }
   // non-forum: single
@@ -9398,8 +9410,16 @@ async function resolveChatTitle(env, token, chatId) {
 }
 
 function progressBar(done, total, width = 18) {
-  const denom = Math.max(Number(done) || 0, Number(total) || 0);
-  const pct = denom ? Math.min(100, Math.round((Number(done) / denom) * 100)) : 0;
+  const d = Math.max(Number(done) || 0, 0);
+  const t = Math.max(Number(total) || 0, 0);
+  // No real denominator (a topic job, or a count we could not probe): render a
+  // bar that fills as messages are scanned but report no percent — a 0 or a
+  // whole-channel id as "total" made finished jobs look stuck at 0%.
+  if (!t) {
+    const filled = Math.min(width, Math.max(1, Math.round(d / 200)));
+    return { bar: '▮'.repeat(filled) + '▯'.repeat(width - filled), pct: null };
+  }
+  const pct = Math.min(100, Math.round((d / t) * 100));
   const filled = Math.round((pct / 100) * width);
   return { bar: '▮'.repeat(filled) + '▯'.repeat(width - filled), pct };
 }
@@ -9409,7 +9429,8 @@ function progressBar(done, total, width = 18) {
  *  renders — keep it first-class instead of relying on fallback. */
 function formatBackfillProgress(o) {
   const { bar, pct } = progressBar(o.done, o.total);
-  const parts = [`${bar} ${pct}%`, `${o.done}${o.total && o.total >= o.done ? `/${o.total}` : ''} msgs`];
+  const pctLabel = pct == null ? '' : ` ${pct}%`;
+  const parts = [`${bar}${pctLabel}`, `${o.done}${o.total && o.total >= o.done ? `/${o.total}` : ''} msgs`];
   if (o.links) parts.push(`${o.links} links`);
   if (o.dupes) parts.push(`${o.dupes} dupes`);
   if (o.docs) parts.push(`${o.docs} docs`);
@@ -9440,8 +9461,9 @@ function formatTopicProgressLine(j) {
   if (!j) return italicHtml('not started');
   const { bar, pct } = progressBar(j.processed, j.total_messages);
   const icon = j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'queued' ? '⏳' : j.status === 'error' ? '❌' : '⏸';
-  let rep = `${bar} ${pct}% · ${j.processed || 0} msgs`;
-  if (j.total_messages && Number(j.total_messages) > Number(j.processed || 0)) rep = `${bar} ${pct}% · ${j.processed || 0}/${j.total_messages} msgs`;
+  const pctLabel = pct == null ? '' : ` ${pct}%`;
+  let rep = `${bar}${pctLabel} · ${j.processed || 0} msgs`;
+  if (j.total_messages && Number(j.total_messages) > Number(j.processed || 0)) rep = `${bar}${pctLabel} · ${j.processed || 0}/${j.total_messages} msgs`;
   if (j.saved_links) rep += ` · ${j.saved_links} links`;
   if (j.saved_docs) rep += ` · ${j.saved_docs} docs`;
   if (j.saved_pdfs) rep += ` · ${j.saved_pdfs} pdfs`;
@@ -9459,7 +9481,7 @@ function formatForumCloneCard(o) {
   const head = `${boldHtml('📇 Forum clone')} ${codeHtml(o.chatId)}${o.chatName && o.chatName !== o.chatId ? ` ${boldHtml(escHtml(o.chatName))}` : ''} — ${o.topics || 0} topics`;
   const byThread = new Map();
   for (const j of o.jobs || []) byThread.set(String(j.thread_id), j);
-  const counts = { running: 0, queued: 0, done: 0, error: 0 };
+  const counts = { running: 0, queued: 0, done: 0, stopped: 0, error: 0 };
   for (const tid of o.topicIds || []) {
     const j = byThread.get(String(tid));
     if (j) { counts[j.status] = (counts[j.status] || 0) + 1; lines.push(`<p>• ${codeHtml('#' + tid)} ${formatTopicProgressLine(j)}</p>`); }
@@ -9469,6 +9491,7 @@ function formatForumCloneCard(o) {
   if (counts.running) tail.push(`${boldHtml('▶️ ' + counts.running + ' running')}`);
   if (counts.queued) tail.push(`${counts.queued} queued/not-started`);
   if (counts.done) tail.push(`${boldHtml('✅ ' + counts.done + ' done')}`);
+  if (counts.stopped) tail.push(`⏸ ${counts.stopped} stopped`);
   if (counts.error) tail.push(`${boldHtml('❌ ' + counts.error + ' failed')}`);
   return `${head}\n${lines.join('\n')}\n${tail.length ? italicHtml(tail.join(' · ')) : ''}`;
 }
@@ -9489,23 +9512,26 @@ async function editForumCard(state, token, chatId, html, forumThreadId) {
 
 async function forumCardTopicIds(env, chatId) {
   const tids = new Set();
-  const binds = await env.DB.prepare('SELECT thread_id FROM telegram_topic_bindings WHERE chat_id = ?').bind(chatId).all().catch(() => ({ results: [] }));
+  const norm = normalizeTgChatId(chatId);
+  const binds = await env.DB.prepare('SELECT thread_id FROM telegram_topic_bindings WHERE chat_id = ?').bind(norm).all().catch(() => ({ results: [] }));
   for (const b of binds.results || []) tids.add(String(b.thread_id));
-  const fws = await env.DB.prepare('SELECT chat_id FROM userbot_follows WHERE chat_id LIKE ?').bind(chatId + ':%').all().catch(() => ({ results: [] }));
+  const fws = await env.DB.prepare('SELECT chat_id FROM userbot_follows WHERE chat_id LIKE ?').bind(norm + ':%').all().catch(() => ({ results: [] }));
   for (const f of fws.results || []) { const tid = String(f.chat_id).split(':')[1] || ''; if (tid) tids.add(tid); }
   return [...tids].sort((a, b) => Number(a) - Number(b));
 }
 
 async function forumCardJobs(env, chatId) {
   const r = await env.DB.prepare(`SELECT thread_id, status, processed, total_messages, saved_links, saved_docs, saved_pdfs, saved_files, dupes_skipped, error
-    FROM index_jobs WHERE chat_id = ? ORDER BY thread_id`).bind(chatId).all().catch(() => ({ results: [] }));
+    FROM index_jobs WHERE chat_id = ? ORDER BY thread_id`).bind(normalizeTgChatId(chatId)).all().catch(() => ({ results: [] }));
   return (r.results || []).filter((j) => j.thread_id);
 }
 
 /** One watcher per forum clone: renders the aggregated card, edits it every
  *  ~9s, and freezes the final frame when no topic job is active. */
 async function startForumCloneCard(env, { token, chatId, chatName = '', progressChatId, forumThreadId = null }) {
-  const key = normalizeTgChatId(chatId);
+  // Key on the progress chat too: two users cloning the same forum each need
+  // their own live card, and a key on channel alone dropped the second one.
+  const key = normalizeTgChatId(chatId) + '|' + String(progressChatId || '') + '|' + String(forumThreadId || '');
   if (!token || FORUM_CLONE_CARDS.has(key)) return;
   const state = { msgId: null };
   FORUM_CLONE_CARDS.set(key, state);
@@ -9644,10 +9670,21 @@ async function runHistoryIndexJob(env, job, token) {
     job.urls_seen = Number(job.urls_seen || 0);
     job.saved_pdfs = Number(job.saved_pdfs || 0);
     job.dupes_skipped = Number(job.dupes_skipped || 0);
-    // Approximate total for the progress bar: latest message id in the chat.
+    // Total for the progress bar: a real message count, never the newest
+    // message id (deleted messages and imported histories make the newest id
+    // overstate the count, so the card read like 120/47000 and looked stuck).
+    // Whole-chat jobs get an accurate count; forum-topic jobs leave it null —
+    // probing a topic's true count is expensive and a whole-channel id would
+    // make a finished topic sit near 0%.
     try {
-      const head = await client.getMessages(job.chat_id, { limit: 1 });
-      job.total_messages = Number(head?.[0]?.id || 0) || null;
+      if (!job.thread_id) {
+        const _g = await import('tele' + 'gram');
+        const _Api = _g.Api || _g.tl?.Api;
+        const hist = await client.invoke(new _Api.messages.GetHistory({ peer: job.chat_id, offsetId: 0, offsetDate: 0, addOffset: 0, limit: 1, maxId: 0, minId: 0, hash: 0n }));
+        job.total_messages = (hist && typeof hist.count === 'number') ? hist.count : null;
+      } else {
+        job.total_messages = null;
+      }
     } catch (_) { job.total_messages = null; }
     if (job.total_messages != null) await patch({ total_messages: job.total_messages }).catch(() => {});
     await pushProgress(true, processed);
@@ -10681,7 +10718,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         }
         await sendTelegramFormatted(token, chatId, `${boldHtml('✅ Confirmed — cloning started.')} ${codeHtml(pend.chat_id)}`, forumThreadId).catch(()=>{});
         try {
-          await doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUser, communityIdArg: pend.community_id||'', chatIdN: pend.chat_id, targetArg: pend.target||'', stats });
+          await doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUser, communityIdArg: pend.community_id||'', chatIdN: pend.chat_id, targetArg: pend.target||'', stats, threadArg: pend.thread_id||'' });
         } catch (cloneErr) {
           console.error('doCloneAfterConfirm failed:', cloneErr?.message || cloneErr);
           await sendTelegramFormatted(token, chatId, `${boldHtml('❌ Clone failed:')} ${escHtml(String(cloneErr?.message || cloneErr).slice(0, 200))}`, forumThreadId).catch(()=>{});
@@ -15995,12 +16032,16 @@ const USERBOT_STARTING = new Set();
 const USERBOT_STATS = new Map(); // chat_id -> {msgs, links, docs, lastAt}
 
 function userbotStat(chatId, field, threadId = null) {
-  const key = String(chatId || '');
+  // Normalize to the -100... form the reads use (buildStatsReport reads
+  // chatNorm), stripping any ':topic' suffix carried on a follow's chat_id.
+  // Writing raw keys made live counters silently 0 for bare-id follows.
+  const raw = String(chatId || '').split(':')[0];
+  const key = normalizeTgChatId(raw);
   const s = USERBOT_STATS.get(key) || { msgs: 0, links: 0, docs: 0, lastAt: 0 };
   if (field) s[field] += 1;
   s.lastAt = Date.now();
   USERBOT_STATS.set(key, s);
-  if (threadId != null && String(threadId).trim() !== '' && !key.includes(':')) {
+  if (threadId != null && String(threadId).trim() !== '') {
     const tKey = `${key}:${String(threadId).trim()}`;
     const t = USERBOT_STATS.get(tKey) || { msgs: 0, links: 0, docs: 0, lastAt: 0 };
     if (field) t[field] += 1;
@@ -16482,15 +16523,21 @@ export async function buildStatsReport(env, token = null) {
   for (const k of topicFollowMap.keys()) chatIds.add(normalizeTgChatId(k.split(':')[0]));
 
   // Helpers for counts
-  async function countLinksForTransfer(transferIds, communityId, userIdForPersonal, target, todayOnly = false) {
+  async function countLinksForTransfer(transferIds, communityId, userIdForPersonal, target, todayOnly = false, chatNorm = '') {
     if (!transferIds.length && !communityId && !userIdForPersonal) return 0;
     const cutoffClause = todayOnly ? ' AND created_at > ' + todayCutoff : '';
+    // Per-chat scoping (mirrors countDocs): count only links tied to THIS chat
+    // via its own transfer/live ids plus its source_chat_id (bare or -100 form).
+    // The old OR community_id / OR user_id widened every chat's /stats to the
+    // whole community, so each chat printed the community's entire total.
+    const srcArgs = chatNorm ? [chatNorm, chatNorm.replace(/^-100/, '')] : [];
+    const srcClause = chatNorm ? ' OR source_chat_id IN (?, ?)' : '';
     // personal
     if (target === 'personal' && userIdForPersonal) {
       if (transferIds.length) {
         const ph = transferIds.map(() => '?').join(',');
         try {
-          const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM personal_links WHERE (transfer_id IN (${ph}) OR user_id = ?) ${todayOnly ? 'AND created_at > ?' : ''}`).bind(...transferIds, userIdForPersonal, ...(todayOnly ? [todayCutoff] : [])).first();
+          const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM personal_links WHERE (transfer_id IN (${ph})${srcClause}) ${todayOnly ? 'AND created_at > ?' : ''}`).bind(...transferIds, ...srcArgs, ...(todayOnly ? [todayCutoff] : [])).first();
           return Number(r?.c || 0);
         } catch (_) {}
       }
@@ -16505,7 +16552,7 @@ export async function buildStatsReport(env, token = null) {
       if (transferIds.length) {
         const ph = transferIds.map(() => '?').join(',');
         try {
-          const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM links WHERE (transfer_id IN (${ph}) OR community_id = ?) ${todayOnly ? 'AND created_at > ?' : ''}`).bind(...transferIds, communityId, ...(todayOnly ? [todayCutoff] : [])).first();
+          const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM links WHERE community_id = ? AND (transfer_id IN (${ph})${srcClause}) ${todayOnly ? 'AND created_at > ?' : ''}`).bind(communityId, ...transferIds, ...srcArgs, ...(todayOnly ? [todayCutoff] : [])).first();
           total += Number(r?.c || 0);
         } catch (_e) {
           try {
@@ -16524,7 +16571,7 @@ export async function buildStatsReport(env, token = null) {
       if (transferIds.length) {
         const ph = transferIds.map(() => '?').join(',');
         try {
-          const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM personal_links WHERE (transfer_id IN (${ph}) OR user_id = ?) ${todayOnly ? 'AND created_at > ?' : ''}`).bind(...transferIds, userIdForPersonal, ...(todayOnly ? [todayCutoff] : [])).first();
+          const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM personal_links WHERE (transfer_id IN (${ph})${srcClause}) ${todayOnly ? 'AND created_at > ?' : ''}`).bind(...transferIds, ...srcArgs, ...(todayOnly ? [todayCutoff] : [])).first();
           total += Number(r?.c || 0);
         } catch (_) {}
       } else {
@@ -16658,8 +16705,8 @@ export async function buildStatsReport(env, token = null) {
     if (chatType === 'unknown') chatType = isForum ? 'forum' : 'group';
 
     // Counts: links/files/photos, today
-    const totalLinks = await countLinksForTransfer([...transferIds, ...liveIds], communityId, personalOwner, target, false);
-    const todayLinks = await countLinksForTransfer([...transferIds, ...liveIds], communityId, personalOwner, target, true);
+    const totalLinks = await countLinksForTransfer([...transferIds, ...liveIds], communityId, personalOwner, target, false, chatNorm);
+    const todayLinks = await countLinksForTransfer([...transferIds, ...liveIds], communityId, personalOwner, target, true, chatNorm);
     const totalDocs = await countDocs(chatNorm, communityId, personalOwner, target, false);
     const todayDocs = await countDocs(chatNorm, communityId, personalOwner, target, true);
     const totalPhotos = await countPhotos(chatNorm, communityId, personalOwner, target, false);
@@ -16716,8 +16763,8 @@ export async function buildStatsReport(env, token = null) {
         // Per-topic counts prefer jobs aggregate + doc source; links transfer per-topic is exact when jobs have thread_id
         let tLinks = 0, tLinksToday = 0;
         if (tTransferIds.length) {
-          tLinks = await countLinksForTransfer([...tTransferIds, `live:${chatNorm}:${tid}`], tb.community_id || communityId, personalOwner, tb.target || target, false);
-          tLinksToday = await countLinksForTransfer([...tTransferIds, `live:${chatNorm}:${tid}`], tb.community_id || communityId, personalOwner, tb.target || target, true);
+          tLinks = await countLinksForTransfer([...tTransferIds, `live:${chatNorm}:${tid}`], tb.community_id || communityId, personalOwner, tb.target || target, false, chatNorm);
+          tLinksToday = await countLinksForTransfer([...tTransferIds, `live:${chatNorm}:${tid}`], tb.community_id || communityId, personalOwner, tb.target || target, true, chatNorm);
         }
         let jobTDocs = tJobs.reduce((a, j) => a + Number(j.saved_docs || 0), 0);
         let jobTLinks = tJobs.reduce((a, j) => a + Number(j.saved_links || 0), 0);
@@ -16752,7 +16799,7 @@ export async function buildStatsReport(env, token = null) {
       total: {
         links: totalLinks || jobLinks,
         docs: totalDocs || jobDocs,
-        files: jobFiles || totalDocs,
+        files: jobFiles,
         photos: totalPhotos,
         msgs: totalMsgs,
         skippedMedia: jobSkipped,

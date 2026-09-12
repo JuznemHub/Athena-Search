@@ -9,6 +9,9 @@ function targetOf(args) { return args.find((x) => TARGETS.has(String(x).toLowerC
 function normalizeChatId(id) { const s=String(id||'').trim(); if(/^-100\d+$/.test(s)) return s; if(/^\d+$/.test(s)&&s.length>=9) return `-100${s}`; return s; }
 function ownerIds(env) { const raw=String(env.TG_OWNER_IDS||'').trim(); return raw ? new Set(raw.split(',').map(x=>x.trim()).filter(Boolean)) : null; }
 function isGod(id,env) { const ids=ownerIds(env); return !ids || ids.has(String(id||'')); }
+// requesterTgId -> { chatId, at } while a forum clone is waiting on a topic
+// choice (the shim showed the topic list and asked the user to pick).
+const FORUM_PENDING = new Map();
 // Same policy as legacy's telegramApiBaseFor: an explicit TELEGRAM_API_BASE is
 // honored ONLY for loopback/private hosts; bot tokens never leave for a
 // random host. Keeps shim rich/ack calls on the SAME Bot API server legacy
@@ -61,12 +64,12 @@ async function unifiedClone(update,env,ctx){
     const resume=(async()=>{ const y=structuredClone(update); y.message.text='yes'; y.message.caption=undefined; y.message.entities=[]; if(y.message&&y.message.message_id!=null) y.message.message_id=y.message.message_id+1000000; if(y.update_id!=null) y.update_id=y.update_id+1; try{ await legacyFetch(y,env); }catch(_){ await richSend(`<h3>❌ Clone failed</h3><p>Clone confirm step failed — check /userbot_status or retry.</p>`); } })();
     if(ctx&&typeof ctx.waitUntil==='function') ctx.waitUntil(resume.catch(()=>{})); else await resume.catch(()=>{});
     return new Response('OK'); }
-  // Forum auto-all: a topic-enabled group clones topic-wise with no extra
-  // arg — Bot API getChat exposes is_forum for visible chats; unknown chats
-  // keep the classic single-chat flow and legacy decides.
+  // Only an explicit 'all' clones every topic. Never auto-detect is_forum and
+  // inject 'all' — that bypassed the preview/confirm gate and cloned every
+  // topic on a bare /clone with no ask. Legacy detects the forum itself, shows
+  // the topic list, and the user picks a topic id or 'all' (gated below).
   const wantAll=args.some(x=>String(x).toLowerCase()==='all');
-  let forumAll=false;
-  if(!topic&&!wantAll){ try{ const gc=await tg(token,'getChat',{chat_id:normRemote}); if(gc&&gc.ok&&gc.result&&gc.result.is_forum) forumAll=true; }catch(_){} }
+  const forumAll=false;
   // Ack BEFORE the blocking preview scan: primeEntity (45s) + history preview
   // run with zero user feedback, and a killed/timed-out webhook otherwise
   // leaves total silence.
@@ -90,7 +93,13 @@ async function unifiedClone(update,env,ctx){
     globalThis.fetch=async(input,init={})=>{
       try{
         const url=typeof input==='string'?input:input?.url;
-        if(url&&/api\.telegram\.org\/bot/.test(url)&&init?.body){
+        // Match the Bot API base the shim actually talks to (a private
+        // TELEGRAM_API_BASE is honored for loopback/private hosts), not just
+        // api.telegram.org — otherwise the preview/confirm swallow and forum
+        // relabel never fire on a self-host bot.
+        let shimHost='api.telegram.org'; try{ shimHost=new URL(shimApiBase).hostname; }catch(_){}
+        const isBotApi=(()=>{ try{ return !!url&&new URL(url).hostname===shimHost; }catch(_){ return false; } })();
+        if(isBotApi&&init?.body){
           const payload=typeof init.body==='string'?JSON.parse(init.body):null;
           if(payload?.chat_id!=null&&String(payload.chat_id)===dmChat){
             // legacy preview/confirm prompts are swallowed — the shim confirms
@@ -134,16 +143,19 @@ async function unifiedClone(update,env,ctx){
     // for the chat, not for a second command.
     if(forumDetected&&!topic&&!wantAll){
       // Ask permission — never auto-clone every topic. The relabeled topic
-      // list above is the ask: the user picks a topic id or 'all'.
+      // list above is the ask: the user picks a topic id or 'all'. Record the
+      // waiting state so a later bare topic-id reply is routed to a real clone
+      // instead of being silently dropped.
+      FORUM_PENDING.set(String(msg.from?.id||''), { chatId: normRemote, at: Date.now() });
       console.log(`[uclone] forum detected for ${normRemote} — waiting for the user to pick a topic or 'all'`);
-      if(ackId) await editRich(ackId, ackHtml+`<p><i>📋 Forum with multiple topics detected — the topic list above is ready. Reply <b>a topic id</b> to clone that topic alone, or <b>'all'</b> to clone every topic (per-topic progress bars below).</i></p>`);
+      if(ackId) await editRich(ackId, ackHtml+`<p><i>📋 Forum with multiple topics detected — the topic list above is ready. Reply <b>a topic id</b> (or <b>'all'</b> to clone every topic, per-topic progress bars below), or rerun <code>/uclone ${remote} &lt;topic_id&gt;</code>.</i></p>`);
       return;
     }
     if(ackId) await editRich(ackId, ackHtml+`<p><i>Preview ready — confirming…</i></p>`);
     // Honesty gate: only confirm when a preview was actually stored. The
     // forum-all path stores none (it clones directly with visible messages),
     // and a silently-died preview must not get a fake "Confirmed".
-    const pendRow=await env.DB.prepare(`SELECT id FROM pending_clones WHERE chat_id=? AND expires_at>?`).bind(normRemote,Date.now()).first().catch(()=>null);
+    const pendRow=await env.DB.prepare(`SELECT id FROM pending_clones WHERE chat_id=? AND expires_at>? AND ((? IS NULL AND thread_id IS NULL) OR thread_id=?)`).bind(normRemote,Date.now(),threadKey,threadKey).first().catch(()=>null);
     if(!pendRow){
       if(ackId) await editRich(ackId, ackHtml+`<p>⚠️ No clone preview was stored — nothing to confirm. If a forum topic list arrived above, run ${`/uclone ${remote} all`} or pick one topic id.</p>`);
       return;
@@ -171,5 +183,18 @@ async function uclone(update,env,ctx){ return unifiedClone(update,env,ctx); }
 async function cloneStop(update,env){ const msg=update.message,args=parts(msg.text).slice(1),chat=args.find(x=>/^-?\d{5,}$/.test(x))||(String(msg.chat.id).startsWith('-')?String(msg.chat.id):''); if(!chat) return reply(env.TELEGRAM_BOT_TOKEN,msg.chat.id,'Usage: /clone_stop <chat_id>'); return legacyFetch(cloneUpdate(update,`/index_stop ${normalizeChatId(chat)}`),env); }
 async function stats(update,env){ return legacyFetch(cloneUpdate(update,'/stats'),env); }
 async function ucloneDel(update,env){ const msg=update.message,args=parts(msg.text).slice(1),chat=args.find(x=>/^-?\d{5,}$/.test(x)); if(!chat) return reply(env.TELEGRAM_BOT_TOKEN,msg.chat.id,'Usage: /uclone_del <chat_id> [topic_id]'); const topic=args.find(x=>/^\d{1,9}$/.test(x)&&x!==chat); return legacyFetch(cloneUpdate(update,`/delete ${chat}${topic?` ${topic}`:''} files`),env); }
-async function intercept(update,env,ctx){ const msg=update.message; if(!msg?.text||!env.TELEGRAM_BOT_TOKEN) return null; switch(command(msg.text)){ case '/clone':return unifiedClone(update,env,ctx); case '/uclone':return uclone(update,env,ctx); case '/ubclone':return uclone(update,env,ctx); case '/userbotconnect':return userbotConnect(update,env); case '/uclone_del':return ucloneDel(update,env); case '/clone_stop':return cloneStop(update,env); case '/stats':return stats(update,env); default:return null; } }
+async function intercept(update,env,ctx){ const msg=update.message; if(!msg?.text||!env.TELEGRAM_BOT_TOKEN) return null;
+  // A bare topic-id or 'all' reply while the shim is waiting on a forum choice:
+  // route it to a real clone. Without this the reply matched no command and the
+  // clone silently never started.
+  const pendText=(msg.text||'').trim(); const fromId=String(msg.from?.id||'');
+  const pend=FORUM_PENDING.get(fromId);
+  if(pend&&(Date.now()-pend.at)<10*60*1000){
+    const lower=pendText.toLowerCase();
+    if(/^-?\d{1,9}$/.test(pendText)||lower==='all'){
+      FORUM_PENDING.delete(fromId);
+      const u=structuredClone(update); u.message.text=`/uclone ${pend.chatId} ${/^-?\d{1,9}$/.test(pendText)?pendText:'all'}`; u.message.caption=undefined; u.message.entities=[{type:'bot_command',offset:0,length:7}]; return uclone(u,env,ctx);
+    }
+  }
+  switch(command(msg.text)){ case '/clone':return unifiedClone(update,env,ctx); case '/uclone':return uclone(update,env,ctx); case '/ubclone':return uclone(update,env,ctx); case '/userbotconnect':return userbotConnect(update,env); case '/uclone_del':return ucloneDel(update,env); case '/clone_stop':return cloneStop(update,env); case '/stats':return stats(update,env); default:return null; } }
 export default {async fetch(request,env,ctx){ shimApiBase = shimBaseFor(env); const url=new URL(request.url); if(request.method==='POST'&&/telegram-webhook$/.test(url.pathname)){ try{const update=await request.clone().json(); const handled=await intercept(update,env,ctx); if(handled)return handled;}catch(_){} } return legacy.fetch(request,env,ctx); }};
