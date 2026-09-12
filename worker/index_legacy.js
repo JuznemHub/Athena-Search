@@ -8251,12 +8251,20 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       for (const j of results || []) {
         await env.DB.prepare(`UPDATE index_jobs SET status = 'stopping', updated_at = ? WHERE id = ?`).bind(Date.now(), j.id).run().catch(() => {});
       }
-      await editTelegramMessage(token, chatId, msgId, `${boldHtml('⏹')} Stopping ${(results || []).length} job(s)…`, cloneCardKeyboard(targetChat), threadId).catch(() => {});
-    } else if (ctrlAction === 'refresh') {
+    }
+    // Stop and Refresh both re-render the SAME card the user sees. The card is
+    // a rich Body API message (formatForumCloneCardRich + in-body buttons), so a
+    // classic editMessageText silently does nothing — that is why Stop/Refresh
+    // looked dead. Edit it as a rich message first, then fall back to classic if
+    // the bot cannot send rich bodies.
+    if (ctrlAction === 'stop' || ctrlAction === 'refresh') {
       const jobs = await forumCardJobs(env, targetChat);
       const topicIds = await forumCardTopicIds(env, targetChat);
-      const html = formatForumCloneCard({ chatId: targetChat, chatName: '', topics: topicIds.length, topicIds, jobs });
-      await editTelegramMessage(token, chatId, msgId, html, cloneCardKeyboard(targetChat), threadId).catch(() => {});
+      const buttons = cloneCardButtonsRich(targetChat);
+      const rich = formatForumCloneCardRich({ chatId: targetChat, chatName: '', topicIds, jobs }) + (buttons ? '\n' + buttons : '');
+      const classic = formatForumCloneCard({ chatId: targetChat, chatName: '', topics: topicIds.length, topicIds, jobs });
+      const edited = await editTelegramRichMessage(token, chatId, msgId, rich, threadId, null);
+      if (!edited?.ok) await editTelegramMessage(token, chatId, msgId, classic, cloneCardKeyboard(targetChat), threadId).catch(() => {});
     }
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
@@ -9646,53 +9654,65 @@ async function forumCardTopicIds(env, chatId) {
 }
 
 async function forumCardJobs(env, chatId) {
-  const r = await env.DB.prepare(`SELECT thread_id, status, processed, total_messages, saved_links, saved_docs, saved_pdfs, saved_files, dupes_skipped, error
-    FROM index_jobs WHERE chat_id = ? ORDER BY thread_id`).bind(normalizeTgChatId(chatId)).all().catch(() => ({ results: [] }));
-  const rows = (r.results || []).filter((j) => j.thread_id);
+  const r = await env.DB.prepare(`SELECT thread_id, status, processed, total_messages, saved_links, saved_docs, saved_pdfs, saved_files, dupes_skipped, error, updated_at
+    FROM index_jobs WHERE chat_id = ? ORDER BY updated_at DESC`).bind(normalizeTgChatId(chatId)).all().catch(() => ({ results: [] }));
+  // Re-cloning (or a resumed run) leaves earlier DONE/ERROR rows for the same
+  // thread. Only the newest job per thread is authoritative — otherwise the
+  // card snaps back to the old clone's numbers ("old progress was saved").
+  const seen = new Set();
+  const rows = (r.results || []).filter((j) => { if (!j.thread_id) return false; const k = String(j.thread_id); if (seen.has(k)) return false; seen.add(k); return true; });
   // Live / catch-up saves never touch index_jobs — they go to the links,
   // personal_links and uploaded_documents tables with a `live:chat:thread`
   // transfer id. /stats sums those per topic, but this card read only the
   // backfill counters, so a topic the live index reached first showed "0 links
   // · N dupes" while the logs and /stats proved the links existed. Enrich each
-  // row with the live-saved links + docs so the card matches the real data.
+  // row with the live-saved links, docs and pdfs so the card matches reality.
   const live = await forumLiveCounts(env, chatId).catch(() => new Map());
   if (live.size) {
     for (const j of rows) {
       const lc = live.get(String(j.thread_id));
-      if (lc && (lc.links || lc.docs)) {
+      if (lc && (lc.links || lc.docs || lc.pdfs)) {
         j.saved_links = Number(j.saved_links || 0) + lc.links;
         j.saved_docs = Number(j.saved_docs || 0) + lc.docs;
+        j.saved_pdfs = Number(j.saved_pdfs || 0) + lc.pdfs;
       }
     }
   }
   return rows;
 }
 
-/** Per-topic counts of LIVE/catch-up-saved links + docs for a forum chat. Pure
- *  reads over `live:chat:thread` transfer ids — one grouped query per table,
- *  then keyed by the thread suffix. Distinct from the backfill job counters
- *  (a URL keeps whichever transfer id inserted it first, so no double count). */
+/** Per-topic counts of LIVE/catch-up-saved links, docs and pdfs for a forum
+ *  chat. Pure reads over `live:chat:thread` transfer ids — one grouped query
+ *  per table, then keyed by the thread suffix. Distinct from the backfill job
+ *  counters (a URL keeps whichever transfer id inserted it first, so no double
+ *  count). */
 async function forumLiveCounts(env, chatId) {
   const chat = String(normalizeTgChatId(chatId));
   const prefix = 'live:' + chat + ':'; // e.g. live:-1002290798043:4100
-  const out = new Map(); // thread -> { links, docs }
-  const add = (thread, links, docs) => {
+  const out = new Map(); // thread -> { links, docs, pdfs }
+  const add = (thread, links, docs, pdfs) => {
     const k = String(thread);
     if (!k || k.startsWith('live:')) return; // never nest a bare-chat live id
-    const cur = out.get(k) || { links: 0, docs: 0 };
-    cur.links += links || 0; cur.docs += docs || 0; out.set(k, cur);
+    const cur = out.get(k) || { links: 0, docs: 0, pdfs: 0 };
+    cur.links += links || 0; cur.docs += docs || 0; cur.pdfs += pdfs || 0; out.set(k, cur);
   };
   try {
     const r = await env.DB.prepare('SELECT transfer_id, COUNT(*) c FROM links WHERE transfer_id LIKE ? GROUP BY transfer_id').bind(prefix + '%').all().catch(() => ({ results: [] }));
-    for (const row of r.results || []) add(String(row.transfer_id).slice(prefix.length), Number(row.c || 0), 0);
+    for (const row of r.results || []) add(String(row.transfer_id).slice(prefix.length), Number(row.c || 0), 0, 0);
   } catch (_) {}
   try {
     const r = await env.DB.prepare('SELECT transfer_id, COUNT(*) c FROM personal_links WHERE transfer_id LIKE ? GROUP BY transfer_id').bind(prefix + '%').all().catch(() => ({ results: [] }));
-    for (const row of r.results || []) add(String(row.transfer_id).slice(prefix.length), Number(row.c || 0), 0);
+    for (const row of r.results || []) add(String(row.transfer_id).slice(prefix.length), Number(row.c || 0), 0, 0);
   } catch (_) {}
   try {
     const r = await env.DB.prepare('SELECT transfer_id, COUNT(*) c FROM uploaded_documents WHERE transfer_id LIKE ? GROUP BY transfer_id').bind(prefix + '%').all().catch(() => ({ results: [] }));
-    for (const row of r.results || []) add(String(row.transfer_id).slice(prefix.length), 0, Number(row.c || 0));
+    for (const row of r.results || []) add(String(row.transfer_id).slice(prefix.length), 0, Number(row.c || 0), 0);
+  } catch (_) {}
+  // PDFs are uploaded_documents whose filename ends .pdf (the table stores the
+  // original name, not a separate ext column).
+  try {
+    const r = await env.DB.prepare("SELECT transfer_id, COUNT(*) c FROM uploaded_documents WHERE transfer_id LIKE ? AND LOWER(filename) LIKE '%.pdf' GROUP BY transfer_id").bind(prefix + '%').all().catch(() => ({ results: [] }));
+    for (const row of r.results || []) add(String(row.transfer_id).slice(prefix.length), 0, 0, Number(row.c || 0));
   } catch (_) {}
   return out;
 }
