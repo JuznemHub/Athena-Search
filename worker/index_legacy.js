@@ -8239,6 +8239,28 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
+  // ---- Clone progress-card buttons (Stop / Refresh) ----
+  if (data.startsWith('clone_ctrl:')) {
+    await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
+    const [, ctrlAction, rawChat] = data.split(':');
+    const targetChat = normalizeTgChatId(String(rawChat || ''));
+    if (ctrlAction === 'stop') {
+      const { results } = await env.DB.prepare(
+        `SELECT id FROM index_jobs WHERE chat_id = ? AND status IN ('queued','running')`
+      ).bind(targetChat).all().catch(() => ({ results: [] }));
+      for (const j of results || []) {
+        await env.DB.prepare(`UPDATE index_jobs SET status = 'stopping', updated_at = ? WHERE id = ?`).bind(Date.now(), j.id).run().catch(() => {});
+      }
+      await editTelegramMessage(token, chatId, msgId, `${boldHtml('⏹')} Stopping ${(results || []).length} job(s)…`, cloneCardKeyboard(targetChat), threadId).catch(() => {});
+    } else if (ctrlAction === 'refresh') {
+      const jobs = await forumCardJobs(env, targetChat);
+      const topicIds = await forumCardTopicIds(env, targetChat);
+      const html = formatForumCloneCard({ chatId: targetChat, chatName: '', topics: topicIds.length, topicIds, jobs });
+      await editTelegramMessage(token, chatId, msgId, html, cloneCardKeyboard(targetChat), threadId).catch(() => {});
+    }
+    return new Response('OK', { status: 200, headers: corsHeaders });
+  }
+
   // ---- Clone confirm buttons ----
   if (data.startsWith('clone:')) {
     const parts = data.split(':');
@@ -9520,9 +9542,19 @@ function formatForumCloneCard(o) {
 // that single message while any topic job is active, then freezes the final state.
 const FORUM_CLONE_CARDS = new Map();
 
-async function editForumCard(state, token, chatId, html, forumThreadId) {
+// Inline keyboard under the live forum card (Telegram 13 welcome-messages
+// buttons): Stop halts the chat's running jobs; Refresh re-renders the card.
+function cloneCardKeyboard(chatId) {
+  const target = normalizeTgChatId(String(chatId || ''));
+  return { inline_keyboard: [[
+    { text: '⏹ Stop', callback_data: 'clone_ctrl:stop:' + target },
+    { text: '🔄 Refresh', callback_data: 'clone_ctrl:refresh:' + target }
+  ]] };
+}
+
+async function editForumCard(state, token, chatId, html, forumThreadId, replyMarkup) {
   if (state.msgId) {
-    const res = await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: state.msgId, text: html, parse_mode: 'HTML' }).catch(() => ({ ok: false, description: 'network' }));
+    const res = await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: state.msgId, text: html, parse_mode: 'HTML', ...(replyMarkup ? { reply_markup: replyMarkup } : {}) }).catch(() => ({ ok: false, description: 'network' }));
     if (res?.ok) return;
     const desc = String(res?.description || '').toLowerCase();
     // Only re-send when the original card is genuinely gone. A "not modified",
@@ -9531,7 +9563,7 @@ async function editForumCard(state, token, chatId, html, forumThreadId) {
     if (!/(not found|message to edit not found|message_id is invalid|message was deleted|deleted)/.test(desc)) return;
     state.msgId = null; // message deleted — send a fresh card
   }
-  const m = await sendTelegramFormatted(token, chatId, html, forumThreadId).catch(() => null);
+  const m = await sendTelegramMessageWithKeyboard(token, chatId, html, replyMarkup, forumThreadId, 'HTML').catch(() => null);
   state.msgId = m?.message_id || null;
 }
 
@@ -9561,17 +9593,18 @@ async function startForumCloneCard(env, { token, chatId, chatName = '', progress
   const state = { msgId: null };
   FORUM_CLONE_CARDS.set(key, state);
   const topicIds = await forumCardTopicIds(env, chatId);
+  const keyboard = cloneCardKeyboard(chatId);
   const loop = (async () => {
     try {
       for (let round = 0; round < 320; round++) {
         const jobs = await forumCardJobs(env, chatId);
-        await editForumCard(state, token, progressChatId, formatForumCloneCard({ chatId, chatName, topics: topicIds.length, topicIds, jobs }), forumThreadId);
+        await editForumCard(state, token, progressChatId, formatForumCloneCard({ chatId, chatName, topics: topicIds.length, topicIds, jobs }), forumThreadId, keyboard);
         const active = jobs.some((j) => j.status === 'queued' || j.status === 'running');
         if (!active || round === 319) break;
         await sleep(9000);
       }
       const jobs = await forumCardJobs(env, chatId);
-      await editForumCard(state, token, progressChatId, formatForumCloneCard({ chatId, chatName, topics: topicIds.length, topicIds, jobs }), forumThreadId);
+      await editForumCard(state, token, progressChatId, formatForumCloneCard({ chatId, chatName, topics: topicIds.length, topicIds, jobs }), forumThreadId, keyboard);
     } finally {
       FORUM_CLONE_CARDS.delete(key);
     }
