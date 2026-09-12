@@ -9648,7 +9648,53 @@ async function forumCardTopicIds(env, chatId) {
 async function forumCardJobs(env, chatId) {
   const r = await env.DB.prepare(`SELECT thread_id, status, processed, total_messages, saved_links, saved_docs, saved_pdfs, saved_files, dupes_skipped, error
     FROM index_jobs WHERE chat_id = ? ORDER BY thread_id`).bind(normalizeTgChatId(chatId)).all().catch(() => ({ results: [] }));
-  return (r.results || []).filter((j) => j.thread_id);
+  const rows = (r.results || []).filter((j) => j.thread_id);
+  // Live / catch-up saves never touch index_jobs — they go to the links,
+  // personal_links and uploaded_documents tables with a `live:chat:thread`
+  // transfer id. /stats sums those per topic, but this card read only the
+  // backfill counters, so a topic the live index reached first showed "0 links
+  // · N dupes" while the logs and /stats proved the links existed. Enrich each
+  // row with the live-saved links + docs so the card matches the real data.
+  const live = await forumLiveCounts(env, chatId).catch(() => new Map());
+  if (live.size) {
+    for (const j of rows) {
+      const lc = live.get(String(j.thread_id));
+      if (lc && (lc.links || lc.docs)) {
+        j.saved_links = Number(j.saved_links || 0) + lc.links;
+        j.saved_docs = Number(j.saved_docs || 0) + lc.docs;
+      }
+    }
+  }
+  return rows;
+}
+
+/** Per-topic counts of LIVE/catch-up-saved links + docs for a forum chat. Pure
+ *  reads over `live:chat:thread` transfer ids — one grouped query per table,
+ *  then keyed by the thread suffix. Distinct from the backfill job counters
+ *  (a URL keeps whichever transfer id inserted it first, so no double count). */
+async function forumLiveCounts(env, chatId) {
+  const chat = String(normalizeTgChatId(chatId));
+  const prefix = 'live:' + chat + ':'; // e.g. live:-1002290798043:4100
+  const out = new Map(); // thread -> { links, docs }
+  const add = (thread, links, docs) => {
+    const k = String(thread);
+    if (!k || k.startsWith('live:')) return; // never nest a bare-chat live id
+    const cur = out.get(k) || { links: 0, docs: 0 };
+    cur.links += links || 0; cur.docs += docs || 0; out.set(k, cur);
+  };
+  try {
+    const r = await env.DB.prepare('SELECT transfer_id, COUNT(*) c FROM links WHERE transfer_id LIKE ? GROUP BY transfer_id').bind(prefix + '%').all().catch(() => ({ results: [] }));
+    for (const row of r.results || []) add(String(row.transfer_id).slice(prefix.length), Number(row.c || 0), 0);
+  } catch (_) {}
+  try {
+    const r = await env.DB.prepare('SELECT transfer_id, COUNT(*) c FROM personal_links WHERE transfer_id LIKE ? GROUP BY transfer_id').bind(prefix + '%').all().catch(() => ({ results: [] }));
+    for (const row of r.results || []) add(String(row.transfer_id).slice(prefix.length), Number(row.c || 0), 0);
+  } catch (_) {}
+  try {
+    const r = await env.DB.prepare('SELECT transfer_id, COUNT(*) c FROM uploaded_documents WHERE transfer_id LIKE ? GROUP BY transfer_id').bind(prefix + '%').all().catch(() => ({ results: [] }));
+    for (const row of r.results || []) add(String(row.transfer_id).slice(prefix.length), 0, Number(row.c || 0));
+  } catch (_) {}
+  return out;
 }
 
 /** One watcher per forum clone: renders the aggregated card, edits it every
