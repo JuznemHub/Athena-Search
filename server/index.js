@@ -58,6 +58,11 @@ const ALLOWED_ENV = [
   'KAGE_BIN', 'KAGE_CHROME',
   // Optional derived search index; PostgreSQL remains the source of truth.
   'MEILI_URL', 'MEILISEARCH_URL', 'MEILI_MASTER_KEY', 'MEILI_INDEX',
+  // Dokploy host control from /dok* (self-host only; inert without keys).
+  'DOKPLOY_URL', 'DOKPLOY_API_KEY', 'DOKPLOY_APP_ID',
+  'DOKPLOY_API_APPLICATIONS', 'DOKPLOY_API_APPLICATION_ONE', 'DOKPLOY_API_DEPLOY',
+  'DOKPLOY_API_RESTART', 'DOKPLOY_API_STOP', 'DOKPLOY_API_START',
+  'DOKPLOY_API_CLEARCACHE', 'DOKPLOY_API_LOGS',
 ];
 const allowedEnv = {};
 for (const k of ALLOWED_ENV) {

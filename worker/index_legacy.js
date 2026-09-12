@@ -2700,6 +2700,67 @@ function telegramApiBaseFor(env) {
   } catch (_) { return TG_CLOUD_BASE; }
 }
 
+// ---- Dokploy self-host control ----------------------------------------
+// Drives the deployment host's REST-ish endpoints (self-hosted builds).
+// Only called from the /dock* commands; the KEY stays inside these
+// functions. Every URL overridable via DOKPLOY_API_* env vars.
+function dokployConf(env) {
+  const base = String(env.DOKPLOY_URL || '').trim().replace(/\/+$/, '');
+  const key = String(env.DOKPLOY_API_KEY || '').trim();
+  return {
+    base, key,
+    paths: {
+      list: String(env.DOKPLOY_API_APPLICATIONS || '/api/application/all'),
+      one: String(env.DOKPLOY_API_APPLICATION_ONE || '/api/application/one'),
+      deploy: String(env.DOKPLOY_API_DEPLOY || '/api/application/deploy'),
+      restart: String(env.DOKPLOY_API_RESTART || '/api/application/restart'),
+      stop: String(env.DOKPLOY_API_STOP || '/api/application/stop'),
+      start: String(env.DOKPLOY_API_START || '/api/application/start'),
+      clearcache: String(env.DOKPLOY_API_CLEARCACHE || '/api/application/clear-cache'),
+      logs: String(env.DOKPLOY_API_LOGS || '/api/application/logs'),
+    },
+    appId: String(env.DOKPLOY_APP_ID || '').trim(),
+  };
+}
+function dokployConfigured(env) {
+  const c = dokployConf(env);
+  return !!(c.base && c.key);
+}
+async function dokployCall(env, path, body = null, method = null) {
+  const c = dokployConf(env);
+  if (!c.base || !c.key) throw new Error('DOKPLOY_URL / DOKPLOY_API_KEY not set');
+  const res = await fetch(`${c.base}${path}`, {
+    method: method || (body ? 'POST' : 'GET'),
+    headers: { 'content-type': 'application/json', 'x-api-key': c.key, authorization: `Bearer ${c.key}` },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text().catch(() => '');
+  let data; try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { raw: String(text).slice(0, 2000) }; }
+  if (!res.ok) throw new Error(`dokploy ${res.status}: ${String(data?.message || data?.error || text).slice(0, 200)}`);
+  return data?.result?.data ?? data?.result ?? data;
+}
+async function dokployApps(env) {
+  const d = await dokployCall(env, dokployConf(env).paths.list);
+  return Array.isArray(d) ? d : d?.applications || d?.data || [];
+}
+async function dokployApp(env, appId) {
+  return dokployCall(env, `${dokployConf(env).paths.one}?applicationId=${encodeURIComponent(appId)}`);
+}
+async function dokployLogs(env, appId, n = '40') {
+  const d = await dokployCall(env, `${dokployConf(env).paths.logs}?applicationId=${encodeURIComponent(appId)}&tail=${encodeURIComponent(String(n))}`);
+  if (typeof d === 'string') return d;
+  if (Array.isArray(d)) return d.map((l) => (typeof l === 'string' ? l : l?.log || l?.message || JSON.stringify(l))).join('\n');
+  return JSON.stringify(d).slice(0, 3500);
+}
+async function dokployDeploy(env, appId) {
+  const c = dokployConf(env);
+  try { await dokployCall(env, c.paths.clearcache, { applicationId: appId }); } catch (_) {}
+  return dokployCall(env, c.paths.deploy, { applicationId: appId });
+}
+async function dokploySimple(env, appId, what) {
+  return dokployCall(env, dokployConf(env).paths[what], { applicationId: appId });
+}
+
 async function telegramApi(token, method, payload = null) {
   const url = `${TG_API_BASE}/bot${token}/${method}`;
   const opts = payload
@@ -13475,6 +13536,74 @@ Rules:
     }
     await sendTelegramRichMessage(token, chatId, lines.join('\n'), forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
+  }
+
+  // ---- /dock, /dok, /dokploy — GOD: host control (self-host only).
+  // Needs DOKPLOY_URL + DOKPLOY_API_KEY in env (profile → API keys).
+  // Optional DOKPLOY_APP_ID pins the app for the short forms.
+  if (cmd === '/dock' || cmd === '/dok' || cmd === '/dokploy') {
+    if (!isGod) {
+      await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    if (!isSelfHosted(env)) {
+      await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Dokploy control runs on the self-hosted server.`, forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    const say = (html) => sendTelegramFormatted(token, chatId, html, forumThreadId);
+    const words = rest.trim().split(/\s+/).filter(Boolean);
+    const sub = (words[0] || 'help').toLowerCase();
+    if (!dokployConfigured(env)) {
+      await say(`${boldHtml('🔧 Dokploy control is not configured.')}\nSet ${codeHtml('DOKPLOY_URL')} (e.g. https://dok.piratezparty.com) and ${codeHtml('DOKPLOY_API_KEY')} (profile → API keys) in the app env, then redeploy.`);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    try {
+      if (sub === 'help') {
+        await say(`${boldHtml('🐳 Dokploy control')}\n\n${codeHtml('/dok apps')} — list applications\n${codeHtml('/dok status [app]')} — status + last deployment\n${codeHtml('/dok logs [app] [n]')} — tail runtime logs (default 40)\n${codeHtml('/dok deploy [app]')} — fresh deploy (cache cleared first)\n${codeHtml('/dok restart [app]')} — restart, no rebuild\n${codeHtml('/dok stop [app] /dok start [app]')} — stop / start\n${codeHtml('/dok clearcache [app]')} — purge build cache\n\n${italicHtml('App id optional when DOKPLOY_APP_ID is set.')}`);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      const appId = words[1] || String(env.DOKPLOY_APP_ID || '').trim();
+      if (sub !== 'apps' && !appId) {
+        await say(`${boldHtml('⚠️')} Pass an app id (${codeHtml('/dok apps')} to list) or set ${codeHtml('DOKPLOY_APP_ID')}.`);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      if (sub === 'apps') {
+        const apps = await dokployApps(env);
+        if (!apps.length) { await say(`${boldHtml('🐳')} No applications found (or the key cannot list them).`); return new Response('OK', { status: 200, headers: corsHeaders }); }
+        const list = apps.slice(0, 20).map((a) => `• ${codeHtml(String(a.applicationId || a.id || '?'))} — ${escHtml(String(a.name || a.appName || ''))}${a.applicationStatus || a.status ? ` (${escHtml(String(a.applicationStatus || a.status))})` : ''}`).join('\n');
+        await say(`${boldHtml('🐳 Applications')}\n\n${list}`);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      if (sub === 'status') {
+        const one = await dokployApp(env, appId);
+        await say(`${boldHtml('🐳 Status')} ${codeHtml(appId)}\n\n${codeHtml(escHtml(JSON.stringify({ name: one?.name ?? one?.appName ?? null, status: one?.applicationStatus ?? one?.status ?? null, branch: one?.branch ?? one?.sourceBranch ?? null, sourceType: one?.sourceType ?? null }, null, 1)))}`);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      if (sub === 'logs') {
+        const lines = await dokployLogs(env, appId, words[2] || '40');
+        await say(`${boldHtml('🐳 Runtime logs')} ${codeHtml(appId)}\n\n${codeHtml(escHtml(String(lines || '(empty)').slice(-3500)))}`);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      if (sub === 'deploy' || sub === 'redeploy') {
+        const r = await dokployDeploy(env, appId);
+        const extra = r ? `\n${codeHtml(escHtml(String(JSON.stringify(r)).slice(0, 300)))}` : '';
+        await say(`${boldHtml('🚀 Redeploy started')} ${codeHtml(appId)}\n${italicHtml('Watch Deployments, or poll /dok status.')}${extra}`);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      if (sub === 'restart' || sub === 'stop' || sub === 'start' || sub === 'clearcache' || sub === 'cache') {
+        const what = sub === 'cache' ? 'clearcache' : sub;
+        await dokploySimple(env, appId, what);
+        const label = what === 'restart' ? '🔁 Restart requested' : what === 'stop' ? '⏸ Stop requested' : what === 'start' ? '▶️ Start requested' : '🧹 Build cache purge requested';
+        await say(`${boldHtml(label)} ${codeHtml(appId)}${what === 'clearcache' ? ' — redeploy afterwards for a cache-free build.' : '.'}`);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      await say(`${boldHtml('⚠️')} Unknown subcommand ${codeHtml(sub)} — try ${codeHtml('/dok help')}.`);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    } catch (e) {
+      console.error('[dokploy] command failed:', e?.message || e);
+      await say(`${boldHtml('❌ Dokploy call failed:')} ${codeHtml(escHtml(String(e?.message || e).slice(0, 300)))}${italicHtml(' (check DOKPLOY_URL / DOKPLOY_API_KEY / DOKPLOY_APP_ID)')}`);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
   }
 
   // ---- /db — show storage backend (all ranks) ----
