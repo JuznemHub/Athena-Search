@@ -9522,9 +9522,14 @@ const FORUM_CLONE_CARDS = new Map();
 
 async function editForumCard(state, token, chatId, html, forumThreadId) {
   if (state.msgId) {
-    const ok = await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: state.msgId, text: html, parse_mode: 'HTML' }).catch(() => ({ ok: false }));
-    if (ok?.ok) return;
-    state.msgId = null; // deleted/failed — fall through and send fresh
+    const res = await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: state.msgId, text: html, parse_mode: 'HTML' }).catch(() => ({ ok: false, description: 'network' }));
+    if (res?.ok) return;
+    const desc = String(res?.description || '').toLowerCase();
+    // Only re-send when the original card is genuinely gone. A "not modified",
+    // parse or transient failure must never spawn a fresh message — the contract
+    // is ONE card edited in place; anything else spams new cards every round.
+    if (!/(not found|message to edit not found|message_id is invalid|message was deleted|deleted)/.test(desc)) return;
+    state.msgId = null; // message deleted — send a fresh card
   }
   const m = await sendTelegramFormatted(token, chatId, html, forumThreadId).catch(() => null);
   state.msgId = m?.message_id || null;
@@ -15883,7 +15888,16 @@ function parseAiDescribeResponse(text) {
   return { title, description, tags };
 }
 
+// AI circuit breaker: once the model chain is exhausted (provider down / 429
+// / model missing), stop hammering it and let every caller fall through to the
+// inbuilt context-tag logic for a cooldown window, instead of retrying a dead
+// endpoint thousands of times during a backfill. A successful call clears it.
+let AI_DOWN_UNTIL = 0;
+const AI_DOWN_COOLDOWN_MS = 60_000;
+function aiTrip() { AI_DOWN_UNTIL = Date.now() + AI_DOWN_COOLDOWN_MS; }
+
 async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], config = undefined) {
+  if (Date.now() < AI_DOWN_UNTIL) return null;
   let cfg;
   if (config === undefined) {
     try { cfg = await getInstanceAiConfig(env); } catch (_) { return null; }
@@ -15964,6 +15978,7 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
         console.error(`AI link enrichment failed ${curModel} ${res.status}`, errorText.slice(0,180));
         recordAiError({ model: curModel, status: res.status, endpoint, message: `link enrichment: ${errorText.slice(0, 200) || res.statusText}`, source: 'enrichment' });
         if (isRetryable && mi < tryModels.length-1) { await new Promise(r=>setTimeout(r, waitMs)); continue; }
+        aiTrip();
         return null;
       }
       const contentType = res.headers.get('content-type') || '';
@@ -16008,10 +16023,12 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
       lastError = err;
       console.error('AI link enrichment request failed', err?.message || err);
       if (mi < tryModels.length-1) continue;
+      aiTrip();
       return null;
     }
   }
   console.error('AI all fallbacks failed', lastError?.message||'');
+  aiTrip();
   return null;
 }
 
