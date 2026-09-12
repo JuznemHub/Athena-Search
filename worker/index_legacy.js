@@ -2701,23 +2701,24 @@ function telegramApiBaseFor(env) {
 }
 
 // ---- Dokploy self-host control ----------------------------------------
-// Drives the deployment host's REST-ish endpoints (self-hosted builds).
-// Only called from the /dock* commands; the KEY stays inside these
-// functions. Every URL overridable via DOKPLOY_API_* env vars.
+// Drives the deployment host's tRPC REST API (Dokploy mounts it under /api
+// with dotted procedure names; auth is the x-api-key header). Only called
+// from the /dok* commands; the KEY stays inside these functions. Every URL
+// is overridable via DOKPLOY_API_* env vars.
 function dokployConf(env) {
   const base = String(env.DOKPLOY_URL || '').trim().replace(/\/+$/, '');
   const key = String(env.DOKPLOY_API_KEY || '').trim();
   return {
     base, key,
     paths: {
-      list: String(env.DOKPLOY_API_APPLICATIONS || '/api/application/all'),
-      one: String(env.DOKPLOY_API_APPLICATION_ONE || '/api/application/one'),
-      deploy: String(env.DOKPLOY_API_DEPLOY || '/api/application/deploy'),
-      restart: String(env.DOKPLOY_API_RESTART || '/api/application/restart'),
-      stop: String(env.DOKPLOY_API_STOP || '/api/application/stop'),
-      start: String(env.DOKPLOY_API_START || '/api/application/start'),
-      clearcache: String(env.DOKPLOY_API_CLEARCACHE || '/api/application/clear-cache'),
-      logs: String(env.DOKPLOY_API_LOGS || '/api/application/logs'),
+      list: String(env.DOKPLOY_API_APPLICATIONS || ''), // no simple list proc; '' = show configured app
+      one: String(env.DOKPLOY_API_APPLICATION_ONE || '/api/application.one'),
+      deploy: String(env.DOKPLOY_API_DEPLOY || '/api/application.deploy'),
+      restart: String(env.DOKPLOY_API_RESTART || '/api/application.reload'), // reload = restart
+      stop: String(env.DOKPLOY_API_STOP || '/api/application.stop'),
+      start: String(env.DOKPLOY_API_START || '/api/application.start'),
+      clearcache: String(env.DOKPLOY_API_CLEARCACHE || '/api/application.redeploy'), // rebuild clears build cache
+      logs: String(env.DOKPLOY_API_LOGS || '/api/application.readLogs'),
     },
     appId: String(env.DOKPLOY_APP_ID || '').trim(),
   };
@@ -2731,7 +2732,7 @@ async function dokployCall(env, path, body = null, method = null) {
   if (!c.base || !c.key) throw new Error('DOKPLOY_URL / DOKPLOY_API_KEY not set');
   const res = await fetch(`${c.base}${path}`, {
     method: method || (body ? 'POST' : 'GET'),
-    headers: { 'content-type': 'application/json', 'x-api-key': c.key, authorization: `Bearer ${c.key}` },
+    headers: { 'content-type': 'application/json', 'x-api-key': c.key },
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text().catch(() => '');
@@ -2740,8 +2741,17 @@ async function dokployCall(env, path, body = null, method = null) {
   return data?.result?.data ?? data?.result ?? data;
 }
 async function dokployApps(env) {
-  const d = await dokployCall(env, dokployConf(env).paths.list);
-  return Array.isArray(d) ? d : d?.applications || d?.data || [];
+  const c = dokployConf(env);
+  // No reachable "list all applications" route on current Dokploy builds, so
+  // resolve at least the pinned app. Verbose listing happens in the dashboard.
+  if (c.appId) {
+    try { return [await dokployApp(env, c.appId)]; } catch (_) { return []; }
+  }
+  if (c.paths.list) {
+    const d = await dokployCall(env, c.paths.list);
+    return Array.isArray(d) ? d : d?.applications || d?.data || [];
+  }
+  return [];
 }
 async function dokployApp(env, appId) {
   return dokployCall(env, `${dokployConf(env).paths.one}?applicationId=${encodeURIComponent(appId)}`);
@@ -2752,12 +2762,18 @@ async function dokployLogs(env, appId, n = '40') {
   if (Array.isArray(d)) return d.map((l) => (typeof l === 'string' ? l : l?.log || l?.message || JSON.stringify(l))).join('\n');
   return JSON.stringify(d).slice(0, 3500);
 }
-async function dokployDeploy(env, appId) {
-  const c = dokployConf(env);
-  try { await dokployCall(env, c.paths.clearcache, { applicationId: appId }); } catch (_) {}
-  return dokployCall(env, c.paths.deploy, { applicationId: appId });
+async function dokployDeploy(env, appId, { cache = false } = {}) {
+  // application.deploy pulls the latest commit for the branch; application.redeploy
+  // forces a rebuild that clears the build cache (Dokploy's "Rebuild"). Plain deploy
+  // is the default; pass cache-free via cache=true (the /dok redeploy subcommand).
+  return dokployCall(env, dokployConf(env).paths[cache ? 'clearcache' : 'deploy'], { applicationId: appId });
 }
 async function dokploySimple(env, appId, what) {
+  // reload (= restart) needs the appName alongside applicationId; fetch it via one().
+  if (what === 'restart') {
+    const one = await dokployApp(env, appId);
+    return dokployCall(env, dokployConf(env).paths.restart, { appName: String(one?.appName || one?.name || ''), applicationId: appId });
+  }
   return dokployCall(env, dokployConf(env).paths[what], { applicationId: appId });
 }
 
@@ -13559,7 +13575,7 @@ Rules:
     }
     try {
       if (sub === 'help') {
-        await say(`${boldHtml('🐳 Dokploy control')}\n\n${codeHtml('/dok apps')} — list applications\n${codeHtml('/dok status [app]')} — status + last deployment\n${codeHtml('/dok logs [app] [n]')} — tail runtime logs (default 40)\n${codeHtml('/dok deploy [app]')} — fresh deploy (cache cleared first)\n${codeHtml('/dok restart [app]')} — restart, no rebuild\n${codeHtml('/dok stop [app] /dok start [app]')} — stop / start\n${codeHtml('/dok clearcache [app]')} — purge build cache\n\n${italicHtml('App id optional when DOKPLOY_APP_ID is set.')}`);
+        await say(`${boldHtml('🐳 Dokploy control')}\n\n${codeHtml('/dok apps')} — list applications\n${codeHtml('/dok status [app]')} — status + last deployment\n${codeHtml('/dok logs [app] [n]')} — tail runtime logs (default 40)\n${codeHtml('/dok deploy [app]')} — fresh deploy (latest commit)\n${codeHtml('/dok redeploy [app]')} — cache-free rebuild\n${codeHtml('/dok restart [app]')} — restart, no rebuild\n${codeHtml('/dok stop [app] /dok start [app]')} — stop / start\n${codeHtml('/dok clearcache [app]')} — rebuild to purge build cache\n\n${italicHtml('App id optional when DOKPLOY_APP_ID is set.')}`);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
       const appId = words[1] || String(env.DOKPLOY_APP_ID || '').trim();
@@ -13585,9 +13601,9 @@ Rules:
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
       if (sub === 'deploy' || sub === 'redeploy') {
-        const r = await dokployDeploy(env, appId);
+        const r = await dokployDeploy(env, appId, { cache: sub === 'redeploy' });
         const extra = r ? `\n${codeHtml(escHtml(String(JSON.stringify(r)).slice(0, 300)))}` : '';
-        await say(`${boldHtml('🚀 Redeploy started')} ${codeHtml(appId)}\n${italicHtml('Watch Deployments, or poll /dok status.')}${extra}`);
+        await say(`${boldHtml('🚀 Redeploy started')} ${codeHtml(appId)}${sub === 'redeploy' ? ' (cache-free rebuild)' : ''}\n${italicHtml('Watch Deployments, or poll /dok status.')}${extra}`);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
       if (sub === 'restart' || sub === 'stop' || sub === 'start' || sub === 'clearcache' || sub === 'cache') {
