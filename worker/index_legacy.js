@@ -9638,24 +9638,32 @@ async function runHistoryIndexJob(env, job, token) {
       return;
     }
     const _ubLabel = sess.label;
-    let gramjs;
-    try {
-      // Non-literal specifier: bundlers must never try to resolve the native
-      // gramjs package — it is an optional, self-host-only dependency.
-      const spec = 'telegram';
-      gramjs = await import(spec);
-    } catch (_) {
-      await patch({ status: 'error', error: 'gramjs not installed (npm install telegram)' });
-      await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('❌')} History backfill needs the optional package. On the server: ${codeHtml('npm install telegram')}, then ${codeHtml('/index_start')} again.`).catch(() => {});
-      return;
+    // Reuse the one already-connected userbot client (startUserbotAccount / live
+    // capture) instead of opening a fresh MTProto connection per backfill job. A
+    // forum clone starts one job per topic — many fan-out jobs each calling new
+    // TelegramClient().connect() floods the session with AUTH_KEY_DUPLICATED /
+    // reconnect churn and the jobs fail. One shared connection is what live
+    // capture already uses.
+    const liveAcc = USERBOT_ACCOUNTS.get(_ubLabel) || USERBOT_ACCOUNTS.get(sess.label);
+    let client = liveAcc && liveAcc.client ? liveAcc.client : null;
+    if (!client || !client.connected) {
+      let gramjs;
+      try {
+        const spec = 'telegram';
+        gramjs = await import(spec);
+      } catch (_) {
+        await patch({ status: 'error', error: 'gramjs not installed (npm install telegram)' });
+        await sendTelegramFormatted(token, job.progress_chat_id, boldHtml('❌')+' History backfill needs the optional package. On the server: '+codeHtml('npm install telegram')+', then '+codeHtml('/index_start')+' again.').catch(() => {});
+        return;
+      }
+      const { TelegramClient } = gramjs;
+      const { StringSession } = gramjs.sessions;
+      const sessionString = await decryptBotToken(env, sess.session_enc);
+      const apiHash = await decryptBotToken(env, sess.api_hash_enc);
+      if (!sessionString || !apiHash) { await patch({ status: 'error', error: 'session decrypt failed (STORAGE_KEY rotated?)' }); return; }
+      client = new TelegramClient(new StringSession(sessionString), Number(sess.api_id) || 0, apiHash, { connectionRetries: 3 });
+      await client.connect();
     }
-    const { TelegramClient } = gramjs;
-    const { StringSession } = gramjs.sessions;
-    const sessionString = await decryptBotToken(env, sess.session_enc);
-    const apiHash = await decryptBotToken(env, sess.api_hash_enc);
-    if (!sessionString || !apiHash) { await patch({ status: 'error', error: 'session decrypt failed (STORAGE_KEY rotated?)' }); return; }
-    const client = new TelegramClient(new StringSession(sessionString), Number(sess.api_id) || 0, apiHash, { connectionRetries: 3 });
-    await client.connect();
     // Resolve the human name via the userbot (Bot API getChat fails for
     // private chats the bot never saw) and persist it for all surfaces.
     try {
