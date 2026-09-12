@@ -9345,6 +9345,44 @@ const INDEX_AUTO_CONTINUATIONS = 20; // big channels finish across chunked runs
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 /**
+ * Session-scoped flood-wait gate.
+ *
+ * Every history/media read on a userbot session shares ONE release timestamp
+ * per account label. When any read trips a FloodWaitError it reports the
+ * server-announced seconds here, and every other read on the same label waits
+ * for that same timestamp before issuing its request. This turns many
+ * uncoordinated per-request sleeps — where N jobs each sleep then immediately
+ * re-trip the limit and re-sleep, the "Sleeping for Ns on flood wait" cascade
+ * — into a single backoff window for the whole session.
+ *
+ * gramJS would otherwise sleep short waits internally and per-request, so we
+ * set floodSleepThreshold to 0 on the client so it re-raises EVERY wait to us
+ * and the gate coordinates them. A wait here never fails a job: it just delays
+ * the next read until the session is clear. Capped at 5 min like the code
+ * before, so a stuck session cannot wedge the loop forever.
+ */
+const UB_FLOOD_WAIT = new Map(); // label -> { until: epoch ms }
+function ubFloodWaitMs(label) {
+  if (!label) return 0;
+  const w = UB_FLOOD_WAIT.get(String(label));
+  return w ? Math.max(0, w.until - Date.now()) : 0;
+}
+async function ubWaitForRelease(label) {
+  let ms = ubFloodWaitMs(label);
+  while (ms > 0) {
+    await sleep(ms + 25);
+    ms = ubFloodWaitMs(label);
+  }
+}
+function ubReportFlood(label, seconds) {
+  if (!label || !(seconds > 0)) return;
+  const until = Date.now() + Math.min(seconds * 1000, 300_000);
+  const k = String(label);
+  const w = UB_FLOOD_WAIT.get(k);
+  if (!w || w.until < until) UB_FLOOD_WAIT.set(k, { until });
+}
+
+/**
  * Media vault: store original files on the VPS (self-host only) when
  * ATHENA_MEDIA_DIR is set. Everything is kept — photos, videos, audio,
  * archives, apk — independent of what gets indexed into the brain.
@@ -9818,7 +9856,7 @@ async function runHistoryIndexJob(env, job, token) {
       const sessionString = await decryptBotToken(env, sess.session_enc);
       const apiHash = await decryptBotToken(env, sess.api_hash_enc);
       if (!sessionString || !apiHash) { await patch({ status: 'error', error: 'session decrypt failed (STORAGE_KEY rotated?)' }); return; }
-      client = new TelegramClient(new StringSession(sessionString), Number(sess.api_id) || 0, apiHash, { connectionRetries: 3 });
+      client = new TelegramClient(new StringSession(sessionString), Number(sess.api_id) || 0, apiHash, { connectionRetries: 3, floodSleepThreshold: 0 });
       await client.connect();
     }
     // Only disconnect a client THIS job created. A reused USERBOT_ACCOUNTS
@@ -9828,10 +9866,11 @@ async function runHistoryIndexJob(env, job, token) {
     // Resolve the human name via the userbot (Bot API getChat fails for
     // private chats the bot never saw) and persist it for all surfaces.
     try {
+      await ubWaitForRelease(_ubLabel);
       const ent = await client.getEntity(job.chat_id);
       const nm = ent?.title || (ent?.username ? '@' + ent.username : '');
       if (nm && nm !== job.chat_name) { job.chat_name = nm; await patch({ chat_name: nm }); }
-    } catch (_) {}
+    } catch (e) { if (e && typeof e.seconds === 'number') ubReportFlood(_ubLabel, e.seconds); }
     let offsetId = job.offset_id || 0;
     let processed = job.processed || 0;
     job.saved_files = Number(job.saved_files || 0);
@@ -9849,6 +9888,7 @@ async function runHistoryIndexJob(env, job, token) {
       if (!job.thread_id) {
         const _g = await import('tele' + 'gram');
         const _Api = _g.Api || _g.tl?.Api;
+        await ubWaitForRelease(_ubLabel);
         const hist = await client.invoke(new _Api.messages.GetHistory({ peer: job.chat_id, offsetId: 0, offsetDate: 0, addOffset: 0, limit: 1, maxId: 0, minId: 0, hash: 0n }));
         job.total_messages = (hist && typeof hist.count === 'number') ? hist.count : null;
       } else {
@@ -9867,6 +9907,7 @@ async function runHistoryIndexJob(env, job, token) {
       if (!row || row.status === 'stopping') { await patch({ status: 'stopped' }); log('stopped'); break; }
       let messages;
       try {
+        await ubWaitForRelease(_ubLabel);
         messages = await client.getMessages(job.chat_id, {
           limit: INDEX_BATCH,
           offsetId,
@@ -9874,9 +9915,14 @@ async function runHistoryIndexJob(env, job, token) {
         });
       } catch (e) {
         if (e && typeof e.seconds === 'number') { // FloodWaitError
-          log(`flood-wait ${e.seconds}s — sleeping`);
+          // Coordination: announce the window to every job on this session and
+          // wait on the shared timestamp, not a per-job sleep — so the other
+          // jobs wait too instead of re-tripping the limit the moment this one
+          // wakes up.
+          ubReportFlood(_ubLabel, e.seconds);
+          log(`flood-wait ${e.seconds}s — session gated (${String(_ubLabel)})`);
           await patch({ error: `flood-wait ${e.seconds}s` });
-          await sleep(Math.min(e.seconds * 1000, 300_000));
+          await ubWaitForRelease(_ubLabel);
           continue;
         }
         if (/input entity/i.test(String(e?.message))) {
@@ -9886,6 +9932,7 @@ async function runHistoryIndexJob(env, job, token) {
             e.message = `The session account cannot see ${job.chat_id}. Join this channel/group with that account, then retry.`;
             throw e;
           }
+          await ubWaitForRelease(_ubLabel);
           messages = await client.getMessages(job.chat_id, {
             limit: INDEX_BATCH,
             offsetId,
@@ -9956,6 +10003,7 @@ async function runHistoryIndexJob(env, job, token) {
           try {
             const cls = classifyGramjsMedia(mediaAny.document);
             if (Number(mediaAny.document.size || 0) <= 2 * 1024 * 1024 * 1024) {
+              await ubWaitForRelease(_ubLabel);
               const buf = await client.downloadMedia(message, {});
               if (buf?.length && await vaultSave(job.chat_id, message.id, cls.filename || `media_${message.id}`, new Uint8Array(buf))) {
                 job.saved_files = (job.saved_files || 0) + 1;
@@ -9963,7 +10011,7 @@ async function runHistoryIndexJob(env, job, token) {
               await sleep(300);
             }
           } catch (e) {
-            if (e && typeof e.seconds === 'number') await sleep(Math.min(e.seconds * 1000, 300_000));
+            if (e && typeof e.seconds === 'number') { ubReportFlood(_ubLabel, e.seconds); await ubWaitForRelease(_ubLabel); }
             else console.error('[vault] media failed', e?.message || e);
           }
         }
@@ -9998,6 +10046,7 @@ async function runHistoryIndexJob(env, job, token) {
           // never match DOCUMENT_EXTENSIONS/CONVERTIBLE_EXTENSIONS.
           if (filename && (DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) && Number(docu.size || 0) <= CONVERT_SOURCE_MAX_BYTES) {
             try {
+              await ubWaitForRelease(_ubLabel);
               const buf = await client.downloadMedia(message, {});
               if (buf && buf.length) {
                 const r = await saveIndexedDocument(env, job.community_id, filename, ext, new Uint8Array(buf), `backfill:${job.chat_id}`, { chatId: job.chat_id, messageId: message.id }, job.id);
@@ -10005,7 +10054,7 @@ async function runHistoryIndexJob(env, job, token) {
               }
               await sleep(400);
             } catch (e) {
-              if (e && typeof e.seconds === 'number') { await sleep(Math.min(e.seconds * 1000, 300_000)); }
+              if (e && typeof e.seconds === 'number') { ubReportFlood(_ubLabel, e.seconds); await ubWaitForRelease(_ubLabel); }
               else console.error('[index] media failed', e?.message || e);
             }
           }
@@ -16367,6 +16416,7 @@ async function captureGramjsMessage(env, follow, message) {
           const filename = fnameAttr?.fileName || '';
           const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
           if ((DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) && Number(docu.size || 0) <= CONVERT_SOURCE_MAX_BYTES) {
+            await ubWaitForRelease(follow.label);
             const buf = await acc.client.downloadMedia(message, {});
             if (buf?.length) {
               await savePersonalIndexedDocument(env, personalOwner, filename, ext, new Uint8Array(buf), `userbot:${follow.chat_id}`, { chatId: follow.chat_id, messageId: message.id }, liveTransfer);
@@ -16393,6 +16443,7 @@ async function captureGramjsMessage(env, follow, message) {
         const filename = fnameAttr?.fileName || '';
         const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
         if ((DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) && Number(docu.size || 0) <= CONVERT_SOURCE_MAX_BYTES) {
+          await ubWaitForRelease(follow.label);
           const buf = await acc.client.downloadMedia(message, {});
           if (buf?.length) {
             await saveIndexedDocument(env, follow.community_id, filename, ext, new Uint8Array(buf), `userbot:${follow.chat_id}`, { chatId: follow.chat_id, messageId: message.id }, liveTransfer);
@@ -16452,7 +16503,7 @@ export async function startUserbotAccount(env, label = 'main') {
       await env.DB.prepare("UPDATE userbot_accounts SET last_error = 'decrypt failed', updated_at = ? WHERE label = ?").bind(Date.now(), label).run();
       return { ok: false, reason: 'decrypt failed' };
     }
-    const client = new TelegramClient(new StringSession(sessionString), Number(st.api_id) || 0, apiHash, { connectionRetries: 5 });
+    const client = new TelegramClient(new StringSession(sessionString), Number(st.api_id) || 0, apiHash, { connectionRetries: 5, floodSleepThreshold: 0 });
     await client.connect();
     // Prime entity cache so raw -100… ids resolve for this account.
     try {
@@ -16535,8 +16586,12 @@ export async function startUserbotAccount(env, label = 'main') {
     const liveCheck = async () => {
       let timer;
       try {
+        // A flood-wait is rate-limiting, not a wedged socket. Wait on the
+        // session gate (bounded) and treat a flood-style failure as alive so
+        // the reconnect counter is not tripped by a normal backoff.
+        await Promise.race([ubWaitForRelease(label), sleep(9000)]).catch(() => {});
         const raced = await Promise.race([
-          client.getDialogs({ limit: 1 }).then(() => true).catch(() => false),
+          client.getDialogs({ limit: 1 }).then(() => true).catch((e) => (e && typeof e.seconds === 'number') ? true : false),
           new Promise((res) => { timer = setTimeout(() => res(false), 10_000); })
         ]);
         return !!raced;
@@ -16613,10 +16668,13 @@ export async function catchUpUserbotFollows(env, label = 'main') {
       const opts = { limit: 12 };
       if (thread) opts.replyTo = Number(thread);
       // Resolve the entity so numeric ids keep working right after connect.
-      await acc.client.getEntity(base).catch(() => {});
+      // Shared session gate: coordinate this sweep with any backfill on the
+      // same account label instead of re-tripping its flood wait.
+      await ubWaitForRelease(label).catch(() => {});
+      await acc.client.getEntity(base).catch((e) => { if (e && typeof e.seconds === 'number') ubReportFlood(label, e.seconds); });
       let msgs = null;
-      try { msgs = await acc.client.getMessages(base, opts); }
-      catch (err) { await userbotLogError(env, label, base, err).catch(() => {}); }
+      try { await ubWaitForRelease(label); msgs = await acc.client.getMessages(base, opts); }
+      catch (err) { if (err && typeof err.seconds === 'number') ubReportFlood(label, err.seconds); await userbotLogError(env, label, base, err).catch(() => {}); }
       if (!msgs?.length) continue;
       chats++;
       const maxId = Math.max(...msgs.map((m) => Number(m.id || 0)));
