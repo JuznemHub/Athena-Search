@@ -8252,19 +8252,29 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
         await env.DB.prepare(`UPDATE index_jobs SET status = 'stopping', updated_at = ? WHERE id = ?`).bind(Date.now(), j.id).run().catch(() => {});
       }
     }
-    // Stop and Refresh both re-render the SAME card the user sees. The card is
-    // a rich Body API message (formatForumCloneCardRich + in-body buttons), so a
-    // classic editMessageText silently does nothing — that is why Stop/Refresh
-    // looked dead. Edit it as a rich message first, then fall back to classic if
-    // the bot cannot send rich bodies.
+    // The card is a rich Body API message (formatForumCloneCardRich + in-body
+    // buttons), so a classic editMessageText silently does nothing — that is why
+    // Stop/Refresh looked dead. Edit it as a rich message first, then fall back
+    // to classic if the bot cannot send rich bodies.
     if (ctrlAction === 'stop' || ctrlAction === 'refresh') {
       const jobs = await forumCardJobs(env, targetChat);
       const topicIds = await forumCardTopicIds(env, targetChat);
-      const buttons = cloneCardButtonsRich(targetChat);
-      const rich = formatForumCloneCardRich({ chatId: targetChat, chatName: '', topicIds, jobs }) + (buttons ? '\n' + buttons : '');
-      const classic = formatForumCloneCard({ chatId: targetChat, chatName: '', topics: topicIds.length, topicIds, jobs });
-      const edited = await editTelegramRichMessage(token, chatId, msgId, rich, threadId, null);
-      if (!edited?.ok) await editTelegramMessage(token, chatId, msgId, classic, cloneCardKeyboard(targetChat), threadId).catch(() => {});
+      if (ctrlAction === 'stop') {
+        // Every queued/running topic was set 'stopping' above (all at once).
+        // Close the live card: render the final state WITHOUT the Stop/Refresh
+        // buttons and a 'stopped' banner so it is plain the clone is halted.
+        const stopBanner = boldHtml('⏹ Stopped — cloning halted for all topics.') + '\n';
+        const rich = stopBanner + formatForumCloneCardRich({ chatId: targetChat, chatName: '', topicIds, jobs });
+        const classic = stopBanner + formatForumCloneCard({ chatId: targetChat, chatName: '', topics: topicIds.length, topicIds, jobs });
+        const edited = await editTelegramRichMessage(token, chatId, msgId, rich, threadId, null);
+        if (!edited?.ok) await editTelegramMessage(token, chatId, msgId, classic, null, threadId).catch(() => {});
+      } else {
+        const buttons = cloneCardButtonsRich(targetChat);
+        const rich = formatForumCloneCardRich({ chatId: targetChat, chatName: '', topicIds, jobs }) + (buttons ? '\n' + buttons : '');
+        const classic = formatForumCloneCard({ chatId: targetChat, chatName: '', topics: topicIds.length, topicIds, jobs });
+        const edited = await editTelegramRichMessage(token, chatId, msgId, rich, threadId, null);
+        if (!edited?.ok) await editTelegramMessage(token, chatId, msgId, classic, cloneCardKeyboard(targetChat), threadId).catch(() => {});
+      }
     }
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
@@ -9797,7 +9807,21 @@ async function startForumCloneSequential(env, { token, chatId, chatName = '', pr
         const st = row && row.status;
         if (st === 'stopped' || st === 'stopping') break;
         if (st === 'done' || st === 'error' || !st) break;
-        if (Date.now() - t0 > 30 * 60 * 1000) break;
+        // Never start the next topic while this one still reads the session
+        // (that re-introduces concurrency and the flood-wait cascade, and the
+        // card jumps to a topic that is not finished). The old 30-min cap did
+        // exactly that. Only as a last resort against a forever-stuck job: stop
+        // THIS job and wait for it to settle before moving on.
+        if (Date.now() - t0 > 6 * 60 * 60 * 1000) {
+          await env.DB.prepare(`UPDATE index_jobs SET status = 'stopping', updated_at = ? WHERE id = ? AND status IN ('queued','running')`).bind(Date.now(), jobId).run().catch(() => {});
+          for (let w = 0; w < 90; w++) {
+            const r2 = await env.DB.prepare('SELECT status FROM index_jobs WHERE id = ?').bind(jobId).first().catch(() => null);
+            const s2 = r2 && r2.status;
+            if (s2 === 'stopped' || s2 === 'done' || s2 === 'error') break;
+            await sleep(2000);
+          }
+          break;
+        }
         await sleep(6000);
       }
     }
