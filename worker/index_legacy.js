@@ -11740,36 +11740,28 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       if (isForum) {
         const topics = await getForumTopicsViaUserbot(env, chatIdN);
         if (topics.length) {
-          // If user said "all" as target, clone every topic topic-wise
+          // "all" — preview every topic, then ask before cloning. The old block
+          // started N jobs with no preview and no ask. Route it through the
+          // pending_clones gate: doCloneAfterConfirm then fans out topic-wise.
           if (cloneAllTopics) {
-            let _started = 0, _failed = 0;
-            for (const t of topics) {
-              try {
-                await env.DB.prepare(
-                  `INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(chat_id, thread_id) DO UPDATE SET community_id=excluded.community_id, target=excluded.target`
-                ).bind('tb_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), chatIdN, String(t.id), communityIdArg || 'personal', targetArg || 'community', athenaUser.id, Date.now()).run();
-                // Also create follow+backfill for each topic
-                await env.DB.prepare(
-                  `INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(chat_id) DO NOTHING`
-                ).bind(chatIdN+':'+String(t.id), (await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled=1 LIMIT 1').first())?.label || 'main', communityIdArg || 'personal', targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
-                // Per-topic history backfill: without this the fanout only
-                // registers live follows and no history is ever indexed. Topic
-                // jobs are SILENT — the aggregated forum card below renders one
-                // realtime progress bar per topic (per-topic cards flooded).
-                try {
-                  await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: String(t.id), communityName: communityIdArg || 'personal', userbotLabel: (await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled=1 LIMIT 1').first())?.label || 'main', silentProgress: true });
-                  _started++;
-                } catch(e) { console.error('topic backfill start failed', e?.message); _failed++; }
-              } catch(e) { console.error('topic clone all failed', e?.message); _failed++; }
-            }
-            await sendTelegramFormatted(token, chatId,
-              `${boldHtml('✅ Cloning ' + _started + '/' + topics.length + ' topics from ' + escHtml(chatIdN))} — one progress bar per topic below${_failed ? ` · ⚠️ ${boldHtml(_failed + ' failed to start')} (see /userbot_status / logs)` : ''}.`,
-              forumThreadId);
-            // ONE realtime card (edited every ~9s) with per-topic progress bars.
-            if (_started) await startForumCloneCard(env, { token, chatId: chatIdN, chatName: chatIdN, progressChatId: chatId, forumThreadId });
+            const label = enabledAccounts[0].label;
+            const preview = (await collectClonePreview(env, label, chatIdN).catch(() => null)) || { isForum: true, topics, topicCount: topics.length, totalMsgs: null, estLinks: null, estFiles: null, estUrls: null, sampleLinks: 0, sampleFiles: 0, sampleUrls: 0, sampleSize: 0 };
+            const previewStats = { ...preview, isForum: true, topics, topicCount: topics.length, cloneAll: true };
+            const pendingId = 'pc_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+            await storePendingClone(env, { id: pendingId, chat_id: chatIdN, thread_id: null, community_id: communityIdArg||'', target: targetArg||'', requester_tg_id: String(tgUserId||''), requester_user_id: athenaUser.id, stats: previewStats, created_at: Date.now(), expires_at: Date.now()+10*60*1000 });
+            const scopeLabel = targetArg==='personal' ? 'personal' : targetArg==='both' ? 'personal + community' : escHtml(communityIdArg||'community');
+            const lines = [
+              boldHtml('🔍 Clone preview') + ' ' + codeHtml(chatIdN) + ' → ' + boldHtml(scopeLabel),
+              boldHtml('Topics:') + ' ' + topics.length + ' (forum)',
+              boldHtml('Msgs:') + ' ' + (previewStats.totalMsgs && previewStats.totalMsgs > 0 ? previewStats.totalMsgs.toLocaleString() : '—') + ' · ' + boldHtml('Links:') + ' ' + formatPreviewEst(previewStats.estLinks ?? null, previewStats.sampleLinks, previewStats.sampleSize) + ' · ' + boldHtml('Files:') + ' ' + formatPreviewEst(previewStats.estFiles ?? null, previewStats.sampleFiles, previewStats.sampleSize) + ' · ' + boldHtml('URLs:') + ' ' + formatPreviewEst(previewStats.estUrls ?? null, previewStats.sampleUrls, previewStats.sampleSize),
+              '', boldHtml('Topics list:'),
+            ];
+            for(const tp of topics.slice(0,10)) lines.push('• #'+tp.id+' '+escHtml(tp.title||'Untitled'));
+            if(topics.length>10) lines.push(italicHtml('+ '+(topics.length-10)+' more'));
+            lines.push('', italicHtml('Yes will clone every topic (real backfill per topic) + live indexing each afterwards.'));
+            lines.push('', codeHtml('/index_stop')+' to stop · '+codeHtml('/del '+chatIdN)+' to delete after.', 'Reply '+codeHtml('yes')+' or tap Yes.');
+            await sendTelegramFormatted(token, chatId, lines.filter(Boolean).join(String.fromCharCode(10)), forumThreadId).catch(()=>{});
+            await telegramApi(token,'sendMessage',{chat_id: chatId, text: 'Confirm clone?', reply_markup:{inline_keyboard:[[{text:'✅ Yes, clone', callback_data:'clone:yes:'+pendingId},{text:'❌ No', callback_data:'clone:no:'+pendingId}]]}, message_thread_id: forumThreadId||undefined}).catch(()=>{});
             return new Response('OK', { status: 200, headers: corsHeaders });
           }
           const lines = topics.slice(0, 15).map(t => `${codeHtml('/clone ' + chatIdN + ' ' + t.id)} — ${escHtml(t.title)}`);
@@ -12387,13 +12379,26 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        if (isTopicFollow) name = `${f.chat_id.split(':')[0]}#${tidPart}`;
        const s = USERBOT_STATS.get(f.chat_id) || USERBOT_STATS.get(String(Number(f.chat_id))) || {};
        let liveBits = [];
-       if (!isTopicFollow) {
-         const fl = followLiveness(USERBOT_ACCOUNTS.has(f.label), f.last_seen_at);
-         const sActive = (s.msgs || s.links || s.docs) ? [`msgs ${s.msgs || 0}`, `links ${s.links || 0}`, `docs ${s.docs || 0}`] : [];
-         liveBits = [`${fl.emoji}`, ...sActive];
-         if (s.lastAt) liveBits.push(`last ${Math.max(1, Math.round((Date.now() - s.lastAt) / 60000))}m ago`);
-         else liveBits.push(italicHtml('waiting for new posts'));
-       }
+        if (!isTopicFollow) {
+          const fl = followLiveness(USERBOT_ACCOUNTS.has(f.label), f.last_seen_at);
+          const sActive = (s.msgs || s.links || s.docs) ? [`msgs ${s.msgs || 0}`, `links ${s.links || 0}`, `docs ${s.docs || 0}`] : [];
+          liveBits = [`${fl.emoji}`, ...sActive];
+          if (s.lastAt) liveBits.push(`last ${Math.max(1, Math.round((Date.now() - s.lastAt) / 60000))}m ago`);
+          else liveBits.push(italicHtml('waiting for new posts'));
+          // Today (rolling 24h) from the DB, scoped per-chat like /stats.
+          try {
+            const norm = normalizeTgChatId(f.chat_id);
+            const comm = f.community_id || null;
+            let tLinks = 0, tDocs = 0;
+            if (comm) {
+              const lr = await env.DB.prepare('SELECT COUNT(*) as c FROM links WHERE community_id = ? AND source_chat_id IN (?, ?) AND created_at > ?').bind(comm, norm, norm.replace(/^-100/, ''), Date.now() - 86400000).first().catch(() => null);
+              if (lr) tLinks = Number(lr.c || 0);
+            }
+            const dr = await env.DB.prepare('SELECT COUNT(*) as c FROM uploaded_documents WHERE source_chat_id IN (?, ?) AND created_at > ?').bind(norm, norm.replace(/^-100/, ''), Date.now() - 86400000).first().catch(() => null);
+            if (dr) tDocs = Number(dr.c || 0);
+            if (tLinks || tDocs) liveBits.push(italicHtml(`today ${tLinks} links · ${tDocs} files`));
+          } catch (_) {}
+        }
        const jb = isTopicFollow ? jobsByChatThread.get(baseChatId + ':' + tidPart) : jobByChat.get(baseChatId);
        let bf = 'backfill: not run';
        if (jb) {
