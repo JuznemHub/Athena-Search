@@ -49,13 +49,48 @@ async function unifiedClone(update,env,ctx){
   // run with zero user feedback, and a killed/timed-out webhook otherwise
   // leaves total silence.
   const scopeLabel=target==='personal'?'personal brain':target==='both'?'personal + community':(community||'community');
-  const ackHtml=`<h3>🔄 Clone started</h3><p>for <code>${remote}</code> → <b>${scopeLabel}</b>${topic?` (topic ${topic})`:''}${forumAll?' (forum — cloning topic-wise)':''}.</p><p><i>Preview + history scan run in the background — progress via /userbot_status.</i></p>`;
+  const userCmd=String(parts(msg.text)[0]||'/clone').split('@')[0];
+  const ackHtml=`<h3>🔄 Clone requested</h3><p>for <code>${remote}</code> → <b>${scopeLabel}</b>${topic?` (topic ${topic})`:forumAll||wantAll?' (forum — cloning topic-wise)':''}.</p><p><i>Checking the chat and starting the clone… progress via /userbot_status.</i></p>`;
   const ackRes=await richSend(ackHtml);
   const ackId=ackRes&&ackRes.result?ackRes.result.message_id:0;
   const task=(async()=>{
-    const extra=[remote]; if(topic) extra.push(topic); else if(forumAll||wantAll) extra.push('all'); extra.push(target); if(community) extra.push(community); const first=cloneUpdate(update,`/clone ${extra.join(' ')}`);
+    const extra=[remote]; if(topic) extra.push(topic); else if(forumAll||wantAll) extra.push('all'); extra.push(target); if(community) extra.push(community); const first=cloneUpdate(update,`/clone ${extra.join(' ')}`); console.log(`[uclone] dispatch: ${`/clone ${extra.join(' ')}`}`);
+    // Fresh ids: the server dedupes webhooks on chat:from:message_id, so a
+    // follow-up update that reuses the /uclone message id is swallowed as a
+    // duplicate and the step silently never happens.
+    const freshIds = (u) => {
+      if (u.message && u.message.message_id != null) u.message.message_id = u.message.message_id + 1000000;
+      if (u.update_id != null) u.update_id = u.update_id + 1;
+      return u;
+    };
     const originalFetch=globalThis.fetch; const dmChat=String(msg.chat.id);
-    globalThis.fetch=async(input,init={})=>{ try{ const url=typeof input==='string'?input:input?.url; if(url&&/api\.telegram\.org\/bot/.test(url)&&init?.body){ const payload=typeof init.body==='string'?JSON.parse(init.body):null; if(payload?.chat_id!=null&&String(payload.chat_id)===dmChat&&payload?.text!=null){ const text=String(payload.text||''); if(text.includes('Clone preview')||text.trim()==='Confirm clone?'){ return new Response(JSON.stringify({ok:true,result:{message_id:0,chat:{id:payload.chat_id}}}),{status:200,headers:{'content-type':'application/json'}}); } } } }catch(_){} return originalFetch(input,init); };
+    let forumDetected=false;
+    globalThis.fetch=async(input,init={})=>{
+      try{
+        const url=typeof input==='string'?input:input?.url;
+        if(url&&/api\.telegram\.org\/bot/.test(url)&&init?.body){
+          const payload=typeof init.body==='string'?JSON.parse(init.body):null;
+          if(payload?.chat_id!=null&&String(payload.chat_id)===dmChat){
+            // legacy preview/confirm prompts are swallowed — the shim confirms
+            if(payload?.text!=null){
+              const text=String(payload.text||'');
+              if(text.includes('Clone preview')||text.trim()==='Confirm clone?'){
+                return new Response(JSON.stringify({ok:true,result:{message_id:0,chat:{id:payload.chat_id}}}),{status:200,headers:{'content-type':'application/json'}});
+              }
+            }
+            // forum topic list: relabel /clone as the command the user invoked
+            const html=payload?.rich_message?.html ?? payload?.text ?? '';
+            if(typeof html==='string'&&html.includes('📋 Forum detected')){
+              forumDetected=true;
+              const relabeled=html.split('/clone ').join(userCmd+' ');
+              if(payload?.rich_message) payload.rich_message.html=relabeled; else payload.text=relabeled;
+              init.body=JSON.stringify(payload);
+            }
+          }
+        }
+      }catch(_){}
+      return originalFetch(input,init);
+    };
     // The ack doubles as a live stage card: heartbeat while the preview
     // scans, stage edits after, 8-minute timeout instead of infinite silence.
     const t0=Date.now();
@@ -72,14 +107,16 @@ async function unifiedClone(update,env,ctx){
       if(ackId) await editRich(ackId,failHtml); else await richSend(failHtml);
       return;
     }
-    // Fresh ids: the server dedupes webhooks on chat:from:message_id, so a
-    // yes that reuses the /uclone message id is swallowed as a duplicate
-    // and the confirm silently never happens.
-    const freshIds = (u) => {
-      if (u.message && u.message.message_id != null) u.message.message_id = u.message.message_id + 1000000;
-      if (u.update_id != null) u.update_id = u.update_id + 1;
-      return u;
-    };
+    // Forum with no explicit topic: legacy replied with the topic list (relabeled
+    // to the invoked command). Auto-run the all-topics clone now — the user asked
+    // for the chat, not for a second command.
+    if(forumDetected&&!topic&&!wantAll){
+      console.log(`[uclone] forum detected for ${normRemote} — dispatching all-topics clone`);
+      if(ackId) await editRich(ackId, ackHtml+`<p><i>Forum with multiple topics detected — cloning <b>all topics</b>. Watch the ✅ summary above and /userbot_status for per-topic progress.</i></p>`);
+      const allUpd=freshIds(structuredClone(update)); allUpd.message.text=`/clone ${remote} all ${target}${community?` ${community}`:''}`; allUpd.message.caption=undefined; allUpd.message.entities=[{type:'bot_command',offset:0,length:6}];
+      try{ await legacyFetch(allUpd,env); }catch(e){ console.error('[uclone] all-topics dispatch failed', e?.message); if(ackId) await editRich(ackId, ackHtml+`<p>❌ All-topics clone failed (${String(e?.message||e).slice(0,100)}) — run ${`/uclone ${remote} all`} manually.</p>`); }
+      return;
+    }
     if(ackId) await editRich(ackId, ackHtml+`<p><i>Preview ready — confirming…</i></p>`);
     // Honesty gate: only confirm when a preview was actually stored. The
     // forum-all path stores none (it clones directly with visible messages),
