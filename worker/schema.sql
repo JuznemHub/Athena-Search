@@ -197,6 +197,10 @@ CREATE INDEX IF NOT EXISTS idx_documents_personal
   ON uploaded_documents(scope, user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_documents_community
   ON uploaded_documents(scope, community_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_documents_personal_source
+  ON uploaded_documents(scope, user_id, source_chat_id, source_message_id);
+CREATE INDEX IF NOT EXISTS idx_documents_community_source
+  ON uploaded_documents(scope, community_id, source_chat_id, source_message_id);
 
 -- Short-lived server-side state for Telegram /search pagination. The query and
 -- scope stay here instead of in callback_data, which is size-limited and user-editable.

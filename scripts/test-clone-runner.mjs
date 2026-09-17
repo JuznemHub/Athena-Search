@@ -117,6 +117,15 @@ try {
   await runHistoryIndexJob(env, job, 'fixture', { client, sleep: async () => {} });
   const after = await env.DB.prepare('SELECT * FROM index_jobs WHERE id=?').bind('ij_fixture_1').first();
   assert.equal(after.status, 'done', JSON.stringify(after));
+  // Document dedupe runs once per cloned message. Without the source-identity
+  // index it scans every document for the scope, so a large clone degrades to
+  // O(n^2) - pin the plan.
+  const dedupePlan = sql.prepare("EXPLAIN QUERY PLAN SELECT id FROM uploaded_documents WHERE scope = 'personal' AND user_id = ? AND source_chat_id = ? AND source_message_id = ? LIMIT 1")
+    .all('u_fixture', '-1001234567890', '4').map(row => row.detail).join(' | ');
+  assert.match(dedupePlan, /USING (COVERING )?INDEX idx_documents_personal_source/, `document dedupe must use the source-identity index: ${dedupePlan}`);
+  const dedupePlanCommunity = sql.prepare("EXPLAIN QUERY PLAN SELECT id FROM uploaded_documents WHERE scope = 'community' AND community_id = ? AND source_chat_id = ? AND source_message_id = ? LIMIT 1")
+    .all('c_fixture', '-1001234567890', '4').map(row => row.detail).join(' | ');
+  assert.match(dedupePlanCommunity, /USING (COVERING )?INDEX idx_documents_community_source/, `community document dedupe must use the source-identity index: ${dedupePlanCommunity}`);
   const counters = JSON.parse(after.counters_json);
   assert.equal(counters.messages, 4);
   assert.equal(counters.savedPdfs, 0, 'video-attributed pdf excluded by attribute priority, not counted');

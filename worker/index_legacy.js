@@ -3965,6 +3965,11 @@ async function ensureDocumentsTable(env) {
   await env.DB.prepare('ALTER TABLE uploaded_documents ADD COLUMN IF NOT EXISTS source_message_id TEXT').run().catch(() => {});
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_documents_personal ON uploaded_documents(scope, user_id, created_at)').run();
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_documents_community ON uploaded_documents(scope, community_id, created_at)').run();
+  // Clone/backfill dedupe looks documents up by their source message; without
+  // these the lookup scans every document for the scope, so a large clone
+  // degrades to O(n^2).
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_documents_personal_source ON uploaded_documents(scope, user_id, source_chat_id, source_message_id)').run();
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_documents_community_source ON uploaded_documents(scope, community_id, source_chat_id, source_message_id)').run();
 }
 
 export async function ensureChunksTable(env) {
@@ -8776,7 +8781,7 @@ async function saveIndexedDocument(env, communityId, filename, ext, bytes, uploa
   }
   if (valid?.error) return valid;
   if (!valid || !valid.content) return null;
-  const id = 'doc_ix_' + Date.now().toString(36) + '_' + randomToken().slice(0, 4);
+  const id = 'doc_ix_' + Date.now().toString(36) + '_' + randomToken().slice(0, 12);
   try {
     await env.DB.prepare(
       `INSERT INTO uploaded_documents
@@ -8986,7 +8991,7 @@ async function savePersonalIndexedDocument(env, ownerUserId, filename, ext, byte
   }
   if (valid?.error) return valid;
   if (!valid || !valid.content) return null;
-  const id = 'doc_ixp_' + Date.now().toString(36) + '_' + randomToken().slice(0, 4);
+  const id = 'doc_ixp_' + Date.now().toString(36) + '_' + randomToken().slice(0, 12);
   await env.DB.prepare(
     `INSERT INTO uploaded_documents
      (id, scope, user_id, filename, content, uploaded_by, created_at, source_chat_id, source_message_id)
