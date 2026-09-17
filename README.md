@@ -134,7 +134,7 @@ Bot API mode is the default and safest mode:
 
 - no user session string is required for live indexing;
 - links, captions, documents (pdf/docx/epub/md/…), and text-only announcements are captured;
-- video/audio/apk/archives are skipped by design;
+- video is excluded; full-copy channel/topic/group capture also stores photos, audio and other non-video files;
 - every insert is deduplicated — canonical URL hash per brain (community or personal), plus `chat_id + message_id` identity for channel documents, so replays and cross-posts never create duplicates.
 
 Session mode is optional and self-host-only. It uses a Telegram user session to backfill older history with `/index_start`; the encrypted session is kept only for the job and removed when the job finishes or is stopped. Treat a session string like a password: it can grant access to the Telegram account that created it.
@@ -209,7 +209,7 @@ The one-session userbot commands above still work. For several accounts or a gui
 /userbot_accounts                                          # list, select, re-authenticate, remove
 /userbot_select                                            # pick the account future clones use
 /uclone <chat_id>          # scan a channel/group, preview exact statistics, pick a destination
-/ubclone <chat_id>         # same wizard, whole-chat instead of per-topic
+/ubclone <chat_id>         # alias for the same managed wizard
 /userbot_status            # accounts, follows, backfill progress
 ```
 
@@ -219,6 +219,20 @@ The one-session userbot commands above still work. For several accounts or a gui
 - videos are excluded by design; links, documents (pdf/epub/md/…), images and audio are cloned with per-message provenance, so re-cloning the same source never duplicates rows;
 - a failed item is recorded and cloning continues; Telegram flood-waits are honored; interrupted jobs resume from their cursor after restart;
 - `/transfers` lists clone sessions, `/clone_del <id> [files]` removes everything one clone imported.
+- `/stats` reads persisted run and per-message checkpoints, with separate destination/account totals and topic navigation. Preview counts describe encountered content; saved counters describe successful writes.
+- URL search returns the original source post, including the other URLs in that message. Source bodies, entity offsets and reply metadata are preserved separately from canonical URL rows.
+
+### Runtime logs and agent access
+
+GOD-only commands: `/log [n]`, `/log --json [n]`, `/log dokploy [app] [n]`, `/log buildlogs [app] [n]`. The JSON command returns whole records within Telegram's message limit and reports truncation; use HTTP for continuous consumption.
+
+Configure `DOKPLOY_URL`, `DOKPLOY_API_KEY` and optionally `DOKPLOY_APP_ID` for container/build logs. Application logs come from Athena's bounded process buffer. Container logs and deployment build logs are distinct sources.
+
+Use an authenticated GOD session with `GET /api/logs?source=app&tail=100&follow=1`. A session cookie or `Authorization: Bearer <session-token>` is accepted. For Dokploy, select `source=container` or `source=deployment` and `app=<application_id>`.
+
+The response is NDJSON. Save each `checkpoint.cursor`; reconnect with the URL-encoded `cursor` parameter after an `end` event or disconnect. Streams end after five minutes. A `reset` event reports a possible history gap after process restart, rotation or cursor expiry. Container resumption uses best-effort overlapping log tails, not a durable log archive.
+
+`/dok` supports `apps`, `status`, `logs`, `buildlogs`, `deploy`, `redeploy`, `restart`, `stop` and `start`. Deployment acceptance means the job was queued; inspect status and build logs to establish completion.
 
 ### Local Bot API server (2 GB files)
 

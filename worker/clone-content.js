@@ -14,6 +14,8 @@ function positiveId(value) {
 }
 
 function topicOf(message) {
+  const thread = positiveId(message?.message_thread_id);
+  if (thread) return String(thread);
   const reply = message?.replyTo;
   const top = positiveId(reply?.replyToTopId);
   if (top) return String(top);
@@ -33,19 +35,21 @@ function isContentMessage(message) {
   return !!message && !['MessageEmpty', 'MessageService'].includes(className(message)) && !message.action;
 }
 
-function textUrls(text, entities, urls) {
+function textUrls(text, entities, urls, occurrences, field) {
   const covered = [];
   for (const entity of entities || []) {
-    const type = className(entity);
-    if (type === 'MessageEntityTextUrl' && entity.url) urls.add(String(entity.url));
-    if (type === 'MessageEntityUrl') {
-      const start = Number(entity.offset);
-      const end = start + Number(entity.length);
-      if (Number.isInteger(start) && start >= 0 && end > start && end <= text.length) {
-        // Telegram entity offsets and JavaScript string slices both use UTF-16.
-        urls.add(text.slice(start, end));
-        covered.push([start, end]);
-      }
+    const type = entity.type || className(entity);
+    const start = Number(entity.offset);
+    const length = Number(entity.length);
+    const end = start + length;
+    const valid = Number.isInteger(start) && Number.isInteger(length) && start >= 0 && end > start && end <= text.length;
+    const hidden = type === 'MessageEntityTextUrl' || type === 'text_link';
+    const visible = type === 'MessageEntityUrl' || type === 'url';
+    const url = hidden && entity.url ? String(entity.url) : visible && valid ? text.slice(start, end) : '';
+    if (url) {
+      urls.add(url);
+      occurrences.push({ url, type, label: valid ? text.slice(start, end) : '', offset: valid ? start : null, length: valid ? length : null, field });
+      if (visible && valid) covered.push([start, end]);
     }
   }
   for (const match of text.matchAll(/https?:\/\/[^\s<>"\u0000-\u001f]+/gi)) {
@@ -58,24 +62,57 @@ function textUrls(text, entities, urls) {
       if (!opening || url.split(closing).length <= url.split(opening).length) break;
       url = url.slice(0, -1).replace(/[.,!?;:'”’]+$/, '');
     }
-    if (url) urls.add(url);
+    if (url) {
+      urls.add(url);
+      occurrences.push({ url, type: 'raw', label: url, offset: match.index, length: url.length, field });
+    }
   }
+}
+
+/** GramJS toJSON exposes protocol args rather than its client/session caches.
+ * Native BigInt and GramJS big-integer values remain exact decimal strings. */
+export function sourceClonePost(message) {
+  const text = String(message?.message || message?.text || message?.caption || '');
+  const original = JSON.parse(JSON.stringify(message ?? null, (_key, value) => typeof value === 'bigint' ? value.toString() : value));
+  return { text, message: original };
+}
+
+function classifyDocument(document, forcedKind = '', fallbackMime = '') {
+  const attributes = document.attributes || [];
+  const filename = String(document.file_name || attributes.find((a) => className(a) === 'DocumentAttributeFilename')?.fileName || '');
+  const ext = /\.([^.\\/]+)$/.exec(filename)?.[1]?.toLowerCase() || '';
+  const mime = String(document.mimeType || document.mime_type || fallbackMime).split(';', 1)[0].trim().toLowerCase();
+  const generic = GENERIC_MIMES.has(mime);
+  const video = forcedKind === 'video' || attributes.some((a) => className(a) === 'DocumentAttributeVideo') || mime.startsWith('video/');
+  const audio = forcedKind === 'audio' || attributes.some((a) => className(a) === 'DocumentAttributeAudio') || mime.startsWith('audio/');
+  const kind = video ? 'video' : audio ? 'audio' : forcedKind === 'photo' || mime.startsWith('image/') ? 'photo'
+    : generic && VIDEO_EXTENSIONS.has(ext) ? 'video'
+      : generic && AUDIO_EXTENSIONS.has(ext) ? 'audio'
+        : generic && IMAGE_EXTENSIONS.has(ext) ? 'photo' : 'document';
+  return { kind, filename, ext, mime, size: Math.max(0, Number(document.size ?? document.file_size) || 0) };
 }
 
 /** Classify original media only: web previews, thumbnails and pinned references
  * are not additional files. Attributes and MIME beat a misleading filename. */
 export function classifyCloneMessage(message) {
   const topicId = topicOf(message);
-  if (!isContentMessage(message)) return { urls: [], media: null, topicId };
+  if (!isContentMessage(message)) return { urls: [], occurrences: [], media: null, topicId };
   const urls = new Set();
-  const text = String(message.message || message.text || '');
-  textUrls(text, message.entities, urls);
+  const occurrences = [];
+  const field = message.message ? 'message' : 'text';
+  textUrls(String(message.message || message.text || ''), message.entities, urls, occurrences, field);
   if (message.caption != null) {
-    textUrls(String(message.caption), message.captionEntities || message.caption_entities, urls);
+    textUrls(String(message.caption), message.captionEntities || message.caption_entities, urls, occurrences, 'caption');
   }
-  for (const row of message.replyMarkup?.rows || []) {
-    for (const button of row.buttons || []) {
-      if (button.url) urls.add(String(button.url));
+  const gramRows = message.replyMarkup?.rows;
+  const rows = gramRows || message.reply_markup?.inline_keyboard || [];
+  for (const [rowIndex, row] of rows.entries()) {
+    for (const [buttonIndex, button] of (gramRows ? row.buttons || [] : row).entries()) {
+      if (!button.url) continue;
+      const url = String(button.url);
+      urls.add(url);
+      occurrences.push({ url, type: gramRows ? className(button) : 'url', label: String(button.text || ''), offset: null, length: null,
+        field: gramRows ? `replyMarkup.rows[${rowIndex}].buttons[${buttonIndex}]` : `reply_markup.inline_keyboard[${rowIndex}][${buttonIndex}]` });
     }
   }
   let media = null;
@@ -89,28 +126,33 @@ export function classifyCloneMessage(message) {
     }
     media = { kind: 'photo', filename: '', ext: 'jpg', mime: 'image/jpeg', size };
   } else if (className(original) === 'MessageMediaDocument' && original.document && className(original.document) !== 'DocumentEmpty') {
-    const document = original.document;
-    const attributes = document.attributes || [];
-    const filename = String(attributes.find((a) => className(a) === 'DocumentAttributeFilename')?.fileName || '');
-    const ext = /\.([^.\\/]+)$/.exec(filename)?.[1]?.toLowerCase() || '';
-    const mime = String(document.mimeType || '').split(';', 1)[0].trim().toLowerCase();
-    const generic = GENERIC_MIMES.has(mime);
-    const video = attributes.some((a) => className(a) === 'DocumentAttributeVideo') || mime.startsWith('video/');
-    const audio = attributes.some((a) => className(a) === 'DocumentAttributeAudio') || mime.startsWith('audio/');
-    const kind = video ? 'video' : audio ? 'audio' : mime.startsWith('image/') ? 'photo'
-      : generic && VIDEO_EXTENSIONS.has(ext) ? 'video'
-        : generic && AUDIO_EXTENSIONS.has(ext) ? 'audio'
-          : generic && IMAGE_EXTENSIONS.has(ext) ? 'photo' : 'document';
-    media = { kind, filename, ext, mime, size: Math.max(0, Number(document.size) || 0) };
+    media = classifyDocument(original.document, original.video || original.round ? 'video' : original.voice ? 'audio' : '');
+  } else if (message.video || message.video_note) {
+    media = classifyDocument(message.video || message.video_note, 'video');
+  } else if (message.audio || message.voice) {
+    media = classifyDocument(message.audio || message.voice, 'audio');
+  } else if (message.animation) {
+    // Bot API also includes document for an animation; count the original once.
+    media = classifyDocument(message.animation);
+  } else if (message.sticker) {
+    const sticker = message.sticker;
+    media = classifyDocument(sticker, sticker.is_video ? 'video' : sticker.is_animated ? '' : 'photo',
+      sticker.is_video ? 'video/webm' : sticker.is_animated ? 'application/x-tgsticker' : 'image/webp');
+  } else if (message.document) {
+    media = classifyDocument(message.document);
+  } else if (message.photo?.length) {
+    let size = 0;
+    for (const variant of message.photo) size = Math.max(size, Number(variant.file_size) || 0);
+    media = { kind: 'photo', filename: '', ext: 'jpg', mime: 'image/jpeg', size };
   }
-  return { urls: [...urls], media, topicId };
+  return { urls: [...urls], occurrences, media, topicId };
 }
 
 export function emptyCloneCounters() {
-  return { messages: 0, links: 0, files: 0, pdfs: 0, markdown: 0, json: 0, html: 0, other: 0, images: 0, audio: 0, skippedVideos: 0 };
+  return { messages: 0, links: 0, linkPosts: 0, files: 0, pdfs: 0, markdown: 0, json: 0, html: 0, other: 0, images: 0, audio: 0, skippedVideos: 0 };
 }
 
-function documentCounter({ mime, ext }) {
+export function documentCounter({ mime, ext }) {
   if (mime === 'application/pdf') return 'pdfs';
   if (['text/markdown', 'text/x-markdown'].includes(mime)) return 'markdown';
   if (mime === 'application/json' || mime === 'text/json' || mime.endsWith('+json')) return 'json';
@@ -131,6 +173,7 @@ export function countCloneMessage(counters, message) {
   const { urls, media } = classifyCloneMessage(message);
   counters.messages++;
   counters.links += urls.length;
+  if (urls.length) counters.linkPosts = (counters.linkPosts || 0) + 1;
   if (!media) return;
   if (media.kind === 'video') { counters.skippedVideos++; return; }
   counters.files++;

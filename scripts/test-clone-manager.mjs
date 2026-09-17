@@ -6,8 +6,8 @@ import { createUcloneManager, ensureUcloneTables } from '../worker/uclone-manage
 // These tests verify orchestration, not ingestion by runHistoryIndexJob.
 async function fixture({ forum = false, sourceClass = 'Channel', topics = [7, 9], messages, topicPageSize = 100, orderByCreateDate = false, includeTopicCount = true } = {}) {
   const sql = new DatabaseSync(':memory:');
-  sql.exec(`CREATE TABLE userbot_accounts (label TEXT PRIMARY KEY, enabled INTEGER, last_error TEXT);
-    INSERT INTO userbot_accounts VALUES ('alpha',1,NULL),('beta',1,NULL);
+  sql.exec(`CREATE TABLE userbot_accounts (label TEXT PRIMARY KEY, enabled INTEGER, last_error TEXT, telegram_id TEXT, telegram_username TEXT, display_name TEXT, phone_masked TEXT, verified_at INTEGER);
+    INSERT INTO userbot_accounts VALUES ('alpha',1,NULL,'101','alpha_fixture','Alpha','••••1001',1),('beta',1,NULL,'102','beta_fixture','Beta','••••1002',1);
     CREATE TABLE index_jobs (id TEXT PRIMARY KEY, parent_id TEXT, userbot_label TEXT, target TEXT, community_id TEXT, user_id TEXT, thread_id TEXT, status TEXT, processed INTEGER, total_messages INTEGER, counters_json TEXT, saved_links INTEGER, saved_files INTEGER, saved_pdfs INTEGER, dupes_skipped INTEGER, errors INTEGER, retries INTEGER, error TEXT, created_at INTEGER, updated_at INTEGER);`);
   const DB = { prepare(query) {
     const bind = (values = []) => ({ bind(...args) { return bind(args.map(v => v ?? null)); },
@@ -26,9 +26,10 @@ async function fixture({ forum = false, sourceClass = 'Channel', topics = [7, 9]
     { id: 1, className: 'Message', message: 'https://one.example/', replyTo: { forumTopic: true, replyToTopId: 7, replyToMsgId: 7 } }
   ];
   const client = { connected: true,
+    async getMe() { return { id: 102, username: 'beta_fixture', firstName: 'Beta', phone: '123451002' }; },
     async getEntity() {
       if (f.expired) throw new Error('SESSION_REVOKED');
-      return { className: sourceClass, title: forum ? 'Forum fixture' : 'Stream fixture', forum, participantsCount: 12 };
+      return { className: sourceClass, broadcast: sourceClass === 'Channel' && !forum, title: forum ? 'Forum fixture' : 'Stream fixture', forum, participantsCount: 12 };
     },
     async invoke(request) {
       f.requests.push(request);
@@ -55,11 +56,12 @@ async function fixture({ forum = false, sourceClass = 'Channel', topics = [7, 9]
     sql.prepare('INSERT INTO index_jobs (id,parent_id,userbot_label,target,community_id,user_id,thread_id,status,processed,total_messages,counters_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
       .run(opts.jobId, opts.parentId, opts.userbotLabel, opts.target, opts.communityIdArg || '', opts.athenaUser.id, String(opts.threadArg || ''), status, 0, opts.knownTotal, '{}', f.now, f.now);
   };
-  f.finish = (child, counters = { messages: child.total_messages, copiedMessages: child.total_messages, links: child.total_messages }) => {
+  f.finish = (child, counters = { messages: child.total_messages, copiedMessages: child.total_messages, links: child.total_messages, savedLinks: child.total_messages }) => {
     sql.prepare("UPDATE index_jobs SET status='done',processed=total_messages,counters_json=? WHERE id=?").run(JSON.stringify(counters), child.id);
     f.events.push(`done:${child.thread_id}`);
   };
   const deps = {
+    classicText: text => text.replace(/<\/?(?:h[1-6]|p|table|tr|td)[^>]*>/g, '\n').replace(/<br>/g, '\n'),
     now: () => f.now,
     sleep: async ms => {
       f.now += ms;
@@ -78,7 +80,8 @@ async function fixture({ forum = false, sourceClass = 'Channel', topics = [7, 9]
     authorizeCommunity: async (user, id) => user.id === 'u_fixture' && !f.denied.has(id) && ['c_a', 'c_b'].includes(id),
     telegram: async (_token, method, body) => {
       f.sent.push({ method, body, at: f.now });
-      return { ok: true, result: { message_id: method === 'sendMessage' ? f.messageId++ : body.message_id } };
+      if (f.rejectRich && body.rich_message) return { ok: false, error_code: 400, description: 'Rich messages not supported' };
+      return { ok: true, result: { message_id: ['sendMessage', 'sendRichMessage'].includes(method) ? f.messageId++ : body.message_id } };
     },
     background: task => f.tasks.push(task),
     startJob: async opts => {
@@ -95,7 +98,10 @@ async function fixture({ forum = false, sourceClass = 'Channel', topics = [7, 9]
   f.drain = async () => { while (f.tasks.length) await f.tasks.shift(); };
   f.run = () => { const row = sql.prepare('SELECT * FROM pending_clones ORDER BY rowid DESC LIMIT 1').get(); return row ? { ...row, state: JSON.parse(row.stats_json) } : null; };
   f.edits = () => f.sent.filter(s => s.method === 'editMessageText' && s.body.message_id === f.run()?.state.progressMessageId);
-  f.buttons = () => f.edits().at(-1)?.body.reply_markup?.inline_keyboard.flat() || [];
+  f.buttons = () => {
+    const body = f.edits().at(-1)?.body;
+    return body?.reply_markup?.inline_keyboard.flat() || [...(body?.rich_message?.html || '').matchAll(/<tg-button type="callback_data" data="([^"]+)">([^<]+)<\/tg-button>/g)].map(m => ({ callback_data: m[1], text: m[2] }));
+  };
   f.callback = async (data, overrides = {}) => f.manager.callback({ ...f.context, messageId: f.run().state.progressMessageId, callbackId: `cb${f.now++}`, data, ...overrides });
   f.click = async label => {
     const button = f.buttons().find(b => b.text.includes(label));
@@ -123,11 +129,11 @@ async function scenario(name, options, test) {
   } finally { await f.drain(); f.sql.close(); }
 }
 function finalCounters(f) {
-  const text = f.edits().at(-1).body.text;
+  const text = f.edits().at(-1).body.rich_message?.html || f.edits().at(-1).body.text;
   assert.match(text, /Status: done/);
-  const table = [...text.matchAll(/<pre>([\s\S]*?)<\/pre>/g)].at(-1)?.[1];
+  const table = [...text.matchAll(/<table>([\s\S]*?)<\/table>/g)].at(-1)?.[1];
   assert.ok(table, 'final message contains aggregate counters');
-  return Object.fromEntries(table.split('\n').map(row => { const match = row.match(/^(.*?)\s+(\d[\d,]*)$/); assert.ok(match); return [match[1], Number(match[2].replaceAll(',', ''))]; }));
+  return Object.fromEntries([...table.matchAll(/<tr><td>(.*?)<\/td><td>([\d,]+)<\/td><\/tr>/g)].map(m => [m[1], Number(m[2].replaceAll(',', ''))]));
 }
 
 await scenario('nonforum channel, persisted account, personal destination and stale controls', {}, async f => {
@@ -145,7 +151,7 @@ await scenario('nonforum channel, persisted account, personal destination and st
   await f.callback(control); await f.drain();
   assert.equal(f.starts.length, 1, 'stale destination callback cannot launch twice');
   assert.ok(f.connections.every(label => label === 'beta') && f.clientLabels.every(label => label === 'beta'), 'selected account survives restart without fallback');
-  assert.equal(finalCounters(f).Messages, 3);
+  assert.equal(finalCounters(f)['Encountered messages'], 3);
 });
 
 await scenario('ordinary group stays one stream in Community B', { sourceClass: 'Chat' }, async f => {
@@ -182,8 +188,12 @@ await scenario('forum children wait for completion and aggregate counters stay c
   assert.deepEqual(f.children().map(j => [j.thread_id, j.processed]), [['1', 0], ['7', 2], ['9', 1]]);
   assert.equal(f.polls, 6, 'each running child was polled before completion');
   const counters = finalCounters(f);
-  assert.deepEqual([counters.Messages, counters['Copied messages'], counters.Links], [3, 3, 3]);
-  assert.match(f.edits().at(-1).body.text, /Topics completed: 3 \/ 3/);
+  assert.deepEqual([counters['Encountered messages'], counters['Copied messages'], counters['Saved URLs']], [3, 3, 3]);
+  assert.match(f.edits().at(-1).body.rich_message.html, /Topics completed: 3 \/ 3/);
+  const completionCards = f.edits().filter(e => /Status: Topic completed: Topic 7/.test(e.body.rich_message?.html || ''));
+  assert.ok(completionCards.length, 'completed topic remains visible before next topic starts');
+  assert.match(completionCards.at(-1).body.rich_message.html, /100%/);
+  assert.match(completionCards.at(-1).body.rich_message.html, /Saved URLs<\/td><td>2/);
 });
 
 await scenario('destination permission denial and revocation prevent copying', { forum: true, topics: [1, 7, 9] }, async f => {
@@ -211,7 +221,7 @@ await scenario('restart resumes an existing child before starting the next topic
   assert.deepEqual(f.resumed, [childId]);
   assert.deepEqual(f.events, ['done:1', 'start:7', 'done:7', 'start:9', 'done:9']);
   assert.equal(f.children().length, 3, 'restart reuses the interrupted child rather than duplicating it');
-  assert.equal(finalCounters(f).Messages, 3);
+  assert.equal(finalCounters(f)['Encountered messages'], 3);
   const before = f.starts.length;
   await f.manager.resume('fixture'); await f.drain();
   assert.equal(f.starts.length, before, 'completed parent is not replayed');
@@ -230,14 +240,14 @@ await scenario('cancel while running stops current child and never starts anothe
   assert.equal(f.children().length, 1);
   f.recreate(); await f.manager.resume('fixture'); await f.drain();
   assert.equal(f.children().length, 1, 'cancelled parent never resumes');
-  assert.match(f.edits().at(-1).body.text, /Status: stopped/);
+  assert.match(f.edits().at(-1).body.rich_message.html, /Status: stopped/);
 });
 
 await scenario('expired selected session reports reauthentication without substitution', {}, async f => {
   f.expired = true;
   await f.preview();
   assert.equal(f.run().state.stage, 'error');
-  assert.match(f.edits().at(-1).body.text, /reauthentication/i);
+  assert.match(f.edits().at(-1).body.rich_message.html, /reauthentication/i);
   assert.equal(f.children().length, 0);
   assert.ok(f.connections.every(label => label === 'beta') && f.clientLabels.every(label => label === 'beta'));
 });
@@ -249,36 +259,40 @@ await scenario('progress is throttled but final counters are exact and scope-iso
   f.onPoll = async child => {
     f.sql.prepare('UPDATE index_jobs SET processed=? WHERE id=?').run(Math.min(f.polls, 3), child.id);
     if (f.polls !== 12) return;
-    f.finish(child, { messages: 3, copiedMessages: 2, links: 4, files: 2, pdfs: 1, markdown: 1, duplicates: 1, failed: 1, retries: 2 });
+    f.finish(child, { messages: 3, copiedMessages: 2, links: 4, files: 2, pdfs: 1, markdown: 1, savedLinks: 3, savedFiles: 1, savedPdfs: 1, savedMarkdown: 0, duplicates: 1, failed: 1, retries: 2 });
     for (const [index, change] of [{ userbotLabel: 'alpha' }, { target: 'community' }, { communityIdArg: 'c_b' }, { athenaUser: { id: 'other' } }].entries()) {
       f.insertChild({ ...f.starts[0], jobId: `foreign_${index}`, ...change }, 'done');
       f.sql.prepare("UPDATE index_jobs SET processed=999,counters_json='{" + '"messages":999,"links":999' + "}' WHERE id=?").run(`foreign_${index}`);
     }
   };
   await f.click('Personal'); await f.drain();
-  const running = f.edits().filter(s => /Status: running/.test(s.body.text));
+  const running = f.edits().filter(s => /Status: running/.test(s.body.rich_message?.html));
   assert.ok(running.length >= 2 && running.length < f.polls, 'long job has live updates without an edit on every poll');
   for (let i = 1; i < running.length; i++) assert.ok(running[i].at - running[i - 1].at >= 8000, 'automatic edits are throttled');
   assert.equal(new Set(f.edits().map(s => s.body.message_id)).size, 1, 'progress edits one message');
   const counters = finalCounters(f);
-  assert.deepEqual([counters.Messages, counters['Copied messages'], counters.Links, counters.Files, counters.PDF, counters.MD, counters.Duplicates, counters.Failed, counters.Retries], [3, 2, 4, 2, 1, 1, 1, 1, 2]);
-  assert.deepEqual(f.edits().at(-1).body.reply_markup.inline_keyboard, [], 'final summary removes live controls');
+  assert.deepEqual([counters['Encountered messages'], counters['Copied messages'], counters['Saved URLs'], counters['Saved files'], counters['Saved PDF'], counters['Saved MD'], counters.Duplicates, counters.Failed, counters.Retries], [3, 2, 3, 1, 1, 0, 1, 1, 2]);
+  assert.ok(!f.buttons().some(b => /Stop|Refresh/.test(b.text)), 'final summary removes live controls');
+  const previousId = f.run().id;
+  await f.click('Retry clone'); await f.drain();
+  assert.notEqual(f.run().id, previousId, 'retry creates a separate measured run instead of corrupting final totals');
+  assert.equal(f.run().state.label, 'beta');
 });
 
 await scenario('combined destination selects Community B and personal without another community', {}, async f => {
   await f.preview();
-  const row = f.edits().at(-1).body.reply_markup.inline_keyboard.find(buttons => buttons.some(b => b.text === 'Community B'));
-  const both = row.find(b => b.text === 'Also personal');
+  const communityIndex = f.buttons().findIndex(b => b.text === 'Community B');
+  const both = f.buttons()[communityIndex + 1];
   assert.ok(both, 'each community exposes its own combined destination');
   await f.callback(both.callback_data); await f.drain();
   assert.deepEqual(f.children().map(j => [j.target, j.community_id, j.user_id, j.processed]), [['both', 'c_b', 'u_fixture', 3]]);
-  assert.equal(finalCounters(f).Messages, 3, 'combined destination does not double-count source messages');
+  assert.equal(finalCounters(f)['Encountered messages'], 3, 'combined destination does not double-count source messages');
 });
 
 await scenario('combined destination enforces authorization before copying and between topics', { forum: true }, async f => {
   await f.preview(); await f.click('All topics');
-  const row = f.edits().at(-1).body.reply_markup.inline_keyboard.find(buttons => buttons.some(b => b.text === 'Community A'));
-  const both = row.find(b => b.text === 'Also personal');
+  const communityIndex = f.buttons().findIndex(b => b.text === 'Community A');
+  const both = f.buttons()[communityIndex + 1];
   f.denied.add('c_a');
   await f.callback(both.callback_data); await f.drain();
   assert.equal(f.run().state.stage, 'destination');
@@ -288,6 +302,25 @@ await scenario('combined destination enforces authorization before copying and b
   await f.callback(both.callback_data); await f.drain();
   assert.equal(f.run().state.stage, 'error');
   assert.deepEqual(f.children().map(j => [j.target, j.community_id]), [['both', 'c_a']], 'revocation prevents subsequent combined-destination topics');
+});
+
+await scenario('rich account callbacks and classic rejection fallback retain identity and actions', {}, async f => {
+  const rich = f.edits().at(-1).body;
+  assert.match(rich.rich_message.html, /@beta_fixture/);
+  assert.ok(!rich.reply_markup, 'supported transport puts controls inside the body');
+  await f.click('Status');
+  assert.match(f.edits().at(-1).body.rich_message.html, /Session: \*{8}/);
+  await f.click('Back');
+  f.rejectRich = true;
+  await f.manager.command({ ...f.context, text: '/userbot_accounts' });
+  assert.ok(f.sent.some(s => s.method === 'sendMessage'), 'API rejection uses classic send');
+  assert.ok(f.edits().at(-1).body.reply_markup.inline_keyboard.length);
+  await f.click('Status');
+  assert.match(f.edits().at(-1).body.text, /@beta_fixture/);
+  assert.doesNotMatch(f.edits().at(-1).body.text, /123451002/);
+  await f.click('Back');
+  await f.click('Add Account');
+  assert.match(f.edits().at(-1).body.text, /\/userbot_add/);
 });
 
 console.log(`clone manager workflow tests passed (${passed.length} cases):\n${passed.join('\n')}`);

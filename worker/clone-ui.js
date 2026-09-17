@@ -1,21 +1,15 @@
 const TELEGRAM_LIMIT = 4096;
 const TERMINAL_STATUSES = new Set(['done', 'complete', 'completed', 'error', 'failed', 'stopped', 'cancelled', 'canceled']);
 const COUNTER_ROWS = [
-  ['messages', 'Messages'],
-  ['copiedMessages', 'Copied messages'],
-  ['links', 'Links'],
-  ['files', 'Files'],
-  ['pdfs', 'PDF'],
-  ['markdown', 'MD'],
-  ['json', 'JSON'],
-  ['html', 'HTML'],
-  ['other', 'Other files'],
-  ['images', 'Photos'],
-  ['audio', 'Audio'],
-  ['skippedVideos', 'Skipped videos'],
-  ['duplicates', 'Duplicates'],
-  ['failed', 'Failed'],
-  ['retries', 'Retries']
+  ['messages', 'Encountered messages'], ['linkPosts', 'Encountered link posts'], ['links', 'Encountered URLs'],
+  ['files', 'Encountered files'], ['pdfs', 'PDF'], ['markdown', 'MD'], ['json', 'JSON'], ['html', 'HTML'],
+  ['other', 'Other files'], ['images', 'Images'], ['audio', 'Audio'], ['skippedVideos', 'Videos excluded'],
+];
+const SAVED_ROWS = [
+  ['copiedMessages', 'Copied messages'], ['savedLinkPosts', 'Saved link posts'], ['savedLinks', 'Saved URLs'],
+  ['savedFiles', 'Saved files'], ['savedDocs', 'Saved documents'], ['savedPdfs', 'Saved PDF'], ['savedMarkdown', 'Saved MD'],
+  ['savedJson', 'Saved JSON'], ['savedHtml', 'Saved HTML'], ['savedOther', 'Saved other files'],
+  ['savedImages', 'Saved images'], ['savedAudio', 'Saved audio'], ['duplicates', 'Duplicates'], ['failed', 'Failed'], ['retries', 'Retries'],
 ];
 
 function escHtml(value) {
@@ -43,17 +37,17 @@ function countText(value, absent = '0') {
   return n === null ? 'unknown' : n.toLocaleString('en-US');
 }
 
-// Aligned values make the content and failure counts readable in Telegram's
-// native monospace block without unsupported table or rich-body tags.
 function counterTable(counters = {}, includeDelivery = true) {
-  const rows = includeDelivery ? COUNTER_ROWS : COUNTER_ROWS.filter(([key]) => !['copiedMessages', 'duplicates', 'failed', 'retries'].includes(key));
-  return '<pre>' + rows.map(([key, label]) => `${label.padEnd(16)} ${countText(counters?.[key])}`).join('\n') + '</pre>';
+  const rows = includeDelivery ? [...SAVED_ROWS, ...COUNTER_ROWS.slice(0, 4), COUNTER_ROWS.at(-1)] : COUNTER_ROWS;
+  return '<table>' + rows.map(([key, label]) => `<tr><td>${label}</td><td>${countText(counters?.[key])}</td></tr>`).join('') + '</table>';
 }
 
 function sourceLine(sourceName, chatId) {
   const name = boundedText(sourceName, 160);
   const id = boundedText(chatId, 64);
-  return 'Source:' + (name ? ` <b>${escHtml(name)}</b>` : '') + (id ? ` <code>${escHtml(id)}</code>` : '');
+  const url = /^-100\d+$/.test(id) ? `https://t.me/c/${id.slice(4)}/1` : /^@\w+$/.test(id) ? `https://t.me/${id.slice(1)}` : null;
+  const title = escHtml(name || id);
+  return 'Source:' + (title ? ` ${url ? `<a href="${url}">${title}</a>` : `<b>${title}</b>`}` : '') + (id ? ` <code>${escHtml(id)}</code>` : '');
 }
 
 function topicLine(topic, label = 'Topic') {
@@ -62,43 +56,44 @@ function topicLine(topic, label = 'Topic') {
   return `${label}:` + (id ? ` <code>#${escHtml(id)}</code>` : '') + (name ? ` ${escHtml(name)}` : '');
 }
 
-function progressLine(processed, total) {
+function progressLine(processed, total, unit = 'messages') {
   const done = count(processed);
   const available = count(total);
-  if (available === null) return `${countText(processed, 'unknown')} messages processed; total unknown`;
-  const progress = `${countText(processed, 'unknown')} / ${countText(total)} messages`;
+  if (available === null) return `${countText(processed, 'unknown')} ${unit} processed; total unknown`;
+  const progress = `${countText(processed, 'unknown')} / ${countText(total)} ${unit}`;
   if (available === 0) return done === 0 ? `${progress} (empty history)` : progress;
   if (done === null || done > available) return progress;
-  return `${progress} (${Math.floor(done / available * 100)}%)`;
+  const percent = Math.floor(done / available * 100);
+  const blocks = Math.floor(percent / 10);
+  return `${'█'.repeat(blocks)}${'░'.repeat(10 - blocks)} ${percent}%<br>${progress}`;
 }
 
-export function renderCloneProgress({ sourceName, chatId, destination, status, topicsTotal = 0, topicsDone = 0, currentTopic = null, processed, total, counters, overallCounters, error }) {
-  const state = boundedText(status, 40);
+export function renderCloneProgress({ sourceName, chatId, destination, target, status, topicsTotal = 0, topicsDone = 0, currentTopic = null, processed, total, counters = {}, overallCounters, error }) {
+  const state = boundedText(status, 80);
   const terminal = TERMINAL_STATUSES.has(state.toLowerCase());
+  const completed = ['done', 'complete', 'completed'].includes(state.toLowerCase());
   const hasTopics = (count(topicsTotal) ?? 0) > 0;
-  const lines = [
-    `<b>Clone ${terminal ? 'summary' : 'progress'}</b>`,
-    sourceLine(sourceName, chatId),
-    `Destination: ${escHtml(boundedText(destination, 160))}`,
-    `Status: ${escHtml(state || 'unknown')}`
-  ];
-  if (currentTopic) lines.push(topicLine(currentTopic, terminal ? 'Topic' : 'Current topic'));
+  const lines = [`<h3>Clone ${terminal ? 'summary' : 'progress'}</h3>`, `<p>${sourceLine(sourceName, chatId)}<br>Destination: ${escHtml(boundedText(destination, 160))}<br>Status: ${escHtml(state || 'unknown')}</p>`];
+  if (target === 'both') lines.push('<p>Saved URLs/files, duplicates and failures: per destination (two sinks). Copied messages and saved link posts: once per source message.</p>');
   if (!terminal) {
-    if (hasTopics && !currentTopic) lines.push('No topic running.');
-    else lines.push(progressLine(processed, total));
-    lines.push('', `<b>${currentTopic ? 'Current topic' : 'This run'} counters</b>`, counterTable(counters));
+    if (currentTopic) lines.push(`<h4>${topicLine(currentTopic, 'Current topic')}</h4>`);
+    lines.push(`<p>${hasTopics && !currentTopic ? 'No topic running.' : progressLine(processed, total)}</p>`, counterTable(counters));
   }
-  lines.push('', `<b>${terminal ? 'Final aggregate' : 'Overall progress'}</b>`);
-  if (hasTopics) lines.push(`Topics completed: ${countText(topicsDone)} / ${countText(topicsTotal)}`);
-  if (terminal || hasTopics || overallCounters) lines.push(counterTable(overallCounters ?? counters));
-  else lines.push(progressLine(processed, total));
-  if (error) lines.push('', `<b>Error:</b> ${escHtml(boundedText(error?.message ?? error, 480))}`);
+  if (terminal || hasTopics || overallCounters) {
+    lines.push(`<h4>${terminal ? 'Final aggregate' : 'Overall progress'}</h4>`);
+    if (hasTopics) lines.push(`<p>Topics completed: ${countText(topicsDone)} / ${countText(topicsTotal)}<br>${progressLine(topicsDone, topicsTotal, 'topics')}</p>`);
+    else if (completed) lines.push('<p>██████████ 100%</p>');
+    lines.push(counterTable(overallCounters ?? counters));
+  }
+  const failures = (overallCounters ?? counters)?.errorCategories;
+  if (failures && Object.keys(failures).length) lines.push(`<p>Error categories: ${Object.entries(failures).map(([category, n]) => `${escHtml(boundedText(category, 40))}: ${countText(n)}`).join(' · ')}</p>`);
+  if (error) lines.push(`<p><b>Error:</b> ${escHtml(boundedText(error?.message ?? error, 480))}</p>`);
   return lines.join('\n');
 }
 
 export function renderCloneStatistics({ sourceName, chatId, username, members, topic, counters, measurement, complete }) {
   const accessible = measurement === 'accessible-history';
-  const lines = ['<b>Clone statistics</b>', sourceLine(sourceName, chatId)];
+  const lines = ['<h3>Clone statistics</h3>', `<p>${sourceLine(sourceName, chatId)}</p>`];
   if (username) lines.push(`Username: ${escHtml(boundedText(username, 64))}`);
   if (topic) lines.push(topicLine(topic));
   lines.push(`Members (Telegram-reported): ${countText(members, 'unknown')}`);

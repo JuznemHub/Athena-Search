@@ -82,22 +82,34 @@ export function createUcloneManager(env, deps) {
         Number(context.messageId) !== Number(run.state.progressMessageId) || run.expires_at <= clock()) return false;
     return !run.community_id || await deps.authorizeCommunity(context.user, run.community_id);
   }
-  async function send(context, text, keyboard) {
-    const response = await deps.telegram(context.token, 'sendMessage', {
-      chat_id: context.chatId, text, parse_mode: 'HTML',
-      ...(context.threadId ? { message_thread_id: context.threadId } : {}),
-      ...(keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {}),
+  const richBody = (text, rows = []) => text + rows.map(row => '<tg-button-row>' + row.map(control => `<tg-button type="callback_data" data="${esc(control.callback_data)}">${esc(control.text)}</tg-button>`).join('') + '</tg-button-row>').join('');
+  async function deliver(token, method, address, text, rows = []) {
+    const response = await deps.telegram(token, method, { ...address, rich_message: { html: richBody(text, rows) } });
+    if (response?.ok || response?.parameters?.retry_after || /message is not modified/i.test(response?.description || '')) return response;
+    console.error('[uclone] rich message rejected:', response?.description || 'Unknown Telegram error');
+    const fallback = await deps.telegram(token, method === 'sendRichMessage' ? 'sendMessage' : method, {
+      ...address, text: deps.classicText(text), parse_mode: 'HTML', reply_markup: { inline_keyboard: rows },
     });
+    if (!fallback?.ok && !fallback?.parameters?.retry_after && !/message is not modified/i.test(fallback?.description || '')) {
+      console.error('[uclone] classic message rejected:', fallback?.description || 'Unknown Telegram error');
+      throw new Error('TELEGRAM_PROGRESS_UPDATE_FAILED');
+    }
+    return fallback;
+  }
+  async function send(context, text, keyboard = []) {
+    const response = await deliver(context.token, 'sendRichMessage', {
+      chat_id: context.chatId,
+      ...(context.threadId ? { message_thread_id: context.threadId } : {}),
+    }, text, keyboard);
     if (!response?.ok || !response.result?.message_id) throw new Error('PROGRESS_MESSAGE_FAILED');
     return response.result.message_id;
   }
   const button = (run, text, action, index = '') => ({ text: String(text).slice(0, 48), callback_data: `uc:${run.id}:${run.state.revision}:${action}${index === '' ? '' : ':' + index}` });
   async function edit(run, token, text, rows = [], force = false) {
     if (!force && clock() < Number(run.state.nextEditAt || 0)) { await persist(run); return; }
-    const response = await deps.telegram(token, 'editMessageText', {
+    const response = await deliver(token, 'editMessageText', {
       chat_id: run.state.progressChatId, message_id: run.state.progressMessageId,
-      text, parse_mode: 'HTML', reply_markup: { inline_keyboard: rows },
-    });
+    }, text, rows);
     const retry = Number(response?.parameters?.retry_after || 0);
     run.state.nextEditAt = clock() + Math.max(8000, retry * 1000);
     await persist(run);
@@ -120,7 +132,7 @@ export function createUcloneManager(env, deps) {
     return run;
   }
   async function accounts(run, token) {
-    const { results } = await db.prepare('SELECT label, enabled, last_error FROM userbot_accounts ORDER BY label').all();
+    const { results } = await db.prepare('SELECT label, enabled, last_error, telegram_id, telegram_username, display_name, phone_masked, verified_at FROM userbot_accounts ORDER BY label').all();
     const selection = await db.prepare('SELECT label FROM userbot_selections WHERE requester_tg_id=?').bind(run.requester_tg_id).first();
     run.state.accounts = results.map((a) => a.label);
     run.state.stage = 'accounts';
@@ -132,16 +144,18 @@ export function createUcloneManager(env, deps) {
       [button(run, `${selection?.label === a.label ? 'Selected: ' : 'Select: '}${a.label}`, 'select', page * 8 + index)],
       [button(run, 'Status', 'status', page * 8 + index), button(run, 'Reauthenticate', 'reauth', page * 8 + index), button(run, 'Remove', 'remove', page * 8 + index)],
     ]);
+    rows.push([button(run, 'Add Account', 'add')]);
     if (page > 0) rows.push([button(run, 'Previous', 'accounts', page - 1)]);
     if ((page + 1) * 8 < results.length) rows.push([button(run, 'Next', 'accounts', page + 1)]);
-    await edit(run, token, `<b>Saved userbot accounts</b>\nSelected: <code>${esc(selection?.label || 'none')}</code>\n${shown.map((a) => `${esc(a.label)} — ${a.enabled ? (a.last_error ? 'needs attention' : 'enabled') : 'disabled'}`).join('\n')}\n\nAdd or reauthenticate in a DM only:\n<code>/userbot_add &lt;label&gt; &lt;api_id&gt; &lt;api_hash&gt; &lt;session_string&gt;</code>`, rows, true);
+    await edit(run, token, `<b>Saved userbot accounts</b>\nSelected: <code>${esc(selection?.label || 'none')}</code>\n${shown.map((a) => `<b>${esc(a.label)}</b> — ${a.enabled ? (a.last_error ? 'needs attention' : a.verified_at ? 'verified' : 'enabled') : 'disabled'}\nUsername: ${a.telegram_username ? '@' + esc(a.telegram_username) : 'not set'}\nName: ${esc(a.display_name || 'not available')}\nAccount ID: <code>${esc(a.telegram_id || 'not available')}</code>\nPhone: ${esc(a.phone_masked || 'not shared')}\nSession: ********`).join('\n\n')}`, rows, true);
   }
-  async function listTopics(client, source, label) {
-    if (deps.listTopics) return deps.listTopics(client, source, label);
+  async function listTopics(client, source, label, onProgress) {
+    if (deps.listTopics) return deps.listTopics(client, source, label, onProgress);
     const { Api } = await import('telegram');
     const topics = new Map();
     let offsetDate = 0, offsetId = 0, offsetTopic = 0;
     for (;;) {
+      await onProgress?.(topics.size);
       await deps.beforeRequest(label);
       let page;
       try {
@@ -168,6 +182,13 @@ export function createUcloneManager(env, deps) {
     return [...topics.values()].sort((a, b) => Number(a.id) - Number(b.id));
   }
   async function preview(run, token) {
+    const checkCancelled = async () => {
+      if ((await load(run.id))?.state.cancelled) { const error = new Error('CANCELLED'); error.name = 'AbortError'; throw error; }
+    };
+    const scanning = async (counters = {}, topic = null, status = 'Measuring accessible history') => {
+      await checkCancelled();
+      await edit(run, token, renderCloneProgress({ sourceName: run.state.sourceName, chatId: run.chat_id, destination: 'Not selected', status, currentTopic: topic, processed: counters.messages || 0, total: null, counters }), [[button(run, 'Cancel scan', 'stop')]]);
+    };
     return withCloneAccount(run.state.label, async () => {
       try {
         const client = await account(run.state.label);
@@ -177,16 +198,22 @@ export function createUcloneManager(env, deps) {
         run.state.sourceName = entity.title || run.chat_id;
         run.state.username = entity.username || null;
         run.state.members = entity.participantsCount ?? null;
+        run.state.sourceType = entity.className === 'Channel' && entity.broadcast ? 'channel' : 'group';
+        if (run.state.members == null) {
+          try {
+            const { Api } = await import('telegram');
+            await deps.beforeRequest(run.state.label);
+            const full = await client.invoke(entity.className === 'Channel' ? new Api.channels.GetFullChannel({ channel: run.chat_id }) : new Api.messages.GetFullChat({ chatId: entity.id }));
+            run.state.members = full.fullChat?.participantsCount ?? full.fullChat?.participants?.participants?.length ?? null;
+          } catch (error) { deps.log?.(`member-count: ${cloneFailure(error).category}`); }
+        }
         run.state.isForum = !!entity.forum;
-        run.state.topics = entity.forum ? await listTopics(client, run.chat_id, run.state.label) : [];
+        await edit(run, token, '<b>Measuring accessible history</b>\nYou can cancel during discovery or scanning.', [[button(run, 'Cancel scan', 'stop')]], true);
+        run.state.topics = entity.forum ? await listTopics(client, run.chat_id, run.state.label, (n) => scanning({}, null, `Discovering topics: ${n}`)) : [];
         run.state.measurement = 'accessible-history';
         const result = await scanCloneHistory(client, run.chat_id, {
-          beforeRequest: () => deps.beforeRequest(run.state.label), onFlood: (seconds) => deps.onFlood(run.state.label, seconds),
-          onProgress: async (progress) => {
-            const current = await load(run.id);
-            if (current?.state.cancelled) { const error = new Error('CANCELLED'); error.name = 'AbortError'; throw error; }
-            await edit(run, token, renderCloneProgress({ sourceName: run.state.sourceName, chatId: run.chat_id, destination: 'Not selected', status: 'Measuring accessible history', processed: progress.counters?.messages ?? progress.messages ?? 0, total: null, counters: progress.counters || progress, overallCounters: progress.counters || progress }));
-          },
+          beforeRequest: async () => { await checkCancelled(); await deps.beforeRequest(run.state.label); }, onFlood: (seconds) => deps.onFlood(run.state.label, seconds),
+          onProgress: (progress) => scanning(progress.counters || progress),
         });
         run.state.snapshot = result.maxId;
         run.state.counters = result.counters;
@@ -196,7 +223,8 @@ export function createUcloneManager(env, deps) {
             if (current?.state.cancelled) throw new Error('CANCELLED');
             const scan = await scanCloneHistory(client, run.chat_id, {
               threadId: topic.id, maxId: result.maxId,
-              beforeRequest: () => deps.beforeRequest(run.state.label), onFlood: (seconds) => deps.onFlood(run.state.label, seconds),
+              beforeRequest: async () => { await checkCancelled(); await deps.beforeRequest(run.state.label); }, onFlood: (seconds) => deps.onFlood(run.state.label, seconds),
+              onProgress: (progress) => scanning(progress.counters || progress, topic, `Measuring topic ${topic.name}`),
             });
             topic.counters = scan.counters;
           }
@@ -211,7 +239,7 @@ export function createUcloneManager(env, deps) {
         const cancelled = (await load(run.id))?.state.cancelled;
         run.state.stage = cancelled ? 'stopped' : 'error';
         run.state.error = cancelled ? null : cloneFailure(error).message;
-        await edit(run, token, cancelled ? '<b>Clone stopped</b>' : `<b>Clone could not start</b>\n${esc(run.state.error)}`, [], true);
+        await edit(run, token, cancelled ? '<b>Clone stopped</b>' : `<b>Clone could not start</b>\n${esc(run.state.error)}`, [[button(run, 'Retry clone', 'retry')]], true);
       }
     });
   }
@@ -257,19 +285,29 @@ export function createUcloneManager(env, deps) {
     for (const job of results) {
       let counts = {};
       try { counts = JSON.parse(job.counters_json || '{}'); } catch { /* Old jobs expose scalar counters. */ }
-      const fallback = { messages: job.processed, links: job.saved_links, files: job.saved_files, pdfs: job.saved_pdfs, duplicates: job.dupes_skipped, failed: job.errors, retries: job.retries };
-      for (const key of Object.keys(overall)) overall[key] += Number(counts[key] ?? fallback[key] ?? 0);
+      const fallback = { messages: job.processed, savedLinks: job.saved_links, savedFiles: job.saved_files, savedPdfs: job.saved_pdfs, duplicates: job.dupes_skipped, failed: job.errors, retries: job.retries };
+      for (const key of new Set([...Object.keys(overall), ...Object.keys(counts), ...Object.keys(fallback)])) {
+        const value = counts[key] ?? fallback[key] ?? 0;
+        if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+        overall[key] = (overall[key] || 0) + value;
+      }
+    }
+    overall.errorCategories = {};
+    for (const job of results) {
+      let categories;
+      try { categories = JSON.parse(job.counters_json || '{}').errorCategories; } catch { categories = null; }
+      for (const [category, n] of Object.entries(categories || {})) overall.errorCategories[category] = (overall.errorCategories[category] || 0) + Number(n || 0);
     }
     let counts = {};
     try { counts = JSON.parse(child?.counters_json || '{}'); } catch { /* Scalar fallback below. */ }
-    const topic = run.state.chosen?.[run.state.cursor || 0];
-    const text = renderCloneProgress({ sourceName: run.state.sourceName, chatId: run.chat_id, destination: run.state.destinationName || run.target,
+    const topic = run.state.chosen?.[run.state.transition ? Math.max(0, (run.state.cursor || 0) - 1) : run.state.cursor || 0];
+    const text = renderCloneProgress({ sourceName: run.state.sourceName, chatId: run.chat_id, destination: run.state.destinationName || run.target, target: run.target,
       status: terminal.has(run.state.stage) ? run.state.stage : run.state.transition || run.state.stage, topicsTotal: run.state.isForum ? run.state.chosen.length : 0, topicsDone: run.state.cursor || 0,
       currentTopic: run.state.isForum && topic ? { id: topic.id, name: topic.name } : null,
       processed: Number(child?.processed || 0), total: topic?.counters?.messages ?? run.state.total,
       counters: counts, overallCounters: { ...overall, total: run.state.total }, error: run.state.error,
     });
-    await edit(run, token, text, terminal.has(run.state.stage) ? [] : [[button(run, 'Stop entire clone', 'stop'), button(run, 'Refresh', 'refresh')]], force);
+    await edit(run, token, text, terminal.has(run.state.stage) ? [[button(run, 'Retry clone (new run)', 'retry')]] : [[button(run, 'Stop entire clone', 'stop'), button(run, 'Refresh', 'refresh')]], force);
   }
   async function sequence(id, token) {
     if (activeRuns.has(id)) return activeRuns.get(id);
@@ -322,8 +360,9 @@ export function createUcloneManager(env, deps) {
           if (child.status !== 'done') throw new Error(child.error || 'CHILD_JOB_FAILED');
           run.state.cursor = (run.state.cursor || 0) + 1;
           run.state.childId = null;
-          run.state.transition = `Completed ${topic.name || 'source'}`;
-          await progress(run, token, null, true);
+          run.state.transition = `Topic completed: ${topic.name || 'source'}`;
+          await progress(run, token, child, true);
+          if (run.state.isForum) await sleep(8000);
         }
       } catch (error) {
         run = await load(id);
@@ -365,15 +404,26 @@ export function createUcloneManager(env, deps) {
     }
     await deps.telegram(context.token, 'answerCallbackQuery', { callback_query_id: context.callbackId });
     const index = /^\d+$/.test(arg || '') ? Number(arg) : -1;
+    if (action === 'retry' && terminal.has(run.state.stage)) {
+      run.state.revision++;
+      await persist(run);
+      const next = await create(context, run.chat_id, { label: run.state.label, stage: 'scanning', cursor: 0, cancelled: false });
+      background(preview(next, context.token));
+      return true;
+    }
     if (action === 'stop') {
       run.state.cancelled = true;
       if (run.state.childId) await db.prepare("UPDATE index_jobs SET status='stopping',updated_at=? WHERE id=? AND status IN ('queued','running')").bind(clock(), run.state.childId).run();
       run.state.stage = 'stopped';
       run.state.revision++;
-      await edit(run, context.token, '<b>Clone stopped</b>\nNo further topic will start.', [], true);
+      await edit(run, context.token, '<b>Clone stopped</b>\nNo further topic will start.', [[button(run, 'Retry clone', 'retry')]], true);
     } else if (run.state.stage === 'accounts') {
       if (String(context.chatId).startsWith('-')) return true;
       if (action === 'accounts') { run.state.page = index; await accounts(run, context.token); return true; }
+      if (action === 'add') {
+        await edit(run, context.token, 'In this DM, add a named account:\n<code>/userbot_add &lt;label&gt; &lt;api_id&gt; &lt;api_hash&gt; &lt;session_string&gt;</code>\nThe credential message is deleted after processing. Never send credentials to a group.', [[button(run, 'Back', 'accounts', run.state.page)]], true);
+        return true;
+      }
       const label = run.state.accounts[index];
       if (!label) return true;
       if (action === 'select') {
@@ -397,7 +447,8 @@ export function createUcloneManager(env, deps) {
           await deps.beforeRequest(label);
           const me = await client.getMe();
           const phone = String(me.phone || '');
-          text = `<code>${esc(label)}</code> — verified\n${esc(me.firstName || '')} ${esc(me.lastName || '')}\nAccount ID: <code>${esc(me.id)}</code>\nPhone: ${phone ? '••••' + esc(phone.slice(-4)) : 'not shared'}`;
+          text = `<code>${esc(label)}</code> — verified\nUsername: ${me.username ? '@' + esc(me.username) : 'not set'}\nName: ${esc(me.firstName || '')} ${esc(me.lastName || '')}\nAccount ID: <code>${esc(me.id)}</code>\nPhone: ${phone ? '••••' + esc(phone.slice(-4)) : 'not shared'}\nSession: ********`;
+          await db.prepare('UPDATE userbot_accounts SET telegram_id=?, telegram_username=?, display_name=?, phone_masked=?, verified_at=? WHERE label=?').bind(String(me.id), me.username || '', [me.firstName, me.lastName].filter(Boolean).join(' '), phone ? '••••' + phone.slice(-4) : '', clock(), label).run();
         } catch (error) { text = cloneFailure(error).message; }
         await edit(run, context.token, text, [[button(run, 'Back', 'accounts', run.state.page)]], true);
       }

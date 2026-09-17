@@ -54,7 +54,7 @@ const hooks = registerHooks({ resolve(specifier, context, nextResolve) {
   if (specifier.startsWith('telegram/')) throw new Error('Unmocked Telegram module');
   return nextResolve(specifier, context);
 } });
-const { default: worker, ensureIndexTables, runHistoryIndexJob, wipeCloneVaultPaths } = await import('../worker/index.js');
+const { default: worker, buildStatsReport, capturePostIntoSinks, ensureIndexTables, runHistoryIndexJob, wipeCloneVaultPaths } = await import('../worker/index.js');
 
 const sql = new DatabaseSync(':memory:');
 sql.exec(readFileSync(new URL('../worker/schema.sql', import.meta.url), 'utf8')
@@ -62,12 +62,14 @@ sql.exec(readFileSync(new URL('../worker/schema.sql', import.meta.url), 'utf8')
 sql.exec(`CREATE TABLE IF NOT EXISTS userbot_accounts (label TEXT PRIMARY KEY, api_id TEXT, api_hash_enc TEXT, session_enc TEXT, enabled INTEGER, last_error TEXT, updated_at INTEGER);
 INSERT INTO userbot_accounts VALUES ('alpha','1','x','y',1,NULL,NULL);`);
 const DB = { prepare(query) {
+  const checkFault = () => { if (databaseFault?.(query)) throw new Error('synthetic persistence outage'); };
   const bind = (values = []) => ({ bind(...args) { return bind(args.map(v => v ?? null)); },
     async first(column) { const r = sql.prepare(query).get(...values); return r ? (column ? r[column] : r) : null; },
     async all() { return { results: sql.prepare(query).all(...values) }; },
-    async run() { const r = sql.prepare(query).run(...values); return { success: true, meta: { changes: Number(r.changes) } }; } });
+    async run() { checkFault(); const r = sql.prepare(query).run(...values); return { success: true, meta: { changes: Number(r.changes) } }; } });
   return bind();
 } };
+let databaseFault = null;
 const HISTORY = [
   { id: 4, className: 'Message', date: 1700000004, senderId: 777, message: 'see https://example.com/one and https://example.com/two',
     media: { className: 'MessageMediaDocument', document: { size: 900, mimeType: 'application/pdf', attributes: [ { className: 'DocumentAttributeFilename', fileName: 'report.pdf' }, { className: 'DocumentAttributeVideo', w: 10, h: 10 } ] } } },
@@ -120,6 +122,14 @@ try {
   assert.equal(counters.savedPdfs, 0, 'video-attributed pdf excluded by attribute priority, not counted');
   assert.equal(counters.skippedVideos, 2, 'both video-classified media skipped regardless of filename');
   assert.equal(downloads, 2, 'video never downloaded');
+  assert.equal(counters.linkPosts, 1);
+  assert.equal(counters.savedLinkPosts, 1);
+  assert.equal(counters.savedMarkdown, 1);
+  assert.equal(counters.savedAudio, 1);
+  const completePost = sql.prepare("SELECT * FROM clone_posts WHERE destination='personal:u_fixture' AND message_id='4'").get();
+  assert.equal(completePost.message_text, HISTORY[0].message, 'complete body survives individual URL indexing');
+  assert.deepEqual(JSON.parse(completePost.message_json).media, HISTORY[0].media, 'original media attributes remain attached to the source post');
+  assert.equal(sql.prepare("SELECT count(*) n FROM clone_posts WHERE destination='personal:u_fixture'").get().n, 4, 'each source message has one post, including excluded media');
   assert.equal(Number(after.saved_docs), 1, 'markdown indexed as document; spoofed pdf is video');
   const personal = sql.prepare('SELECT url FROM personal_links ORDER BY url').all();
   assert.equal(personal.length, 2, 'both URLs land in the personal sink');
@@ -237,6 +247,9 @@ try {
     assert.equal(counts.failed, sinkCount, JSON.stringify(sql.prepare('SELECT message_id,content_key,status,error_category FROM clone_sources WHERE transfer_id=?').all(id)));
     assert.equal(counts.savedFiles, sinkCount);
     assert.equal(counts.savedLinks, sinkCount);
+    assert.equal(counts.linkPosts, 1);
+    assert.equal(counts.savedLinkPosts, 1, 'saved link posts count once across both sinks');
+    assert.equal(counts.savedMarkdown, sinkCount, 'successful subtypes use per-sink write units');
     assert.deepEqual(offsets, [9], 'snapshot is inclusive; minimum terminates without fetching older pages');
     assert.ok(attemptedMedia.includes(8) && attemptedMedia.includes(6), 'failed media does not end the clone');
     const destinations = target === 'both' ? [`community:${communityId}`, `personal:${userId}`] : [`community:${communityId}`];
@@ -296,6 +309,116 @@ try {
   assert.deepEqual(JSON.parse(sql.prepare('SELECT counters_json FROM index_jobs WHERE id=?').get(restartId).counters_json), restartCounters, 'replaying committed messages preserves counters');
   assert.equal(sql.prepare('SELECT count(*) n FROM personal_links WHERE user_id=?').get('u_restart').n, 3);
 
+  // Normal capture and history use the same original-post contract: hidden
+  // labels, raw links, mixed posts and repeated canonical URLs keep every post.
+  const labels = ['First', 'Second', 'Third', 'Fourth'];
+  const hiddenText = '  😀 First Second Third Fourth\n';
+  const hiddenEntities = labels.map((label, index) => ({ type: 'text_link', offset: hiddenText.indexOf(label), length: label.length, url: `https://example.com/source-hidden-${index}` }));
+  const rawUrls = Array.from({ length: 6 }, (_, index) => `https://example.com/source-raw-${index}`);
+  const posts = [
+    { message_id: 1, text: hiddenText, entities: hiddenEntities },
+    { message_id: 2, text: `  ${rawUrls.join('\n')}\n` },
+    { message_id: 3, caption: `${hiddenText}${rawUrls.join('\n')}\n`, caption_entities: hiddenEntities,
+      photo: [{ file_id: 'full-post-photo', file_unique_id: 'full-post-photo-unique', width: 10, height: 10, file_size: 3 }] },
+    { message_id: 4, text: `Different original context: ${hiddenEntities[0].url}\nDo not replace this with metadata.`, reply_to_message: { message_id: 1, text: hiddenText } }
+  ];
+  const richChatId = '-1006666666666';
+  sql.prepare('INSERT INTO users (id,username,created_at) VALUES (?,?,?)').run('u_sources', 'sources', Date.now());
+  sql.prepare('INSERT INTO communities (id,name,creator_id,created_at) VALUES (?,?,?,?)').run('c_sources', 'Sources', 'u_sources', Date.now());
+  for (const post of posts) {
+    const msg = { ...post, chat: { id: richChatId, type: 'supergroup' }, message_thread_id: 42, date: 1700000200 + post.message_id };
+    const captured = await capturePostIntoSinks(env, ['personal', 'community'], { msg, token: 'fixture', personalOwner: 'u_sources', communityId: 'c_sources', channelTitle: 'Originals', topicName: 'Full body', downloadMedia: async () => new Uint8Array([1, 2, 3]) });
+    assert.equal(captured.failed, 0);
+    assert.equal(captured.linkPosts, 1);
+    const expected = [4, 6, 10, 1][post.message_id - 1];
+    assert.equal(captured.links, expected);
+    assert.equal(captured.savedLinkPosts, post.message_id <= 2 ? 1 : 0, 'one source link-post save across both destinations');
+    for (const destination of ['personal:u_sources', 'community:c_sources']) {
+      const saved = sql.prepare('SELECT * FROM clone_posts WHERE destination=? AND chat_id=? AND topic_id=? AND message_id=?').get(destination, richChatId, '42', String(post.message_id));
+      assert.equal(saved.message_text, post.text || post.caption);
+      assert.deepEqual(JSON.parse(saved.message_json), msg);
+      assert.equal(JSON.parse(saved.urls_json).length, expected);
+      assert.equal(saved.topic_name, 'Full body');
+      assert.equal(sql.prepare("SELECT count(*) n FROM clone_sources WHERE destination=? AND chat_id=? AND message_id=? AND content_key LIKE 'url:%'").get(destination, richChatId, String(post.message_id)).n, expected);
+    }
+  }
+  const liveReport = await buildStatsReport(env, null, { athenaUserId: 'u_sources' });
+  const liveRuns = liveReport.runs.filter(run => run.chat_id === richChatId);
+  assert.equal(liveRuns.length, 2, 'each live destination has its own durable ledger');
+  for (const run of liveRuns) {
+    assert.equal(run.state.overall.messages, 4);
+    assert.equal(run.state.overall.links, 21);
+    assert.equal(run.state.overall.savedLinks, 10);
+    assert.equal(run.live, false, 'finished capture is not still copying');
+  }
+  await capturePostIntoSinks(env, ['personal', 'community'], {
+    msg: { ...posts[0], chat: { id: richChatId }, message_thread_id: 42 }, token: 'fixture',
+    personalOwner: 'u_sources', communityId: 'c_sources', channelTitle: 'Originals',
+  });
+  const replayReport = await buildStatsReport({ ...env }, null, { athenaUserId: 'u_sources' });
+  assert.deepEqual(replayReport.runs.filter(run => run.chat_id === richChatId).map(run => run.state.overall),
+    liveRuns.map(run => run.state.overall), 'fresh report and duplicate delivery retain durable counters');
+  assert.equal(sql.prepare('SELECT count(*) n FROM personal_links WHERE user_id=?').get('u_sources').n, 10);
+  assert.equal(sql.prepare('SELECT count(*) n FROM links WHERE community_id=?').get('c_sources').n, 10);
+  const repeatedPosts = sql.prepare("SELECT message_id,content_id FROM clone_sources WHERE destination='personal:u_sources' AND chat_id=? AND content_id=(SELECT id FROM personal_links WHERE user_id='u_sources' AND url=?) ORDER BY message_id").all(richChatId, hiddenEntities[0].url);
+  assert.deepEqual(repeatedPosts.map(row => row.message_id), ['1', '3', '4'], 'one canonical URL associates every original post');
+
+  const historyPosts = posts.map(post => ({ ...post, id: post.message_id, className: 'Message', message: post.text || '', replyTo: { forumTopic: true, replyToTopId: 42 },
+    ...(post.photo ? { media: { className: 'MessageMediaPhoto', photo: { className: 'Photo', sizes: [{ size: 3 }] } } } : {}) })).reverse();
+  const fullHistoryClient = { ...client, async getMessages(_chat, options) { return historyPosts.filter(post => !options.offsetId || post.id < options.offsetId); }, async downloadMedia() { return new Uint8Array([1, 2, 3]); } };
+  await insert('ij_full_posts', { userId: 'u_history_sources', chatId: '-1006666666667', threadId: '42', topicName: 'Full body', total: 4, minId: 1, maxId: 4 });
+  await runHistoryIndexJob(env, { id: 'ij_full_posts' }, 'fixture', { client: fullHistoryClient, sleep: async () => {} });
+  const fullJob = sql.prepare('SELECT * FROM index_jobs WHERE id=?').get('ij_full_posts');
+  assert.equal(fullJob.status, 'done', fullJob.error);
+  const fullCounts = JSON.parse(fullJob.counters_json);
+  assert.equal(fullCounts.linkPosts, 4);
+  assert.equal(fullCounts.links, 21);
+  assert.equal(sql.prepare('SELECT count(*) n FROM personal_links WHERE user_id=?').get('u_history_sources').n, 10);
+  for (const post of posts) {
+    const saved = sql.prepare("SELECT * FROM clone_posts WHERE destination='personal:u_history_sources' AND message_id=?").get(String(post.message_id));
+    assert.equal(saved.message_text, post.text || post.caption);
+    assert.equal(JSON.parse(saved.urls_json).length, [4, 6, 10, 1][post.message_id - 1]);
+  }
+
+  // Removing one clone source removes its full posts, not another chat's copy
+  // or the independently enriched canonical records.
+  await wipeCloneVaultPaths(env, { chatKeys: [richChatId] });
+  assert.equal(sql.prepare('SELECT count(*) n FROM clone_posts WHERE chat_id=?').get(richChatId).n, 0);
+  assert.equal(sql.prepare('SELECT count(*) n FROM clone_sources WHERE chat_id=?').get(richChatId).n, 0);
+  assert.equal(sql.prepare("SELECT count(*) n FROM clone_posts WHERE destination='personal:u_history_sources'").get().n, 4);
+  assert.equal(sql.prepare('SELECT count(*) n FROM personal_links WHERE user_id=?').get('u_sources').n, 10);
+
+  // Database failures must not advance the page past unsaved source bodies,
+  // provenance or checkpoints. Restart reuses durable content exactly once.
+  for (const table of ['clone_posts', 'clone_sources', 'clone_job_items']) {
+    const id = `ij_db_${table}`;
+    const userId = `u_db_${table}`;
+    const chatId = `-100777777777${['clone_posts', 'clone_sources', 'clone_job_items'].indexOf(table)}`;
+    const history = [{ id: 1, className: 'Message', message: `  https://example.com/db-${table}\nOriginal body survives recovery.\n` }];
+    const failureClient = { ...client, async getMessages(_chat, options) { return history.filter(post => !options.offsetId || post.id < options.offsetId); } };
+    await insert(id, { userId, chatId, total: 1, minId: 1, maxId: 1 });
+    databaseFault = query => new RegExp(`INSERT INTO ${table}\\b`).test(query);
+    try { await runHistoryIndexJob(env, { id }, 'fixture', { client: failureClient, sleep: async () => {} }); }
+    finally { databaseFault = null; }
+    const failed = sql.prepare('SELECT * FROM index_jobs WHERE id=?').get(id);
+    assert.equal(failed.status, 'error', `failed ${table} persistence cannot claim completion`);
+    assert.equal(failed.offset_id, 0, `failed ${table} persistence retains safe page boundary`);
+    assert.equal(sql.prepare('SELECT count(*) n FROM clone_job_items WHERE job_id=?').get(id).n, 0);
+    if (table === 'clone_posts') assert.equal(sql.prepare('SELECT count(*) n FROM personal_links WHERE user_id=?').get(userId).n, 0, 'source persistence precedes canonical writes');
+    sql.prepare("UPDATE index_jobs SET status='queued' WHERE id=?").run(id);
+    await runHistoryIndexJob(env, { id }, 'fixture', { client: failureClient, sleep: async () => {} });
+    const recovered = sql.prepare('SELECT * FROM index_jobs WHERE id=?').get(id);
+    assert.equal(recovered.status, 'done', recovered.error);
+    assert.equal(JSON.parse(recovered.counters_json).messages, 1, 'restart reconstructs counters without failed-attempt inflation');
+    assert.equal(sql.prepare('SELECT count(*) n FROM personal_links WHERE user_id=?').get(userId).n, 1);
+    assert.equal(sql.prepare('SELECT count(*) n FROM clone_sources WHERE transfer_id=?').get(id).n, 1);
+    assert.equal(sql.prepare('SELECT message_text FROM clone_posts WHERE transfer_id=?').get(id).message_text, history[0].message);
+    assert.equal(sql.prepare('SELECT count(*) n FROM clone_job_items WHERE job_id=?').get(id).n, 1);
+    sql.prepare("UPDATE index_jobs SET status='queued',offset_id=0 WHERE id=?").run(id);
+    await runHistoryIndexJob(env, { id }, 'fixture', { client: failureClient, sleep: async () => {} });
+    assert.deepEqual(JSON.parse(sql.prepare('SELECT counters_json FROM index_jobs WHERE id=?').get(id).counters_json), JSON.parse(recovered.counters_json), 'checkpoint replay leaves recovered counters unchanged');
+  }
+
   // Full signed-webhook -> manager -> startBackfillJob -> real runner path.
   // Credentials are synthetic, but their encryption and private account map
   // registration are production code; no runtime client override is involved.
@@ -314,10 +437,12 @@ try {
   }
   async function command(text) { await deliver({ message: { message_id: updateId + 1, from, chat, text } }); }
   async function click(label) {
-    const card = sent.findLast(call => call.method === 'editMessageText' && call.body.reply_markup);
-    const control = card?.body.reply_markup.inline_keyboard.flat().find(button => button.text === label);
+    const card = sent.findLast(call => call.method === 'editMessageText' && call.body.rich_message);
+    const html = card?.body.rich_message?.html || '';
+    const controls = [...html.matchAll(/<tg-button\b[^>]*data="([^"]+)"[^>]*>(.*?)<\/tg-button>/gs)];
+    const control = controls.find(([, , text]) => text === label);
     assert.ok(control, `Missing manager control: ${label}`);
-    await deliver({ callback_query: { id: `runner-callback-${updateId + 1}`, from, data: control.callback_data,
+    await deliver({ callback_query: { id: `runner-callback-${updateId + 1}`, from, data: control[1].replace(/&amp;/g, '&'),
       message: { message_id: card.messageId, chat } } });
   }
   await command('/userbot_add managed 12345 runner-synthetic-hash runner-synthetic-session');

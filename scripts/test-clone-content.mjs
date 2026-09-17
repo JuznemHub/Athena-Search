@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import worker from '../worker/index.js';
-import { classifyCloneMessage, countCloneMessage, emptyCloneCounters, scanCloneHistory } from '../worker/clone-content.js';
+import { Api } from 'telegram';
+import bigInt from 'big-integer';
+import { classifyCloneMessage, countCloneMessage, documentCounter, emptyCloneCounters, scanCloneHistory, sourceClonePost } from '../worker/clone-content.js';
 
 // Exercise the actual authenticated webhook, with SQL executed by SQLite and
 // only the external Bot API replaced. No saved Telegram account is contacted.
@@ -84,6 +86,72 @@ assert.deepEqual(new Set(classifyCloneMessage(linked).urls), new Set([
 const typedUrl = 'https://example.org/exact.';
 assert.deepEqual(classifyCloneMessage({ message: typedUrl, entities: [attr('MessageEntityUrl', { offset: 0, length: typedUrl.length })] }).urls, [typedUrl]);
 
+// Bot API MessageEntity offsets and lengths are UTF-16 code units, as are TL
+// MessageEntityTextUrl offsets. Neither hidden labels nor captions are snippets.
+const hiddenText = '😀 First Second Third Fourth';
+const hiddenEntities = ['First', 'Second', 'Third', 'Fourth'].map((label, index) => ({
+  type: 'text_link', offset: hiddenText.indexOf(label), length: label.length, url: `https://hidden.example/${index}`
+}));
+const fourHidden = { message_id: 31, text: hiddenText, entities: hiddenEntities };
+const sixRawUrls = Array.from({ length: 6 }, (_, index) => `https://raw.example/${index}`);
+const sixRaw = { message_id: 32, text: sixRawUrls.join('\n') };
+const mixedText = `${hiddenText}\n${sixRaw.text}`;
+const mixed = { message_id: 33, text: mixedText, entities: hiddenEntities };
+assert.deepEqual(classifyCloneMessage(fourHidden).urls, hiddenEntities.map(entity => entity.url));
+assert.deepEqual(classifyCloneMessage(sixRaw).urls, sixRawUrls);
+assert.deepEqual(new Set(classifyCloneMessage(mixed).urls), new Set([...hiddenEntities.map(entity => entity.url), ...sixRawUrls]));
+assert.deepEqual(classifyCloneMessage(fourHidden).occurrences[0], {
+  url: hiddenEntities[0].url, type: 'text_link', label: 'First', offset: 3, length: 5, field: 'text'
+});
+const captionPost = { message_id: 34, message_thread_id: 30, caption: `  ${hiddenText}\n`,
+  caption_entities: hiddenEntities.map(entity => ({ ...entity, offset: entity.offset + 2 })),
+  document: { file_id: 'caption-file', file_unique_id: 'caption-unique', file_name: 'paper.pdf', mime_type: 'application/pdf', file_size: 2048 },
+  reply_to_message: { message_id: 29, text: 'The full original reply' }
+};
+assert.equal(classifyCloneMessage(captionPost).topicId, '30');
+assert.deepEqual(classifyCloneMessage(captionPost).occurrences[0], {
+  url: hiddenEntities[0].url, type: 'text_link', label: 'First', offset: 5, length: 5, field: 'caption'
+});
+assert.deepEqual(sourceClonePost(captionPost), { text: captionPost.caption, message: captionPost });
+const repeatedUrl = 'https://repeated.example/';
+const repeated = { text: `${repeatedUrl} then ${repeatedUrl}`, entities: [{ type: 'url', offset: 0, length: repeatedUrl.length }],
+  reply_markup: { inline_keyboard: [[{ text: 'Open again', url: repeatedUrl }, { text: 'Other place', url: repeatedUrl }]] }
+};
+const repeatClass = classifyCloneMessage(repeated);
+assert.deepEqual(repeatClass.urls, [repeatedUrl]);
+assert.deepEqual(repeatClass.occurrences.map(({ type, offset, field }) => ({ type, offset, field })), [
+  { type: 'url', offset: 0, field: 'text' },
+  { type: 'raw', offset: repeatedUrl.length + 6, field: 'text' },
+  { type: 'url', offset: null, field: 'reply_markup.inline_keyboard[0][0]' },
+  { type: 'url', offset: null, field: 'reply_markup.inline_keyboard[0][1]' }
+]);
+const postCounters = emptyCloneCounters();
+for (const post of [fourHidden, sixRaw, mixed, repeated, { text: 'No link' }]) countCloneMessage(postCounters, post);
+assert.equal(postCounters.linkPosts, 4);
+assert.equal(postCounters.links, 21);
+
+const tlSource = new Api.Message({ id: 35, date: 1_800_000_000, message: `  ${hiddenText}\n${'Full original body. '.repeat(1000)}\n`,
+  peerId: new Api.PeerChannel({ channelId: bigInt('9007199254740993') }),
+  groupedId: 9007199254740995n,
+  entities: hiddenEntities.map(({ offset, length, url }) => new Api.MessageEntityTextUrl({ offset: offset + 2, length, url })),
+  replyTo: new Api.MessageReplyHeader({ replyToMsgId: 29, forumTopic: true, replyToTopId: 30 }),
+  media: new Api.MessageMediaDocument({ document: new Api.Document({
+    id: bigInt('9007199254740997'), accessHash: 9007199254740999n, fileReference: Buffer.from([1, 2, 3]),
+    date: 1_800_000_000, mimeType: 'application/pdf', size: 1024n, dcId: 2,
+    attributes: [new Api.DocumentAttributeFilename({ fileName: 'paper.pdf' })]
+  }) })
+});
+const tlPost = sourceClonePost(tlSource);
+assert.equal(tlPost.text, tlSource.message);
+assert.equal(tlPost.message.message, tlSource.message);
+assert.equal(tlPost.message.peerId.channelId, '9007199254740993');
+assert.equal(tlPost.message.groupedId, '9007199254740995');
+assert.equal(tlPost.message.media.document.accessHash, '9007199254740999');
+assert.equal(tlPost.message.media.document.attributes[0].fileName, 'paper.pdf');
+assert.equal(tlPost.message.replyTo.replyToTopId, 30);
+assert.equal(tlPost.message.entities[0].url, hiddenEntities[0].url);
+assert.deepEqual(classifyCloneMessage(tlSource), classifyCloneMessage(tlPost.message));
+
 class DocumentAttributeVideo {}
 class DocumentAttributeAudio {}
 const disguisedVideo = documentMessage(11, 'report.pdf', 'application/pdf', [new DocumentAttributeVideo()]);
@@ -97,6 +165,33 @@ assert.deepEqual(classifyCloneMessage(documentMessage(16, 'bundle.tar.gz', 'appl
 assert.equal(classifyCloneMessage(photoMessage(17)).media.size, 200);
 assert.equal(classifyCloneMessage({ id: 18, media: { className: 'MessageMediaWebPage', webpage: { document: disguisedVideo.media.document } } }).media, null);
 
+const botFile = (fields = {}) => ({ file_id: 'file', file_unique_id: 'unique-file', file_size: 1024, ...fields });
+for (const [message, kind] of [
+  [{ document: botFile({ file_name: 'misleading.mp4', mime_type: 'application/pdf' }) }, 'document'],
+  [{ document: botFile({ file_name: 'notes.pdf', mime_type: 'video/mp4' }) }, 'video'],
+  [{ video: botFile({ file_name: 'notes.pdf', mime_type: 'application/pdf', width: 10, height: 10, duration: 1 }) }, 'video'],
+  [{ video_note: botFile({ length: 10, duration: 1 }) }, 'video'],
+  [{ audio: botFile({ file_name: 'notes.pdf', mime_type: 'application/pdf', duration: 1 }) }, 'audio'],
+  [{ voice: botFile({ mime_type: 'audio/ogg', duration: 1 }) }, 'audio'],
+  [{ animation: botFile({ mime_type: 'video/mp4', width: 10, height: 10, duration: 1 }), document: botFile({ mime_type: 'video/mp4' }) }, 'video'],
+  [{ animation: botFile({ mime_type: 'image/gif', width: 10, height: 10, duration: 1 }), document: botFile({ mime_type: 'image/gif' }) }, 'photo'],
+  [{ sticker: botFile({ type: 'regular', width: 10, height: 10, is_video: true, is_animated: false }) }, 'video'],
+  [{ sticker: botFile({ type: 'regular', width: 10, height: 10, is_video: false, is_animated: true }) }, 'document'],
+  [{ sticker: botFile({ type: 'regular', width: 10, height: 10, is_video: false, is_animated: false }) }, 'photo'],
+  [{ document: botFile({ mime_type: 'application/pdf', thumbnail: botFile({ width: 10, height: 10 }) }) }, 'document']
+]) {
+  assert.equal(classifyCloneMessage(message).media.kind, kind);
+  const counters = emptyCloneCounters();
+  countCloneMessage(counters, message);
+  assert.equal(counters.files, kind === 'video' ? 0 : 1);
+  assert.equal(counters.skippedVideos, kind === 'video' ? 1 : 0);
+}
+assert.equal(classifyCloneMessage({ photo: [botFile({ width: 10, height: 10, file_size: 100 }), botFile({ width: 20, height: 20, file_size: 500 })] }).media.size, 500);
+assert.equal(documentCounter(classifyCloneMessage(captionPost).media), 'pdfs');
+assert.equal(classifyCloneMessage(documentMessage(36, 'animation.gif', 'image/gif', [attr('DocumentAttributeAnimated')])).media.kind, 'photo');
+assert.equal(classifyCloneMessage(documentMessage(37, 'sticker.tgs', 'application/x-tgsticker', [attr('DocumentAttributeSticker')])).media.kind, 'document');
+assert.equal(classifyCloneMessage(documentMessage(38, 'circle.pdf', 'application/pdf', [attr('DocumentAttributeVideo', { roundMessage: true })])).media.kind, 'video');
+
 const counted = emptyCloneCounters();
 for (const message of [
   linked, disguisedVideo, photoMessage(19), documentMessage(20, 'voice.ogg', 'audio/ogg'),
@@ -105,7 +200,7 @@ for (const message of [
   { className: 'MessageService', id: 25, action: attr('MessageActionPinMessage'), replyTo: { replyToMsgId: 10 } },
   { className: 'MessageEmpty', id: 26 },
 ]) countCloneMessage(counted, message);
-assert.deepEqual(counted, { messages: 8, links: 5, files: 7, pdfs: 1, markdown: 1, json: 1, html: 1, other: 1, images: 1, audio: 1, skippedVideos: 1 });
+assert.deepEqual(counted, { messages: 8, links: 5, linkPosts: 1, files: 7, pdfs: 1, markdown: 1, json: 1, html: 1, other: 1, images: 1, audio: 1, skippedVideos: 1 });
 assert.equal(classifyCloneMessage({ replyTo: { replyToMsgId: 99 } }).topicId, null, 'ordinary replies are not forum topics');
 assert.equal(classifyCloneMessage({ replyTo: { forumTopic: true, replyToTopId: 30, replyToMsgId: 99 } }).topicId, '30');
 assert.equal(classifyCloneMessage({ replyTo: { forumTopic: true, replyToMsgId: 30 } }).topicId, '30');

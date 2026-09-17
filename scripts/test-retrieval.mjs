@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { DatabaseSync } from 'node:sqlite';
 
 import {
   buildSearchBlob,
@@ -11,6 +12,10 @@ import {
   followLiveness,
   formatBackfillDone,
   formatBackfillProgress,
+  generateUrlHash,
+  handleSearchLinks,
+  hydrateMeiliRows,
+  hydrateSourcePosts,
   importBackupSql,
   loadLinkNamePattern,
   notesForUrl,
@@ -24,7 +29,9 @@ import {
   parseTelegramEditPayload,
   rankLinks,
   resolveChatEndpoint,
-  resultLimitClause
+  resultLimitClause,
+  searchAllLinks,
+  telegramSearchRowHtml
 } from '../worker/index.js';
 
 assert.equal(resultLimitClause(null), '');
@@ -356,6 +363,112 @@ assert.equal(await detectBackupCommunityId(mockEnvWith(['c_aaa']), `INSERT INTO 
   assert.equal(followLiveness(false, now - 3600_000, now).emoji, '🟢', 'recently seen follow is live');
   assert.equal(followLiveness(false, now - 48 * 3600_000, now).emoji, '⚪', 'stale follow is idle');
   assert.equal(followLiveness(false, 0, now).emoji, '⚪', 'never-seen follow is idle');
+}
+
+// Canonical rows are enrichment; source occurrences must remain complete and scoped.
+{
+  const sqlite = new DatabaseSync(':memory:');
+  sqlite.exec(fs.readFileSync(new URL('../worker/schema.sql', import.meta.url), 'utf8')
+    .replace(/^CREATE EXTENSION[^;]*;/gm, '').replace(/^CREATE INDEX[^;]*USING gin[^;]*;/gm, ''));
+  const DB = {
+    prepare(sql) {
+      const statement = (params = []) => ({
+        bind(...values) { return statement(values.map(value => value ?? null)); },
+        async run() { const result = sqlite.prepare(sql).run(...params); return { success: true, meta: { changes: Number(result.changes) } }; },
+        async first(column) { const row = sqlite.prepare(sql).get(...params); return row ? (column ? row[column] : row) : null; },
+        async all() { return { results: sqlite.prepare(sql).all(...params) }; }
+      });
+      return statement();
+    }
+  };
+  const env = { DB };
+  const user = { id: 'source_reader', provider: 'fixture' };
+  const url = 'https://hidden.example/tool';
+  const rawUrl = 'https://raw.example/reference';
+  const hash = generateUrlHash(url);
+  const body = `  Tool label\n${'Original paragraph with spacing.  '.repeat(180)}\n${rawUrl}\nsourceonlyneedle\nLast line <keep>  `;
+  const message = { message: body, entities: [{ className: 'MessageEntityTextUrl', offset: 2, length: 10, url }], media: { document: { id: '9007199254740993' } }, replyTo: { replyToMsgId: 7 } };
+  try {
+    sqlite.prepare('INSERT INTO users (id,username,created_at) VALUES (?,?,?)').run(user.id, user.id, 1);
+    for (const community of ['source_community', 'other_community']) {
+      sqlite.prepare('INSERT INTO communities (id,name,creator_id,created_at) VALUES (?,?,?,?)').run(community, community, user.id, 1);
+      sqlite.prepare('INSERT INTO community_members (community_id,user_id,joined_at) VALUES (?,?,?)').run(community, user.id, 1);
+    }
+    sqlite.prepare('INSERT INTO users (id,username,created_at) VALUES (?,?,?)').run('other_reader', 'other_reader', 1);
+    for (const [table, column, key, id] of [
+      ['personal_links', 'user_id', user.id, 'personal_hit'],
+      ['personal_links', 'user_id', 'other_reader', 'other_hit'],
+      ['links', 'community_id', 'source_community', 'community_hit'],
+      ['links', 'community_id', 'other_community', 'foreign_hit']
+    ]) {
+      const columns = table === 'links' ? ',added_by' : '';
+      const values = table === 'links' ? [user.id] : [];
+      sqlite.prepare(`INSERT INTO ${table} (id,${column},url,url_hash,title,notes,tags,created_at,metadata_version${columns}) VALUES (?,?,?,?,?,?,?,?,?${values.length ? ',?' : ''})`)
+        .run(id, key, url, hash, 'Enriched tool title', 'Independent canonical summary', '[]', 1, 3, ...values);
+    }
+    sqlite.prepare('INSERT INTO personal_links (id,user_id,url,url_hash,title,notes,created_at,metadata_version) VALUES (?,?,?,?,?,?,?,?)')
+      .run('raw_hit', user.id, rawUrl, generateUrlHash(rawUrl), 'Reference', 'Reference enrichment', 1, 3);
+    await hydrateSourcePosts(env, 'personal', user.id, [{ id: 'personal_hit', url }]);
+    const postInsert = sqlite.prepare('INSERT INTO clone_posts (destination,chat_id,topic_id,message_id,message_text,message_json,urls_json,topic_name,message_date,source_url,transfer_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)');
+    const sourceInsert = sqlite.prepare('INSERT INTO clone_sources (destination,chat_id,topic_id,message_id,content_key,content_id,status,transfer_id) VALUES (?,?,?,?,?,?,?,?)');
+    const addPost = (destination, mid, text, contentId, status = 'saved') => {
+      postInsert.run(destination, '-1001234567', '7', mid, text, JSON.stringify({ ...message, message: text, entities: text === body ? message.entities : [] }), JSON.stringify([{ url, label: 'Tool label' }]), 'Research', Number(mid), `https://t.me/c/1234567/${mid}`, 'source_fixture');
+      sourceInsert.run(destination, '-1001234567', '7', mid, `url:${hash}`, contentId, status, 'source_fixture');
+    };
+    addPost(`personal:${user.id}`, '10', body, 'personal_hit');
+    sourceInsert.run(`personal:${user.id}`, '-1001234567', '7', '10', `url:${generateUrlHash(rawUrl)}`, 'raw_hit', 'saved', 'source_fixture');
+    // Source-only association: URL dedupe can have no content_id but still maps to the canonical URL.
+    addPost(`personal:${user.id}`, '11', '  Repeated post, separate original body  ', null, 'duplicate');
+    addPost(`personal:${user.id}`, '12', 'failed-source-must-not-appear', null, 'failed');
+    addPost('personal:other_reader', '10', 'private-foreign-source', 'other_hit');
+    addPost('community:source_community', '10', '  Community original body  ', 'community_hit');
+    addPost('community:other_community', '10', 'foreign-community-source', 'foreign_hit');
+    const assertPersonalSources = rows => {
+      const row = rows.find(item => item.id === 'personal_hit');
+      assert.ok(row, 'canonical hidden URL is found');
+      assert.deepEqual(row.source_posts.map(post => post.message_id).sort(), ['10', '11'], 'all repeated source posts, including URL-only association');
+      const full = row.source_posts.find(post => post.message_id === '10');
+      assert.equal(full.message_text, body, 'original body is untrimmed and not clipped');
+      assert.deepEqual(full.message, message, 'entities, media and reply metadata survive');
+      assert.equal(full.topic_name, 'Research');
+      assert.equal(full.source_url, 'https://t.me/c/1234567/10');
+      assert.ok(row.source_posts.every(post => post.destination === `personal:${user.id}`));
+      assert.equal(row.notes, 'Independent canonical summary');
+      return row;
+    };
+    assertPersonalSources(await hydrateSourcePosts(env, 'personal', user.id, [{ id: 'personal_hit', url, notes: 'Independent canonical summary' }]));
+    for (const query of [url, url + '/', 'sourceonlyneedle']) {
+      const rows = await searchAllLinks(env, 'personal', user.id, query);
+      assertPersonalSources(rankLinks(rows, query));
+    }
+    const rawRows = await searchAllLinks(env, 'personal', user.id, rawUrl);
+    const rawPost = rawRows.find(row => row.id === 'raw_hit').source_posts;
+    assert.equal(rawPost.length, 1);
+    assert.equal(rawPost[0].message_text, body, 'a raw URL in a multi-link post retrieves the same whole original as its hidden URL');
+    const meiliRows = await hydrateMeiliRows(env, 'personal', user.id, [
+      { id: 'personal_hit', url, notes: 'index snippet' },
+      { id: 'other_hit', url, notes: 'foreign index hit' },
+      { id: 'deleted_hit', url, notes: 'stale index hit' }
+    ]);
+    assert.deepEqual(meiliRows.map(row => row.id), ['personal_hit'], 'foreign and deleted index hits are not returned');
+    const hydrated = assertPersonalSources(meiliRows);
+    const html = telegramSearchRowHtml(hydrated);
+    assert.ok(html.includes('Original paragraph with spacing.  '.repeat(180)), 'Telegram keeps body beyond its old 360-character snippet');
+    assert.ok(html.includes('Last line &lt;keep&gt;  '), 'Telegram retains and escapes the body ending');
+    assert.ok(html.includes(`<a href="${url}">Tool label</a>`), 'hidden URL retains its visible entity label');
+    assert.ok(html.includes('Repeated post, separate original body'));
+    assert.doesNotMatch(html, /private-foreign-source|foreign-community-source|failed-source/);
+    for (const [scope, key, expected] of [['personal', user.id, body], ['community', 'source_community', '  Community original body  ']]) {
+      const api = new URL(`https://fixture.invalid/api/links/search?scope=${scope}&community_id=${key}&q=${encodeURIComponent(url)}`);
+      const response = await handleSearchLinks(api, user, env, {});
+      assert.equal(response.status, 200);
+      const payload = await response.json();
+      assert.ok(payload.links.some(row => row.source_posts.some(post => post.message_text === expected)));
+      assert.ok(payload.links.every(row => row.source_posts.every(post => post.destination === `${scope}:${key}`)), 'API cannot cross source destinations');
+    }
+  } finally {
+    sqlite.close();
+  }
 }
 
 console.log('retrieval tests passed');

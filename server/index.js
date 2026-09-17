@@ -13,6 +13,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import worker, { getInstanceAiConfig, getSteroidMode, syncAiConfigToPeer, syncSteroidToPeer, resumeCloneJobs, syncInstanceTelegramCommands } from '../worker/index.js';
+import { installConsoleLogging } from '../worker/runtime-logs.js';
 import { createAssets } from './assets.js';
 import { startBackups, runBackupOnce } from './backup.js';
 import { PostgresD1, translateSchema } from './pgdb.js';
@@ -204,6 +205,7 @@ server.listen(PORT, HOST, () => {
   if (!process.env.TG_OWNER_IDS) {
     console.log('[athena] WARNING: TG_OWNER_IDS is empty — every logged-in user is GOD. Set it before exposing this.');
   }
+  installConsoleLogging(env);
   startBackups({ connectionString: DATABASE_URL, env: process.env, db: DB });
 
   // Refresh Telegram "/" command menus (default + GOD scopes) on boot.

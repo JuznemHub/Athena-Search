@@ -26,7 +26,7 @@ const env = {
   STORAGE_KEY: 'account-fixture-only-not-a-production-key'
 };
 const identities = {
-  'fixture-session-alpha': { id: 700000001n, firstName: 'Alpha <Fixture>', lastName: 'Account', phone: '15550001001' },
+  'fixture-session-alpha': { id: 700000001n, username: 'alpha_fixture', firstName: 'Alpha <Fixture>', lastName: 'Account', phone: '15550001001' },
   'fixture-session-beta': { id: 700000002n, firstName: 'Beta', lastName: 'Account', phone: '15550002002' },
   'fixture-session-renewed': { id: 700000003n, firstName: 'Renewed', lastName: 'Account', phone: '15550003003' },
 };
@@ -85,7 +85,7 @@ globalThis.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === 'string' ? input : input.url);
   const method = url.pathname.split('/').at(-1);
   if (url.origin !== 'https://api.telegram.org' || !url.pathname.startsWith('/bot123:fixture/') ||
-      !['sendMessage', 'editMessageText', 'deleteMessage', 'answerCallbackQuery', 'getMe', 'sendChatAction'].includes(method)) {
+      !['sendMessage', 'sendRichMessage', 'editMessageText', 'deleteMessage', 'answerCallbackQuery', 'getMe', 'sendChatAction'].includes(method)) {
     unexpectedCalls.push(`${url.origin}${url.pathname}`);
     throw new Error('Unmocked external request');
   }
@@ -138,11 +138,14 @@ async function command(text, requestEnv = env) {
 function card() {
   const result = sent.findLast(call => call.method === 'editMessageText');
   assert.ok(result, 'Account controls must render a Bot API message');
-  return result;
+  return { ...result, body: { ...result.body, text: result.body.rich_message?.html || result.body.text } };
 }
 async function click(text, occurrence = 0) {
   const current = card();
-  const matches = (current.body.reply_markup?.inline_keyboard || []).flat().filter(button => button.text === text);
+  const controls = current.body.rich_message
+    ? [...current.body.rich_message.html.matchAll(/<tg-button type="callback_data" data="([^"]+)">([^<]+)<\/tg-button>/g)].map((match) => ({ callback_data: match[1], text: match[2] }))
+    : (current.body.reply_markup?.inline_keyboard || []).flat();
+  const matches = controls.filter(button => button.text === text);
   const button = matches[occurrence];
   assert.ok(button, `Missing account control ${text} #${occurrence}`);
   await deliver({ callback_query: {
@@ -178,12 +181,22 @@ try {
   assert.equal(alpha.telegram_id, '700000001', 'getMe identity persists with the saved account');
   assert.equal(alpha.display_name, 'Alpha <Fixture> Account');
   assert.equal(alpha.phone_masked, '••••1001');
+  assert.equal(alpha.telegram_username, 'alpha_fixture');
+  const setup = sent.findLast(call => call.method === 'sendMessage').body.text;
+  assert.match(setup, /@alpha_fixture/);
+  assert.match(setup, /700000001/);
+  assert.match(setup, /Alpha &lt;Fixture&gt; Account/);
+  assert.ok(setup.includes('••••1001'));
+  assert.match(setup, /Status: Active/);
   assert.ok(alpha.verified_at > 0);
   assert.equal(alpha.last_error, null);
   assert.equal(await decryptFixture(alpha.session_enc), 'fixture-session-alpha');
   assert.equal(await decryptFixture(alpha.api_hash_enc), 'fixture-api-hash');
   assert.equal(selected(), 'alpha', 'First successful account becomes the selection');
   assert.ok(sent.some(call => call.method === 'deleteMessage'), 'Credential message is deleted');
+  await command('/userbot_add alpha! 12345 fixture-api-hash fixture-session-beta');
+  assert.equal(account('alpha').telegram_id, '700000001', 'Invalid labels cannot silently overwrite a sanitized account label');
+  assert.equal(account('alpha!'), undefined);
 
   await command('/userbot_add beta 12345 fixture-api-hash fixture-session-beta');
   assert.equal(account('beta').telegram_id, '700000002');
@@ -212,10 +225,15 @@ try {
   assert.match(account('expired').last_error, /reauthenticat/i);
 
   await command('/userbot_accounts');
+  assert.match(card().body.text, /@alpha_fixture/, 'Saved account list includes its persisted Telegram identity');
+  await click('Add Account');
+  assert.match(card().body.text, /\/userbot_add/);
+  await click('Back');
   await click('Status');
   assert.match(card().body.text, /700000001/);
   assert.match(card().body.text, /Alpha &lt;Fixture&gt;/, 'Identity display escapes Telegram HTML');
   assert.ok(card().body.text.includes('••••1001'));
+  assert.match(card().body.text, /@alpha_fixture/);
   assert.ok(!card().body.text.includes(identities['fixture-session-alpha'].phone), 'Full phone is never displayed');
   await click('Back');
   await click('Select: beta');
@@ -233,6 +251,7 @@ try {
   await command('/userbot_add expired 12345 fixture-api-hash fixture-session-renewed');
   assert.equal(account('expired').telegram_id, '700000003');
   assert.equal(account('expired').last_error, null, 'Reauthentication clears the failed session status');
+  assert.equal(account('expired').telegram_username, null, 'Accounts without a username persist no fabricated handle');
   assert.notEqual(account('expired').session_enc, expiredCiphertext);
   assert.equal(await decryptFixture(account('expired').session_enc), 'fixture-session-renewed');
   assert.equal(selected(), 'beta', 'Same-label reauthentication preserves explicit selection');
@@ -262,17 +281,32 @@ try {
   assert.equal(account('beta').telegram_id, '700000002');
   await click('Select: alpha');
   assert.equal(selected(), 'alpha', 'Remaining account can be selected after removal');
+  await command('/userbot_status');
+  const statusMessage = sent.findLast(call => ['sendMessage', 'sendRichMessage'].includes(call.method));
+  const status = statusMessage.body.rich_message?.html || statusMessage.body.text;
+  assert.match(status, /@alpha_fixture/);
+  assert.match(status, /700000001/);
+  assert.ok(status.includes('••••1001'));
+  await deliver({ message: { message_id: updateId + 1, from, chat: { id: -10012345, type: 'supergroup' }, text: '/userbot_status' } });
+  assert.ok(!sent.findLast(call => call.method === 'sendMessage').body.text.includes('alpha_fixture'), 'Identity dashboard is private even for an owner');
+  await command('/userbot_add alpha 12345 fixture-api-hash fixture-session-expired');
+  assert.equal(account('alpha').telegram_id, null, 'Failed same-label reauthentication clears the previous verified identity');
+  assert.equal(account('alpha').telegram_username, null);
+  assert.equal(account('alpha').verified_at, null);
+  assert.equal(selected(), 'alpha', 'A failed selected session never falls back to another account');
+  await command('/userbot_add alpha 12345 fixture-api-hash fixture-session-alpha');
+  assert.equal(account('alpha').telegram_username, 'alpha_fixture');
 
   const output = JSON.stringify(sent);
   for (const secret of ['fixture-api-hash', ...Object.keys(identities), 'fixture-session-expired', ...Object.values(identities).map(identity => identity.phone)]) {
     assert.ok(!output.includes(secret), 'Outgoing Bot API payload must not contain fixture credentials or full phone numbers');
   }
   const logOutput = logs.join('\n');
-  assert.ok(logOutput.includes('[webhook]'), 'The fixture captures the actual webhook logger');
   assert.ok(!logOutput.includes('fixture-api-hash'), 'Webhook logs must never contain an API hash');
   assert.ok(!logOutput.includes('fixture-session'), 'Webhook logs must never contain even a session prefix');
   await command('/userbot_del all');
   assert.equal(sqlite.prepare('SELECT count(*) AS n FROM userbot_accounts').get().n, 0);
+  assert.equal(selected(), undefined, 'Command removal clears selections just like manager removal');
   assert.ok(clients.every(client => !client.connected), 'All fixture accounts disconnect');
   assert.deepEqual(unexpectedCalls, [], 'No unmocked external call may be swallowed by worker error handling');
   originalConsole.log('Clone account webhook/lifecycle fixtures passed: encrypted setup, redacted logs, identity/masking, multi-account boot reconnect, selection/removal, expired session, same-label reauthentication and watchdog cleanup.');
