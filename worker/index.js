@@ -59,7 +59,8 @@ async function unifiedClone(update,env,ctx){
   const threadKey = topic || null;
   const running=await env.DB.prepare(`SELECT id FROM index_jobs WHERE chat_id=? AND status IN ('queued','running') AND COALESCE(thread_id, '') = COALESCE(?, '')`).bind(normRemote,threadKey).first().catch(()=>null);
   if(running){ await richSend(`<h3>⏳ Already running</h3><p>Clone for <code>${remote}</code>${topic?` topic <code>#${topic}</code>`:''} is already running — progress via /userbot_status.</p>`); return new Response('OK'); }
-  const pend=await env.DB.prepare(`SELECT id FROM pending_clones WHERE chat_id=? AND expires_at>? AND COALESCE(thread_id, '') = COALESCE(?, '')`).bind(normRemote,Date.now(),threadKey).first().catch(()=>null);
+  const pendingRows=await env.DB.prepare(`SELECT id,stats_json FROM pending_clones WHERE chat_id=? AND expires_at>? AND COALESCE(thread_id, '') = COALESCE(?, '')`).bind(normRemote,Date.now(),threadKey).all();
+  const pend=(pendingRows.results || []).find(row => JSON.parse(row.stats_json || '{}').manager !== 'uclone');
   if(pend){ await richSend(`<h3>⏳ Clone preview ready</h3><p>Preview for <code>${remote}</code> is ready — resuming auto-confirm now, hold on.</p>`);
     const resume=(async()=>{ const y=structuredClone(update); y.message.text='yes'; y.message.caption=undefined; y.message.entities=[]; if(y.message&&y.message.message_id!=null) y.message.message_id=y.message.message_id+1000000; if(y.update_id!=null) y.update_id=y.update_id+1; try{ await legacyFetch(y,env); }catch(_){ await richSend(`<h3>❌ Clone failed</h3><p>Clone confirm step failed — check /userbot_status or retry.</p>`); } })();
     if(ctx&&typeof ctx.waitUntil==='function') ctx.waitUntil(resume.catch(()=>{})); else await resume.catch(()=>{});
@@ -163,6 +164,7 @@ async function cloneStop(update,env){ const msg=update.message,args=parts(msg.te
 async function stats(update,env){ return legacyFetch(cloneUpdate(update,'/stats'),env); }
 async function ucloneDel(update,env){ const msg=update.message,args=parts(msg.text).slice(1),chat=args.find(x=>/^-?\d{5,}$/.test(x)); if(!chat) return reply(env.TELEGRAM_BOT_TOKEN,msg.chat.id,'Usage: /uclone_del <chat_id> [topic_id]'); const topic=args.find(x=>/^\d{1,9}$/.test(x)&&x!==chat); return legacyFetch(cloneUpdate(update,`/delete ${chat}${topic?` ${topic}`:''} files`),env); }
 async function intercept(update,env,ctx){ const msg=update.message; if(!msg?.text||!env.TELEGRAM_BOT_TOKEN) return null;
+  if (command(msg.text) === '/uclone' || command(msg.text) === '/ubclone') return null;
   // A bare topic-id or 'all' reply while the shim is waiting on a forum choice:
   // route it to a real clone. Without this the reply matched no command and the
   // clone silently never started.

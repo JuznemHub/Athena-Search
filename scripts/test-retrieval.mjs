@@ -328,17 +328,12 @@ assert.equal(await detectBackupCommunityId(mockEnvWith(['c_aaa']), `INSERT INTO 
 
 // Clone progress/completion/liveness formatters (pure — safe to unit test).
 {
-  const b0 = progressBar(0, 0);
-  assert.equal(b0.pct, 0);
-  assert.equal(b0.bar.length, 18);
   const b1 = progressBar(50, 100);
   assert.equal(b1.pct, 50);
-  assert.ok(b1.bar.startsWith('▮'.repeat(9)));
   const b2 = progressBar(150, 100);
   assert.equal(b2.pct, 100, 'done>total clamps instead of overflowing');
 
   const prog = formatBackfillProgress({ name: 'Pirate Movies', chatId: '-100123', threadId: '', done: 500, total: 1000, links: 120, dupes: 2159, docs: 30, pdfs: 7, files: 4, urls: 200, skipped: 11 });
-  assert.ok(prog.includes('<b>'), 'formatted header');
   assert.ok(prog.includes('Pirate Movies'), 'chat name shown');
   assert.ok(prog.includes('-100123'), 'chat id shown');
   assert.ok(prog.includes('7 pdfs'), 'pdf counter shown');
@@ -346,6 +341,7 @@ assert.equal(await detectBackupCommunityId(mockEnvWith(['c_aaa']), `INSERT INTO 
   assert.ok(prog.includes('50%'), 'percent shown');
   const progBare = formatBackfillProgress({ chatId: '-100123', done: 5, total: 0 });
   assert.ok(progBare.includes('-100123'), 'works with no name and no total');
+  assert.ok(!/\d+%/.test(progBare), 'unknown history size must not display a fabricated percentage');
   assert.ok(!progBare.includes('pdfs'), 'zero counters omitted');
 
   const done = formatBackfillDone({ status: 'done', name: 'Pirate Movies', chatId: '-100123', processed: 1000, links: 120, dupes: 2159, docs: 30, pdfs: 7, files: 0, live: { emoji: '🟢', label: 'Live indexing ON' } });

@@ -200,23 +200,25 @@ Then in a **private bot DM**:
 - `/index_stop` cancels; jobs resume from their cursor;
 - the session is AES-GCM encrypted at rest (`STORAGE_KEY`) and auto-deleted when the job completes.
 
-### Userbot mode: live cloning without adding the bot
+### Managed userbot mode: persistent accounts and the clone wizard
 
-Bot mode requires the bot to be an admin of each channel/group. **Userbot mode** removes that requirement: a Telegram *user account* (via session string) does the cloning, so any chat the account can read can be mirrored — including channels where adding bots is impossible.
+The one-session userbot commands above still work. For several accounts or a guided flow, self-hosted Athena also has a managed mode with a persistent account store and an interactive wizard in the bot DM:
 
 ```text
-/userbot_connect <api_id> <api_hash> <session_string>   # GOD, bot DM, self-host
-/userbot_follow <community_id> <chat_id> [community|personal|both]
-/userbot_status
-/userbot_unfollow <chat_id>
-/userbot_disconnect    # stops the daemon and deletes the stored session
+/userbot_add <label> <api_id> <api_hash> <session_string>  # save an encrypted account
+/userbot_accounts                                          # list, select, re-authenticate, remove
+/userbot_select                                            # pick the account future clones use
+/uclone <chat_id>          # scan a channel/group, preview exact statistics, pick a destination
+/ubclone <chat_id>         # same wizard, whole-chat instead of per-topic
+/userbot_status            # accounts, follows, backfill progress
 ```
 
-- generate the session with `node scripts/gen-session.js` (the account must already be a member of the chats you want to follow);
-- followed chats clone **live** — links, documents (pdf/epub/…), and text posts — into the chosen target (`community` / `personal` / `both`, rank rules identical to channel targets);
-- existing history: run `/index_start` for that chat once (optionally with `thread_id`);
-- the session is AES-GCM encrypted at rest under `STORAGE_KEY`; `/userbot_disconnect` deletes it completely;
-- self-hosted only (needs the persistent Node process; gramjs is bundled).
+- every saved session is AES-GCM encrypted at rest (`STORAGE_KEY`); credentials typed into a command are never logged;
+- `/uclone` scans the accessible history first (it never guesses totals it cannot measure), shows per-topic statistics, then asks where to copy: your personal brain, one of your communities, or both (combined destinations copy to both brains);
+- forum groups list their topics with pagination (more than 100 topics work); choosing "All topics, sequentially" clones topic by topic, one live progress card;
+- videos are excluded by design; links, documents (pdf/epub/md/…), images and audio are cloned with per-message provenance, so re-cloning the same source never duplicates rows;
+- a failed item is recorded and cloning continues; Telegram flood-waits are honored; interrupted jobs resume from their cursor after restart;
+- `/transfers` lists clone sessions, `/clone_del <id> [files]` removes everything one clone imported.
 
 ### Local Bot API server (2 GB files)
 
@@ -252,6 +254,7 @@ Useful commands:
 | `/index_start ...` | Start optional self-hosted history backfill (optional `thread_id`). |
 | `/index_status` / `/index_stop` | Inspect or cancel a backfill. |
 | `/community_join <id>` | Join a community after joining its Telegram group. |
+| `/uclone <chat_id>` | GOD: clone a channel/group via the account wizard (personal/community/both). |
 | `/personal` / `/community` | Switch the GOD user’s dump target. |
 | `/delete <url>` | Delete a link, or reply to a saved link with `/delete`. |
 
