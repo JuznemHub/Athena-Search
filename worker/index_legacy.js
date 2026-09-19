@@ -9483,6 +9483,21 @@ ${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, f
 const INDEX_BATCH = 100;
 const INDEX_BATCH_DELAY_MS = 1500; // ~40 req/min ceiling — well under Telegram's flood limits
 
+/**
+ * Flood-wait retry policy for one operation (a download, a link save, a page
+ * read).
+ *
+ * Retrying on the server-announced boundary is not enough: a throttled
+ * `upload.getFile` keeps re-tripping the limiter, so the announced 1s never
+ * clears it and the runner sits on one message forever — the item is never
+ * saved, the cursor never moves and no error is ever reported. Each retry
+ * therefore pauses for at least the announced time, escalating through
+ * FLOOD_PAUSE_SECONDS so a sustained throttle gets a real quiet period; after
+ * the last step the flood is raised so the run stops with the flood reason
+ * instead of looping.
+ */
+const FLOOD_PAUSE_SECONDS = [10, 60, 300];
+
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 /**
@@ -10037,7 +10052,7 @@ function countCloneSave(item, key, media, result) {
   if (key === 'text' || (key === 'media' && result.saved)) item.savedDocs++;
 }
 
-async function persistCloneComponent(env, { job, sink, message, classification, topicId, item, key, save, replay = true }) {
+async function persistCloneComponent(env, { job, sink, message, classification, topicId, item, key, save, replay = true, stopOnFlood = false }) {
   const destination = sink + ':' + (sink === 'personal' ? job.user_id : job.community_id);
   const mid = String(message.id ?? message.message_id);
   const identity = [destination, job.chat_id, topicId, mid, key];
@@ -10067,7 +10082,10 @@ async function persistCloneComponent(env, { job, sink, message, classification, 
       if (result.duplicate) status = 'duplicate';
     } catch (error) {
       const failure = cloneFailure(error);
-      if (error.name === 'AbortError' || ['session', 'permission'].includes(failure.category)) throw error;
+      // A sustained flood is an account-level stop, not an item failure: the
+      // cursor is already checkpointed, so stopping lets the run resume cleanly
+      // instead of marking every remaining item failed.
+      if (error.name === 'AbortError' || ['session', 'permission'].includes(failure.category) || (stopOnFlood && failure.category === 'flood')) throw error;
       status = 'failed'; category = failure.category;
       console.error('[clone-media-diag]', key, category, String(error?.message || error).slice(0, 200));
     }
@@ -10201,12 +10219,21 @@ async function runHistoryIndexJob(env, initialJob, token, runtime = {}) {
       };
       const request = async (operation) => {
         let retries = 0;
+        let floodRetries = 0;
         for (;;) {
           if (await stopped()) { const error = new Error('Clone stopped'); error.name = 'AbortError'; throw error; }
           await ubWaitForRelease(job.userbot_label);
           try { return await operation(); } catch (error) {
-            console.error('[clone-req-diag]', JSON.stringify({ message: String(error?.message || error).slice(0, 200), errorMessage: error?.errorMessage ?? null, seconds: error?.seconds ?? null, name: error?.name ?? null, className: error?.className ?? null, category: cloneFailure(error).category }));
-            if (Number(error?.seconds) > 0) { counters.retries++; ubReportFlood(job.userbot_label, Number(error.seconds)); await progress(); continue; }
+            const announced = Number(error?.seconds) || 0;
+            if (announced > 0) {
+              counters.retries++;
+              if (floodRetries >= FLOOD_PAUSE_SECONDS.length) throw error;
+              const pause = Math.max(announced, FLOOD_PAUSE_SECONDS[floodRetries]);
+              floodRetries++;
+              ubReportFlood(job.userbot_label, pause);
+              await progress();
+              continue;
+            }
             if (cloneFailure(error).category === 'network' && retries++ < 3) { counters.retries++; await wait(1000 * 2 ** retries); continue; }
             throw error;
           }
@@ -10254,7 +10281,7 @@ async function runHistoryIndexJob(env, initialJob, token, runtime = {}) {
             const topicId = String(job.thread_id || classification.topicId || (entity.forum ? '1' : ''));
             let downloaded, durable = true;
             const component = async (sink, key, save) => {
-              if (!await persistCloneComponent(env, { job, sink, message, classification, topicId, item, key, save })) durable = false;
+              if (!await persistCloneComponent(env, { job, sink, message, classification, topicId, item, key, save, stopOnFlood: true })) durable = false;
             };
             for (const sink of sinks) {
               try { await persistClonePost(env, job, sink, message, classification, topicId); }

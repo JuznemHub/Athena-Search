@@ -357,7 +357,7 @@ export function createUcloneManager(env, deps) {
             await sleep(2000);
           }
           if (run.state.cancelled || child.status === 'stopped') { run.state.stage = 'stopped'; await progress(run, token, child, true); return; }
-          if (child.status !== 'done') throw new Error(child.error || 'CHILD_JOB_FAILED');
+          if (child.status !== 'done') { const failure = new Error(child.error || 'CHILD_JOB_FAILED'); failure.childReason = child.error || null; throw failure; }
           run.state.cursor = (run.state.cursor || 0) + 1;
           run.state.childId = null;
           run.state.transition = `Topic completed: ${topic.name || 'source'}`;
@@ -366,7 +366,7 @@ export function createUcloneManager(env, deps) {
         }
       } catch (error) {
         run = await load(id);
-        if (run) { run.state.stage = 'error'; run.state.error = cloneFailure(error).message; await progress(run, token, null, true); }
+        if (run) { run.state.stage = 'error'; run.state.error = error.childReason || cloneFailure(error).message; await progress(run, token, null, true); }
       }
     })();
     activeRuns.set(id, operation);
