@@ -6,6 +6,9 @@ const accountQueues = new Map();
 const terminal = new Set(['done', 'stopped', 'error']);
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Pause before re-running a topic that could not finish, so a transient write
+// or flood failure has a chance to clear before the single retry.
+const TOPIC_RETRY_PAUSE_MS = 60000;
 const uuid = () => crypto.randomUUID().replace(/-/g, '').slice(0, 20);
 
 export function cloneFailure(error) {
@@ -326,7 +329,17 @@ export function createUcloneManager(env, deps) {
           }
           if (run.community_id && !await deps.authorizeCommunity({ id: run.requester_user_id }, run.community_id)) throw new Error('permission revoked');
           const topic = run.state.chosen[run.state.cursor || 0];
-          if (!topic) { run.state.stage = 'done'; run.state.transition = null; await progress(run, token, null, true); return; }
+          if (!topic) {
+            const failed = run.state.failedTopics || [];
+            run.state.transition = null;
+            if (failed.length) {
+              const names = failed.slice(0, 4).map((f) => f.name || f.id).join(', ');
+              run.state.stage = 'error';
+              run.state.error = `${failed.length}/${run.state.chosen.length} topic(s) failed: ${names}${failed.length > 4 ? `, +${failed.length - 4} more` : ''}. Retry the clone to redo them — completed topics are skipped.`;
+            } else run.state.stage = 'done';
+            await progress(run, token, null, true);
+            return;
+          }
           const jobId = run.state.childId || `ij_${run.id}_${run.state.cursor || 0}`;
           run.state.childId = jobId;
           run.state.stage = 'running';
@@ -357,16 +370,41 @@ export function createUcloneManager(env, deps) {
             await sleep(2000);
           }
           if (run.state.cancelled || child.status === 'stopped') { run.state.stage = 'stopped'; await progress(run, token, child, true); return; }
-          if (child.status !== 'done') { const failure = new Error(child.error || 'CHILD_JOB_FAILED'); failure.childReason = child.error || null; throw failure; }
+          if (child.status !== 'done') {
+            // One topic must not kill a multi-topic run. A topic that could not
+            // finish (an association write failed, so its cursor never advanced)
+            // is retried once from its own checkpoint; if it still fails the run
+            // records it and moves on, ending in error with a summary instead of
+            // abandoning every remaining topic.
+            if (run.state.retriedChildId !== jobId) {
+              run.state.retriedChildId = jobId;
+              run.state.transition = `Topic failed, retrying: ${topic.name || 'source'}`;
+              await persist(run);
+              await db.prepare("UPDATE index_jobs SET status='queued', error=NULL, updated_at=? WHERE id=? AND status='error'").bind(clock(), jobId).run();
+              await progress(run, token, child, true);
+              await sleep(TOPIC_RETRY_PAUSE_MS);
+              continue;
+            }
+            const reason = child.error || cloneFailure(new Error('CHILD_JOB_FAILED')).message;
+            run.state.failedTopics = [...(run.state.failedTopics || []), { id: topic.id, name: topic.name || '', reason }];
+            run.state.cursor = (run.state.cursor || 0) + 1;
+            run.state.childId = null;
+            run.state.retriedChildId = null;
+            run.state.transition = `Topic failed: ${topic.name || 'source'}`;
+            await progress(run, token, child, true);
+            if (run.state.isForum) await sleep(8000);
+            continue;
+          }
           run.state.cursor = (run.state.cursor || 0) + 1;
           run.state.childId = null;
+          run.state.retriedChildId = null;
           run.state.transition = `Topic completed: ${topic.name || 'source'}`;
           await progress(run, token, child, true);
           if (run.state.isForum) await sleep(8000);
         }
       } catch (error) {
         run = await load(id);
-        if (run) { run.state.stage = 'error'; run.state.error = error.childReason || cloneFailure(error).message; await progress(run, token, null, true); }
+        if (run) { run.state.stage = 'error'; run.state.error = cloneFailure(error).message; await progress(run, token, null, true); }
       }
     })();
     activeRuns.set(id, operation);
