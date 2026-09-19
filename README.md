@@ -181,6 +181,8 @@ Groups work out of the box once bound with `/community_verify`: member links and
 
 New posts in a linked topic are indexed in real time; existing topic history is pulled in by the backfill below (pass the thread id as the last argument).
 
+For the guided Bot API flow, run `/clone` inside the linked group. Confirming `/clone` enables live copying without a userbot: omit the topic id to cover the group and all topics, or pass a topic id (or run it inside that topic) to bind one forum topic. The Bot API still cannot read earlier history; use `/uclone` or `/index_start` for history.
+
 ### History backfill (one-time, self-hosted)
 
 Bots cannot read old messages. To clone everything already in a channel/group/topic, run a one-time backfill with your own session:
@@ -212,6 +214,10 @@ The one-session userbot commands above still work. For several accounts or a gui
 /ubclone <chat_id>         # alias for the same managed wizard
 /userbot_status            # accounts, follows, backfill progress
 ```
+
+The destination picker is intentionally explicit: `Personal` is the private brain; each authorized community is shown as `<community name> — community DB`, with a separate `Personal + community` option. Topic statistics and clone completion both include Back so another topic can be selected without rescanning the source.
+
+`/stats` groups topic jobs into their parent clone instead of showing one dashboard page per topic. Refresh reads persisted checkpoints and reports live state from active userbot follows. `/userbot_status` is a userbot health dashboard; it does not represent Bot API `/clone` groups. Disconnected-session errors are summarized and repeated identical errors are collapsed.
 
 - every saved session is AES-GCM encrypted at rest (`STORAGE_KEY`); credentials typed into a command are never logged;
 - `/uclone` scans the accessible history first (it never guesses totals it cannot measure), shows per-topic statistics, then asks where to copy: your personal brain, one of your communities, or both (combined destinations copy to both brains);
@@ -268,6 +274,9 @@ Useful commands:
 | `/index_start ...` | Start optional self-hosted history backfill (optional `thread_id`). |
 | `/index_status` / `/index_stop` | Inspect or cancel a backfill. |
 | `/community_join <id>` | Join a community after joining its Telegram group. |
+| `/clone [topic_id] [community|personal|both]` | Owner/GOD: inside a linked group, preview and confirm Bot API live indexing for the whole group or one forum topic; no userbot and no old-history access. |
+| `/stats` | Show persisted clone counters, grouped forum topics, run navigation, live state and refresh controls. |
+| `/userbot_status` | GOD, DM only: show account identity, actual connection state, saved userbot follows, backfill/topic progress and recent normalized errors. |
 | `/uclone <chat_id>` | GOD: clone a channel/group via the account wizard (personal/community/both). |
 | `/personal` / `/community` | Switch the GOD user’s dump target. |
 | `/delete <url>` | Delete a link, or reply to a saved link with `/delete`. |

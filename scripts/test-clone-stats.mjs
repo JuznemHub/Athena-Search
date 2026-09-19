@@ -247,6 +247,23 @@ try {
   await deliver({ callback_query: { id: 'stats-cb-3', from: stranger, data: 'stats:run:0:0', message: { message_id: statsSend.messageId, chat } } });
   assert.ok(!sent.some((c) => c.method === 'editMessageText' && /CLONE STATS/.test(c.body.rich_message?.html || '')), 'foreign callback must not re-render the run');
 
+  // Bot API /clone is separate from userbot history: it works in a linked group,
+  // creates a confirmation preview, and persists an active live binding without
+  // requiring a userbot account or history scan.
+  sql.prepare('INSERT INTO users (id,username,provider,provider_id,telegram_api_id,created_at) VALUES (?,?,?,?,?,?)').run('u_bot', 'bot_fixture', 'telegram', '123456789', '123456789', Date.now());
+  sql.prepare('INSERT INTO communities (id,name,creator_id,created_at) VALUES (?,?,?,?)').run('c_bot', 'Bot Community', 'u_bot', Date.now());
+  sql.prepare('INSERT INTO community_bots (id,community_id,platform,bot_username,group_id,group_name,created_by,created_at) VALUES (?,?,?,?,?,?,?,?)').run('b_bot', 'c_bot', 'telegram', 'FixtureBot', '-1003333333333', 'Bot Group', 'u_bot', Date.now());
+  sent.length = 0;
+  const groupChat = { id: -1003333333333, type: 'supergroup', title: 'Bot Group' };
+  await deliver({ message: { message_id: 700, from, chat: groupChat, text: '/clone' } });
+  const botPreview = sent.findLast((c) => c.method === 'sendRichMessage' && /Bot clone preview/.test(c.body.rich_message?.html || ''));
+  assert.ok(botPreview, 'group /clone sends a Bot API live preview');
+  const botYes = buttonsOf(botPreview).find(([data]) => data.startsWith('clone:yes:'));
+  assert.ok(botYes, 'bot clone preview has a confirmation control');
+  await deliver({ callback_query: { id: 'bot-clone-cb', from, data: botYes[0], message: { message_id: botPreview.messageId, chat: groupChat } } });
+  const botState = sql.prepare("SELECT stats_json FROM pending_clones WHERE id LIKE 'bc_%' ORDER BY created_at DESC LIMIT 1").get();
+  assert.equal(JSON.parse(botState.stats_json).stage, 'running', 'confirmed bot clone remains a live run');
+  assert.equal(sql.prepare('SELECT copy_text FROM community_bots WHERE id=?').get('b_bot').copy_text, 1, 'whole-group bot clone enables full-copy mode');
   console.log('clone stats fixtures passed: managed parents+children counters, requester/destination/account isolation, compact overview with source links, LIVE flag from actual job state, successful vs copying counters, completed/pending/current topics with 100% and bars, 100-topic pagination, run pagination, callback round-trip with auth guard, telegram-safe HTML');
 } finally {
   await drain();

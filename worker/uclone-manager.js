@@ -270,17 +270,28 @@ export function createUcloneManager(env, deps) {
     run.state.revision++;
     run.state.communities = await deps.listCommunities({ id: run.requester_user_id });
     const page = Math.max(0, Number(run.state.destinationPage || 0));
-    const rows = [[button(run, 'Personal brain', 'personal')]];
+    const rows = [[button(run, 'Personal', 'personal')]];
     for (const [index, community] of run.state.communities.entries()) {
       if (index < page * 8 || index >= (page + 1) * 8) continue;
-      rows.push([button(run, community.name || community.id, 'community', index), button(run, 'Also personal', 'both', index)]);
+      const name = community.name || community.id;
+      rows.push([button(run, `${name} — community DB`, 'community', index), button(run, `${name} — Personal + community`, 'both', index)]);
     }
     if (page > 0) rows.push([button(run, 'Previous communities', 'destpage', page - 1)]);
     if ((page + 1) * 8 < run.state.communities.length) rows.push([button(run, 'More communities', 'destpage', page + 1)]);
-    rows.push([button(run, 'Cancel', 'stop')]);
+    rows.push([button(run, 'Back to topic statistics', 'topics'), button(run, 'Cancel', 'stop')]);
     const counters = run.state.chosen.reduce((sum, topic) => { for (const key of Object.keys(sum)) sum[key] += Number(topic.counters?.[key] || 0); return sum; }, emptyCloneCounters());
     run.state.total = counters.messages;
-    await edit(run, token, renderCloneStatistics({ sourceName: run.state.sourceName, chatId: run.chat_id, username: run.state.username, members: run.state.members, topic: run.state.chosen.length === 1 && run.state.isForum ? run.state.chosen[0] : null, counters, complete: true, measurement: 'accessible-history' }) + '\n\nChoose the destination. Nothing has been copied yet.', rows, true);
+    await edit(run, token, renderCloneStatistics({ sourceName: run.state.sourceName, chatId: run.chat_id, username: run.state.username, members: run.state.members, topic: run.state.chosen.length === 1 && run.state.isForum ? run.state.chosen[0] : null, counters, complete: true, measurement: 'accessible-history' }) + '\n\nChoose a destination. Personal is your private brain; community DB is the selected community. Nothing has been copied yet.', rows, true);
+  }
+  async function returnToTopics(run, token) {
+    run.state.cancelled = false;
+    run.state.childId = null;
+    run.state.cursor = 0;
+    run.state.failedTopics = [];
+    run.state.retriedChildId = null;
+    run.state.transition = null;
+    run.state.cloneAttempt = Number(run.state.cloneAttempt || 0) + 1;
+    await topicMenu(run, token);
   }
   async function progress(run, token, child = null, force = false) {
     const { results } = await db.prepare('SELECT * FROM index_jobs WHERE parent_id=? AND userbot_label=? AND target=? AND community_id=? AND user_id=? ORDER BY created_at').bind(run.id, run.state.label, run.target, run.community_id || '', run.requester_user_id).all();
@@ -310,7 +321,7 @@ export function createUcloneManager(env, deps) {
       processed: Number(child?.processed || 0), total: topic?.counters?.messages ?? run.state.total,
       counters: counts, overallCounters: { ...overall, total: run.state.total }, error: run.state.error,
     });
-    await edit(run, token, text, terminal.has(run.state.stage) ? [[button(run, 'Retry clone (new run)', 'retry')]] : [[button(run, 'Stop entire clone', 'stop'), button(run, 'Refresh', 'refresh')]], force);
+    await edit(run, token, text, terminal.has(run.state.stage) ? [[button(run, 'Back to topic statistics', 'topics'), button(run, 'Retry clone (new run)', 'retry')]] : [[button(run, 'Stop entire clone', 'stop'), button(run, 'Refresh', 'refresh')]], force);
   }
   async function sequence(id, token) {
     if (activeRuns.has(id)) return activeRuns.get(id);
@@ -340,7 +351,8 @@ export function createUcloneManager(env, deps) {
             await progress(run, token, null, true);
             return;
           }
-          const jobId = run.state.childId || `ij_${run.id}_${run.state.cursor || 0}`;
+          const attempt = Number(run.state.cloneAttempt || 0);
+          const jobId = run.state.childId || `ij_${run.id}_${attempt ? attempt + '_' : ''}${run.state.cursor || 0}`;
           run.state.childId = jobId;
           run.state.stage = 'running';
           run.state.transition = null;
@@ -442,6 +454,10 @@ export function createUcloneManager(env, deps) {
     }
     await deps.telegram(context.token, 'answerCallbackQuery', { callback_query_id: context.callbackId });
     const index = /^\d+$/.test(arg || '') ? Number(arg) : -1;
+    if (action === 'topics' && terminal.has(run.state.stage) && run.state.isForum) {
+      await returnToTopics(run, context.token);
+      return true;
+    }
     if (action === 'retry' && terminal.has(run.state.stage)) {
       run.state.revision++;
       await persist(run);
@@ -501,18 +517,21 @@ export function createUcloneManager(env, deps) {
         await destinations(run, context.token);
       }
     } else if (run.state.stage === 'destination') {
+      if (action === 'topics') { await returnToTopics(run, context.token); return true; }
       if (action === 'destpage') { run.state.destinationPage = index; await destinations(run, context.token); return true; }
-      if (action === 'personal') { run.target = 'personal'; run.community_id = ''; run.state.destinationName = 'Personal brain'; }
+      if (action === 'personal') { run.target = 'personal'; run.community_id = ''; run.state.destinationName = 'Personal'; }
       else if (action === 'community' || action === 'both') {
         const community = run.state.communities[index];
         if (!community || !await deps.authorizeCommunity(context.user, community.id)) return true;
         run.target = action; run.community_id = community.id;
-        run.state.destinationName = (community.name || community.id) + (action === 'both' ? ' + Personal brain' : '');
+        run.state.destinationName = (community.name || community.id) + (action === 'both' ? ' + Personal' : ' (community DB)');
       } else return true;
       // Compare-and-swap prevents two repeated callbacks launching different destinations.
       const stored = await load(run.id);
       if (stored.state.stage !== 'destination' || stored.state.revision !== run.state.revision) return true;
       const previous = JSON.stringify(stored.state);
+      const selectedTopic = run.state.isForum && run.state.chosen.length === 1 ? String(run.state.chosen[0].id || '') : '';
+      await deps.ensureFollow?.({ chatId: run.chat_id, threadId: selectedTopic, label: run.state.label, communityId: run.community_id || '', target: run.target, createdBy: run.requester_user_id });
       run.state.stage = 'queued'; run.state.revision++;
       const result = await db.prepare('UPDATE pending_clones SET stats_json=?,target=?,community_id=? WHERE id=? AND stats_json=?').bind(JSON.stringify(run.state), run.target, run.community_id || null, run.id, previous).run();
       if (Number(result?.meta?.changes ?? result?.changes ?? 0) !== 1) return true;

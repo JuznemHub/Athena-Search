@@ -2776,9 +2776,9 @@ const TELEGRAM_COMMAND_MENU = [
   { command: 'community_list', description: 'Your communities' },
   { command: 'edit', description: 'Edit title/notes of a link' },
   { command: 'delete', description: 'Delete a saved link' },
-  { command: 'clone', description: 'Clone this chat (live + history)' },
-  { command: 'stats', description: 'Clone stats for this chat' },
-  { command: 'userbot_status', description: 'Userbot connection + follows' },
+  { command: 'clone', description: 'Bot live clone in this linked group' },
+  { command: 'stats', description: 'Persisted clone stats and live state' },
+  { command: 'userbot_status', description: 'Userbot account and follow health (DM)' },
 ];
 
 // GOD-only commands, advertised as a per-chat scope for TG_OWNER_IDS so the
@@ -2793,9 +2793,9 @@ const TELEGRAM_GOD_COMMAND_MENU = [
   { command: 'kick', description: 'Remove a member (rejoin allowed)' },
   { command: 'admin', description: 'Promote a member (reply)' },
   { command: 'demote', description: 'Demote a member (reply)' },
-  { command: 'uclone', description: 'Account chooser, exact scan, explicit destination' },
+  { command: 'uclone', description: 'Userbot history wizard with topic chooser' },
   { command: 'userbot_accounts', description: 'Select or verify saved accounts (DM)' },
-  { command: 'clone_stop', description: 'Stop a running clone' },
+  { command: 'clone_stop', description: 'Stop a userbot history clone' },
   { command: 'group_copy', description: 'Copy group messages' },
   { command: 'channel_link', description: 'Link a channel to a community' },
   { command: 'channel_unlink', description: 'Unlink a channel' },
@@ -7968,7 +7968,7 @@ function helpTextForSection(section, isGod = false) {
       cmd(5, `${codeHtml('/group_copy')} ${codeHtml('on|off')}`, 'Whole-group copy mode — index everything posted, not just links.'),
       spacer,
       richParagraph('<b>Groups & forum topics</b>'),
-      cmd(6, `${codeHtml('/clone')} ${codeHtml('<group_id> community')}`, 'Whole group; forums clone topic-by-topic automatically. One topic only: add the topic id — or run /clone inside the topic.'),
+      cmd(6, `${codeHtml('/clone')} ${codeHtml('[topic_id] [community|personal|both]')}`, 'Bot-only live clone: run inside a linked group where Athena is an administrator. No userbot is required; without a topic id it covers the group and all topics, with a topic id it covers one forum topic. Bot API history is unavailable, so only new posts are indexed.'),
       cmd(7, `${codeHtml('/topic_link')} ${codeHtml('[community|personal|both]')}`, 'Bind the current forum topic to a brain.'),
       cmd(8, `${codeHtml('/topic_list')} · ${codeHtml('/topic_unlink')}`, 'List topic bindings or unbind the current one.'),
       cmd(9, `${codeHtml('/topic_target')} ${codeHtml('community|personal|both')}`, 'Switch the current topic\'s target brain.'),
@@ -7980,18 +7980,18 @@ function helpTextForSection(section, isGod = false) {
       cmd(13, `${codeHtml('/clone_del')} ${codeHtml('<transfer_id>')}`, "Delete everything one clone imported."),
       cmd(14, `${codeHtml('/delete')} ${codeHtml('<chat_id> [topic_id]')}`, 'Delete a cloned chat or topic (alias: ' + codeHtml('/del') + ').'),
       spacer,
-      richParagraph('<b>Userbot</b> — powers history backfill; live indexing needs admin only'),
-      cmd(15, `${codeHtml('/uclone')} ${codeHtml('<chat_id>')} · ${codeHtml('/ubclone')}`, 'GOD: selected saved account; exact accessible-history scan, one topic or sequential forum topics, then an explicit personal/community destination chooser.'),
+      richParagraph('<b>Userbot history + live mode</b> — GOD, self-hosted, DM setup; the selected account must be able to read the source chat'),
+      cmd(15, `${codeHtml('/uclone')} ${codeHtml('<chat_id> [topic_id]')}`, 'Scans accessible history exactly, shows statistics, lets you choose one topic or all topics, then lists Personal or each community database. The destination screen has Back; completed runs return to topic statistics so another topic can be cloned. Live indexing is enabled for the selected scope. Alias: /ubclone. You can also run /uclone <chat_id> and choose a topic from the buttons.'),
       cmd(16, `${codeHtml('/userbot_accounts')} · ${codeHtml('/userbot_select')}`, 'GOD, DM only: add, list, select, check status, remove or reauthenticate saved accounts. Setup verifies username, name, ID and masked phone; encrypted credentials and your selection survive restart. Reauthenticate using the same label; adding another account never changes an existing selection.'),
-      cmd(17, `${codeHtml('/userbot_status')}`, 'GOD, DM only: verified account identities, connection state and followed chats. Add securely with /userbot_add <label> <api_id> <api_hash> <session_string> in a DM; never share credentials in groups.'),
-      cmd(17, `${codeHtml('/userbot_follow')} · ${codeHtml('/userbot_unfollow')}`, 'Add or remove live-follow chats for the userbot.'),
-      cmd(18, `${codeHtml('/userbot_disconnect')} · ${codeHtml('/userbot_del')}`, 'Delete all saved accounts, or remove one with /userbot_del <label>. Sessions and follows are deleted, running clones stop, and no replacement account is selected.'),
+      cmd(17, `${codeHtml('/userbot_status')}`, 'GOD, DM only: verified account identities, live connection state, saved follows, backfill progress, per-topic progress and deduplicated recent errors. It reports userbot follows only; /clone is the separate Bot API live-clone command.'),
+      cmd(18, `${codeHtml('/userbot_follow')} · ${codeHtml('/userbot_unfollow')}`, 'Add or remove live-follow chats for the userbot. Use /uclone when you want history plus live indexing.'),
+      cmd(19, `${codeHtml('/userbot_disconnect')} · ${codeHtml('/userbot_del')}`, 'Delete all saved accounts, or remove one with /userbot_del <label>. Sessions and follows are deleted, running clones stop, and no replacement account is selected.'),
       spacer,
       richParagraph('<b>Legacy backfill</b>'),
-      cmd(19, `${codeHtml('/index_start')} · ${codeHtml('/index_status')} · ${codeHtml('/index_stop')}`, 'Older session-based backfill — /clone is the normal path now.'),
+      cmd(20, `${codeHtml('/index_start')} · ${codeHtml('/index_status')} · ${codeHtml('/index_stop')}`, 'Older session-based history backfill. Use /uclone for the guided wizard; /index_start remains available for the explicit legacy form and optional topic id.'),
       spacer,
-      richParagraph(`<b>Recipe:</b> ${codeHtml('/channel_link')} → ${codeHtml('/userbotconnect')} → ${codeHtml('/clone')} → ${codeHtml('/stats')} → ${codeHtml('/clone_stop')}`),
-      richParagraph('<i>Cloning never edits the source chat. If the userbot cannot see a chat, add it there first and retry.</i>')
+      richParagraph(`<b>Recipes:</b> bot live clone: ${codeHtml('/community_verify')} → run ${codeHtml('/clone')} in the group → ${codeHtml('/stats')}; userbot history + live: ${codeHtml('/userbot_add')} → ${codeHtml('/userbot_select')} → ${codeHtml('/uclone <chat_id>')} → choose destination → ${codeHtml('/stats')}`),
+      richParagraph('<i>Cloning never edits the source chat. Bot mode needs Athena in the group; userbot mode needs the selected account in the source chat.</i>')
     ].join('\n');
   }
 
@@ -8367,11 +8367,24 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
     }
     if(action==='yes'){
       const stats = JSON.parse(pend.stats_json||'{}');
+      const athenaUser2 = await resolveAthenaUserFromTg(env, tgUserId);
+      if (stats.manager === 'botclone') {
+        if (!athenaUser2) {
+          await editTelegramMessage(token, chatId, msgId, `${boldHtml('⚠️')} Login at ${await getWebsiteDisplayUrl(env)} first.`, null, threadId);
+          return new Response('OK',{status:200, headers:corsHeaders});
+        }
+        try {
+          await activateBotClone(env, { pendingId, stats, chatId: pend.chat_id, token, messageId: msgId, threadId, user: athenaUser2 });
+        } catch (error) {
+          await deletePendingClone(env, pendingId);
+          await editTelegramMessage(token, chatId, msgId, `${boldHtml('❌ Bot clone failed:')} ${escHtml(String(error?.message || error).slice(0, 160))}`, null, threadId);
+        }
+        return new Response('OK',{status:200, headers:corsHeaders});
+      }
       const communityIdArg = pend.community_id || '';
       const chatIdN2 = pend.chat_id;
       const targetArg2 = pend.target || '';
       await deletePendingClone(env, pendingId);
-      const athenaUser2 = await resolveAthenaUserFromTg(env, tgUserId);
       if(!athenaUser2){
         await editTelegramMessage(token, chatId, msgId, `${boldHtml('⚠️')} Login at ${await getWebsiteDisplayUrl(env)} first.`, null, threadId);
         return new Response('OK',{status:200, headers:corsHeaders});
@@ -8466,7 +8479,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       await sendTelegramRichMessage(token, chatId, [
         richHeading(3, '🧬 Clone a chat'),
         '',
-        richParagraph('• /uclone <chat_id> community — channel/group → community (DM)<br>• /uclone <chat_id> <topic_id> community — one forum topic<br>• /uclone <chat_id> personal — GOD-only, to your brain<br>• /uclone_del <chat_id> — remove the follow<br><br>Channel posts index live automatically after clone.')
+        richParagraph(`• ${codeHtml('/clone')} [topic_id] — run inside a linked group for Bot API live indexing; no userbot, no old history<br>• ${codeHtml('/uclone <chat_id> [topic_id]')} — DM wizard for exact history scan, one topic or all topics, destination chooser and live userbot follow<br>• ${codeHtml('/stats')} — persisted counters and live state; ${codeHtml('/userbot_status')} — userbot account/follow health<br>• ${codeHtml('/clone_del <transfer_id> [files]')} — remove imported history`)
       ].join('\n'), threadId);
     }
     return new Response('OK', { status: 200, headers: corsHeaders });
@@ -9065,6 +9078,18 @@ function ucloneManager(env) {
     getClient: (label) => USERBOT_ACCOUNTS.get(label)?.client,
     stopAccount: (label) => stopUserbotAccount(env, label),
     startJob: (options) => startBackfillJob(env, options),
+    ensureFollow: async ({ chatId, threadId = '', label, communityId = '', target, createdBy }) => {
+      const followChat = `${normalizeTgChatId(chatId)}${threadId ? ':' + threadId : ''}`;
+      await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at)
+        VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET label=excluded.label, community_id=excluded.community_id,
+        target=excluded.target, created_by=excluded.created_by`).bind(followChat, label, communityId || '', target, createdBy, Date.now()).run();
+      if (threadId) {
+        await ensureTopicBindingTable(env);
+        await env.DB.prepare(`INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at)
+          VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id) DO UPDATE SET community_id=excluded.community_id,
+          target=excluded.target, created_by=excluded.created_by`).bind('tb_' + Date.now().toString(36) + '_' + randomToken().slice(0, 5), normalizeTgChatId(chatId), threadId, communityId || '', target, createdBy, Date.now()).run();
+      }
+    },
     runJob: (job, token) => runHistoryIndexJob(env, job, token),
     authorizeCommunity: async (user, id) => {
       const fullUser = await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(user.id).first();
@@ -9109,6 +9134,31 @@ async function ensurePendingCloneTable(env){
 async function storePendingClone(env, row){ await ensurePendingCloneTable(env); await env.DB.prepare(`INSERT INTO pending_clones (id, chat_id, thread_id, community_id, target, requester_tg_id, requester_user_id, stats_json, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(row.id,row.chat_id,row.thread_id||null,row.community_id||null,row.target||null,row.requester_tg_id,row.requester_user_id,JSON.stringify(row.stats),row.created_at,row.expires_at).run(); }
 async function getPendingClone(env, id){ await ensurePendingCloneTable(env); return await env.DB.prepare(`SELECT * FROM pending_clones WHERE id=? AND expires_at>?`).bind(id,Date.now()).first(); }
 async function deletePendingClone(env,id){ await env.DB.prepare(`DELETE FROM pending_clones WHERE id=?`).bind(id).run().catch(()=>{}); }
+async function activateBotClone(env, { pendingId, stats, chatId, token, messageId, threadId, user }) {
+  if (!user?.id) throw new Error('LOGIN_REQUIRED');
+  await ensureBotBindingColumns(env);
+  const sourceChat = normalizeTgChatId(chatId);
+  const thread = stats.threadId ? String(stats.threadId) : '';
+  const target = CHANNEL_TARGETS.has(stats.target) ? stats.target : 'community';
+  const communityId = String(stats.communityId || '');
+  if (thread) {
+    await ensureTopicBindingTable(env);
+    await env.DB.prepare(`INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at)
+      VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id) DO UPDATE SET community_id=excluded.community_id,
+      target=excluded.target, created_by=excluded.created_by`).bind('tb_' + Date.now().toString(36) + '_' + randomToken().slice(0, 5), sourceChat, thread, communityId, target, user.id, Date.now()).run();
+  } else {
+    const binding = await env.DB.prepare("SELECT id FROM community_bots WHERE platform='telegram' AND group_id=? ORDER BY created_at DESC LIMIT 1").bind(sourceChat).first();
+    if (!binding?.id) throw new Error('BOT_BINDING_REQUIRED');
+    await env.DB.prepare('UPDATE community_bots SET copy_text=1, channel_target=?, user_id=? WHERE id=?').bind(target, user.id, binding.id).run();
+  }
+  const next = { ...stats, manager: 'botclone', stage: 'running', live: true, sourceName: stats.sourceName || sourceChat, destinationName: target === 'community' ? communityId : target === 'both' ? 'Personal + community' : 'Personal', isForum: !!thread, chosen: thread ? [{ id: thread, name: `Topic ${thread}`, counters: { messages: 0 } }] : [] };
+  await ensurePendingCloneTable(env);
+  await env.DB.prepare('UPDATE pending_clones SET stats_json=?, expires_at=? WHERE id=?').bind(JSON.stringify(next), Date.now() + 30 * 86400_000, pendingId).run();
+  await editTelegramRichMessage(token, chatId, messageId,
+    `${boldHtml('✅ Live clone enabled')} ${codeHtml(sourceChat)}${thread ? ` · topic ${codeHtml('#' + thread)}` : ''}\n` +
+    `${italicHtml('The Bot API cannot read old messages. New links, files and text posts are indexed as they arrive.')}`,
+    threadId);
+}
 
 async function collectClonePreview(env, label, chatIdN){
   let isForum = false;
@@ -11118,8 +11168,8 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       if(pend && String(pend.requester_tg_id)===String(tgUserId) && JSON.parse(pend.stats_json || '{}').manager !== 'uclone'){
         const isYes = /^(yes|y)$/i.test(text.trim());
         const stats = JSON.parse(pend.stats_json||'{}');
-        await deletePendingClone(env, pend.id);
         if(!isYes){
+          await deletePendingClone(env, pend.id);
           await sendTelegramFormatted(token, chatId, `${boldHtml('❌ Cancelled.')}`, forumThreadId).catch(()=>{});
           return new Response('OK', {status:200, headers: corsHeaders});
         }
@@ -11127,6 +11177,16 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
           await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Login at ${await getWebsiteDisplayUrl(env)} first.`, forumThreadId).catch(()=>{});
           return new Response('OK', {status:200, headers: corsHeaders});
         }
+        if (stats.manager === 'botclone') {
+          try {
+            await activateBotClone(env, { pendingId: pend.id, stats, chatId: pend.chat_id, token, messageId: msg.message_id, threadId: forumThreadId, user: athenaUser });
+          } catch (cloneErr) {
+            await deletePendingClone(env, pend.id);
+            await sendTelegramFormatted(token, chatId, `${boldHtml('❌ Bot clone failed:')} ${escHtml(String(cloneErr?.message || cloneErr).slice(0, 200))}`, forumThreadId).catch(()=>{});
+          }
+          return new Response('OK', {status:200, headers: corsHeaders});
+        }
+        await deletePendingClone(env, pend.id);
         await sendTelegramFormatted(token, chatId, `${boldHtml('✅ Confirmed — cloning started.')} ${codeHtml(pend.chat_id)}`, forumThreadId).catch(()=>{});
         try {
           await doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUser, communityIdArg: pend.community_id||'', chatIdN: pend.chat_id, targetArg: pend.target||'', stats, threadArg: pend.thread_id||'' });
@@ -11774,7 +11834,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      const botId = me?.result?.id;
      const chk = await telegramApi(token, 'getChat', { chat_id: cid });
      if (!chk?.ok || chk?.result?.type !== 'channel') {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} ${codeHtml(cid)} is not a reachable channel for this bot — add the bot as ADMIN first.\n${italicHtml('Or connect a userbot account (/userbot_add) and use /clone — no admin needed.')}`, forumThreadId);
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} ${codeHtml(cid)} is not a reachable channel for this bot — add the bot as ADMIN first.\n${italicHtml('For history, connect a userbot account (/userbot_add) and use /uclone <chat_id>; /clone is for linked-group Bot API live indexing.')}`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      const member = botId ? await telegramApi(token, 'getChatMember', { chat_id: cid, user_id: botId }) : null;
@@ -12035,7 +12095,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         await sendTelegramFormatted(token, chatId, [
           `${boldHtml('🗂 Session history export')}`,
           '',
-          `${italicHtml('This is optional. Bot mode handles new posts; history needs')} ${codeHtml('/clone')} ${italicHtml('after')} ${codeHtml('/userbot_add')}${italicHtml('.')}`,
+          `${italicHtml('This is optional. Bot mode handles new posts with')} ${codeHtml('/clone')} ${italicHtml('inside a linked group; userbot history uses')} ${codeHtml('/uclone')} ${italicHtml('after')} ${codeHtml('/userbot_add')}${italicHtml('.')}`,
           `Install ${codeHtml('npm install telegram')} on the self-hosted server first.`,
           `${boldHtml('Never paste a session string in a group.')} It grants the user account access and is encrypted only when ${codeHtml('STORAGE_KEY')} is configured.`,
           `Progress: ${codeHtml('/index_status')} · cancel and delete session: ${codeHtml('/index_stop')}`
@@ -12076,7 +12136,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        chanLines.length ? `• Linked channels (new posts auto-copied):\n${chanLines.join('\n')}` : '• Channels: none linked yet — /channel_link <community_id> <channel_id>',
        '',
        `${boldHtml('History backfill')}`,
-       `Use ${codeHtml('/clone')} — shows preview → Yes does topic-wise backfill + live indexing`,
+       `Use ${codeHtml('/uclone')} — scans history, shows topic statistics, then enables live indexing after confirmation`,
        `${codeHtml('/index_status')} — progress · ${codeHtml('/index_stop')} — stop · ${codeHtml('/del <chat_id>')} — delete`
      ].join('\n'), forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
@@ -12085,14 +12145,48 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
    // ---- /index_start — history backfill with a user session string ----
    // Self-host only (gramjs is a native Node dependency), DM only (the
    // session string is a live account key), GOD or community owner.
-     // ---- /clone (aliases /follow, /backfill): ONE command inside any chat ----
-     // Registers live following AND starts history backfill. Dedupe makes the
-     // overlap free. Works in channels/groups/topics where the userbot account
-     // is a member — no bot-admin, no group binding required.
+     // ---- /clone (Bot API live mode) plus legacy /follow and /backfill aliases ----
+     // /clone is handled here only after the bot/group checks below; the
+     // aliases retain their older explicit userbot backfill behavior.
      if (cmd === '/clone' || cmd === '/uclone' || cmd === '/ubclone' || cmd === '/follow' || cmd === '/backfill') {
+     if (cmd === '/clone') {
+       if (!chatId.startsWith('-')) {
+         await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Bot clone')}\nRun ${codeHtml('/clone')} in the Telegram group where Athena is an administrator. The Bot API cannot read a channel or group history from a DM; ${codeHtml('/uclone <chat_id>')} is the separate userbot history wizard.`, forumThreadId);
+         return new Response('OK', { status: 200, headers: corsHeaders });
+       }
+       if (!binding?.community_id) {
+         await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} This group is not linked to a community. Run ${codeHtml('/community_verify')} first.`, forumThreadId);
+         return new Response('OK', { status: 200, headers: corsHeaders });
+       }
+       if (!athenaUser || (!isGod && !(await ensureOwnerOrAdmin(binding.community_id, athenaUser.id, env)))) {
+         await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
+         return new Response('OK', { status: 200, headers: corsHeaders });
+       }
+       let target = 'community';
+       let thread = msg.is_topic_message && forumThreadId != null ? String(forumThreadId) : '';
+       for (const arg of parts.slice(1)) {
+         const value = String(arg || '').trim().toLowerCase();
+         if (CHANNEL_TARGETS.has(value)) target = value;
+         else if (/^\d{1,9}$/.test(value)) thread = value;
+       }
+       if ((target === 'personal' || target === 'both') && !isGod) {
+         await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} ${codeHtml('personal')}/${codeHtml('both')} targets are GOD rank only.`, forumThreadId);
+         return new Response('OK', { status: 200, headers: corsHeaders });
+       }
+       const sourceChat = normalizeTgChatId(chatId);
+       const pendingId = 'bc_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+       const sourceName = binding.group_name || msg.chat?.title || sourceChat;
+       await storePendingClone(env, { id: pendingId, chat_id: sourceChat, thread_id: thread || null, community_id: binding.community_id, target, requester_tg_id: String(tgUserId || ''), requester_user_id: athenaUser.id, stats: { manager: 'botclone', stage: 'preview', sourceName, threadId: thread, communityId: binding.community_id, target, isForum: !!thread, chosen: thread ? [{ id: thread, name: `Topic ${thread}`, counters: { messages: 0 } }] : [], createdAt: Date.now() }, created_at: Date.now(), expires_at: Date.now() + 10 * 60 * 1000 });
+       const destination = target === 'community' ? `${sourceName} (community DB)` : target === 'both' ? 'Personal + community' : 'Personal';
+       const scope = thread ? `this forum topic ${codeHtml('#' + thread)}` : 'this group and all its topics';
+       const preview = `${richHeading(3, '🔍 Bot clone preview')}\n${richParagraph(`Source: ${boldHtml(escHtml(sourceName))} ${codeHtml(sourceChat)}<br>Scope: ${escHtml(scope)}<br>Destination: ${boldHtml(escHtml(destination))}<br><br>${italicHtml('History is not available to the Bot API. Confirm to index new links, files and text posts as they arrive.')}`)}`;
+       const controls = richButtonRow([{ label: thread ? '✅ Clone this topic' : '✅ Clone this group', data: `clone:yes:${pendingId}` }, { label: '❌ Cancel', data: `clone:no:${pendingId}` }]);
+       await sendTelegramRichMessage(token, chatId, preview, forumThreadId, controls);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
        const dmOnly = !chatId.startsWith('-');
-    // Remote mode (DM): /clone <chat_id> [thread_id] [target|community…]
-    // or reply-to a forwarded channel post. For channels you cannot type in.
+    // Remote mode (DM): /follow or /backfill <chat_id> [thread_id] [target|community…]
+    // or reply to a forwarded channel post. Guided userbot history uses /uclone.
     let remoteChatId = '';
     let remoteThread = '';
     if (dmOnly) {
@@ -12107,7 +12201,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       if (!remoteChatId && fwd != null) remoteChatId = String(fwd);
       if (!remoteChatId) {
         await sendTelegramFormatted(token, chatId,
-          `${boldHtml('🧬 /clone from my DM')}\n\n${boldHtml('Easiest:')} forward any post from the channel here, then ${boldHtml('reply')} to it with ${codeHtml('/clone [target]')}\n\n${boldHtml('Or by id:')} ${codeHtml('/clone <chat_id> [thread_id] [target|community_id]')}\n${italicHtml('chat ids look like -100… (forward a post to @userinfobot to see one)')}`,
+          `${boldHtml('🧬 ' + cmd + ' from my DM')}\n\n${boldHtml('Easiest:')} forward any post from the channel here, then ${boldHtml('reply')} to it with ${codeHtml(cmd + ' [target]')}\n\n${boldHtml('Or by id:')} ${codeHtml(cmd + ' <chat_id> [thread_id] [target|community_id]')}\n${italicHtml('chat ids look like -100… (forward a post to @userinfobot to see one)')}`,
           forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
@@ -12185,9 +12279,9 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
             await telegramApi(token,'sendMessage',{chat_id: chatId, text: 'Confirm clone?', reply_markup:{inline_keyboard:[[{text:'✅ Yes, clone', callback_data:'clone:yes:'+pendingId},{text:'❌ No', callback_data:'clone:no:'+pendingId}]]}, message_thread_id: forumThreadId||undefined}).catch(()=>{});
             return new Response('OK', { status: 200, headers: corsHeaders });
           }
-          const lines = topics.slice(0, 15).map(t => `${codeHtml('/clone ' + chatIdN + ' ' + t.id)} — ${escHtml(t.title)}`);
+          const lines = topics.slice(0, 15).map(t => `${codeHtml(cmd + ' ' + chatIdN + ' ' + t.id)} — ${escHtml(t.title)}`);
           await sendTelegramFormatted(token, chatId,
-            `${boldHtml('📋 Forum detected (' + topics.length + ' topics)')}\n${lines.join('\n')}\n\n${italicHtml('Run /clone with a topic id to clone just that topic, or /clone ' + chatIdN + ' all to clone all topics')}`,
+            `${boldHtml('📋 Forum detected (' + topics.length + ' topics)')}\n${lines.join('\n')}\n\n${italicHtml('Run ' + cmd + ' with a topic id to clone just that topic, or ' + cmd + ' ' + chatIdN + ' all to clone all topics')}`,
             forumThreadId);
           return new Response('OK', { status: 200, headers: corsHeaders });
         }
@@ -12204,7 +12298,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     if (!communityIdArg && !targetArg && isGod) targetArg = 'personal';
     if (!communityIdArg && !targetArg) {
       await sendTelegramFormatted(token, chatId,
-        `${boldHtml('⚠️')} No community bound here. GOD can use ${codeHtml('/clone personal')} or ${codeHtml('/clone both')}; otherwise pass the community: ${codeHtml('/clone <community_id>')}${dmOnly ? ` or ${codeHtml('/clone <chat_id> <community_id>')}` : ''}`,
+        `${boldHtml('⚠️')} No community bound here. Use ${codeHtml('/uclone <chat_id>')} for the guided userbot wizard, or pass a community to ${codeHtml(cmd)}: ${codeHtml(cmd + ' <community_id>')}${dmOnly ? ` or ${codeHtml(cmd + ' <chat_id> <community_id>')}` : ''}`,
         forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
@@ -12241,7 +12335,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     const visible = await primeEntity(USERBOT_ACCOUNTS.get(label).client, chatIdN, 45_000);
     if (!visible) {
       await sendTelegramFormatted(token, chatId,
-        `${boldHtml('⚠️')} The account ${codeHtml(label)} cannot see ${codeHtml(chatIdN)}.\n${italicHtml('Join this channel/group with that account, then run /clone again.')}`,
+        `${boldHtml('⚠️')} The account ${codeHtml(label)} cannot see ${codeHtml(chatIdN)}.\n${italicHtml('Join this channel/group with that account, then run ' + cmd + ' again.')}`,
         forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
@@ -12556,7 +12650,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
           target = excluded.target, created_by = excluded.created_by`
      ).bind(chatIdArg, label, communityIdArg, targetArg || 'community', athenaUser.id, Date.now()).run();
      await sendTelegramFormatted(token, chatId,
-       `${boldHtml('✅')} Following ${codeHtml(chatIdArg)} → ${boldHtml(escHtml(community.name || communityIdArg))} · account ${codeHtml(label)} · target ${codeHtml(targetArg || 'community')}${probeNote}\n${italicHtml('New messages clone automatically. History: /clone')}`,
+       `${boldHtml('✅')} Following ${codeHtml(chatIdArg)} → ${boldHtml(escHtml(community.name || communityIdArg))} · account ${codeHtml(label)} · target ${codeHtml(targetArg || 'community')}${probeNote}\n${italicHtml('New messages clone automatically. For history, use /uclone.')}`,
        forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
@@ -12789,7 +12883,9 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      ).all();
 
      const accItems = (accounts || []).map((a) => {
-       const live = !a.enabled ? 'Disabled' : a.last_error ? 'Error — open /userbot_accounts to reauthenticate' : USERBOT_ACCOUNTS.has(a.label) ? 'Active' : 'Stored, disconnected';
+       const connection = USERBOT_ACCOUNTS.get(a.label);
+       const connected = !!connection && connection.client?.connected !== false;
+       const live = !a.enabled ? 'Disabled' : a.last_error ? 'Error — reauthenticate this label with /userbot_add' : connected ? 'Active' : 'Stored, disconnected';
        return `<li>${formatUserbotIdentity(a, live)}</li>`;
      });
 
@@ -12806,19 +12902,21 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        if (!jobsByChatThread.has(k)) jobsByChatThread.set(k, j);
      }
      for (const f of follows || []) {
-       let name = f.chat_id;
+       const followKey = String(f.chat_id || '');
+       const baseFollowChat = normalizeTgChatId(followKey.split(':')[0]);
+       const isTopicFollow = followKey.includes(':');
+       const tidPart = isTopicFollow ? String(followKey.split(':')[1] || '') : '';
+       let name = baseFollowChat;
        const ubAcc = USERBOT_ACCOUNTS.get(f.label);
        if (ubAcc) {
-         try { const ent = await ubAcc.client.getEntity(f.chat_id); if (ent?.title || ent?.username) name = ent.title || `@${ent.username}`; } catch (_) {}
+         try { const ent = await ubAcc.client.getEntity(baseFollowChat); if (ent?.title || ent?.username) name = ent.title || `@${ent.username}`; } catch (_) {}
        }
        try {
-         const ch = await telegramApi(token, 'getChat', { chat_id: f.chat_id });
+         const ch = await telegramApi(token, 'getChat', { chat_id: baseFollowChat });
          if (ch?.ok && (ch.result?.title || ch.result?.username)) name = ch.result.title ? `${ch.result.title}` : `@${ch.result.username}`;
        } catch (_) {}
-       const isTopicFollow = String(f.chat_id || '').includes(':');
-       const baseChatId = isTopicFollow ? normalizeTgChatId(f.chat_id.split(':')[0]) : normalizeTgChatId(f.chat_id);
-       const tidPart = isTopicFollow ? String(f.chat_id.split(':')[1] || '') : '';
-       if (isTopicFollow) name = `${f.chat_id.split(':')[0]}#${tidPart}`;
+       if (isTopicFollow) name = `${name}#${tidPart}`;
+       const baseChatId = baseFollowChat;
        const ledgerRows = await env.DB.prepare("SELECT id,updated_at FROM index_jobs WHERE id LIKE 'live_%' AND chat_id=? AND userbot_label=? AND community_id=? AND user_id=?")
          .bind(baseChatId, f.label, f.community_id || '', f.created_by || '').all();
        const durable = {};
@@ -12827,14 +12925,15 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        const s = { msgs: durable.messages, links: durable.savedLinks, docs: durable.savedFiles, lastAt };
        let liveBits = [];
         if (!isTopicFollow) {
-          const fl = followLiveness(USERBOT_ACCOUNTS.has(f.label), f.last_seen_at);
+          const connection = USERBOT_ACCOUNTS.get(f.label);
+          const fl = followLiveness(!!connection && connection.client?.connected !== false, f.last_seen_at);
           const sActive = (s.msgs || s.links || s.docs) ? [`msgs ${s.msgs || 0}`, `links ${s.links || 0}`, `docs ${s.docs || 0}`] : [];
           liveBits = [`${fl.emoji}`, ...sActive];
           if (s.lastAt) liveBits.push(`last ${Math.max(1, Math.round((Date.now() - s.lastAt) / 60000))}m ago`);
           else liveBits.push(italicHtml('waiting for new posts'));
           // Today (rolling 24h) from the DB, scoped per-chat like /stats.
           try {
-            const norm = normalizeTgChatId(f.chat_id);
+            const norm = baseChatId;
             const comm = f.community_id || null;
             let tLinks = 0, tDocs = 0;
             if (comm) {
@@ -12882,7 +12981,8 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
            }
          }
        } catch (_) {}
-       const liveMark = isTopicFollow ? '' : `— live: ${liveBits.join(' · ')}${USERBOT_ACCOUNTS.has(f.label) ? ' ' + italicHtml('(active — new posts clone automatically)') : ''}`;
+       const connection = USERBOT_ACCOUNTS.get(f.label);
+       const liveMark = isTopicFollow ? '' : `— live: ${liveBits.join(' · ')}${connection?.client?.connected !== false ? ' ' + italicHtml('(active — new posts clone automatically)') : ''}`;
        followLines.push(
          `<p>• ${boldHtml(escHtml(name))} ${italicHtml(`[${f.target || 'community'}]`)} ${liveMark}</p>` +
          `<p>${bf}</p>` +
@@ -12890,17 +12990,25 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        );
      }
 
-     let errLines = [];
+     const errLines = [];
      try {
-       const { results: errs } = await env.DB.prepare('SELECT t, label, chat, error FROM userbot_errors ORDER BY t DESC LIMIT 5').all();
-       errLines = (errs || []).map((e) => `• ${new Date(e.t).toISOString().slice(11, 19)} [${escHtml(e.label || '-')}] ${escHtml(String(e.error).slice(0, 110))}`);
+       const { results: errs } = await env.DB.prepare('SELECT t, label, chat, error FROM userbot_errors ORDER BY t DESC LIMIT 20').all();
+       const seenErrors = new Set();
+       for (const e of errs || []) {
+         const normalized = cloneFailure(new Error(String(e.error || ''))).message;
+         const key = `${e.label || '-'}|${e.chat || '-'}|${normalized}`;
+         if (seenErrors.has(key)) continue;
+         seenErrors.add(key);
+         errLines.push(`• ${new Date(e.t).toISOString().slice(11, 19)} [${escHtml(e.label || '-')}] ${escHtml(normalized)}`);
+         if (errLines.length >= 5) break;
+       }
      } catch (_) {}
 
      await sendTelegramRichMessage(token, chatId,
        `<h3>🤖 Userbot status</h3>` +
        `<p>${boldHtml('Accounts')}</p><ul>${accItems.length ? accItems.join('') : `<li>${italicHtml('none — /userbot_add')}</li>`}</ul>` +
        `<p>${boldHtml('📡 Channels/chats being indexed')}</p>` +
-       (followLines.length ? followLines.join('') : `<p>${italicHtml('none — run /clone inside a chat, or /clone <chat_id> in DM')}</p>`) +
+       (followLines.length ? followLines.join('') : `<p>${italicHtml('none — run /uclone <chat_id> for history + live indexing, or /userbot_follow for a saved live follow')}</p>`) +
        (errLines.length ? `<p>${boldHtml('⚠️ Recent errors')}</p><ul>${errLines.map((e) => `<li>${e.replace(/^• /, '')}</li>`).join('')}</ul>` : ''),
        forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
@@ -12932,7 +13040,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        `SELECT j.* FROM index_jobs j WHERE j.user_id = ? ORDER BY j.updated_at DESC LIMIT 5`
      ).bind(athenaUser?.id || tgUserId || '').all();
      if (!results || !results.length) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No backfill jobs yet. ${codeHtml('/clone')} to begin.`, forumThreadId);
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No backfill jobs yet. ${codeHtml('/uclone <chat_id>')} starts the guided history scan; ${codeHtml('/clone')} is Bot API live mode inside a linked group.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      const lines = results.map((j) => `<li>${j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'error' ? '❌' : '⏸'} ${j.chat_name ? `${boldHtml(escHtml(j.chat_name))} ` : ''}${codeHtml(j.chat_id)}${j.thread_id ? ` topic ${codeHtml('#' + j.thread_id)}` : ''} — ${escHtml(j.status)} · ${j.processed || 0} scanned · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.dupes_skipped ? ` · ${j.dupes_skipped} dupes` : ''} · del: /clone_del ${codeHtml(j.id)}${j.error ? ` — ${escHtml(String(j.error).slice(0, 80))}` : ''}</li>`);
@@ -16797,6 +16905,7 @@ export async function startUserbotAccount(env, label = 'main') {
           } catch (_) {}
           console.error(`[userbot:${label}] session unreachable — stopping watchdog (refresh via /userbotconnect)`);
           if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = undefined; }
+          USERBOT_ACCOUNTS.delete(label);
         }
       } catch (_) {}
     };
@@ -16952,19 +17061,24 @@ export async function buildStatsReport(env, _token = null, scope = null) {
   let parents = [];
   try {
     const q = requesterTgId
-      ? 'SELECT * FROM pending_clones WHERE stats_json LIKE \'%"manager":"uclone"%\' AND requester_tg_id=? ORDER BY created_at DESC'
-      : 'SELECT * FROM pending_clones WHERE stats_json LIKE \'%"manager":"uclone"%\' ORDER BY created_at DESC';
+      ? 'SELECT * FROM pending_clones WHERE (stats_json LIKE \'%"manager":"uclone"%\' OR stats_json LIKE \'%"manager":"botclone"%\') AND requester_tg_id=? ORDER BY created_at DESC'
+      : 'SELECT * FROM pending_clones WHERE (stats_json LIKE \'%"manager":"uclone"%\' OR stats_json LIKE \'%"manager":"botclone"%\') ORDER BY created_at DESC';
     const r = await env.DB.prepare(q).bind(...(requesterTgId ? [requesterTgId] : [])).all();
     // Expired parents whose clone reached a terminal stage stay visible with
     // their final totals; only non-terminal runs drop off after expiry.
     parents = (r.results || r || []).map((row) => {
-      try { const state = JSON.parse(row.stats_json); return state?.manager === 'uclone' ? { ...row, state } : null; } catch (_) { return null; }
+      try { const state = JSON.parse(row.stats_json); return ['uclone', 'botclone'].includes(state?.manager) ? { ...row, state } : null; } catch (_) { return null; }
     }).filter((p) => p && (Number(p.expires_at || 0) > now || ['done', 'stopped', 'error'].includes(String(p.state?.stage || ''))));
   } catch (_) {}
 
   const ph = (ids) => ids.length ? ids.map(() => '?').join(',') : '';
   const jobsByParent = new Map();
   const standalone = [];
+  const liveFollowKeys = new Set();
+  try {
+    const { results: followRows } = await env.DB.prepare('SELECT chat_id, label, community_id, target, created_by FROM userbot_follows').all();
+    for (const f of followRows || []) liveFollowKeys.add([normalizeTgChatId(String(f.chat_id || '').split(':')[0]), String(f.label || ''), String(f.target || ''), String(f.community_id || ''), String(f.created_by || '')].join('|'));
+  } catch (_) {}
   if (parents.length) {
     let rows = [];
     try {
@@ -16994,16 +17108,27 @@ export async function buildStatsReport(env, _token = null, scope = null) {
     }
   }
 
-  // Standalone clones: no parent, never merged into managed runs. Grouped by
-  // (chat, thread, account, target, community, user) so destinations stay isolated.
+  // Standalone clones are grouped by source chat, account, destination and
+  // owner. Topic rows belong to one run; treating every topic ledger row as a
+  // separate run produced misleading dashboards such as page 1/112.
   try {
+    const liveFollows = liveFollowKeys;
+    const grouped = new Map();
     const r = await env.DB.prepare("SELECT * FROM index_jobs WHERE (parent_id IS NULL OR parent_id='') AND status IN ('done','error','stopped','queued','running','stopping') ORDER BY created_at DESC").all();
-    const rows = r.results || r || [];
-    for (const row of rows) {
+    for (const row of (r.results || r || [])) {
+      const baseChat = normalizeTgChatId(String(row.chat_id || '').split(':')[0]);
+      const key = [baseChat, String(row.userbot_label || ''), String(row.target || ''), String(row.community_id || ''), String(row.user_id || '')].join('|');
+      let group = grouped.get(key);
+      if (!group) {
+        group = { chat_id: baseChat, target: row.target, community_id: row.community_id, user_id: row.user_id, state: { label: row.userbot_label || '', sourceName: row.chat_name || baseChat, destinationName: row.target || null }, jobs: [], overall: {}, requester_tg_id: row.requester_tg_id || '', live: liveFollows.has(key) };
+        grouped.set(key, group);
+      }
       const counters = String(row.id).startsWith('live_') ? await liveCaptureCounters(env, row.id) : statsParseCounters(row);
-      const jobRows = [{ ...row, counters }];
-      standalone.push({ chat_id: row.chat_id, thread_id: row.thread_id, target: row.target, community_id: row.community_id, user_id: row.user_id, state: { label: row.userbot_label || '' }, jobs: jobRows, overall: counters, requester_tg_id: row.requester_tg_id || '' });
+      group.jobs.push({ ...row, counters });
+      statsAddCounters(group.overall, counters);
+      group.live ||= liveFollows.has(key);
     }
+    standalone.push(...grouped.values());
   } catch (_) {}
 
   // Visibility: a requester sees their own runs; GOD sees everything.
@@ -17050,21 +17175,30 @@ export async function buildStatsReport(env, _token = null, scope = null) {
         topics.push({ threadId: tid, title: j.topic_name || null, total: { links: c.savedLinks || 0, files: c.savedFiles || 0, other: 0 }, percent: j.status === 'done' ? 100 : 0, done: j.status === 'done', stateMark: j.status === 'done' ? '✅ COMPLETE' : '⏳ PENDING' });
       }
     }
+    const followKey = [normalizeTgChatId(p.chat_id), String(state.label || ''), String(p.target || ''), String(p.community_id || ''), String(p.requester_user_id || '')].join('|');
     runs.push({
-      id: String(p.id), chat_id: normalizeTgChatId(p.chat_id), state: { ...state, overall, requesterTgId: String(p.requester_tg_id || '') },
-      jobs: agg.rows, live: state.stage === 'running' || agg.rows.some((j) => j.status === 'running' || j.status === 'queued'),
+      id: String(p.id), chat_id: normalizeTgChatId(p.chat_id), state: { ...state, overall, requesterTgId: String(p.requester_tg_id || ''), requesterUserId: String(p.requester_user_id || '') },
+      jobs: agg.rows, live: state.stage === 'running' || agg.rows.some((j) => j.status === 'running' || j.status === 'queued') || liveFollowKeys.has(followKey),
       topics, standalone: false,
     });
   }
   for (const s of visibleStandalone) {
     const overall = { ...s.overall };
-    const active = s.jobs.some((j) => j.status === 'running' || j.status === 'queued');
-    const liveRow = s.jobs.some((j) => j.status === 'live');
-    runs.push({
-      id: 'standalone:' + s.jobs.map((j) => j.id).sort().join(','),
-      chat_id: normalizeTgChatId(s.chat_id), state: { label: s.state.label || '', destinationName: null, sourceName: null, isForum: s.thread_id ? true : null, stage: active ? 'running' : (s.jobs.some((j) => j.status === 'error') ? 'error' : 'done'), sourceType: null, username: null, overall, requesterTgId: String(s.requester_tg_id || ''), requesterUserId: String(s.user_id || '') },
-      jobs: s.jobs, live: active || liveRow, topics: null, standalone: true,
+    const active = s.jobs.some((j) => j.status === 'running' || j.status === 'queued' || j.status === 'stopping');
+    const topicJobs = new Map();
+    for (const job of s.jobs) {
+      if (job.thread_id == null || job.thread_id === '') continue;
+      const tid = String(job.thread_id);
+      const current = topicJobs.get(tid);
+      if (!current || Number(job.updated_at || 0) >= Number(current.updated_at || 0)) topicJobs.set(tid, job);
+    }
+    const topics = [...topicJobs.entries()].map(([threadId, job]) => {
+      const c = statsNormalizeCounters(job.counters);
+      const done = job.status === 'done';
+      return { threadId, title: job.topic_name || null, total: { links: c.savedLinks || 0, files: c.savedFiles || 0, other: (c.savedOther || 0) + (c.savedHtml || 0) + (c.savedJson || 0) + (c.savedMarkdown || 0) + (c.savedImages || 0) + (c.savedAudio || 0) }, percent: done ? 100 : 0, done, stateMark: done ? '✅ COMPLETE' : active ? '🟢 LIVE' : '⏳ PENDING' };
     });
+    const state = { ...s.state, isForum: topics.length > 0, stage: active ? 'running' : (s.jobs.some((j) => j.status === 'error') ? 'error' : 'done'), sourceType: topics.length ? 'group' : null, username: null, overall, requesterTgId: String(s.requester_tg_id || ''), requesterUserId: String(s.user_id || '') };
+    runs.push({ id: 'standalone:' + s.jobs.map((j) => j.id).sort().join(','), chat_id: normalizeTgChatId(s.chat_id), state, jobs: s.jobs, live: active || s.live, topics, standalone: true });
   }
 
   return { runs, chats: [], generatedAt: now };

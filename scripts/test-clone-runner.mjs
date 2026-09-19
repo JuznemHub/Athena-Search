@@ -467,7 +467,9 @@ try {
   assert.equal(preview.counters.messages, 2);
   assert.equal(sql.prepare('SELECT count(*) n FROM clone_sources WHERE chat_id=?').get(pending.chat_id).n, 0, 'preview copies nothing');
   includeLateMessage = true;
-  await click('Personal brain');
+  await click('Personal');
+  const liveFollow = sql.prepare('SELECT chat_id,label,target,created_by FROM userbot_follows WHERE chat_id=?').get('-1005555555555');
+  assert.deepEqual([liveFollow.chat_id, liveFollow.label, liveFollow.target, liveFollow.created_by], ['-1005555555555', 'managed', 'personal', 'u_managed'], 'uclone persists the selected live follow');
   const finished = JSON.parse(sql.prepare('SELECT stats_json FROM pending_clones WHERE id=?').get(pending.id).stats_json);
   assert.equal(finished.stage, 'done', finished.error);
   const managedJob = sql.prepare('SELECT * FROM index_jobs WHERE parent_id=?').get(pending.id);

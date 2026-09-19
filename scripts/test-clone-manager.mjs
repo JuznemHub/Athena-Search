@@ -174,6 +174,24 @@ await scenario('forum discovery crosses 100 topics through short pages and late 
   assert.deepEqual(f.children().map(j => [j.thread_id, j.processed]), [['106', 1]], 'late-page choice clones only that topic');
 });
 
+await scenario('topic statistics and completed clone return to chooser', { forum: true, topics: [1, 7] }, async f => {
+  await f.preview();
+  await f.click('Statistics');
+  assert.ok(f.buttons().some(b => b.text === 'Back'), 'topic statistics has a back control');
+  await f.click('Back');
+  assert.equal(f.run().state.stage, 'topics');
+  await f.click('7:');
+  assert.ok(f.buttons().some(b => b.text === 'Back to topic statistics'), 'destination has a back control');
+  await f.click('Back to topic statistics');
+  assert.equal(f.run().state.stage, 'topics');
+  await f.click('7:'); await f.click('Personal'); await f.drain();
+  assert.equal(f.run().state.stage, 'done');
+  assert.ok(f.buttons().some(b => b.text === 'Back to topic statistics'), 'completed clone has a back control');
+  await f.click('Back to topic statistics');
+  assert.equal(f.run().state.stage, 'topics');
+  await f.click('1:'); await f.click('Personal'); await f.drain();
+  assert.equal(f.children().length, 2, 'back navigation permits a second topic clone without rescanning');
+});
 await scenario('creation-ordered topics continue until empty when total is unavailable', { forum: true, topicPageSize: 1, orderByCreateDate: true, includeTopicCount: false }, async f => {
   await f.preview();
   assert.equal(f.run().state.stage, 'topics');
@@ -281,7 +299,7 @@ await scenario('progress is throttled but final counters are exact and scope-iso
 
 await scenario('combined destination selects Community B and personal without another community', {}, async f => {
   await f.preview();
-  const communityIndex = f.buttons().findIndex(b => b.text === 'Community B');
+  const communityIndex = f.buttons().findIndex(b => b.text.startsWith('Community B'));
   const both = f.buttons()[communityIndex + 1];
   assert.ok(both, 'each community exposes its own combined destination');
   await f.callback(both.callback_data); await f.drain();
@@ -291,7 +309,7 @@ await scenario('combined destination selects Community B and personal without an
 
 await scenario('combined destination enforces authorization before copying and between topics', { forum: true }, async f => {
   await f.preview(); await f.click('All topics');
-  const communityIndex = f.buttons().findIndex(b => b.text === 'Community A');
+  const communityIndex = f.buttons().findIndex(b => b.text.startsWith('Community A'));
   const both = f.buttons()[communityIndex + 1];
   f.denied.add('c_a');
   await f.callback(both.callback_data); await f.drain();
