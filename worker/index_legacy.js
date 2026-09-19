@@ -10205,6 +10205,7 @@ async function runHistoryIndexJob(env, initialJob, token, runtime = {}) {
           if (await stopped()) { const error = new Error('Clone stopped'); error.name = 'AbortError'; throw error; }
           await ubWaitForRelease(job.userbot_label);
           try { return await operation(); } catch (error) {
+            console.error('[clone-req-diag]', JSON.stringify({ message: String(error?.message || error).slice(0, 200), errorMessage: error?.errorMessage ?? null, seconds: error?.seconds ?? null, name: error?.name ?? null, className: error?.className ?? null, category: cloneFailure(error).category }));
             if (Number(error?.seconds) > 0) { counters.retries++; ubReportFlood(job.userbot_label, Number(error.seconds)); await progress(); continue; }
             if (cloneFailure(error).category === 'network' && retries++ < 3) { counters.retries++; await wait(1000 * 2 ** retries); continue; }
             throw error;
