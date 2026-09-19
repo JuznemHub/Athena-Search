@@ -9976,11 +9976,15 @@ function addCloneCounters(total, item) {
 // Retry only database operations, never the surrounding content write. A lost
 // checkpoint must not advance history past an item whose association is absent.
 async function cloneDatabaseWrite(operation) {
+  // A single failed association write marks the whole topic incomplete, which
+  // stops the run — so a connection/pool blip must not surface as a failure.
+  // 25/50ms is too tight for that; back off far enough to ride out a blip.
+  const delays = [200, 1000, 3000];
   for (let attempt = 0; ; attempt++) {
     try { return await operation(); }
     catch (error) {
-      if (attempt >= 2) { error.cloneDatabaseFailure = true; throw error; }
-      await sleep(25 * (attempt + 1));
+      if (attempt >= delays.length) { error.cloneDatabaseFailure = true; throw error; }
+      await sleep(delays[attempt]);
     }
   }
 }
