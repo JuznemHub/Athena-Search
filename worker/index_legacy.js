@@ -9090,50 +9090,9 @@ function ucloneManager(env) {
   return manager;
 }
 
-/** TEMP-DIAG (support call 2026-09-19): one-shot boot dump of clone state.
- *  Reads only; remove once the clone stall is explained. */
-async function cloneDiagDump(env) {
-  const out = {};
-  const q = async (label, sql) => { try { out[label] = (await env.DB.prepare(sql).all()).results; } catch (error) { out[label + 'Error'] = error.message; } };
-  await q('jobs', "SELECT id,parent_id,chat_id,thread_id,status,processed,total_messages,saved_links,saved_docs,saved_files,errors,error,updated_at FROM index_jobs ORDER BY updated_at DESC LIMIT 12");
-  await q('items', "SELECT job_id, COUNT(*) n FROM clone_job_items GROUP BY job_id ORDER BY n DESC LIMIT 12");
-  await q('sources', "SELECT status, error_category, COUNT(*) n, SUM(CASE WHEN storage_path IS NOT NULL THEN 1 ELSE 0 END) with_path FROM clone_sources GROUP BY status, error_category ORDER BY n DESC LIMIT 20");
-  await q('errors', "SELECT t,label,chat,error FROM userbot_errors ORDER BY t DESC LIMIT 5");
-  await q('pending', "SELECT id,chat_id,thread_id,target,expires_at,created_at,stats_json FROM pending_clones ORDER BY created_at DESC LIMIT 5");
-  try { out.pending = (out.pending || []).map((r) => { const s = JSON.parse(r.stats_json || '{}'); return { id: r.id, chat_id: r.chat_id, thread: r.thread_id, target: r.target, expires_at: r.expires_at, stage: s.stage, cursor: s.cursor, cancelled: s.cancelled, error: s.error, topics: (s.chosen || []).length }; }); } catch (_) {}
-  try {
-    const fs = await import('node:fs/promises');
-    const path = await import('node:path');
-    const root = MEDIA_VAULT_DIR;
-    out.mediaEnv = { processEnv: process.env?.ATHENA_MEDIA_DIR ?? null, moduleConst: MEDIA_VAULT_DIR };
-    if (!root) out.vault = { root: null };
-    else {
-      let files = 0, bytes = 0, capped = false;
-      const walk = async (dir) => {
-        for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
-          if (files > 50000) { capped = true; return; }
-          const full = path.join(dir, entry.name);
-          if (entry.isDirectory()) await walk(full);
-          else { files++; bytes += (await fs.stat(full)).size; }
-        }
-      };
-      await walk(root);
-      const st = await fs.stat(root);
-      out.vault = { root, files, bytes, capped, mode: st.mode.toString(8), uid: st.uid, gid: st.gid, isDir: st.isDirectory(), entries: (await fs.readdir(root)).slice(0, 10) };
-      try { await fs.access(root, (await import('node:fs')).constants.W_OK); out.vault.writable = true; }
-      catch (error) { out.vault.writable = false; out.vault.accessError = `${error.code || ''} ${error.message}`; }
-      const probe = path.join(root, '.vault-probe');
-      try { await fs.mkdir(path.join(root, 'community_probe'), { recursive: true }); await fs.writeFile(probe, Buffer.from('probe')); await fs.unlink(probe); out.vault.writeProbe = 'ok'; }
-      catch (error) { out.vault.writeProbe = `${error.code || ''} ${error.message}`; }
-    }
-  } catch (error) { out.vaultError = error.message; }
-  console.log('[clone-diag]', JSON.stringify(out));
-}
-
 export async function resumeCloneJobs(env, token) {
   await startUserbotDaemon(env);
   await ensureIndexTables(env);
-  await cloneDiagDump(env);
   await ucloneManager(env).resume(token);
   const { results } = await env.DB.prepare("SELECT * FROM index_jobs WHERE status IN ('queued','running','stopping') AND parent_id IS NULL ORDER BY created_at").all();
   for (const job of results) runInBackground(env, runHistoryIndexJob(env, job, token));
@@ -9545,21 +9504,15 @@ function ubReportFlood(label, seconds) {
  */
 const MEDIA_VAULT_DIR = String(process.env?.ATHENA_MEDIA_DIR || '').trim();
 async function vaultSave(chatId, messageId, filename, bytes) {
-  if (!MEDIA_VAULT_DIR || !bytes?.length) { console.error('[vault-diag] null', JSON.stringify({ hasDir: !!MEDIA_VAULT_DIR, len: bytes?.length ?? null, messageId })); return null; }
+  if (!MEDIA_VAULT_DIR || !bytes?.length) return null;
   const fsSpec = 'node:fs/promises';
   const { mkdir, writeFile } = await import(fsSpec);
   const safeName = String(filename || `file_${messageId}`).replace(/[^\w.-]+/g, '_').slice(0, 120);
   const dir = `${MEDIA_VAULT_DIR}/${String(chatId).replace(/[^\w-]+/g, '_')}`;
-  try {
-    await mkdir(dir, { recursive: true });
-    const path = `${dir}/${messageId}_${safeName}`;
-    await writeFile(path, bytes);
-    console.error('[vault-diag] wrote', path, bytes.length);
-    return path;
-  } catch (error) {
-    console.error('[vault-diag] error', JSON.stringify({ code: error.code || null, message: error.message, dir, messageId, len: bytes.length }));
-    throw error;
-  }
+  await mkdir(dir, { recursive: true });
+  const path = `${dir}/${messageId}_${safeName}`;
+  await writeFile(path, bytes);
+  return path;
 }
 
 
@@ -10087,7 +10040,6 @@ async function persistCloneComponent(env, { job, sink, message, classification, 
       // instead of marking every remaining item failed.
       if (error.name === 'AbortError' || ['session', 'permission'].includes(failure.category) || (stopOnFlood && failure.category === 'flood')) throw error;
       status = 'failed'; category = failure.category;
-      console.error('[clone-media-diag]', key, category, String(error?.message || error).slice(0, 200));
     }
     const sourceUrl = /^-100/.test(job.chat_id) ? `https://t.me/c/${job.chat_id.slice(4)}/${mid}` : null;
     await cloneDatabaseWrite(() => env.DB.prepare(`INSERT INTO clone_sources (destination,chat_id,topic_id,message_id,content_key,topic_name,message_date,sender_id,source_url,content_id,storage_path,status,error_category,transfer_id)
