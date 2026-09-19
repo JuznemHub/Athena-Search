@@ -9105,6 +9105,7 @@ async function cloneDiagDump(env) {
     const fs = await import('node:fs/promises');
     const path = await import('node:path');
     const root = MEDIA_VAULT_DIR;
+    out.mediaEnv = { processEnv: process.env?.ATHENA_MEDIA_DIR ?? null, moduleConst: MEDIA_VAULT_DIR };
     if (!root) out.vault = { root: null };
     else {
       let files = 0, bytes = 0, capped = false;
@@ -9117,7 +9118,13 @@ async function cloneDiagDump(env) {
         }
       };
       await walk(root);
-      out.vault = { root, files, bytes, capped };
+      const st = await fs.stat(root);
+      out.vault = { root, files, bytes, capped, mode: st.mode.toString(8), uid: st.uid, gid: st.gid, isDir: st.isDirectory(), entries: (await fs.readdir(root)).slice(0, 10) };
+      try { await fs.access(root, (await import('node:fs')).constants.W_OK); out.vault.writable = true; }
+      catch (error) { out.vault.writable = false; out.vault.accessError = `${error.code || ''} ${error.message}`; }
+      const probe = path.join(root, '.vault-probe');
+      try { await fs.mkdir(path.join(root, 'community_probe'), { recursive: true }); await fs.writeFile(probe, Buffer.from('probe')); await fs.unlink(probe); out.vault.writeProbe = 'ok'; }
+      catch (error) { out.vault.writeProbe = `${error.code || ''} ${error.message}`; }
     }
   } catch (error) { out.vaultError = error.message; }
   console.log('[clone-diag]', JSON.stringify(out));
