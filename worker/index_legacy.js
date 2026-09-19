@@ -9441,6 +9441,12 @@ ${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, f
 
 const INDEX_BATCH = 100;
 const INDEX_BATCH_DELAY_MS = 1500; // ~40 req/min ceiling — well under Telegram's flood limits
+// The page delay above does not pace media: a media-heavy topic issues one
+// upload.getFile per message, so the runner used to burst ~1.7 downloads/s
+// until Telegram throttled the account and every later download sat in a flood
+// wait. One gap per downloaded file keeps the sustained rate at the same
+// ~40 req/min ceiling the page delay targets.
+const MEDIA_DOWNLOAD_GAP_MS = 1500;
 
 /**
  * Flood-wait retry policy for one operation (a download, a link save, a page
@@ -10243,7 +10249,8 @@ async function runHistoryIndexJob(env, initialJob, token, runtime = {}) {
               if (media && media.kind !== 'video') await component(sink, 'media', async () => {
                 if (!downloaded) {
                   if (media.size > 2 * 1024 * 1024 * 1024) throw new Error('FILE_SIZE_LIMIT');
-                  downloaded = await request(() => client.downloadMedia(message, {}));
+                  try { downloaded = await request(() => client.downloadMedia(message, {})); }
+                  finally { await wait(MEDIA_DOWNLOAD_GAP_MS); }
                   if (!downloaded?.length) throw new Error('EMPTY_DOWNLOAD');
                 }
                 const filename = media.filename || `${media.kind}_${mid}${media.ext ? '.' + media.ext : ''}`;
