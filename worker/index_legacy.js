@@ -9530,15 +9530,21 @@ function ubReportFlood(label, seconds) {
  */
 const MEDIA_VAULT_DIR = String(process.env?.ATHENA_MEDIA_DIR || '').trim();
 async function vaultSave(chatId, messageId, filename, bytes) {
-  if (!MEDIA_VAULT_DIR || !bytes?.length) return null;
+  if (!MEDIA_VAULT_DIR || !bytes?.length) { console.error('[vault-diag] null', JSON.stringify({ hasDir: !!MEDIA_VAULT_DIR, len: bytes?.length ?? null, messageId })); return null; }
   const fsSpec = 'node:fs/promises';
   const { mkdir, writeFile } = await import(fsSpec);
   const safeName = String(filename || `file_${messageId}`).replace(/[^\w.-]+/g, '_').slice(0, 120);
   const dir = `${MEDIA_VAULT_DIR}/${String(chatId).replace(/[^\w-]+/g, '_')}`;
-  await mkdir(dir, { recursive: true });
-  const path = `${dir}/${messageId}_${safeName}`;
-  await writeFile(path, bytes);
-  return path;
+  try {
+    await mkdir(dir, { recursive: true });
+    const path = `${dir}/${messageId}_${safeName}`;
+    await writeFile(path, bytes);
+    console.error('[vault-diag] wrote', path, bytes.length);
+    return path;
+  } catch (error) {
+    console.error('[vault-diag] error', JSON.stringify({ code: error.code || null, message: error.message, dir, messageId, len: bytes.length }));
+    throw error;
+  }
 }
 
 
@@ -10063,6 +10069,7 @@ async function persistCloneComponent(env, { job, sink, message, classification, 
       const failure = cloneFailure(error);
       if (error.name === 'AbortError' || ['session', 'permission'].includes(failure.category)) throw error;
       status = 'failed'; category = failure.category;
+      console.error('[clone-media-diag]', key, category, String(error?.message || error).slice(0, 200));
     }
     const sourceUrl = /^-100/.test(job.chat_id) ? `https://t.me/c/${job.chat_id.slice(4)}/${mid}` : null;
     await cloneDatabaseWrite(() => env.DB.prepare(`INSERT INTO clone_sources (destination,chat_id,topic_id,message_id,content_key,topic_name,message_date,sender_id,source_url,content_id,storage_path,status,error_category,transfer_id)
