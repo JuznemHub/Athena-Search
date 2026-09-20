@@ -5459,6 +5459,15 @@ async function handleGetPersonalLinks(userId, env, corsHeaders) {
   return Response.json({ success: true, links, enrichment_pending: enrichmentPending }, { headers: corsHeaders });
 }
 
+/**
+ * Rows affected by a write. D1 and the Postgres adapter both report the count
+ * as `meta.changes`; a top-level `changes` only exists on older shims, so
+ * reading it alone silently reported 0 for every delete.
+ */
+function rowsChanged(result) {
+  return Number(result?.meta?.changes ?? result?.changes ?? 0) || 0;
+}
+
 function isUniqueConstraintError(error) {
   const code = String(error?.code || error?.cause?.code || '').toUpperCase();
   const message = String(error?.message || error || '').toLowerCase();
@@ -7625,7 +7634,7 @@ function helpTextForSection(section, isGod = false) {
       cmd(3, `${codeHtml('/dumpall')} ${codeHtml('on|off')} · ${codeHtml('/dumpsmart')}`, 'Every URL in a post, or the primary one only.'),
       spacer,
       richParagraph('<b>Tagging & structure</b>'),
-      cmd(4, `${codeHtml('/forcetags')} ${codeHtml('[community_id]')}`, 'AI re-tags every link (existing tags can be overwritten).'),
+      cmd(4, `${codeHtml('/forcetags')} ${codeHtml('[community_id]')}`, 'AI tags links that have no tags yet, up to 150 per run — run it again to continue. Links that already carry tags are left alone.'),
       cmd(5, codeHtml('/tag_untagged'), 'Tags only rows with no real tags — cheap first pass.'),
       cmd(6, codeHtml('/structure'), 'One-pass DB cleanup: strips tracking URLs, merges near-duplicate links, cleans titles and notes, trims multi-link notes to each link’s own section. Runs in the background with live progress.'),
       spacer,
@@ -11754,11 +11763,14 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
-     const cid = (parts[1] || '').trim();
-     if (!cid) {
+     const cidArg = (parts[1] || '').trim();
+     if (!cidArg) {
        await sendTelegramFormatted(token, chatId, `Usage: ${codeHtml('/channel_unlink <channel_id>')}`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
+     // /channel_link stores the -100… form, so accept the bare id the user
+     // linked with instead of looking up the raw argument and finding nothing.
+     const cid = cidArg.startsWith('-') ? cidArg : `-100${cidArg.replace(/^-100/, '')}`;
      const row = await env.DB.prepare(
        `SELECT id, community_id FROM community_bots WHERE platform = 'telegram' AND group_id = ? AND community_id IS NOT NULL`
      ).bind(cid).first();
@@ -12095,7 +12107,12 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      //   legacy: /index_start <community_id> <chat_id> <api_id> <api_hash> <session_string> [thread_id]
      const communityIdArg = parts[1] || '';
      const chatIdArg = parts[2] || '';
-     const legacy = parts.length >= 6;
+     // Legacy credential form: 5 arguments (api_id, api_hash, session, plus the
+     // two ids). Four arguments is an incomplete credential form, not the short
+     // form — treating it as short would discard the api_id and clone whatever
+     // the third argument happens to be as a topic.
+     const credentialLike = /^\d{4,}$/.test(parts[3] || '');
+     const legacy = parts.length >= 6 || (parts.length === 5 && credentialLike);
      let apiIdArg = '';
      let apiHashArg = '';
      let sessionArg = '';
@@ -12346,14 +12363,16 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
 
    // ---- /userbot_unfollow ----
    if (cmd === '/userbot_unfollow' || cmd === '/userbotunfollow') {
-     const cidArg = (parts[1] || '').trim();
+     const cidArg = normalizeTgChatId((parts[1] || '').trim());
      if (!cidArg) {
        await sendTelegramFormatted(token, chatId, `Usage: ${codeHtml('/userbot_unfollow <chat_id>')}`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      await ensureUserbotTables(env);
+     // /userbot_follow stores the normalized id, so normalize here too or the
+     // delete matches nothing while the follow keeps cloning the chat.
      const r = await env.DB.prepare('DELETE FROM userbot_follows WHERE chat_id = ?').bind(cidArg).run();
-     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Unfollowed ${codeHtml(cidArg)}${r?.changes ? '' : italicHtml(' (was not followed)')}.`, forumThreadId);
+     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Unfollowed ${codeHtml(cidArg)}${rowsChanged(r) ? '' : italicHtml(' (was not followed)')}.`, forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
@@ -12490,7 +12509,12 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       jobIds = (results || []).map((r) => r.id);
       transferIds = [...jobIds, `live:${cid}`];
     }
-    if (!transferIds.length) {
+    // The live:… id is always present, so "nothing found" has to mean "no
+    // session row and no imported content", not an empty transfer list.
+    const known = jobIds.length
+      ? true
+      : Boolean(await env.DB.prepare('SELECT 1 FROM clone_sources WHERE transfer_id IN (' + transferIds.map(() => '?').join(',') + ') LIMIT 1').bind(...transferIds).first().catch(() => null));
+    if (!known) {
       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Nothing found for ${codeHtml(target)}. See ${codeHtml('/index_status all')}.`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
@@ -12514,7 +12538,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        if (cidForMeili) markMeiliScopeDirty(env, 'community', cidForMeili);
      } catch (_) {}
      await sendTelegramFormatted(token, chatId,
-       `${boldHtml('🗑 Deleted session')} ${codeHtml(target)}\n• links removed: ${d1?.changes || 0}\n• personal links: ${d2?.changes || 0}\n• documents: ${d3?.changes || 0}${filesWiped ? '\n• vault media folder wiped' : ''}\n${italicHtml(withFiles ? '' : 'Vault media files were kept — repeat with "files" to wipe them.')}`,
+       `${boldHtml('🗑 Deleted session')} ${codeHtml(target)}\n• links removed: ${rowsChanged(d1)}\n• personal links: ${rowsChanged(d2)}\n• documents: ${rowsChanged(d3)}${filesWiped ? '\n• vault media folder wiped' : ''}\n${italicHtml(withFiles ? '' : 'Vault media files were kept — repeat with "files" to wipe them.')}`,
        forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
@@ -12758,16 +12782,17 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Only GOD rank can restart the service.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
+     // Restart is a self-host-only capability. Cloudflare Workers cannot access
+     // the host process, so expose it through the Node adapter instead of
+     // bundling node:child_process into the Worker. Checked BEFORE the
+     // "Restarting…" message so the reply never claims a restart that cannot run.
+     if (env.ATHENA_RUNTIME !== 'selfhost' || typeof env.restartService !== 'function') {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Restart is only available on the self-hosted backend.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
      await sendTelegramFormatted(token, chatId, `${boldHtml('🔄')} Restarting Athena… Back in ~5 seconds.\nSend /start to check.`, forumThreadId);
-      // Restart is a self-host-only capability. Cloudflare Workers cannot
-      // access the host process, so expose it through the Node adapter instead
-      // of bundling node:child_process into the Worker.
-      if (env.ATHENA_RUNTIME !== 'selfhost' || typeof env.restartService !== 'function') {
-        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Restart is only available on the self-hosted backend.`, forumThreadId);
-        return new Response('OK', { status: 200, headers: corsHeaders });
-      }
-      env.restartService();
-      return new Response('OK', { status: 200, headers: corsHeaders });
+     env.restartService();
+     return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
    if (cmd === '/help') {
@@ -13001,7 +13026,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
-  // ---- /clear_personal_db (GOD only) ----
+  // ---- /clear_personal_db (GOD only, explicit confirmation) ----
   if (cmd === '/clear_personal_db' || cmd === '/clear_perosnal_db' || cmd === '/clearpersonal') {
     if (!isGod) {
       await sendTelegramMessage(token, chatId, 'GOD rank only (instance host).', forumThreadId);
@@ -13011,12 +13036,28 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       await sendTelegramMessage(token, chatId, 'Login on website first.', forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
+    // Irreversible, so the argument is the confirmation — matching what /help
+    // has always told the user. Without it, ask and stop.
+    if (!/^yes$/i.test((parts[1] || '').trim())) {
+      let count = 0;
+      try { count = Number((await env.DB.prepare('SELECT COUNT(*) AS n FROM personal_links WHERE user_id = ?').bind(athenaUser.id).first())?.n || 0); } catch (_) {}
+      await sendTelegramFormatted(token, chatId, [
+        `${boldHtml('⚠️ Confirm personal brain wipe')}`,
+        `This deletes every link in your personal brain${count ? ` (${count} link${count === 1 ? '' : 's'})` : ''}. Community brains are untouched.`,
+        '',
+        `Reply ${codeHtml('/clear_personal_db YES')} to confirm.`,
+        italicHtml('There is no undo.')
+      ].join('\n'), forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    let removed = 0;
     try {
-      await env.DB.prepare('DELETE FROM personal_links WHERE user_id = ?').bind(athenaUser.id).run();
+      const r = await env.DB.prepare('DELETE FROM personal_links WHERE user_id = ?').bind(athenaUser.id).run();
+      removed = rowsChanged(r);
     } catch (_) {}
     markMeiliScopeDirty(env, 'personal', athenaUser.id);
     await logOperationalEvent(env, '🧹 Personal database cleared', `${athenaUser.username || athenaUser.display_name || athenaUser.id} cleared personal links`, athenaUser.id);
-    await sendTelegramMessage(token, chatId, 'Personal DB cleared for your GOD account.', forumThreadId);
+    await sendTelegramMessage(token, chatId, `Personal DB cleared for your GOD account.\nRemoved ~${removed} links.`, forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
@@ -14357,26 +14398,27 @@ Rules:
         const cph = cIds.map(() => '?').join(',');
         const kph = chatKeys.map(() => '?').join(',');
         const r1 = await env.DB.prepare(`DELETE FROM links WHERE source_chat_id IN (${kph}) AND community_id IN (${cph})`).bind(...chatKeys, ...cIds).run().catch(() => ({ changes: 0 }));
-        orphanLinks = r1.changes || 0;
+        orphanLinks = rowsChanged(r1);
         const r3 = await env.DB.prepare(`DELETE FROM uploaded_documents WHERE source_chat_id IN (${kph}) AND scope = 'community' AND community_id IN (${cph})`).bind(...chatKeys, ...cIds).run().catch(() => ({ changes: 0 }));
-        orphanDocs += r3.changes || 0;
+        orphanDocs += rowsChanged(r3);
       }
       if (pIds.length) {
         const pph = pIds.map(() => '?').join(',');
         const k2 = chatKeys.map(() => '?').join(',');
         const r2 = await env.DB.prepare(`DELETE FROM personal_links WHERE source_chat_id IN (${k2}) AND user_id IN (${pph})`).bind(...chatKeys, ...pIds).run().catch(() => ({ changes: 0 }));
-        orphanPersonal = r2.changes || 0;
+        orphanPersonal = rowsChanged(r2);
         const r3b = await env.DB.prepare(`DELETE FROM uploaded_documents WHERE source_chat_id IN (${k2}) AND scope = 'personal' AND user_id IN (${pph})`).bind(...chatKeys, ...pIds).run().catch(() => ({ changes: 0 }));
-        orphanDocs += r3b.changes || 0;
+        orphanDocs += rowsChanged(r3b);
       }
       // Docs for this chat regardless of path (chat-scoped, precise).
       try {
         const k3 = chatKeys.map(() => '?').join(',');
         const rd = await env.DB.prepare(`DELETE FROM uploaded_documents WHERE source_chat_id IN (${k3})`).bind(...chatKeys).run().catch(() => ({ changes: 0 }));
-        orphanDocs += rd.changes || 0;
+        orphanDocs += rowsChanged(rd);
       } catch (_) {}
+      let vaultWiped = 0;
       if (withFiles && MEDIA_VAULT_DIR) {
-        await wipeCloneVaultPaths(env, { transferIds: jobIds, chatKeys: threadArg ? [] : chatKeys });
+        vaultWiped = await wipeCloneVaultPaths(env, { transferIds: jobIds, chatKeys: threadArg ? [] : chatKeys }).catch(() => 0);
       }
       if (jobIds.length) {
         await env.DB.prepare(`DELETE FROM index_jobs WHERE id IN (${jobIds.map(() => '?').join(',')})`).bind(...jobIds).run().catch(() => {});
@@ -14392,14 +14434,14 @@ Rules:
       const scopeTxt = [];
       if (cIds.length) scopeTxt.push('community: ' + cIds.map(c => escHtml(c.replace(/^c_/, ''))).join(', '));
       if (pIds.length) scopeTxt.push('personal: ' + pIds.length + ' user(s)');
-      const totalLinks = (d1?.changes || 0) + orphanLinks;
-      const totalPersonal = (d2?.changes || 0) + orphanPersonal;
-      const totalDocs = (d3?.changes || 0) + orphanDocs;
+      const totalLinks = rowsChanged(d1) + orphanLinks;
+      const totalPersonal = rowsChanged(d2) + orphanPersonal;
+      const totalDocs = rowsChanged(d3) + orphanDocs;
       await sendTelegramMessage(token, chatId,
         `🗑 Deleted ${threadArg ? 'topic ' + threadArg + ' of ' : ''}${chatArg}
 • community links: ${totalLinks}
 • personal links: ${totalPersonal}
-• documents: ${totalDocs}${scopeTxt.length ? '\n• path: ' + scopeTxt.join(' · ') : ''}${withFiles ? '\n• vault files wiped' : ''}`,
+• documents: ${totalDocs}${scopeTxt.length ? '\n• path: ' + scopeTxt.join(' · ') : ''}${withFiles ? (vaultWiped ? `\n• vault files wiped: ${vaultWiped}` : `\n• vault files: none to wipe${MEDIA_VAULT_DIR ? '' : ' (media vault not configured)'}`) : ''}`,
         forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
