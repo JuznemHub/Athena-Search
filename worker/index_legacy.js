@@ -9344,9 +9344,23 @@ function formatStatsRichReport(report, _pageIndex = 0) {
   if (!runs.length) {
     html = statsEmptyPage();
   } else {
-    // The dashboard is a current-state view. Historical retry attempts remain
-    // in the ledger, but must not become eleven navigation pages.
-    html = statsRunPage(runs[0]);
+    // /stats is a source dashboard, not a report for only the newest retry.
+    // Repeated runs of the same source/destination are cumulative: a fresh
+    // retry commonly has zero new writes because the prior run already
+    // imported the links.
+    const destinationKey = (run) => {
+      const state = run.state || {};
+      if (state.target || run.target) return String(state.target || run.target);
+      const label = String(state.destinationName || '').toLowerCase();
+      return label.includes('personal') ? 'personal' : label.includes('community') ? 'community' : label;
+    };
+    const key = (run) => [run.chat_id, destinationKey(run), run.state?.requesterUserId || run.state?.requesterTgId || ''].join('|');
+    const first = runs[0];
+    const matching = runs.filter((run) => key(run) === key(first));
+    const overall = {};
+    for (const run of matching) statsAddCounters(overall, statsNormalizeCounters(run.state?.overall || run.state?.counters || {}));
+    const dashboard = { ...first, state: { ...first.state, overall }, live: matching.some((run) => run.live === true) };
+    html = statsRunPage(dashboard);
   }
   rows.push([
     { label: '🔄 Refresh', data: 'stats:refresh' },
