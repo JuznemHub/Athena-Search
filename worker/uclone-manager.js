@@ -274,7 +274,7 @@ export function createUcloneManager(env, deps) {
     for (const [index, community] of run.state.communities.entries()) {
       if (index < page * 8 || index >= (page + 1) * 8) continue;
       const name = community.name || community.id;
-      rows.push([button(run, `${name} — community DB`, 'community', index), button(run, `${name} — Personal + community`, 'both', index)]);
+      rows.push([button(run, `${name} — community DB`, 'community', index)]);
     }
     if (page > 0) rows.push([button(run, 'Previous communities', 'destpage', page - 1)]);
     if ((page + 1) * 8 < run.state.communities.length) rows.push([button(run, 'More communities', 'destpage', page + 1)]);
@@ -344,7 +344,11 @@ export function createUcloneManager(env, deps) {
             const failed = run.state.failedTopics || [];
             run.state.transition = null;
             if (failed.length) {
-              const names = failed.slice(0, 4).map((f) => f.name || f.id).join(', ');
+              const names = failed.slice(0, 4).map((f) => {
+                const name = String(f.name || f.id || 'unknown').slice(0, 80);
+                const reason = String(f.reason || '').replace(/\s+/g, ' ').slice(0, 120);
+                return reason ? `${name} (${reason})` : name;
+              }).join(', ');
               run.state.stage = 'error';
               run.state.error = `${failed.length}/${run.state.chosen.length} topic(s) failed: ${names}${failed.length > 4 ? `, +${failed.length - 4} more` : ''}. Retry the clone to redo them — completed topics are skipped.`;
             } else run.state.stage = 'done';
@@ -461,8 +465,40 @@ export function createUcloneManager(env, deps) {
     if (action === 'retry' && terminal.has(run.state.stage)) {
       run.state.revision++;
       await persist(run);
-      const next = await create(context, run.chat_id, { label: run.state.label, stage: 'scanning', cursor: 0, cancelled: false });
-      background(preview(next, context.token));
+      const failedTopics = Array.isArray(run.state.failedTopics) ? run.state.failedTopics : [];
+      const retryTopics = run.state.isForum && failedTopics.length
+        ? (run.state.chosen || []).filter((topic) => failedTopics.some((failed) => String(failed.id) === String(topic.id)))
+        : null;
+      const retryState = retryTopics?.length
+        ? {
+            label: run.state.label,
+            stage: 'queued',
+            cursor: 0,
+            chosen: retryTopics,
+            topics: run.state.topics,
+            isForum: true,
+            sourceName: run.state.sourceName,
+            username: run.state.username,
+            members: run.state.members,
+            sourceType: run.state.sourceType,
+            snapshot: run.state.snapshot,
+            measurement: run.state.measurement,
+            destinationName: run.state.destinationName,
+            cancelled: false,
+            failedTopics: [],
+            cloneAttempt: Number(run.state.cloneAttempt || 0) + 1,
+          }
+        : { label: run.state.label, stage: 'scanning', cursor: 0, cancelled: false };
+      const next = await create(context, run.chat_id, retryState);
+      if (retryTopics?.length) {
+        next.target = run.target;
+        next.community_id = run.community_id;
+        await db.prepare('UPDATE pending_clones SET stats_json=?,target=?,community_id=? WHERE id=?')
+          .bind(JSON.stringify(next.state), next.target, next.community_id || null, next.id).run();
+        background(sequence(next.id, context.token));
+      } else {
+        background(preview(next, context.token));
+      }
       return true;
     }
     if (action === 'stop') {

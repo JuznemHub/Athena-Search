@@ -9097,12 +9097,13 @@ function ucloneManager(env) {
       return !!community && !!fullUser && (await isGodUserAsync(fullUser, env) || await ensureOwnerOrAdmin(id, user.id, env));
     },
     listCommunities: async (user) => {
-      const { results } = await env.DB.prepare('SELECT id,name FROM communities ORDER BY name,id').all();
-      const allowed = [];
-      const fullUser = await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(user.id).first();
-      const god = fullUser && await isGodUserAsync(fullUser, env);
-      for (const row of results) if (god || await ensureOwnerOrAdmin(row.id, user.id, env)) allowed.push(row);
-      return allowed;
+      // Clone destinations are the communities this user created.  The default
+      // system community and unrelated communities are not valid personal
+      // destinations, even for GOD users.
+      const { results } = await env.DB.prepare(
+        `SELECT id,name FROM communities WHERE id != 'default' AND creator_id = ? ORDER BY name,id`
+      ).bind(user.id).all();
+      return results || [];
     },
     telegram: telegramApi,
     classicText: richHtmlToClassic,
@@ -9229,22 +9230,6 @@ function formatPreviewEst(est, sampleVal, sampleSize) {
   return shown + note;
 }
 
-function statsTopicPages(topics) {
-  const pages = [[]];
-  let length = 0;
-  for (const topic of topics) {
-    const size = richHtmlToClassic(statsTopicLine(topic)).length;
-    if (pages.at(-1).length && (length + size > 2400 || pages.at(-1).length >= STATS_TOPICS_PAGE_MAX)) {
-      pages.push([]);
-      length = 0;
-    }
-    pages.at(-1).push(topic);
-    length += size;
-  }
-  return pages;
-}
-
-const STATS_TOPICS_PAGE_MAX = 100;
 const STATS_BAR_FILLED = '█';
 const STATS_BAR_EMPTY = '░';
 
@@ -9296,11 +9281,6 @@ function statsLiveLine(live) {
   return richParagraph((live ? '🟢' : '🔴') + ' LIVE CLONING: ' + (live ? 'ON' : 'OFF'));
 }
 
-function statsTopicLine(t) {
-  const title = t.title ? ' ' + escHtml(t.title) : '';
-  return '<li>' + codeHtml('#' + t.threadId) + title + '<br>' + statsProgressBar(t.percent) + '<br>' +
-    '🔗 ' + (t.total?.links || 0) + ' | 📄 ' + (t.total?.files || 0) + ' | 📦 ' + (t.total?.other || 0) + ' · ' + t.stateMark + '</li>';
-}
 
 function statsSourceHtml(run) {
   const state = run.state || {};
@@ -9311,8 +9291,8 @@ function statsSourceHtml(run) {
     : escHtml(name) + ' ' + codeHtml(escHtml(run.chat_id));
 }
 
-/** One stats page per run: compact overview + ≤100 topic lines. */
-function statsRunPage(run, topicPage = 0, topicPages = 1, pre = '') {
+/** One compact stats page per clone run; topic counts stay aggregate. */
+function statsRunPage(run, pre = '') {
   const state = run.state || {};
   const overall = statsNormalizeCounters(state.overall || state.counters || {});
   const topics = state.isForum ? (run.topics || []) : [];
@@ -9320,7 +9300,6 @@ function statsRunPage(run, topicPage = 0, topicPages = 1, pre = '') {
   const totalTopics = topics.length;
   const typeLabel = state.sourceType === 'channel' ? 'Channel'
     : state.isForum ? 'Group — Topics Enabled' : 'Group — No Topics';
-  const shown = statsTopicPages(topics)[topicPage] || [];
   const lines = [];
   lines.push(richHeading(3, pre + '📊 CLONE STATS'));
   lines.push(richParagraph('Source: ' + statsSourceHtml(run) + '<br>Type: ' + escHtml(typeLabel) +
@@ -9332,10 +9311,6 @@ function statsRunPage(run, topicPage = 0, topicPages = 1, pre = '') {
   }
   lines.push(statsCountersText(overall, run.live === true));
   lines.push(statsLiveLine(run.live === true));
-  if (state.isForum && topics.length) {
-    lines.push(richParagraph('📚 TOPICS — page ' + (topicPage + 1) + ' / ' + topicPages + ' · ' + totalTopics + ' total'));
-    lines.push('<ul>' + shown.map(statsTopicLine).join('') + '</ul>');
-  }
   return lines.join('\n');
 }
 
@@ -9344,52 +9319,29 @@ function statsEmptyPage() {
     richParagraph('No clones yet. Start one with ' + codeHtml('/uclone') + ' or ' + codeHtml('/clone') + ' — then this page shows<br>successful links / files / other and live progress for every clone you own.');
 }
 
-/**
- * Render the /stats dashboard. One compact page per clone run — run-scoped
- * pagination: nav buttons carry the run id and topic page; every render is
- * rebuilt from the authoritative report so counters stay exact. Run ids in
- * callback data use a stable index key (run ids are uuid/standalone safe).
- */
-function formatStatsRichReport(report, pageIndex = 0) {
+/** Render the /stats dashboard with no per-topic pagination. */
+function formatStatsRichReport(report, _pageIndex = 0) {
   const runs = (report?.runs || []);
-  const pages = Math.max(1, runs.length);
-  const page = Math.max(0, Math.min(pages - 1, Number(pageIndex?.page ?? pageIndex) || 0));
+  const pages = 1;
+  const page = 0;
   const rows = [];
   let html;
   if (!runs.length) {
     html = statsEmptyPage();
   } else {
-    const run = runs[page];
-    const state = run.state || {};
-    let topicPage = 0, topicPages = 1;
-    if (state.isForum && run.topics?.length) {
-      topicPages = statsTopicPages(run.topics).length;
-      topicPage = Math.max(0, Math.min(topicPages - 1, Number(pageIndex?.topicPage) || 0));
-    }
-    const pre = pages > 1 ? 'Run ' + (page + 1) + ' / ' + pages + ' — ' : '';
-    html = statsRunPage(run, topicPage, topicPages, pre);
-    if (topicPages > 1) {
-      rows.push([
-        { label: '◀ Previous', data: 'stats:run:' + page + ':' + Math.max(0, topicPage - 1) },
-        { label: '📚 Page ' + (topicPage + 1) + ' / ' + topicPages, data: 'stats:noop' },
-        { label: 'Next ▶', data: 'stats:run:' + page + ':' + Math.min(topicPages - 1, topicPage + 1) },
-      ]);
-    }
-    if (pages > 1) {
-      rows.push([
-        { label: '◀ Previous', data: 'stats:run:' + Math.max(0, page - 1) + ':0' },
-        { label: 'Page ' + (page + 1) + ' / ' + pages, data: 'stats:noop' },
-        { label: 'Next ▶', data: 'stats:run:' + Math.min(pages - 1, page + 1) + ':0' },
-      ]);
-    }
+    // The dashboard is a current-state view. Historical retry attempts remain
+    // in the ledger, but must not become eleven navigation pages.
+    html = statsRunPage(runs[0]);
   }
   rows.push([
     { label: '🔄 Refresh', data: 'stats:refresh' },
     { label: '💻 Clone', data: 'menu:clone' },
     { label: '❌ Close', data: 'stats:close' },
   ]);
-  return { html, pages, page, totalRuns: pages, buttons: rows.map((r) => richButtonRow(r)).join('\n') };
+  return { html, pages, page, totalRuns: runs.length, buttons: rows.map((r) => richButtonRow(r)).join('\n') };
 }
+
+
 
 function welcomeRichButtonRows(websiteUrl) {
   const rows = [richButtonRow([
@@ -17249,5 +17201,4 @@ export {
   syncAiConfigToPeer,
   syncSteroidToPeer,
   formatStatsRichReport,
-  STATS_TOPICS_PAGE_MAX
 };
