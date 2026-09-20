@@ -40,10 +40,9 @@ async function userbotConnect(update,env){ const msg=update.message,args=parts(m
 // No chat id stops every running clone for the caller — that is what the
 // optional [chat_id] in /help means; in a group the current chat is the default.
 async function cloneStop(update,env){ const msg=update.message,args=parts(msg.text).slice(1),chat=args.find(x=>/^-?\d{5,}$/.test(x))||(String(msg.chat.id).startsWith('-')?String(msg.chat.id):''); return legacyFetch(cloneUpdate(update,`/index_stop${chat?` ${normalizeChatId(chat)}`:''}`),env); }
-async function ucloneDel(update,env){ const msg=update.message,args=parts(msg.text).slice(1),chat=args.find(x=>/^-?\d{5,}$/.test(x)); if(!chat) return reply(env.TELEGRAM_BOT_TOKEN,msg.chat.id,'Usage: /uclone_del <chat_id> [topic_id]'); const topic=args.find(x=>/^\d{1,9}$/.test(x)&&x!==chat); return legacyFetch(cloneUpdate(update,`/delete ${chat}${topic?` ${topic}`:''} files`),env); }
 // Only commands the legacy webhook cannot serve itself are rewritten here.
 // /clone, /uclone, /ubclone and /stats already reach the legacy dispatcher with
 // their original text, so forwarding them adds a JSON round-trip and no behavior.
 async function intercept(update,env,_ctx){ const msg=update.message; if(!msg?.text||!env.TELEGRAM_BOT_TOKEN) return null;
-  switch(command(msg.text)){ case '/userbotconnect':return userbotConnect(update,env); case '/uclone_del':return ucloneDel(update,env); case '/clone_stop':return cloneStop(update,env); default:return null; } }
+  switch(command(msg.text)){ case '/userbotconnect':return userbotConnect(update,env); case '/clone_stop':return cloneStop(update,env); default:return null; } }
 export default {async fetch(request,env,ctx){ shimApiBase = shimBaseFor(env); const url=new URL(request.url); if(request.method==='POST'&&/telegram-webhook$/.test(url.pathname)){ try{const update=await request.clone().json(); const handled=await intercept(update,env,ctx); if(handled)return handled;}catch(_){} } return legacy.fetch(request,env,ctx); }};

@@ -508,12 +508,6 @@ export default {
           return await handleSaveStorageConfig(request, env, corsHeaders);
         }
       }
-      if (pathname === '/api/storage/sync' && request.method === 'POST') {
-        if (!(await isInstanceOwnerUserAsync(user, env))) {
-          return deny(corsHeaders, 'Storage sync is GOD rank only', 'GOD_ONLY');
-        }
-        return await handleStorageSync(user, env, corsHeaders);
-      }
 
       // Community admins (platform IDs)
       if (pathname === '/api/community-admins') {
@@ -1159,9 +1153,6 @@ async function clearCommunityLinksOnly(env, communityId) {
   }
   try { await env.DB.prepare('DELETE FROM links WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
   markMeiliScopeDirty(env, 'community', communityId);
-  // Only the ACTIVE store is cleared. In GitHub mode that means the Markdown
-  // too; the parked Cloudflare copy is deliberately left alone, and vice versa.
-  await clearActiveStoreFolder(env, 'community', communityId);
   runInBackground(env, logOperationalEvent(
     env,
     '🧹 Community database cleared',
@@ -1530,7 +1521,6 @@ async function handleWipePersonalAccount(request, user, env, corsHeaders) {
   } catch (_) {}
   try {
     await ensureDocumentsTable(env);
-    await clearActiveDocumentFolder(env, 'personal', uid);
     await env.DB.prepare("DELETE FROM uploaded_documents WHERE scope = 'personal' AND user_id = ?").bind(uid).run();
   } catch (_) {}
   markMeiliScopeDirty(env, 'personal', uid);
@@ -2802,7 +2792,6 @@ const TELEGRAM_GOD_COMMAND_MENU = [
   { command: 'userbotconnect', description: 'Connect userbot session (GOD)' },
   { command: 'userbot_disconnect', description: 'Disconnect userbot' },
   { command: 'userbot_del', description: 'Delete userbot session' },
-  { command: 'transfers', description: 'Recent clone/backfill sessions (GOD)' },
   { command: 'clone_del', description: "Delete a clone's data" },
   { command: 'forcetags', description: 'AI-tag untagged links (GOD)' },
   { command: 'tag_untagged', description: 'Tag every untagged link (GOD)' },
@@ -3183,7 +3172,6 @@ async function handleGetCommunityLinks(url, user, env, corsHeaders) {
   if (!(await ensureMember(communityId, user.id, env))) {
     return Response.json({ success: false, error: 'Not a member — join with /community_join ' + communityId, code: 'NOT_MEMBER' }, { status: 403, headers: corsHeaders });
   }
-  await ensureFresh(env, 'community', communityId);
   await ensureLinkMetaColumns(env);
   const { results } = await env.DB.prepare(
     'SELECT * FROM links WHERE community_id = ? ORDER BY created_at DESC LIMIT 500'
@@ -3253,18 +3241,6 @@ async function handlePostCommunityLink(request, user, env, corsHeaders) {
   const id = 'link_' + Date.now().toString(36);
   const displayName = user.display_name || user.username || user.id;
   const now = Date.now();
-
-  // Commit to GitHub first when it is the source of truth. appendLink retries on
-  // conflict, which matters here: several members can dump into the same
-  // community from Telegram at the same moment.
-  const gh = await storeAddLink(env, 'community', communityId, {
-    id, url: rawUrl, url_hash: urlHash, title: meta.title, notes: meta.notes,
-    tags: body.tags || [], created_at: now, added_by_name: displayName,
-    added_by_user_id: user.id, image_url: meta.image_url, site_name: meta.site_name,
-  });
-  if (gh.handled && !gh.ok) {
-    return Response.json({ success: false, error: `GitHub write failed: ${gh.error}` }, { status: 502, headers: corsHeaders });
-  }
 
   try {
     await env.DB.prepare(
@@ -3339,10 +3315,6 @@ async function handleDeleteCommunityLink(request, user, env, corsHeaders) {
   await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(link.id).run();
   await env.DB.prepare('DELETE FROM link_votes WHERE link_id = ?').bind(link.id).run();
   markMeiliScopeDirty(env, 'community', link.community_id);
-  const gh = await storeMutateLink(env, 'community', link.community_id, link.id, null);
-  if (gh.handled && !gh.ok) {
-    return Response.json({ success: false, error: `GitHub write failed: ${gh.error}` }, { status: 502, headers: corsHeaders });
-  }
   return Response.json({ success: true, deleted: link.id }, { headers: corsHeaders });
 }
 
@@ -3783,12 +3755,10 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
       if (!(await isInstanceOwnerUserAsync(user, env))) {
         return deny(corsHeaders, 'Personal mode is for GOD rank (instance host) only', 'PERSONAL_LOCKED');
       }
-      await ensureFresh(env, 'personal', user.id);
     } else {
       const communityId = url.searchParams.get('community_id');
       const gate = await requireActiveMember(env, communityId, user, corsHeaders);
       if (gate) return gate;
-      await ensureFresh(env, 'community', communityId);
     }
     const scopeKey = scope === 'personal' ? user.id : url.searchParams.get('community_id');
     const retrieval = await retrieveAiRows(env, scope, scopeKey, q, { limit: AI_RETRIEVAL_LIMIT });
@@ -3814,7 +3784,6 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
     if (!(await isInstanceOwnerUserAsync(user, env))) {
       return deny(corsHeaders, 'Personal mode is for GOD rank (instance host) only', 'PERSONAL_LOCKED');
     }
-    await ensureFresh(env, 'personal', user.id);
     await ensureLinkMetaColumns(env);
     const accelerated = await meiliSearchScope(env, 'personal', user.id, q, { limit: effectiveLimit });
     const rows = accelerated?.rows || await searchAllLinks(env, 'personal', user.id, q, effectiveLimit);
@@ -3833,7 +3802,6 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
   }
   const gate = await requireActiveMember(env, communityId, user, corsHeaders);
   if (gate) return gate;
-  await ensureFresh(env, 'community', communityId);
   await ensureLinkMetaColumns(env);
   const accelerated = await meiliSearchScope(env, 'community', communityId, q, { limit: effectiveLimit });
   const rows = accelerated?.rows || await searchAllLinks(env, 'community', communityId, q, effectiveLimit);
@@ -4008,10 +3976,6 @@ export async function ensureChunksTable(env) {
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON document_chunks USING gin(tsv)').run().catch(() => {});
 }
 
-function documentFolder(scope, key) {
-  return scope === 'personal' ? `documents/personal/${key}` : `documents/communities/${key}`;
-}
-
 function validateDocumentText(scope, filename, content) {
   if (typeof content !== 'string') return { error: 'content must be UTF-8 text' };
   const encoded = new TextEncoder().encode(content);
@@ -4098,31 +4062,13 @@ async function handlePostDocument(request, user, env, corsHeaders) {
 
   const id = `doc_${crypto.randomUUID()}`;
   const key = doc.scope === 'personal' ? user.id : communityId;
-  const safeId = id.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const pathFilename = doc.filename.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const githubPath = `${documentFolder(doc.scope, key)}/${safeId}--${pathFilename}`;
-  const store = await githubStoreFor(env);
-  if (store) {
-    const written = await store.writeFile(githubPath, doc.content, { message: `athena: upload ${doc.filename}` });
-    if (!written.ok) {
-      return Response.json({ success: false, error: `GitHub write failed: ${written.body?.message || `HTTP ${written.status}`}` }, { status: 502, headers: corsHeaders });
-    }
-  }
 
-  try {
-    await env.DB.prepare(
-      `INSERT INTO uploaded_documents
-       (id, scope, user_id, community_id, filename, content, uploaded_by, github_path, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(id, doc.scope, doc.scope === 'personal' ? user.id : null, communityId, doc.filename,
-      doc.content, user.id, store ? githubPath : null, Date.now()).run();
-  } catch (err) {
-    if (store) {
-      const written = await store.readFile(githubPath).catch(() => null);
-      if (written) await store.deleteFile(githubPath, written.sha, `athena: rollback ${doc.filename}`).catch(() => null);
-    }
-    throw err;
-  }
+  await env.DB.prepare(
+    `INSERT INTO uploaded_documents
+     (id, scope, user_id, community_id, filename, content, uploaded_by, github_path, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(id, doc.scope, doc.scope === 'personal' ? user.id : null, communityId, doc.filename,
+    doc.content, user.id, null, Date.now()).run();
   markMeiliScopeDirty(env, doc.scope, key);
   const row = await env.DB.prepare('SELECT * FROM uploaded_documents WHERE id = ?').bind(id).first();
   return Response.json({ success: true, document: row }, { status: 201, headers: corsHeaders });
@@ -4141,16 +4087,6 @@ async function handleDeleteDocument(request, user, env, corsHeaders) {
   }
   if (row.scope === 'community' && row.uploaded_by !== user.id && !(await ensureOwnerOrAdmin(row.community_id, user.id, env))) {
     return Response.json({ success: false, error: 'Only community staff or the uploader can delete documents' }, { status: 403, headers: corsHeaders });
-  }
-  if (row.github_path) {
-    const store = await githubStoreFor(env);
-    if (store) {
-      const got = await store.readFile(row.github_path).catch(() => null);
-      if (got) {
-        const deleted = await store.deleteFile(row.github_path, got.sha, `athena: delete ${row.filename}`);
-        if (!deleted.ok) return Response.json({ success: false, error: `GitHub delete failed: ${deleted.body?.message || `HTTP ${deleted.status}`}` }, { status: 502, headers: corsHeaders });
-      }
-    }
   }
   await env.DB.prepare('DELETE FROM uploaded_documents WHERE id = ?').bind(row.id).run();
   markMeiliScopeDirty(env, row.scope, row.scope === 'personal' ? row.user_id : row.community_id);
@@ -4550,61 +4486,8 @@ async function handleClearAiConfig(user, env, corsHeaders) {
 }
 
 // ============================================================
-// Pluggable link storage — PostgreSQL only (D1/GitHub removed).
-// Legacy GitHub cache tables (storage_sync, storage_file_cache, parked_*) kept for compat.
+// Secret encryption for credentials stored in database rows.
 // ============================================================
-/* eslint-disable no-unused-vars */
-async function ensureStorageTables(env) {
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS instance_storage_config (
-      id TEXT PRIMARY KEY,
-      provider TEXT NOT NULL DEFAULT 'd1',
-      repo TEXT, branch TEXT, token TEXT,
-      updated_at INTEGER NOT NULL
-    )`
-  ).run();
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS storage_sync (
-      scope_key TEXT PRIMARY KEY,
-      sig TEXT,
-      checked_at INTEGER NOT NULL
-    )`
-  ).run();
-  // Parsed contents per Markdown file, keyed by its git sha, so a refresh only
-  // re-reads the files that actually changed.
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS storage_file_cache (
-      scope_key TEXT NOT NULL,
-      file_name TEXT NOT NULL,
-      sha TEXT NOT NULL,
-      payload TEXT NOT NULL,
-      updated_at INTEGER NOT NULL,
-      PRIMARY KEY (scope_key, file_name)
-    )`
-  ).run();
-}
-
-/** Per-file parse cache kept for compat — orphaned after postgres-only (GitHub removed). */
-function fileCacheFor(env, scopeKey) {
-  return {
-    async get(name, sha) {
-      try {
-        const row = await env.DB.prepare(
-          'SELECT payload FROM storage_file_cache WHERE scope_key = ? AND file_name = ? AND sha = ?'
-        ).bind(scopeKey, name, sha).first();
-        return row ? JSON.parse(row.payload) : null;
-      } catch (_) { return null; }
-    },
-    async put(name, sha, links) {
-      try {
-        await env.DB.prepare(
-          `INSERT OR REPLACE INTO storage_file_cache (scope_key, file_name, sha, payload, updated_at)
-           VALUES (?, ?, ?, ?, ?)`
-        ).bind(scopeKey, name, sha, JSON.stringify(links), Date.now()).run();
-      } catch (_) {}
-    },
-  };
-}
 
 /**
  * The storage token is a real credential sitting in a database row, so anyone
@@ -4661,46 +4544,6 @@ async function decryptSecret(env, stored) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Two independent stores
-//
-// The live tables (links / personal_links) always hold whichever store is
-// ACTIVE. The other store's rows are parked in mirror tables, untouched, so a
-// delete or edit in one mode can never reach the other. Switching provider
-// swaps the two sets. Every existing query keeps reading the live tables, so
-// mode-scoping is automatic rather than bolted onto 60+ call sites.
-// ---------------------------------------------------------------------------
-
-const LINK_COLS = 'id, community_id, url, url_hash, title, notes, tags, added_by, added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at, image_url, site_name';
-const PERSONAL_COLS = 'id, user_id, url, url_hash, title, notes, tags, created_at, image_url, site_name';
-
-async function ensureParkingTables(env) {
-  await ensureLinkMetaColumns(env);
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS parked_links (
-      store TEXT NOT NULL, ${LINK_COLS.split(', ').map(c => `${c} TEXT`).join(', ')}
-    )`
-  ).run();
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS parked_personal_links (
-      store TEXT NOT NULL, ${PERSONAL_COLS.split(', ').map(c => `${c} TEXT`).join(', ')}
-    )`
-  ).run();
-  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_parked_links_store ON parked_links(store)').run();
-  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_parked_personal_store ON parked_personal_links(store)').run();
-}
-
-/** Parking/switching removed — PostgreSQL is the only store. Kept as no-ops for call sites. */
-async function parkActiveStore(_env, _storeName) { return; }
-async function restoreStore(_env, _storeName) { return; }
-async function clearActiveStoreFolder(_env, _scope, _key) { return { handled: false }; }
-async function clearActiveDocumentFolder(_env, _scope, _key) { return { handled: false }; }
-async function parkedLinksFor(_env, _storeName, _scope, _key) { return []; }
-async function getStorageConfig(env) {
-  // Single-backend mode: always PostgreSQL. Existing rows (provider='d1'/'github') are ignored.
-  return { provider: 'postgres', repo: '', branch: '', token: null };
-}
-
 /**
  * Self-hosted instances run on their own database, which is faster than GitHub
  * and has no API rate limit, and they already back up to Telegram/Drive. A live
@@ -4744,100 +4587,6 @@ function frontendOrigin(env, url) {
   if (configured) return configured;
   return url.origin;
 }
-
-/** GitHub removed — always null. */
-async function githubStoreFor(_env) { return null; }
-function scopeKeyFor(scope, key) {
-  return scope === 'personal' ? `personal:${key}` : `community:${key}`;
-}
-/** No-op: PostgreSQL is live, no cache to reconcile. */
-async function ensureFresh(_env, _scope, _key, { force = false } = {}) {
-  return { provider: 'postgres' };
-}
-
-/** Rebuild the D1 rows for one scope from the authoritative Markdown. */
-async function replaceCachedLinks(env, scope, key, links) {
-  await ensureLinkMetaColumns(env);
-  if (scope === 'personal') {
-    await env.DB.prepare('DELETE FROM personal_links WHERE user_id = ?').bind(key).run();
-    for (const l of links) {
-      try {
-        await env.DB.prepare(
-          `INSERT OR REPLACE INTO personal_links
-             (id, user_id, url, url_hash, title, notes, tags, created_at, image_url, site_name)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        ).bind(
-          l.id, key, l.url, l.url_hash || generateUrlHash(l.url), l.title || '', l.notes || '',
-          JSON.stringify(l.tags || []), l.created_at || Date.now(), l.image_url || null, l.site_name || null
-        ).run();
-      } catch (_) {}
-    }
-    markMeiliScopeDirty(env, 'personal', key);
-    return;
-  }
-  await env.DB.prepare('DELETE FROM links WHERE community_id = ?').bind(key).run();
-  for (const l of links) {
-    try {
-      await env.DB.prepare(
-        `INSERT OR REPLACE INTO links
-           (id, community_id, url, url_hash, title, notes, tags, added_by, added_by_user_id,
-            added_by_name, upvotes, downvotes, created_at, image_url, site_name)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`
-      ).bind(
-        l.id, key, l.url, l.url_hash || generateUrlHash(l.url), l.title || '', l.notes || '',
-        JSON.stringify(l.tags || []), l.added_by_name || 'athena', l.added_by_user_id || null,
-        l.added_by_name || null, l.created_at || Date.now(), l.image_url || null, l.site_name || null
-      ).run();
-    } catch (_) {}
-  }
-  markMeiliScopeDirty(env, 'community', key);
-}
-
-function storageHeadingFor(scope, key) {
-  return scope === 'personal' ? 'Athena — personal brain' : `Athena — community ${key}`;
-}
-
-/** GitHub removed — always fall through to PostgreSQL direct INSERT. */
-async function storeAddLink(_env, _scope, _key, _link) { return { handled: false }; }
-async function storeAddLinks(_env, _scope, _key, _links) { return { handled: false }; }
-async function storeMutateLink(_env, _scope, _key, _linkId, _replacement) { return { handled: false }; }
-
-/**
- * Called right after we commit to GitHub ourselves.
- *
- * It is tempting to invalidate the cache here, but that is actively harmful:
- * GitHub's directory listing lags a commit by up to ~1s, so the very next read
- * can come back WITHOUT the link we just wrote, and replaceCachedLinks would
- * then delete the D1 row — the link visibly vanishes until the next sync.
- *
- * We just wrote both sides, so D1 is correct by construction. Mark it trusted
- * for one TTL. The empty sig guarantees the next check after the TTL still
- * compares unequal and does a real re-pull, so external edits are not missed.
- */
-async function markCacheTrusted(env, scope, key) {
-  try {
-    await ensureStorageTables(env);
-    await env.DB.prepare(
-      'INSERT OR REPLACE INTO storage_sync (scope_key, sig, checked_at) VALUES (?, ?, ?)'
-    ).bind(scopeKeyFor(scope, key), '', Date.now()).run();
-  } catch (_) {}
-}
-
-/** Current rows for a scope (legacy Markdown helper, kept). */
-async function cachedLinksFor(env, scope, key) {
-  const rows = scope === 'personal'
-    ? (await env.DB.prepare(
-        'SELECT * FROM personal_links WHERE user_id = ? ORDER BY created_at DESC'
-      ).bind(key).all()).results
-    : (await env.DB.prepare(
-        'SELECT * FROM links WHERE community_id = ? ORDER BY created_at DESC'
-      ).bind(key).all()).results;
-  return (rows || []).map(r => ({
-    ...r,
-    tags: (() => { try { return JSON.parse(r.tags || '[]'); } catch (_) { return []; } })(),
-  }));
-}
-/* eslint-enable no-unused-vars */
 
 // ---------------------------------------------------------------------------
 // Instance defaults
@@ -5001,17 +4750,6 @@ async function handleSaveStorageConfig(request, env, corsHeaders) {
     return Response.json({ success: false, error: 'Only PostgreSQL is supported (D1/GitHub removed). Set DATABASE_URL.' }, { status: 400, headers: corsHeaders });
   }
   return Response.json({ success: true, provider: 'postgres', engine: selfHostedEngine(env) }, { headers: corsHeaders });
-}
-
-// GitHub/D1 sync removed — PostgreSQL only. Stubs kept for call sites.
-// eslint-disable-next-line no-unused-vars
-async function mergeScope(_env, _store, _scope, _key) { return { ok: true, total: 0 }; }
-// eslint-disable-next-line no-unused-vars
-async function replaceParkedLinks(_env, _storeName, _scope, _key, _links) { return; }
-// eslint-disable-next-line no-unused-vars
-async function mergeAllScopes(_env, _store, _godUserId) { return { ok: true, total: 0, detail: [] }; }
-async function handleStorageSync(_user, _env, corsHeaders) {
-  return Response.json({ success: false, error: 'Sync removed — PostgreSQL is the only store (D1/GitHub deprecated). Use backups.', code: 'POSTGRES_ONLY' }, { status: 400, headers: corsHeaders });
 }
 
 function cleanApiBase(baseUrl) {
@@ -5712,7 +5450,6 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
 }
 
 async function handleGetPersonalLinks(userId, env, corsHeaders) {
-  await ensureFresh(env, 'personal', userId);
   await ensureLinkMetaColumns(env);
   const { results } = await env.DB.prepare(
     'SELECT * FROM personal_links WHERE user_id = ? ORDER BY created_at DESC LIMIT 1000'
@@ -5862,21 +5599,6 @@ async function handlePostPersonalLinksBatch(request, userId, env, corsHeaders) {
     }
     inserted.splice(0, inserted.length, ...stored);
     if (stored.length) {
-      const gh = await storeAddLinks(env, 'personal', userId, stored);
-      if (gh.handled && !gh.ok) {
-        for (const l of stored) await env.DB.prepare('DELETE FROM personal_links WHERE id = ? AND user_id = ?').bind(l.id, userId).run().catch(() => {});
-        const failure = {
-          success: false,
-          total: items.length,
-          added: 0,
-          dupes: dupes.length,
-          failed: [...failed.map((f) => f.url), ...stored.map((l) => l.url)],
-          error: `GitHub write failed: ${gh.error}`,
-          code: 'STORAGE_WRITE_FAILED',
-        };
-        await finishBatchUpload(env, replayState.id, failure);
-        return Response.json(failure, { status: 502, headers: corsHeaders });
-      }
       // Dump was fast by design; enrich the fresh links in the background so
       // they carry descriptions/site names/images like Telegram saves do.
       runInBackground(env, enrichLinksInBackground(env, 'personal', userId, stored));
@@ -5973,21 +5695,6 @@ async function handlePostCommunityLinksBatch(request, user, env, corsHeaders) {
     }
     inserted.splice(0, inserted.length, ...stored);
     if (stored.length) {
-      const gh = await storeAddLinks(env, 'community', communityId, stored);
-      if (gh.handled && !gh.ok) {
-        for (const l of stored) await env.DB.prepare('DELETE FROM links WHERE id = ? AND community_id = ?').bind(l.id, communityId).run().catch(() => {});
-        const failure = {
-          success: false,
-          total: items.length,
-          added: 0,
-          dupes: dupes.length,
-          failed: [...failed.map((f) => f.url), ...stored.map((l) => l.url)],
-          error: `GitHub write failed: ${gh.error}`,
-          code: 'STORAGE_WRITE_FAILED',
-        };
-        await finishBatchUpload(env, replayState.id, failure);
-        return Response.json(failure, { status: 502, headers: corsHeaders });
-      }
       runInBackground(env, enrichLinksInBackground(env, 'community', communityId, stored));
       markMeiliScopeDirty(env, 'community', communityId);
     }
@@ -6034,17 +5741,6 @@ async function handlePostPersonalLink(request, userId, env, corsHeaders) {
   const id = 'pl_' + Date.now().toString(36);
   const now = Date.now();
 
-  // GitHub is the source of truth when enabled: commit first, and surface a
-  // failure instead of silently keeping a link that only exists in the cache.
-  const gh = await storeAddLink(env, 'personal', userId, {
-    id, url: rawUrl, url_hash: urlHash, title: meta.title, notes: meta.notes,
-    tags: body.tags || [], created_at: now,
-    image_url: meta.image_url, site_name: meta.site_name,
-  });
-  if (gh.handled && !gh.ok) {
-    return Response.json({ success: false, error: `GitHub write failed: ${gh.error}` }, { status: 502, headers: corsHeaders });
-  }
-
   try {
     await env.DB.prepare(
       `INSERT INTO personal_links (id, user_id, url, url_hash, title, notes, tags, created_at, image_url, site_name)
@@ -6083,11 +5779,6 @@ async function handleDeletePersonalLink(request, userId, env, corsHeaders) {
     'DELETE FROM personal_links WHERE id = ? AND user_id = ?'
   ).bind(body.id, userId).run();
   markMeiliScopeDirty(env, 'personal', userId);
-  // Entries live inside shared Markdown files, so removal means rewriting the folder.
-  const gh = await storeMutateLink(env, 'personal', userId, body.id, null);
-  if (gh.handled && !gh.ok) {
-    return Response.json({ success: false, error: `GitHub write failed: ${gh.error}` }, { status: 502, headers: corsHeaders });
-  }
   return Response.json({ success: true }, { headers: corsHeaders });
 }
 
@@ -6138,15 +5829,6 @@ async function handlePatchPersonalLink(request, userId, env, corsHeaders) {
       `UPDATE personal_links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?
        WHERE id = ? AND user_id = ?`
     ).bind(url, urlHash, title, notes, tags, id, userId).run();
-  }
-
-  const ghPatch = await storeMutateLink(env, 'personal', userId, id, {
-    url, url_hash: urlHash, title, notes,
-    tags: (() => { try { return JSON.parse(tags || '[]'); } catch (_) { return []; } })(),
-    image_url: imageUrl || null, site_name: siteName || null,
-  });
-  if (ghPatch.handled && !ghPatch.ok) {
-    return Response.json({ success: false, error: `GitHub write failed: ${ghPatch.error}` }, { status: 502, headers: corsHeaders });
   }
 
   markMeiliScopeDirty(env, 'personal', userId);
@@ -6214,15 +5896,6 @@ async function handlePatchCommunityLink(request, user, env, corsHeaders) {
     await env.DB.prepare(
       `UPDATE links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ? WHERE id = ?`
     ).bind(url, urlHash, title, notes, tags, id).run();
-  }
-
-  const ghPatch = await storeMutateLink(env, 'community', existing.community_id, id, {
-    url, url_hash: urlHash, title, notes,
-    tags: (() => { try { return JSON.parse(tags || '[]'); } catch (_) { return []; } })(),
-    image_url: imageUrl || null, site_name: siteName || null,
-  });
-  if (ghPatch.handled && !ghPatch.ok) {
-    return Response.json({ success: false, error: `GitHub write failed: ${ghPatch.error}` }, { status: 502, headers: corsHeaders });
   }
 
   markMeiliScopeDirty(env, 'community', existing.community_id);
@@ -6372,7 +6045,6 @@ function linkifyHashtagsHtml(escapedText, botUsername = '') {
 }
 
 async function getTelegramSearchPage(env, session) {
-  await ensureFresh(env, session.scope, session.scope_key);
   const accelerated = await meiliSearchScope(env, session.scope, session.scope_key, session.query, {
     limit: TG_SEARCH_PAGE_SIZE,
     offset: Math.max(0, Number(session.page || 0)) * TG_SEARCH_PAGE_SIZE
@@ -6621,7 +6293,6 @@ async function deleteCommunityFully(env, communityId) {
   markMeiliScopeDirty(env, 'community', communityId);
   try {
     await ensureDocumentsTable(env);
-    await clearActiveDocumentFolder(env, 'community', communityId);
     await env.DB.prepare("DELETE FROM uploaded_documents WHERE scope = 'community' AND community_id = ?").bind(communityId).run();
   } catch (_) {}
   markMeiliScopeDirty(env, 'community', communityId);
@@ -6646,13 +6317,6 @@ async function deleteCommunityFully(env, communityId) {
     await env.DB.prepare(
       `UPDATE community_bots SET community_id = NULL, scope = 'personal' WHERE community_id = ?`
     ).bind(communityId).run();
-  } catch (_) {}
-
-  // Same rule as /clear_db: remove the Markdown only when GitHub is active.
-  await clearActiveStoreFolder(env, 'community', communityId);
-  try {
-    await ensureParkingTables(env);
-    await env.DB.prepare('DELETE FROM parked_links WHERE community_id = ?').bind(communityId).run();
   } catch (_) {}
 
   await env.DB.prepare('DELETE FROM communities WHERE id = ?').bind(communityId).run();
@@ -6705,19 +6369,6 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
   const id = 'tg_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   await ensureLinkMetaColumns(env);
 
-  // Busiest write path in the app — many members dumping into one group. The
-  // append helper retries on commit conflicts so links are not silently dropped.
-  const ghDump = await storeAddLink(env, 'community', communityId, {
-    id, url: rawUrl, url_hash: urlHash, title: meta.title, notes: meta.notes || '',
-    tags: ['telegram', 'community'], created_at: Date.now(),
-    added_by_name: senderName, added_by_user_id: athenaUser?.id || null,
-    image_url: meta.image_url, site_name: meta.site_name,
-  });
-  if (ghDump.handled && !ghDump.ok) {
-    await sendTelegramMessage(token, chatId, `Could not save to GitHub: ${ghDump.error}`, threadId);
-    return;
-  }
-
   try {
     await env.DB.prepare(
       `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
@@ -6755,8 +6406,7 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
       try {
         await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
           .bind(meta.title, JSON.stringify(merged), meta.notes || '', id).run();
-        const g1 = await storeMutateLink(env, 'community', communityId, id, { title: meta.title, notes: meta.notes || '', tags: merged });
-        if (g1?.handled && !g1.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${g1.error||'unknown'}`, threadId); reply = await formatSavedLinkReply(env, 'community', meta.title, rawUrl, { title: meta.title, description: meta.notes || '', tags: userTags }); } else { reply = await formatSavedLinkReply(env, 'community', meta.title, rawUrl, { title: meta.title, description: meta.notes || '', tags: userTags }); }
+        reply = await formatSavedLinkReply(env, 'community', meta.title, rawUrl, { title: meta.title, description: meta.notes || '', tags: userTags });
       } catch (_) { reply = await formatSavedLinkReply(env, 'community', meta.title, rawUrl, { title: meta.title, description: meta.notes || '', tags: userTags }); }
     } else {
       const vocab = await recentTagsForScope(env, 'community', communityId);
@@ -6770,15 +6420,13 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
         try {
           await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
             .bind(savedTitle, JSON.stringify(merged), ai.description || meta.notes || '', id).run();
-          const g2 = await storeMutateLink(env, 'community', communityId, id, { title: savedTitle, notes: ai.description || meta.notes || '', tags: merged });
-          if (g2?.handled && !g2.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${g2.error||'unknown'}`, threadId); }
         } catch (_) {}
         reply = await formatSavedLinkReply(env, 'community', savedTitle, rawUrl, ai);
       } else {
         const fb=fallbackTagsFromMeta(rawUrl, meta);
         if(fb.length){
           const mergedFb=[...new Set([...['telegram','community'], ...fb])];
-          try{ await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`).bind(meta.title, JSON.stringify(mergedFb), meta.notes||'', id).run(); await storeMutateLink(env,'community',communityId,id,{title:meta.title, notes:meta.notes||'', tags:mergedFb}); }catch(_){}
+          try{ await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`).bind(meta.title, JSON.stringify(mergedFb), meta.notes||'', id).run(); }catch(_){}
           reply = await formatSavedLinkReply(env, 'community', meta.title, rawUrl, {title: meta.title, description: meta.notes||'', tags: fb}, meta.notes);
         } else {
           reply = await formatSavedLinkReply(env, 'community', meta.title, rawUrl, null, meta.notes);
@@ -7737,8 +7385,6 @@ async function finalizePersonalSave(env, token, chatId, forumThreadId, athenaUse
       try {
         await env.DB.prepare('UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ' + AI_METADATA_VERSION + ', search_blob = NULL WHERE id = ?')
           .bind(r.title, JSON.stringify(merged), r.notes || '', r.id).run();
-        const gp = await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: r.title, notes: r.notes || '', tags: merged });
-        if (gp?.handled && !gp.ok) { await sendTelegramMessage(token, chatId, 'Saved to DB but GitHub sync failed: ' + (gp.error || 'unknown'), forumThreadId); }
       } catch (_) {}
       reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: userTagsPersonal }, r.notes);
     } else {
@@ -7751,14 +7397,13 @@ async function finalizePersonalSave(env, token, chatId, forumThreadId, athenaUse
         try {
           await env.DB.prepare('UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ' + AI_METADATA_VERSION + ', search_blob = NULL WHERE id = ?')
             .bind(savedTitle, JSON.stringify(merged), ai.description || r.notes || '', r.id).run();
-          await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: savedTitle, notes: ai.description || r.notes || '', tags: merged });
         } catch (_) {}
         reply = await formatSavedLinkReply(env, 'personal', savedTitle, rawUrl, ai, r.notes);
       } else {
         const fb = fallbackTagsFromMeta(rawUrl, { title: r.title, notes: r.notes, content: r.content });
         if (fb.length && r.id) {
           const mergedFb = [...new Set([...['telegram','personal'], ...fb])];
-          try { await env.DB.prepare('UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ' + AI_METADATA_VERSION + ', search_blob = NULL WHERE id = ?').bind(r.title, JSON.stringify(mergedFb), r.notes || '', r.id).run(); await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: r.title, notes: r.notes || '', tags: mergedFb }); } catch (_) {}
+          try { await env.DB.prepare('UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ' + AI_METADATA_VERSION + ', search_blob = NULL WHERE id = ?').bind(r.title, JSON.stringify(mergedFb), r.notes || '', r.id).run(); } catch (_) {}
           reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: fb }, r.notes);
         } else {
           reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, null, r.notes);
@@ -7790,14 +7435,6 @@ async function savePersonalUrl(env, userId, rawUrl, senderName, userNotes = '', 
     // keep scraped title if richer (e.g. GitHub full name)
   }
   const id = 'tgpl_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
-  const ghPersonal = await storeAddLink(env, 'personal', userId, {
-    id, url: rawUrl, url_hash: urlHash, title: meta.title, notes: meta.notes,
-    tags: ['telegram', 'dump'], created_at: Date.now(),
-    added_by_name: senderName, image_url: meta.image_url, site_name: meta.site_name,
-  });
-  if (ghPersonal.handled && !ghPersonal.ok) {
-    return { duplicate: false, error: `GitHub write failed: ${ghPersonal.error}` };
-  }
   try {
     await env.DB.prepare(
       `INSERT INTO personal_links (id, user_id, url, url_hash, title, notes, tags, created_at, image_url, site_name)
@@ -7860,11 +7497,17 @@ function chunkTelegramText(text, maxLen = TG_MSG_MAX) {
   return chunks;
 }
 
+/** Character budget for one help page, well inside the classic-HTML cap after
+ *  the navigation buttons are appended. */
+const HELP_PAGE_CHARS = 1500;
+
+/**
+ * Whole help panel as ready-to-send rich HTML. Command lines use the pattern
+ * "<b>N. /cmd <args></b> — what it is" plus an explanation line, separated by
+ * spacer paragraphs, per Telegram rich-message blocks (heading / paragraph /
+ * blockquote / list / pre — all verified live).
+ */
 function helpTextForSection(section, isGod = false) {
-  // Returns ready-to-send rich HTML. Command lines use the pattern
-  // "<b>N. /cmd <args></b> — what it is" + an indented explanation line,
-  // separated by spacer paragraphs, per Telegram rich-message blocks
-  // (heading / paragraph / blockquote / list / pre — all verified live).
   const cmd = (n, usage, what, extra = '') =>
     `<p><b>${n}. ${usage}</b>${what ? `<br>${what}` : ''}${extra ? `<br>${extra}` : ''}</p>`;
   const spacer = '<p></p>';
@@ -7922,9 +7565,10 @@ function helpTextForSection(section, isGod = false) {
       richParagraph('<b>Moderation (staff)</b>'),
       cmd(5, `${codeHtml('/delete')} ${codeHtml('<url>')}`, 'Remove a link from the community brain (reply to a result works too).'),
       cmd(6, `${codeHtml('/edit')} ${codeHtml('<url>')} | notes: …`, 'Fix a title or notes.'),
-      cmd(7, `${codeHtml('/topic')} ${codeHtml('<id>|off|here')}`, 'Lock the bot to one forum topic; dumps from other topics are ignored.'),
-      cmd(8, `${codeHtml('/kick')} ${codeHtml('<@user|id>')} · ${codeHtml('/clear')}`, 'Remove a member\'s access — they can rejoin later.'),
-      cmd(9, `${codeHtml('/admin')} · ${codeHtml('/demote')}`, 'Promote or demote — reply to the member\'s message. Owner/GOD only.'),
+      cmd(7, `${codeHtml('/topic')} ${codeHtml('<id>|off|here')}`, '<b>Lock, not link.</b> Restricts where the bot replies — dumps from other topics are ignored until ' + codeHtml('/topic off') + '. To copy a topic into a brain use ' + codeHtml('/topic link') + '.'),
+      cmd(8, `${codeHtml('/topic link')} ${codeHtml('[community_id] [community|personal|both]')}`, 'Bind the topic you send it in to a brain: every new post there is copied automatically. Run it inside the topic — the community id defaults to this group\'s.'),
+      cmd(9, `${codeHtml('/kick')} ${codeHtml('<@user|id>')} · ${codeHtml('/clear')}`, 'Remove a member\'s access — they can rejoin later.'),
+      cmd(10, `${codeHtml('/admin')} · ${codeHtml('/demote')}`, 'Promote or demote — reply to the member\'s message. Owner/GOD only.'),
       spacer,
       richParagraph(`<b>Owner:</b> ${codeHtml('/clear_db <id>')} wipes the community brain · ${codeHtml('/community_delete <id>')} deletes it (reply ${codeHtml('YES_DELETE_…')} to confirm). <i>Cloning lives in 📡 Channels.</i>`)
     ].join('\n');
@@ -7939,7 +7583,7 @@ function helpTextForSection(section, isGod = false) {
       cmd(1, 'Add Athena as admin', 'Channel → Manage → Administrators — give it post access.'),
       cmd(2, `${codeHtml('/channel_link')} ${codeHtml('<community_id> <channel_id>')}`, 'Links the channel: every new post is indexed live. IDs start with -100 — forward a post to @userinfobot to find one.'),
       cmd(3, `${codeHtml('/channel_unlink')} ${codeHtml('<channel_id>')}`, 'Stop indexing a channel.'),
-      cmd(4, `${codeHtml('/channel_target')} ${codeHtml('<channel_id> community|personal|both')}`, 'Re-route where a linked channel saves (personal/both: GOD only).'),
+      cmd(4, `${codeHtml('/channel_target')} ${codeHtml('<channel_id> [community|personal|both]')}`, 'Re-route where a linked channel saves (personal/both: GOD only). One argument shows the current target.'),
       cmd(5, `${codeHtml('/group_copy')} ${codeHtml('on|off')}`, 'Whole-group copy mode — index everything posted, not just links.'),
       spacer,
       richParagraph('<b>Groups & forum topics</b>'),
@@ -7949,21 +7593,21 @@ function helpTextForSection(section, isGod = false) {
       cmd(9, `${codeHtml('/topic_target')} ${codeHtml('<thread_id> community|personal|both')}`, 'Switch where a linked topic saves. Alias: ' + codeHtml('/topic target') + '.'),
       spacer,
       richParagraph('<b>Clone control</b>'),
-      cmd(10, `${codeHtml('/clone_stop')} ${codeHtml('[chat_id]')}`, 'Stop a running history backfill.'),
-      cmd(11, `${codeHtml('/stats')}`, 'Live counters for every cloned chat, with refresh.'),
-      cmd(12, `${codeHtml('/transfers')}`, 'List all clone/backfill sessions with their ids.'),
+      cmd(10, `${codeHtml('/clone_stop')} ${codeHtml('[chat_id]')}`, 'Stop running clones — every one you own, or just that chat\'s.'),
+      cmd(11, `${codeHtml('/stats')}`, 'Totals across every source you clone (links, files, other), then one page per run with topic pages. Bound channels, groups and topics report 🟢 LIVE CLONING: ON and their counts grow as new posts land.'),
+      cmd(12, `${codeHtml('/index_status')} ${codeHtml('[all]')}`, 'Backfill jobs with their ids. ' + codeHtml('all') + ' lists every user\'s jobs (GOD).'),
       cmd(13, `${codeHtml('/clone_del')} ${codeHtml('<transfer_id>')}`, "Delete everything one clone imported."),
       cmd(14, `${codeHtml('/delete')} ${codeHtml('<chat_id> [topic_id]')}`, 'Delete a cloned chat or topic (alias: ' + codeHtml('/del') + ').'),
       spacer,
       richParagraph('<b>Userbot history + live mode</b> — GOD, self-hosted, DM setup; the selected account must be able to read the source chat'),
-      cmd(15, `${codeHtml('/uclone')} ${codeHtml('<chat_id> [topic_id]')}`, 'Scans accessible history exactly, shows statistics, lets you choose one topic or all topics, then lists Personal or each community database. The destination screen has Back; completed runs return to topic statistics so another topic can be cloned. Live indexing is enabled for the selected scope. Alias: /ubclone. You can also run /uclone <chat_id> and choose a topic from the buttons.'),
+      cmd(15, `${codeHtml('/uclone')} ${codeHtml('<chat_id> [topic_id]')}`, 'Scans accessible history exactly, shows statistics, lets you choose one topic or all topics, then lists Personal or each community database. The destination screen has Back; completed runs return to topic statistics so another topic can be cloned. Live indexing is enabled for the selected scope. Alias: /ubclone. You can also run ' + codeHtml('/uclone <chat_id>') + ' and choose a topic from the buttons.'),
       cmd(16, `${codeHtml('/userbot_accounts')} · ${codeHtml('/userbot_select')}`, 'GOD, DM only: add, list, select, check status, remove or reauthenticate saved accounts. Setup verifies username, name, ID and masked phone; encrypted credentials and your selection survive restart. Reauthenticate using the same label; adding another account never changes an existing selection.'),
       cmd(17, `${codeHtml('/userbot_status')}`, 'GOD, DM only: verified account identities, live connection state, saved follows, backfill progress, per-topic progress and deduplicated recent errors. It reports userbot follows only; /clone is the separate Bot API live-clone command.'),
       cmd(18, `${codeHtml('/userbot_follow')} · ${codeHtml('/userbot_unfollow')}`, 'Add or remove live-follow chats for the userbot. Use /uclone when you want history plus live indexing.'),
-      cmd(19, `${codeHtml('/userbot_disconnect')} · ${codeHtml('/userbot_del')}`, 'Delete all saved accounts, or remove one with /userbot_del <label>. Sessions and follows are deleted, running clones stop, and no replacement account is selected.'),
+      cmd(19, `${codeHtml('/userbot_disconnect')} · ${codeHtml('/userbot_del')}`, 'Delete all saved accounts, or remove one with ' + codeHtml('/userbot_del <label>') + '. Sessions and follows are deleted, running clones stop, and no replacement account is selected.'),
       spacer,
       richParagraph('<b>Legacy backfill</b>'),
-      cmd(20, `${codeHtml('/index_start')} · ${codeHtml('/index_status')} · ${codeHtml('/index_stop')}`, 'Older session-based history backfill. Use /uclone for the guided wizard; /index_start remains available for the explicit legacy form and optional topic id.'),
+      cmd(20, `${codeHtml('/index_start')} · ${codeHtml('/index_status')} · ${codeHtml('/index_stop')}`, 'Older session-based history backfill. Use /uclone for the guided wizard; /index_start also accepts the short form ' + codeHtml('/index_start <community_id> <chat_id> [topic_id]') + ', which reuses the connected userbot account.'),
       spacer,
       richParagraph(`<b>Recipes:</b> bot live clone: ${codeHtml('/community_verify')} → run ${codeHtml('/clone')} in the group → ${codeHtml('/stats')}; userbot history + live: ${codeHtml('/userbot_add')} → ${codeHtml('/userbot_select')} → ${codeHtml('/uclone <chat_id>')} → choose destination → ${codeHtml('/stats')}`),
       richParagraph('<i>Cloning never edits the source chat. Bot mode needs Athena in the group; userbot mode needs the selected account in the source chat.</i>')
@@ -7993,10 +7637,10 @@ function helpTextForSection(section, isGod = false) {
       richParagraph(`<i>Channel/group/topic cloning and userbot commands live in the ${boldHtml('📡 Channels')} panel — most are GOD/owner gated and non-GOD just get "GOD rank only".</i>`),
       spacer,
       richParagraph('<b>Instance</b>'),
-      cmd(7, `${codeHtml('/setlogchannel')} ${codeHtml('<chat_id>')} ${codeHtml('(/setlog)')}`, 'Mirror operational events to a log channel.'),
-      cmd(8, `${codeHtml('/log')} ${codeHtml('[n|clear|dokploy [app] [n]|buildlogs [app] [n]|--json [n]]')}`, 'Real runtime logs: app log tail (default 30), Dokploy container logs, last deployment build output, or machine-readable JSON. AI agents: GET /api/logs?follow=1 (NDJSON).'),
-      cmd(9, `${codeHtml('/dok')} ${codeHtml('[apps|status|logs|buildlogs|deploy|redeploy|restart|stop|start]')}`, 'Dokploy control (self-host). deploy/redeploy confirm the accepted request only — follow /dok buildlogs and /dok status.'),
-      cmd(10, `${codeHtml('/db')} · ${codeHtml('/clear_personal_db')} · ${codeHtml('/restart')}`, 'Storage info · wipe your personal brain (confirm with YES) · restart the self-host service.'),
+      cmd(9, `${codeHtml('/setlogchannel')} ${codeHtml('<chat_id>')} ${codeHtml('(/setlog)')}`, 'Mirror operational events to a log channel.'),
+      cmd(10, `${codeHtml('/log')} ${codeHtml('[n|clear|dokploy [app] [n]|buildlogs [app] [n]|--json [n]]')}`, 'Real runtime logs: app log tail (default 30), Dokploy container logs, last deployment build output, or machine-readable JSON. AI agents: GET /api/logs?follow=1 (NDJSON).'),
+      cmd(11, `${codeHtml('/dok')} ${codeHtml('[apps|status|logs|buildlogs|deploy|redeploy|restart|stop|start]')}`, 'Dokploy control (self-host). deploy/redeploy confirm the accepted request only — follow /dok buildlogs and /dok status.'),
+      cmd(12, `${codeHtml('/db')} · ${codeHtml('/clear_personal_db')} · ${codeHtml('/restart')}`, 'Storage info · wipe your personal brain (confirm with YES) · restart the self-host service.'),
       spacer,
       richParagraph('<i>Website Settings → AI keys, bot binding, storage.</i>')
     ].join('\n');
@@ -8022,6 +7666,45 @@ function helpTextForSection(section, isGod = false) {
     spacer,
     richParagraph('<i>Settings, AI keys and bot setup live on the website. Tap any #tag chip to search it.</i>')
   ].join('\n');
+}
+
+/**
+ * Split a help panel into pages of whole blocks. A section label always travels
+ * with the commands it introduces, so no page ends on a bare heading.
+ */
+function helpPagesFor(section, isGod = false) {
+  const lines = String(helpTextForSection(section, isGod) || '').split('\n').filter((line) => line.trim() !== '');
+  const isLabel = (line) => /^<p><b>[^<]+<\/b><\/p>$/.test(line) || /^<h[1-6]>/.test(line);
+  const sizeOf = (line) => richHtmlToClassic(line).length + 1;
+  const pages = [[]];
+  let length = 0;
+  for (const line of lines) {
+    if (pages.at(-1).length && length + sizeOf(line) > HELP_PAGE_CHARS) {
+      const carried = [];
+      while (pages.at(-1).length && isLabel(pages.at(-1).at(-1))) carried.unshift(pages.at(-1).pop());
+      pages.push(carried);
+      length = carried.reduce((sum, label) => sum + sizeOf(label), 0);
+    }
+    pages.at(-1).push(line);
+    length += sizeOf(line);
+  }
+  return pages.map((page) => page.join('\n')).filter(Boolean);
+}
+
+function helpSectionTitle(section, isGod = false) {
+  const heading = /<h[1-6]>([\s\S]*?)<\/h[1-6]>/.exec(String(helpTextForSection(section, isGod) || ''))?.[1];
+  return heading || '🧭 Athena help';
+}
+
+/** One page of a help panel. The panel's own heading already names it on page
+ *  one, so only later pages carry the compact "section · page n of m" line. */
+function helpPageHtml(section, page = 0, isGod = false) {
+  const pages = helpPagesFor(section, isGod);
+  if (pages.length <= 1) return { html: pages[0] || helpTextForSection(section, isGod), pages: 1, page: 0 };
+  const current = Math.max(0, Math.min(pages.length - 1, Number(page) || 0));
+  if (current === 0) return { html: pages[0], pages: pages.length, page: 0 };
+  const header = richParagraph(`${boldHtml(helpSectionTitle(section, isGod))} <i>· page ${current + 1} of ${pages.length}</i>`);
+  return { html: `${header}\n${pages[current]}`, pages: pages.length, page: current };
 }
 
 function parseTelegramEditPayload(rest, replyMessage = null) {
@@ -8373,12 +8056,13 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
   // ---- Help menu buttons ----
   if (data.startsWith('help:')) {
     await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id });
-    const section = data.slice(5); // menu | global | personal | community | channels | god
-    const back = section !== 'menu';
+    const [, section = 'menu', rawPage = '0'] = data.split(':');
+    if (section === 'noop') return new Response('OK', { status: 200, headers: corsHeaders });
     const cbIsGod = tgUserId ? isInstanceOwnerTgId(tgUserId, env) : false;
-    if (section === 'menu' || section === 'global' || section === 'personal' || section === 'community' || section === 'channels' || (section === 'god' && cbIsGod)) {
-      await editTelegramRichMessage(token, chatId, msgId, richHelpHtml(section, cbIsGod), threadId, helpRichButtonRows(back, cbIsGod));
-    }
+    const known = ['menu', 'global', 'personal', 'community', 'channels'].includes(section) || (section === 'god' && cbIsGod);
+    if (!known) return new Response('OK', { status: 200, headers: corsHeaders });
+    const view = helpPageHtml(section, rawPage, cbIsGod);
+    await editTelegramRichMessage(token, chatId, msgId, view.html, threadId, helpRichButtonRows(section, view.page, view.pages, cbIsGod));
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
   // ---- /stats buttons: refresh / run navigation / close ----
@@ -9368,7 +9052,7 @@ function welcomeRichButtonRows(websiteUrl) {
     { label: '📊 Stats', data: 'menu:stats' },
     { label: '🔍 Search', data: 'menu:search' },
     { label: '🧬 Clone', data: 'menu:clone' },
-    { label: '🧭 Help', data: 'help:menu' }
+    { label: '🧭 Help', data: 'help:menu:0' }
   ])];
   if (websiteUrl) {
     rows.push(richButtonRow([{ type: 'url', url: websiteUrl, label: '🌐 Open ' + String(websiteUrl).replace(/^https?:\/\//, '') }]));
@@ -9376,19 +9060,25 @@ function welcomeRichButtonRows(websiteUrl) {
   return rows.join('\n');
 }
 
-function helpRichButtonRows(back = false, isGod = false) {
+/** Section switchers plus page navigation for the help panels. */
+function helpRichButtonRows(section = 'menu', page = 0, pages = 1, isGod = false) {
   const rows = [];
-  if (back) rows.push(richButtonRow([{ label: '« Help menu', data: 'help:menu' }]));
+  if (section !== 'menu') rows.push(richButtonRow([{ label: '« All sections', data: 'help:menu:0' }]));
   rows.push(richButtonRow([
-    { label: '🌐 Global', data: 'help:global' },
-    { label: '👤 Personal', data: 'help:personal' }
+    { label: '🌐 Global', data: 'help:global:0' },
+    { label: '👤 Personal', data: 'help:personal:0' }
   ]));
   rows.push(richButtonRow([
-    { label: '👥 Community', data: 'help:community' },
-    { label: '📡 Channels', data: 'help:channels' }
+    { label: '👥 Community', data: 'help:community:0' },
+    { label: '📡 Channels', data: 'help:channels:0' }
   ]));
-  if (isGod) {
-    rows.push(richButtonRow([{ label: '🛡 GOD tools', data: 'help:god' }]));
+  if (isGod) rows.push(richButtonRow([{ label: '🛡 GOD tools', data: 'help:god:0' }]));
+  if (pages > 1) {
+    rows.push(richButtonRow([
+      { label: '◀ Previous', data: `help:${section}:${Math.max(0, page - 1)}` },
+      { label: `📄 Page ${page + 1} / ${pages}`, data: 'help:noop' },
+      { label: 'Next ▶', data: `help:${section}:${Math.min(pages - 1, page + 1)}` }
+    ]));
   }
   return rows.join('\n');
 }
@@ -9402,16 +9092,10 @@ function richTextToRich(htmlText) {
     .join('\n');
 }
 
-function richHelpHtml(section, isGod = false) {
-  const raw = String(helpTextForSection(section, isGod) || '');
-  if (/^<h3/i.test(raw)) return raw; // panels are rich HTML now
-  const out = [];
-  const paras = raw.split(/\n{2,}/).map((x) => x.trim()).filter(Boolean);
-  for (let i = 0; i < paras.length; i++) {
-    const inner = paras[i].split(/\n/).join('<br>');
-    out.push(i === 0 ? richHeading(3, inner) : richParagraph(inner));
-  }
-  return out.join('\n');
+/** One page of a help panel as rich HTML; page parts come from the shared
+ *  splitter so the mobile fallback and the buttons agree on the count. */
+function richHelpHtml(section, isGod = false, page = 0) {
+  return helpPageHtml(section, page, isGod).html;
 }
 async function doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdN, targetArg, stats, threadArg = '' }){
   const _minId = stats?.minId || stats?.min_id || '';
@@ -10526,8 +10210,6 @@ for (const rawUrl of toSave) {
           try {
             await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
               .bind(r.title, JSON.stringify(merged), r.notes || '', r.id).run();
-            const gp = await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: r.title, notes: r.notes || '', tags: merged });
-            if (gp?.handled && !gp.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${gp.error||'unknown'}`, forumThreadId); }
           } catch (_) {}
           reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: userTagsPersonal }, r.notes);
         } else {
@@ -10546,13 +10228,12 @@ for (const rawUrl of toSave) {
             try {
               await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
                 .bind(savedTitle, JSON.stringify(merged), ai.description || r.notes || '', r.id).run();
-              await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: savedTitle, notes: ai.description || r.notes || '', tags: merged });
             } catch (_) {}
           } else {
             const fb=fallbackTagsFromMeta(rawUrl, {title: r.title, notes: r.notes, content: r.content});
             if(fb.length && r.id){
               const mergedFb=[...new Set([...['telegram','personal'], ...fb])];
-              try{ await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`).bind(r.title, JSON.stringify(mergedFb), r.notes||'', r.id).run(); await storeMutateLink(env,'personal',athenaUser.id,r.id,{title:r.title, notes:r.notes||'', tags:mergedFb}); }catch(_){}
+              try{ await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`).bind(r.title, JSON.stringify(mergedFb), r.notes||'', r.id).run(); }catch(_){}
               reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, {title: r.title, description: r.notes||'', tags: fb}, r.notes);
             } else {
               reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, null, r.notes);
@@ -11477,7 +11158,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     // every /clear_db alias must be listed, or the alias skips this gate entirely
     '/clear_db', '/cleardb', '/clear_community_db',
     '/clear_personal_db', '/clear_perosnal_db', '/clearpersonal',
-    '/sync', '/backup'
+    '/backup'
   ]);
   if (cmd && cmd.startsWith('/') && STAFF_OR_ABOVE.has(cmd) && !isCommAdmin && !isGod) {
     await sendTelegramMessage(token, chatId,
@@ -12785,26 +12466,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
-  // ---- /transfers — GOD: recent clone/backfill sessions with ids ----
-   if (cmd === '/transfers' || cmd === '/clone_sessions') {
-     if (!isGod) { await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId); return new Response('OK', { status: 200, headers: corsHeaders }); }
-     await ensureIndexTables(env);
-     await ensureTransferColumns(env);
-     const { results } = await env.DB.prepare(
-       'SELECT id, chat_id, thread_id, chat_name, status, processed, saved_links, saved_docs, saved_pdfs, dupes_skipped, saved_files, created_at FROM index_jobs ORDER BY created_at DESC LIMIT 10'
-       ).all();
-     if (!results?.length) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No clone/backfill sessions yet.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const lines = results.map((j) => `<li>${j.chat_name ? `${boldHtml(escHtml(j.chat_name))} ` : ''}${escHtml(j.chat_id)}${j.thread_id ? ` topic ${codeHtml('#' + j.thread_id)}` : ''} · ${j.status} · ${j.processed || 0} msgs · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.dupes_skipped ? ` · ${j.dupes_skipped} dupes` : ''}${j.saved_files ? ` · ${j.saved_files} files` : ''} (${codeHtml(j.id)})</li>`);
-     await sendTelegramRichMessage(token, chatId,
-       `<h3>🗂 Clone sessions</h3><ul>${lines.join('')}</ul><p>${italicHtml('Delete one:')} ${codeHtml('/clone_del <id> [files]')}${italicHtml(' — add "files" to also wipe its vault media')}</p>`,
-       forumThreadId);
-     return new Response('OK', { status: 200, headers: corsHeaders });
-   }
-
-   // ---- /clone_del — GOD: delete one transfer session's imported data ----
+  // ---- /clone_del — GOD: delete one transfer session's imported data ----
    if (cmd === '/clone_del' || cmd === '/clonedel') {
      if (!isGod) { await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId); return new Response('OK', { status: 200, headers: corsHeaders }); }
      await ensureUserbotTables(env);
@@ -12814,7 +12476,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      const withFiles = (parts[2] || '').toLowerCase() === 'files';
      if (!target) {
        await sendTelegramFormatted(token, chatId,
-         `Usage:\n${codeHtml('/clone_del <job_id> [files]')} — delete that session's imports\n${codeHtml('/clone_del <chat_id> [files]')} — delete ALL sessions for a chat\n${codeHtml('/transfers')} — list ids`,
+         `Usage:\n${codeHtml('/clone_del <job_id> [files]')} — delete that session's imports\n${codeHtml('/clone_del <chat_id> [files]')} — delete ALL sessions for a chat\n${codeHtml('/index_status all')} — list ids`,
          forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
@@ -12829,7 +12491,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       transferIds = [...jobIds, `live:${cid}`];
     }
     if (!transferIds.length) {
-      await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Nothing found for ${codeHtml(target)}. See ${codeHtml('/transfers')}.`, forumThreadId);
+      await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Nothing found for ${codeHtml(target)}. See ${codeHtml('/index_status all')}.`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     const ph = transferIds.map(() => '?').join(',');
@@ -12873,7 +12535,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     }
   }
 
-  if (cmd === '/userbot_status' || cmd === '/userbotstatus' || cmd === '/indexing') {
+  if (cmd === '/userbot_status' || cmd === '/userbotstatus') {
      if (!isGod || String(chatId).startsWith('-')) {
        await sendTelegramFormatted(token, chatId, 'Account identity and status are available to GOD rank in a DM only.', forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
@@ -13044,15 +12706,17 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
 
    if (cmd === '/index_status') {
      await ensureIndexTables(env);
-     const { results } = await env.DB.prepare(
-       `SELECT j.* FROM index_jobs j WHERE j.user_id = ? ORDER BY j.updated_at DESC LIMIT 5`
-     ).bind(athenaUser?.id || tgUserId || '').all();
+     // `all` (GOD) lists every user's jobs; everyone else sees their own.
+     const allUsers = isGod && /^all$/i.test((parts[1] || '').trim());
+     const { results } = allUsers
+       ? await env.DB.prepare('SELECT * FROM index_jobs ORDER BY updated_at DESC LIMIT 10').all()
+       : await env.DB.prepare('SELECT * FROM index_jobs WHERE user_id = ? ORDER BY updated_at DESC LIMIT 10').bind(athenaUser?.id || tgUserId || '').all();
      if (!results || !results.length) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No backfill jobs yet. ${codeHtml('/uclone <chat_id>')} starts the guided history scan; ${codeHtml('/clone')} is Bot API live mode inside a linked group.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
-     const lines = results.map((j) => `<li>${j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'error' ? '❌' : '⏸'} ${j.chat_name ? `${boldHtml(escHtml(j.chat_name))} ` : ''}${codeHtml(j.chat_id)}${j.thread_id ? ` topic ${codeHtml('#' + j.thread_id)}` : ''} — ${escHtml(j.status)} · ${j.processed || 0} scanned · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.dupes_skipped ? ` · ${j.dupes_skipped} dupes` : ''} · del: /clone_del ${codeHtml(j.id)}${j.error ? ` — ${escHtml(String(j.error).slice(0, 80))}` : ''}</li>`);
-     await sendTelegramRichMessage(token, chatId, `<h3>🗂 Backfill jobs</h3><ul>${lines.join('')}</ul>`, forumThreadId);
+     const lines = results.map((j) => `<li>${j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'error' ? '❌' : '⏸'} ${j.chat_name ? `${boldHtml(escHtml(j.chat_name))} ` : ''}${codeHtml(j.chat_id)}${j.thread_id ? ` topic ${codeHtml('#' + j.thread_id)}` : ''} — ${escHtml(j.status)} · ${j.processed || 0} scanned · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.dupes_skipped ? ` · ${j.dupes_skipped} dupes` : ''}${j.saved_files ? ` · ${j.saved_files} files` : ''}${j.error ? ` — ${escHtml(String(j.error).slice(0, 80))}` : ''}</li>`);
+     await sendTelegramRichMessage(token, chatId, `<h3>🗂 Backfill jobs${allUsers ? ' — all users' : ''}</h3><ul>${lines.join('')}</ul><p>${italicHtml('Delete one:')} ${codeHtml('/clone_del <id> [files]')}</p>`, forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
@@ -13107,7 +12771,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
    }
 
    if (cmd === '/help') {
-    await sendTelegramRichMessage(token, chatId, richHelpHtml('menu', isGod), forumThreadId, helpRichButtonRows(false, isGod));
+    await sendTelegramRichMessage(token, chatId, richHelpHtml('menu', isGod), forumThreadId, helpRichButtonRows('menu', 0, 1, isGod));
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
@@ -13986,7 +13650,6 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       // RAG retrieval — Meilisearch finds a small candidate set, PostgreSQL
       // hydrates the authoritative rows, and SQL remains the fallback.
       const scopeKey = scope === 'personal' ? athenaUser.id : aiCommunityId;
-      await ensureFresh(env, scope, scopeKey);
       const retrieval = await retrieveAiRows(env, scope, scopeKey, q, { limit: AI_RETRIEVAL_LIMIT });
       const rows = retrieval.rows;
       const docs = rows;
@@ -14297,12 +13960,6 @@ Rules:
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
-  // ---- /sync — removed (PostgreSQL only). Keep command as stub for compat.
-  if (cmd === '/sync') {
-    await sendTelegramFormatted(token, chatId, `${boldHtml('ℹ️ Sync removed')} — PostgreSQL is the only store (D1/GitHub deprecated). Use ${codeHtml('/backup')} on self-host or ${codeHtml('pg_dump')}.`, forumThreadId);
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-
   // ---- /structure (GOD): clean titles/notes/URLs across the whole DB ----
   if (cmd === '/structure' || cmd === '/structuredb' || cmd === '/structured') {
     if (!isGod) {
@@ -14551,7 +14208,6 @@ Rules:
         await sendTelegramMessage(token, chatId, 'Login with Telegram on the website once.', forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
-      await ensureFresh(env, 'personal', athenaUser.id);
       rows = await candidateLinks(env, 'personal', athenaUser.id, queryPart);
     } else {
       if (!binding.community_id) {
@@ -14563,7 +14219,6 @@ Rules:
         await sendTelegramMessage(token, chatId, 'Only owner/admins can /edit community links.', forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
-      await ensureFresh(env, 'community', binding.community_id);
       rows = await candidateLinks(env, 'community', binding.community_id, queryPart);
     }
 
@@ -14612,11 +14267,6 @@ Rules:
       }
     }
     const storeScopeKey = scope === 'personal' ? athenaUser.id : binding.community_id;
-    const storePatch = await storeMutateLink(env, scope, storeScopeKey, hit.id, { title, notes });
-    if (storePatch.handled && !storePatch.ok) {
-      await sendTelegramMessage(token, chatId, `Updated in database, but storage sync failed: ${storePatch.error}`, forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
     markMeiliScopeDirty(env, scope, storeScopeKey);
     await sendTelegramMessage(token, chatId,
       `Updated:\nTitle: ${title || '(untitled)'}\nURL: ${hit.url}\nNotes: ${String(notes || '(empty)')}`, forumThreadId);
@@ -14690,7 +14340,7 @@ Rules:
         transferIds = [...jobIds, ...liveTransfers];
       } catch (_) {}
       if (!transferIds.length && !communityIds.size && !personalUserIds.size) {
-        await sendTelegramMessage(token, chatId, `Nothing found for ${chatArg}${threadArg ? ':' + threadArg : ''}. Try /transfers to see ids.`, forumThreadId);
+        await sendTelegramMessage(token, chatId, `Nothing found for ${chatArg}${threadArg ? ':' + threadArg : ''}. Try /index_status all to see ids.`, forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
       const ph = transferIds.map(() => '?').join(',');
@@ -14796,11 +14446,6 @@ Rules:
                 await env.DB.prepare(
                   `UPDATE personal_links SET title = ?, notes = ?, tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
                 ).bind(savedTitle, ai.description || add.notes || '', JSON.stringify(tags), add.id).run();
-                await storeMutateLink(env, 'personal', athenaUser.id, add.id, {
-                  title: savedTitle,
-                  notes: ai.description || add.notes || '',
-                  tags
-                });
               }
             } catch (_) {}
             await sendTelegramMessage(token, chatId, `Was not in DB — added to personal: ${rawUrl}`, forumThreadId);
@@ -14846,8 +14491,6 @@ Rules:
               await env.DB.prepare(
                 `UPDATE links SET title = ?, notes = ?, tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
               ).bind(meta.title, meta.notes || '', JSON.stringify(tags), id).run();
-              const gd = await storeMutateLink(env, 'community', binding.community_id, id, { title: meta.title, notes: meta.notes || '', tags });
-              if (gd?.handled && !gd.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${gd.error||'unknown'}`, forumThreadId); }
             } else {
               const vocab = await recentTagsForScope(env, 'community', binding.community_id);
               const ai = await aiDescribeAndTag(env, rawUrl, meta, vocab);
@@ -14858,16 +14501,12 @@ Rules:
                 await env.DB.prepare(
                   `UPDATE links SET title = ?, notes = ?, tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
                 ).bind(savedTitle, ai.description || meta.notes || '', JSON.stringify(tags), id).run();
-                const ga2 = await storeMutateLink(env, 'community', binding.community_id, id, { title: savedTitle, notes: ai.description || meta.notes || '', tags });
-                if (ga2?.handled && !ga2.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${ga2.error||'unknown'}`, forumThreadId); }
               } else {
                 const fb = fallbackTagsFromMeta(rawUrl, meta);
                 if (fb.length) {
                   const tagsFb = [...new Set([...['telegram'], ...fb])];
                   await ensureSearchColumns(env);
                   await env.DB.prepare(`UPDATE links SET title = ?, notes = ?, tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`).bind(meta.title, meta.notes||'', JSON.stringify(tagsFb), id).run();
-                  const gf = await storeMutateLink(env, 'community', binding.community_id, id, { title: meta.title, notes: meta.notes||'', tags: tagsFb });
-                  if (gf?.handled && !gf.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${gf.error||'unknown'}`, forumThreadId); }
                 }
               }
             }
@@ -15235,10 +14874,6 @@ function isUiNoiseText(text) {
     || /^(home|about|contact|blog|docs|pricing|login)\b/i.test(t.trim());
 }
 
-function isGithubUiNoise(text) {
-  return isUiNoiseText(text);
-}
-
 function scoreDescriptionCandidate(text) {
   const t = cleanGenericSummary(text);
   if (!t || isUiNoiseText(t)) return -100;
@@ -15353,7 +14988,7 @@ function parseReadmeIntro(md) {
   let title = '';
   const descLines = [];
   for (const line of lines) {
-    if (isGithubUiNoise(line)) continue;
+    if (isUiNoiseText(line)) continue;
     if (/^license|^badges?$|^download|^install|^features?$/i.test(line)) break;
     if (!title && line.length <= 60 && !/[.!?]$/.test(line) && line.split(/\s+/).length <= 6) {
       title = line.replace(/^[*_]+|[*_]+$/g, '').trim();
@@ -16244,8 +15879,6 @@ async function enrichLinksInBackground(env, scope, key, links) {
             `UPDATE links SET title = ?, notes = ?, image_url = ?, site_name = ?, metadata_version = ${metadataVersion}, search_blob = NULL` + (update.tags ? ', tags = ?' : '') + ' WHERE id = ?'
           ).bind(update.title, update.notes, update.image_url, update.site_name, ...(update.tags ? [JSON.stringify(update.tags)] : []), link.id).run();
         }
-        // Best effort on GitHub storage: the .md entry catches up with the row.
-        await storeMutateLink(env, scope, key, link.id, update);
         markMeiliScopeDirty(env, scope, key);
       } catch (_) { /* one bad link must not stall the rest */ }
     }
@@ -17287,6 +16920,8 @@ export {
   getSteroidMode,
   isGroundedAiAnswer,
   helpTextForSection,
+  helpPageHtml,
+  helpRichButtonRows,
   isFreeTierModel,
   normalizeModelId,
   parseAiDescribeResponse,
