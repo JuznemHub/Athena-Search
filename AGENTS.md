@@ -22,14 +22,11 @@ Before making code changes, read and follow `CLAUDE.md`.
 
 ## OpenCode instance
 
-- This repo is configured for **OpenCode** (`opencode.json`) with the `superpowers` plugin and the following skills:
-  - `tgbot-test-skill` (project, already present — do not reinstall)
-  - `firecrawl`, `composio`, `frontend-design` (global opencode skills — already installed, reused from `~/.config/opencode/skills`)
-  - `stop-slop` + anti-slop bundle (`peakoss/anti-slop`, `miqdadbadjuber/anti-slop`, `petergyang/no-ai-slop`) — applied to every PR/commit/message
-  - `caveman` (token-efficient replies, opt-in via "caveman mode")
-  - `backend-doctor` (health/diagnostics, via `ZypherHQ/backend-doctor`)
-  - top-100 AI Agents catalog (reference: https://github.com/yuxiaopeng/Github-Ranking-AI/blob/main/Top100/AI%20Agents.md) and VoltAgent awesome-agent-skills (https://github.com/VoltAgent/awesome-agent-skills) — used as a menu for agent selection, not all installed by default
-- Multiple agents are available via `/root/.config/opencode/agent`: `architect`, `debugger`, `frontend-designer`, `researcher`, `reviewer`, `technical-writer`. The opencode TUI routes work through them; direct CLI uses `opencode run --agent <name> "…"`.
+- This repo is configured for **OpenCode** (`opencode.json`) with the `superpowers` plugin and 110+ global skills in `~/.config/opencode/skills` (synced in via `~/.config/opencode/sync-skills.sh` — local sources only, no slow installs).
+- Global agents in `~/.config/opencode/agents`: `architect`, `implementer`, `researcher`, `reviewer`, `tester`, `debugger` (root-cause analysis), `ops` (Athena bot ops + deploy). CLI use: `opencode run --agent <name> "…"`.
+- Relevant skills for this repo: `tgbot-test-skill`, `telegram-bot-ops`, `systematic-debugging`, `test-driven-development`, `backend-doctor`, `stop-slop` + anti-slop bundle, `caveman`, plus the full superpowers set (`brainstorming`, `writing-plans`, `executing-plans`, `verification-before-completion`, `using-git-worktrees`, `dispatching-parallel-agents`, …).
+- Web lookups: `firecrawl` skills (CLI, keyless) first, then webfetch/websearch.
+- `dokploy-test` branch is DELETED (remote + local). Work happens on `dev` only.
 
 ## Anti-slop
 

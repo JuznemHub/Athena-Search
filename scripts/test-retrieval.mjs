@@ -1,12 +1,26 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { DatabaseSync } from 'node:sqlite';
 
 import {
   buildSearchBlob,
   cleanApiBase,
   compactAiContext,
   dedupeLinkRows,
+  detectBackupCommunityId,
+  followLiveness,
+  formatBackfillDone,
+  formatBackfillProgress,
+  generateUrlHash,
+  handleSearchLinks,
+  hydrateMeiliRows,
+  hydrateSourcePosts,
+  importBackupSql,
+  loadLinkNamePattern,
+  notesForUrl,
+  progressBar,
+  repairContaminatedNotes,
   fuzzyMatchLinks,
   helpTextForSection,
   isGroundedAiAnswer,
@@ -15,7 +29,9 @@ import {
   parseTelegramEditPayload,
   rankLinks,
   resolveChatEndpoint,
-  resultLimitClause
+  resultLimitClause,
+  searchAllLinks,
+  telegramSearchRowHtml
 } from '../worker/index.js';
 
 assert.equal(resultLimitClause(null), '');
@@ -150,5 +166,309 @@ assert.equal(aiWindow.AthenaAI.isGroundedAiAnswer(
   'Here is a general answer: https://untrusted.example/',
   [{ url: 'https://filmygod.buzz/' }]
 ), false);
+
+// detectBackupCommunityId: backup dumps carry the source community per links row.
+const mockEnvWith = (existingIds) => ({
+  DB: {
+    prepare: () => ({
+      bind: (id) => ({
+        first: async () => (existingIds.includes(id) ? { id } : null),
+      }),
+    }),
+  },
+});
+const linkInsert = (cid, url) =>
+  `INSERT INTO "links" ("community_id","id","url","url_hash") VALUES ('${cid}','x_${url}','https://${url}','h_${url}');`;
+const backupSingle = [
+  linkInsert('c_aaa', 'a.com'),
+  linkInsert('c_aaa', 'b.com'),
+  `INSERT INTO "personal_links" ("user_id","id","url") VALUES ('u1','p1','https://c.com');`,
+].join('\n');
+assert.equal(await detectBackupCommunityId(mockEnvWith(['c_aaa']), backupSingle), 'c_aaa');
+// Two distinct communities -> ambiguous -> ''.
+const backupMulti = [linkInsert('c_aaa', 'a.com'), linkInsert('c_bbb', 'b.com')].join('\n');
+assert.equal(await detectBackupCommunityId(mockEnvWith(['c_aaa', 'c_bbb']), backupMulti), '');
+// Single community unknown locally -> ''.
+assert.equal(await detectBackupCommunityId(mockEnvWith(['c_zzz']), backupSingle), '');
+// No links rows at all -> ''.
+assert.equal(await detectBackupCommunityId(mockEnvWith(['c_aaa']), `INSERT INTO "users" ("id") VALUES ('u1');`), '');
+
+// importBackupSql stamps search_blob at import time so rows are findable
+// without waiting for the lazy backfill (regression: bulk imports were
+// invisible to /search, e.g. a trailing-slash URL query missing its row).
+{
+  const inserts = [];
+  const fakeDb = {
+    prepare: (sql) => ({
+      bind: (...args) => ({
+        all: async () => ({ results: [] }),
+        first: async () => null,
+        run: async () => { inserts.push({ sql, args }); return {}; },
+      }),
+    }),
+  };
+  const dump = `INSERT INTO "links" ("community_id","id","url","url_hash","title","notes","tags") VALUES ('c_old','l1','https://enhancv.com/','h1','Enhancv resume builder','make a resume','["jobs"]');`;
+  const rep = await importBackupSql({ DB: fakeDb }, dump, { targetCommunityId: 'c_new', targetUserId: 'u_new' });
+  assert.equal(rep.linksInserted, 1);
+  const linkInsert = inserts.find(i => /INSERT INTO links/.test(i.sql));
+  assert.ok(linkInsert, 'links INSERT captured');
+  const blobIdx = linkInsert.sql.indexOf('"search_blob"') >= 0
+    ? linkInsert.sql.split(',').findIndex(c => c.includes('search_blob'))
+    : -1;
+  assert.ok(blobIdx >= 0, 'search_blob column present');
+  // Values vector layout: (scope,target,id,url,hash,...cols) — find blob by column order.
+  const colNames = linkInsert.sql.slice(linkInsert.sql.indexOf('(') + 1, linkInsert.sql.indexOf(')')).split(',').map(c => c.replace(/"/g, '').trim());
+  const blob = linkInsert.args[colNames.indexOf('search_blob')];
+  assert.ok(String(blob).includes('httpsenhancvcom'), `blob matches stripped URL form, got: ${blob}`);
+  assert.ok(!String(blob).includes('://'), 'blob is normalized (no URL punctuation)');
+}
+
+// notesForUrl: one message, many links -> each link keeps only its section.
+// Regression: backfill stamped the whole listicle message as every link's
+// notes (enhancv.com and beautiful.ai shared identical "ChatGPT
+// alternatives…" notes).
+{
+  const listMsg = [
+    'ChatGPT alternatives, the best AI tools list:',
+    'For writing:',
+    'Chatsonic - https://chatsonic.com the conversational writer',
+    'For design:',
+    'Enhancv resume builder - https://enhancv.com/ make a standout resume',
+    'Beautiful presentations - https://www.beautiful.ai/ slides in minutes',
+  ].join('\n');
+  const urls = ['https://chatsonic.com', 'https://enhancv.com/', 'https://www.beautiful.ai/'];
+  // Single URL keeps the full text (legacy behavior).
+  assert.equal(notesForUrl(listMsg, 'https://enhancv.com/', 1), listMsg);
+  // Multi URL: enhancv keeps its own line, not the whole list.
+  const enh = notesForUrl(listMsg, 'https://enhancv.com/', urls.length);
+  assert.ok(enh.includes('enhancv'), `enhancv section kept, got: ${enh}`);
+  assert.ok(!enh.includes('chatsonic.com'), 'other link section cut (before)');
+  assert.ok(!enh.includes('beautiful.ai'), 'other link section cut (after)');
+  assert.ok(!enh.includes('ChatGPT alternatives'), 'list header cut');
+  const beau = notesForUrl(listMsg, 'https://www.beautiful.ai/', urls.length);
+  assert.ok(beau.includes('Beautiful presentations'), `beautiful section kept, got: ${beau}`);
+  assert.ok(!beau.includes('enhancv'), 'neighbour section cut');
+  // Bare URL with no descriptive text -> '' (scraper fills it instead).
+  assert.equal(notesForUrl('https://a.com https://b.com', 'https://a.com', 2), '');
+  // Unknown URL -> ''.
+  assert.equal(notesForUrl(listMsg, 'https://missing.example/', 3), '');
+}
+
+// repairContaminatedNotes: URL-stripped listicles (cleanNotesText removes
+// every URL, leaving "Name -" dangling lines) shrink to the row's own
+// section. Real shape pasted from the website detail page.
+{
+  const strippedList = [
+    'ChatGPT alternatives',
+    'For writing',
+    'Chatsonic** - **',
+    'ChatABC -',
+    'JasperAI -',
+    'Quillbot -',
+    'For coding',
+    'CodeWhisperer -',
+    'Copilot -',
+    'For research',
+    'Paperpal -',
+    'Perplexity -',
+    'YouChat -',
+    'For design',
+    'Beautiful presentations -',
+    'Slides in minutes -',
+  ].join('\n');
+  const fixed = repairContaminatedNotes(strippedList, 'https://www.beautiful.ai', 'beautiful.ai');
+  assert.ok(fixed.includes('Beautiful presentations'), `own section kept, got: ${fixed}`);
+  assert.ok(!fixed.includes('ChatGPT alternatives'), 'list header cut');
+  assert.ok(!fixed.includes('Chatsonic'), 'foreign section cut');
+  assert.ok(fixed.length < strippedList.length, 'notes actually shrunk');
+  // No self-mention anywhere -> cleared (pure foreign text).
+  assert.equal(repairContaminatedNotes(strippedList, 'https://unknown.example/', 'Unknown tool'), '');
+  // Legit prose untouched (no dangling-dash fingerprint).
+  const prose = 'A thoughtful review of this resume builder. It handles modern templates well and exports clean PDFs for hiring managers.';
+  assert.equal(repairContaminatedNotes(prose, 'https://www.beautiful.ai', 'beautiful.ai'), prose);
+  // Short notes untouched.
+  assert.equal(repairContaminatedNotes('nice tool', 'https://www.beautiful.ai', 'beautiful.ai'), 'nice tool');
+}
+
+// repairContaminatedNotes v3: enumerated listicles with no URLs and no
+// dangling dashes ("1. Gigapixel AI - …"). Long notes naming 3+ OTHER saved
+// links keep lines naming this row; foreign-only lines drop.
+{
+  const fakeEnv = {
+    DB: {
+      prepare: (sql) => {
+        const rows = /personal_links/.test(sql) ? [] : [
+          { url: 'https://www.hitpaw.com/photo-enhancer.html' },
+          { url: 'https://gigapixel.ai/upscale' },
+          { url: 'https://upscale.media/tools' },
+          { url: 'https://youcam.com/enhance' },
+        ];
+        return {
+          all: async () => ({ results: rows }),
+          bind: () => ({
+            all: async () => ({ results: rows }),
+          }),
+        };
+      },
+    },
+  };
+  const nameRe = await loadLinkNamePattern(fakeEnv);
+  assert.ok(nameRe, 'name pattern builds');
+  const enumNotes = [
+    'Top AI image scalers ranked this week after testing every option twice daily:',
+    '1. Gigapixel AI - Upscales photos up to 600 percent without quality loss, works with vectors and compressed images, face enhancement included free',
+    '2. Upscale.media - Supports PNG JPG and WEBP formats everywhere, removes JPEG artifacts completely, generates high resolution images up to four times daily',
+    '3. YouCam Enhance - One click restoration for old family portraits with automatic retouching and background cleanup tools for everyone using it',
+    '4. HitPaw photo enhancer - Simple enhancement for portraits and landscapes with automatic retouching modes for beginners learning every single day',
+  ].join('\n');
+  const fixed = repairContaminatedNotes(enumNotes, 'https://www.hitpaw.com/photo-enhancer.html', 'hitpaw.com/photo-enhancer.html', nameRe);
+  assert.ok(fixed.includes('HitPaw'), `own section kept, got: ${fixed}`);
+  assert.ok(!fixed.includes('Gigapixel'), 'foreign section dropped');
+  assert.ok(!fixed.includes('Upscale'), 'foreign section dropped');
+  assert.ok(fixed.length < enumNotes.length, 'notes actually shrunk');
+  // Only 2 foreign names -> untouched (legit comparisons name a couple tools).
+  const pairNotes = 'A long comparison of two upscalers after weeks of testing every photo twice daily. Gigapixel AI gives sharper faces overall, while Upscale.media is faster for batch jobs and cheaper monthly plans for everyone involved here today! ' + 'x'.repeat(120);
+  assert.equal(repairContaminatedNotes(pairNotes, 'https://www.hitpaw.com/photo-enhancer.html', 'hitpaw', nameRe), pairNotes);
+  // Short notes never trigger, however many names.
+  assert.equal(repairContaminatedNotes('Gigapixel Upscale YouCam HitPaw tools', 'https://www.hitpaw.com/x', 'hitpaw', nameRe), 'Gigapixel Upscale YouCam HitPaw tools');
+}
+
+// Clone progress/completion/liveness formatters (pure — safe to unit test).
+{
+  const b1 = progressBar(50, 100);
+  assert.equal(b1.pct, 50);
+  const b2 = progressBar(150, 100);
+  assert.equal(b2.pct, 100, 'done>total clamps instead of overflowing');
+
+  const prog = formatBackfillProgress({ name: 'Pirate Movies', chatId: '-100123', threadId: '', done: 500, total: 1000, links: 120, dupes: 2159, docs: 30, pdfs: 7, files: 4, urls: 200, skipped: 11 });
+  assert.ok(prog.includes('Pirate Movies'), 'chat name shown');
+  assert.ok(prog.includes('-100123'), 'chat id shown');
+  assert.ok(prog.includes('7 pdfs'), 'pdf counter shown');
+  assert.ok(prog.includes('2159 dupes'), 'dupe counter shown');
+  assert.ok(prog.includes('50%'), 'percent shown');
+  const progBare = formatBackfillProgress({ chatId: '-100123', done: 5, total: 0 });
+  assert.ok(progBare.includes('-100123'), 'works with no name and no total');
+  assert.ok(!/\d+%/.test(progBare), 'unknown history size must not display a fabricated percentage');
+  assert.ok(!progBare.includes('pdfs'), 'zero counters omitted');
+
+  const done = formatBackfillDone({ status: 'done', name: 'Pirate Movies', chatId: '-100123', processed: 1000, links: 120, dupes: 2159, docs: 30, pdfs: 7, files: 0, live: { emoji: '🟢', label: 'Live indexing ON' } });
+  assert.ok(done.includes('✅'), 'done icon');
+  assert.ok(done.includes('Pirate Movies'), 'name in completion');
+  assert.ok(done.includes('7 pdfs'), 'pdfs in completion');
+  assert.ok(done.includes('2159 dupes already saved'), 'dupes explained in completion');
+  assert.ok(done.includes('🟢'), 'live indicator in completion');
+
+  const now = Date.now();
+  assert.equal(followLiveness(true, 0, now).emoji, '🟢', 'connected account is live');
+  assert.equal(followLiveness(false, now - 3600_000, now).emoji, '🟢', 'recently seen follow is live');
+  assert.equal(followLiveness(false, now - 48 * 3600_000, now).emoji, '⚪', 'stale follow is idle');
+  assert.equal(followLiveness(false, 0, now).emoji, '⚪', 'never-seen follow is idle');
+}
+
+// Canonical rows are enrichment; source occurrences must remain complete and scoped.
+{
+  const sqlite = new DatabaseSync(':memory:');
+  sqlite.exec(fs.readFileSync(new URL('../worker/schema.sql', import.meta.url), 'utf8')
+    .replace(/^CREATE EXTENSION[^;]*;/gm, '').replace(/^CREATE INDEX[^;]*USING gin[^;]*;/gm, ''));
+  const DB = {
+    prepare(sql) {
+      const statement = (params = []) => ({
+        bind(...values) { return statement(values.map(value => value ?? null)); },
+        async run() { const result = sqlite.prepare(sql).run(...params); return { success: true, meta: { changes: Number(result.changes) } }; },
+        async first(column) { const row = sqlite.prepare(sql).get(...params); return row ? (column ? row[column] : row) : null; },
+        async all() { return { results: sqlite.prepare(sql).all(...params) }; }
+      });
+      return statement();
+    }
+  };
+  const env = { DB };
+  const user = { id: 'source_reader', provider: 'fixture' };
+  const url = 'https://hidden.example/tool';
+  const rawUrl = 'https://raw.example/reference';
+  const hash = generateUrlHash(url);
+  const body = `  Tool label\n${'Original paragraph with spacing.  '.repeat(180)}\n${rawUrl}\nsourceonlyneedle\nLast line <keep>  `;
+  const message = { message: body, entities: [{ className: 'MessageEntityTextUrl', offset: 2, length: 10, url }], media: { document: { id: '9007199254740993' } }, replyTo: { replyToMsgId: 7 } };
+  try {
+    sqlite.prepare('INSERT INTO users (id,username,created_at) VALUES (?,?,?)').run(user.id, user.id, 1);
+    for (const community of ['source_community', 'other_community']) {
+      sqlite.prepare('INSERT INTO communities (id,name,creator_id,created_at) VALUES (?,?,?,?)').run(community, community, user.id, 1);
+      sqlite.prepare('INSERT INTO community_members (community_id,user_id,joined_at) VALUES (?,?,?)').run(community, user.id, 1);
+    }
+    sqlite.prepare('INSERT INTO users (id,username,created_at) VALUES (?,?,?)').run('other_reader', 'other_reader', 1);
+    for (const [table, column, key, id] of [
+      ['personal_links', 'user_id', user.id, 'personal_hit'],
+      ['personal_links', 'user_id', 'other_reader', 'other_hit'],
+      ['links', 'community_id', 'source_community', 'community_hit'],
+      ['links', 'community_id', 'other_community', 'foreign_hit']
+    ]) {
+      const columns = table === 'links' ? ',added_by' : '';
+      const values = table === 'links' ? [user.id] : [];
+      sqlite.prepare(`INSERT INTO ${table} (id,${column},url,url_hash,title,notes,tags,created_at,metadata_version${columns}) VALUES (?,?,?,?,?,?,?,?,?${values.length ? ',?' : ''})`)
+        .run(id, key, url, hash, 'Enriched tool title', 'Independent canonical summary', '[]', 1, 3, ...values);
+    }
+    sqlite.prepare('INSERT INTO personal_links (id,user_id,url,url_hash,title,notes,created_at,metadata_version) VALUES (?,?,?,?,?,?,?,?)')
+      .run('raw_hit', user.id, rawUrl, generateUrlHash(rawUrl), 'Reference', 'Reference enrichment', 1, 3);
+    await hydrateSourcePosts(env, 'personal', user.id, [{ id: 'personal_hit', url }]);
+    const postInsert = sqlite.prepare('INSERT INTO clone_posts (destination,chat_id,topic_id,message_id,message_text,message_json,urls_json,topic_name,message_date,source_url,transfer_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)');
+    const sourceInsert = sqlite.prepare('INSERT INTO clone_sources (destination,chat_id,topic_id,message_id,content_key,content_id,status,transfer_id) VALUES (?,?,?,?,?,?,?,?)');
+    const addPost = (destination, mid, text, contentId, status = 'saved') => {
+      postInsert.run(destination, '-1001234567', '7', mid, text, JSON.stringify({ ...message, message: text, entities: text === body ? message.entities : [] }), JSON.stringify([{ url, label: 'Tool label' }]), 'Research', Number(mid), `https://t.me/c/1234567/${mid}`, 'source_fixture');
+      sourceInsert.run(destination, '-1001234567', '7', mid, `url:${hash}`, contentId, status, 'source_fixture');
+    };
+    addPost(`personal:${user.id}`, '10', body, 'personal_hit');
+    sourceInsert.run(`personal:${user.id}`, '-1001234567', '7', '10', `url:${generateUrlHash(rawUrl)}`, 'raw_hit', 'saved', 'source_fixture');
+    // Source-only association: URL dedupe can have no content_id but still maps to the canonical URL.
+    addPost(`personal:${user.id}`, '11', '  Repeated post, separate original body  ', null, 'duplicate');
+    addPost(`personal:${user.id}`, '12', 'failed-source-must-not-appear', null, 'failed');
+    addPost('personal:other_reader', '10', 'private-foreign-source', 'other_hit');
+    addPost('community:source_community', '10', '  Community original body  ', 'community_hit');
+    addPost('community:other_community', '10', 'foreign-community-source', 'foreign_hit');
+    const assertPersonalSources = rows => {
+      const row = rows.find(item => item.id === 'personal_hit');
+      assert.ok(row, 'canonical hidden URL is found');
+      assert.deepEqual(row.source_posts.map(post => post.message_id).sort(), ['10', '11'], 'all repeated source posts, including URL-only association');
+      const full = row.source_posts.find(post => post.message_id === '10');
+      assert.equal(full.message_text, body, 'original body is untrimmed and not clipped');
+      assert.deepEqual(full.message, message, 'entities, media and reply metadata survive');
+      assert.equal(full.topic_name, 'Research');
+      assert.equal(full.source_url, 'https://t.me/c/1234567/10');
+      assert.ok(row.source_posts.every(post => post.destination === `personal:${user.id}`));
+      assert.equal(row.notes, 'Independent canonical summary');
+      return row;
+    };
+    assertPersonalSources(await hydrateSourcePosts(env, 'personal', user.id, [{ id: 'personal_hit', url, notes: 'Independent canonical summary' }]));
+    for (const query of [url, url + '/', 'sourceonlyneedle']) {
+      const rows = await searchAllLinks(env, 'personal', user.id, query);
+      assertPersonalSources(rankLinks(rows, query));
+    }
+    const rawRows = await searchAllLinks(env, 'personal', user.id, rawUrl);
+    const rawPost = rawRows.find(row => row.id === 'raw_hit').source_posts;
+    assert.equal(rawPost.length, 1);
+    assert.equal(rawPost[0].message_text, body, 'a raw URL in a multi-link post retrieves the same whole original as its hidden URL');
+    const meiliRows = await hydrateMeiliRows(env, 'personal', user.id, [
+      { id: 'personal_hit', url, notes: 'index snippet' },
+      { id: 'other_hit', url, notes: 'foreign index hit' },
+      { id: 'deleted_hit', url, notes: 'stale index hit' }
+    ]);
+    assert.deepEqual(meiliRows.map(row => row.id), ['personal_hit'], 'foreign and deleted index hits are not returned');
+    const hydrated = assertPersonalSources(meiliRows);
+    const html = telegramSearchRowHtml(hydrated);
+    assert.ok(html.includes('Original paragraph with spacing.  '.repeat(180)), 'Telegram keeps body beyond its old 360-character snippet');
+    assert.ok(html.includes('Last line &lt;keep&gt;  '), 'Telegram retains and escapes the body ending');
+    assert.ok(html.includes(`<a href="${url}">Tool label</a>`), 'hidden URL retains its visible entity label');
+    assert.ok(html.includes('Repeated post, separate original body'));
+    assert.doesNotMatch(html, /private-foreign-source|foreign-community-source|failed-source/);
+    for (const [scope, key, expected] of [['personal', user.id, body], ['community', 'source_community', '  Community original body  ']]) {
+      const api = new URL(`https://fixture.invalid/api/links/search?scope=${scope}&community_id=${key}&q=${encodeURIComponent(url)}`);
+      const response = await handleSearchLinks(api, user, env, {});
+      assert.equal(response.status, 200);
+      const payload = await response.json();
+      assert.ok(payload.links.some(row => row.source_posts.some(post => post.message_text === expected)));
+      assert.ok(payload.links.every(row => row.source_posts.every(post => post.destination === `${scope}:${key}`)), 'API cannot cross source destinations');
+    }
+  } finally {
+    sqlite.close();
+  }
+}
 
 console.log('retrieval tests passed');

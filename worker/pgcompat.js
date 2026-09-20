@@ -34,14 +34,16 @@ export const PRIMARY_KEYS = {
   document_chunks: ['id'],
   oauth_states: ['state'],
   telegram_bots: ['bot_token'],
-  telegram_pending: ['id'],
   community_bans: ['community_id', 'platform', 'platform_user_id'],
   user_ai_config: ['user_id'],
-  instance_storage_config: ['id'],
-  storage_sync: ['scope_key'],
-  storage_file_cache: ['scope_key', 'file_name'],
   pending_community_deletes: ['token'],
   instance_settings: ['key'],
+  userbot_accounts: ['label'],
+  userbot_selections: ['requester_tg_id'],
+  pending_clones: ['id'],
+  index_jobs: ['id'],
+  clone_sources: ['destination', 'chat_id', 'topic_id', 'message_id', 'content_key'],
+  clone_job_items: ['job_id', 'message_id'],
 };
 
 /**
