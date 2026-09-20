@@ -9277,19 +9277,32 @@ function statsNormalizeCounters(obj) {
   return out;
 }
 
-/** Compact overview counters: successful (saved) vs still-copying deltas.
- * Deltas render only while the run is live — terminal outcomes are final. */
-function statsCountersText(c, isLive = false) {
+/** Compact counters backed by successful rows in the destination database. */
+function statsCountersText(c) {
   const links = statsNum(c.savedLinks);
   const posts = statsNum(c.savedLinkPosts);
-  const files = Number(c.savedFiles || 0);
-  const otherSaved = Number(c.savedOther || 0) + Number(c.savedHtml || 0) + Number(c.savedJson || 0) + Number(c.savedMarkdown || 0) + Number(c.savedImages || 0) + Number(c.savedAudio || 0);
-  const linkDelta = Math.max(0, Number(c.links || 0) - Number(c.savedLinks || 0));
-  const fileDelta = Math.max(0, Number(c.files || 0) - files);
-  const otherDelta = Math.max(0, Number(c.other || 0) + Number(c.images || 0) + Number(c.audio || 0) + Number(c.markdown || 0) + Number(c.json || 0) + Number(c.html || 0) - otherSaved);
-  const copying = (n, delta) => n + (isLive && delta > 0 ? ' <i>(+' + delta + ' copying)</i>' : '');
-  return richParagraph('🔗 Link Posts: ' + posts + '<br>🔗 URLs Indexed: ' + copying(links, linkDelta) +
-    '<br>📄 Files: ' + copying(statsNum(files), fileDelta) + '<br>📦 Other: ' + copying(statsNum(otherSaved), otherDelta));
+  const files = statsNum(c.savedFiles);
+  const other = statsNum(c.savedOther) + statsNum(c.savedHtml) + statsNum(c.savedJson) + statsNum(c.savedMarkdown) + statsNum(c.savedImages) + statsNum(c.savedAudio);
+  return richParagraph('🔗 Link Posts: ' + posts + '<br>🔗 URLs Indexed: ' + links +
+    '<br>📄 Files: ' + files + '<br>📦 Other: ' + other);
+}
+
+async function statsDatabaseCounters(env, target, owner, chatId) {
+  if (!target || !owner || !chatId) return null;
+  try {
+    const destination = `${target}:${owner}`;
+    const row = await env.DB.prepare(`SELECT
+      COUNT(CASE WHEN content_key LIKE 'url:%' THEN 1 END) AS links,
+      COUNT(DISTINCT CASE WHEN content_key LIKE 'url:%' THEN message_id END) AS posts,
+      COUNT(CASE WHEN content_key = 'media' THEN 1 END) AS files,
+      COUNT(CASE WHEN content_key = 'text' THEN 1 END) AS docs
+      FROM clone_sources
+      WHERE destination=? AND chat_id=? AND status IN ('saved','duplicate')`).bind(destination, chatId).first();
+    return {
+      savedLinks: Number(row?.links || 0), savedLinkPosts: Number(row?.posts || 0),
+      savedFiles: Number(row?.files || 0), savedDocs: Number(row?.docs || 0), savedOther: Number(row?.docs || 0),
+    };
+  } catch (_) { return null; }
 }
 
 function statsLiveLine(live) {
@@ -9359,6 +9372,11 @@ function formatStatsRichReport(report, _pageIndex = 0) {
     const matching = runs.filter((run) => key(run) === key(first));
     const overall = {};
     for (const run of matching) statsAddCounters(overall, statsNormalizeCounters(run.state?.overall || run.state?.counters || {}));
+    // Stored destination totals are snapshots of one source, not per-run work.
+    // Re-cloning the same topic must not multiply rows already in the database.
+    for (const field of ['savedLinks', 'savedLinkPosts', 'savedFiles', 'savedDocs', 'savedOther', 'savedPdfs', 'savedMarkdown', 'savedJson', 'savedHtml', 'savedImages', 'savedAudio']) {
+      overall[field] = Math.max(...matching.map((run) => Number(run.state?.overall?.[field] || run.state?.counters?.[field] || 0)));
+    }
     const dashboard = { ...first, state: { ...first.state, overall }, live: matching.some((run) => run.live === true) };
     html = statsRunPage(dashboard);
   }
@@ -17147,6 +17165,10 @@ export async function buildStatsReport(env, _token = null, scope = null) {
     const state = p.state || {};
     const overall = { ...agg.overall };
     if (!agg.rows.length) statsMergeCounters(overall, state.counters || {}); // measuring-stage snapshot fallback
+    const target = p.target || state.target;
+    const owner = target === 'personal' ? p.requester_user_id : (p.community_id || state.communityId);
+    const stored = await statsDatabaseCounters(env, target, owner, p.chat_id);
+    if (stored) Object.assign(overall, stored);
     const topics = [];
     if (state.isForum) {
       const chosenList = Array.isArray(state.chosen) ? state.chosen : [];
