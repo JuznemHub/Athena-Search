@@ -8673,7 +8673,22 @@ function sinkTargetsFor(target, personalOwner) {
  */
 async function liveCaptureCounters(env, id) {
   const { results } = await env.DB.prepare('SELECT counters_json FROM clone_job_items WHERE job_id=?').bind(id).all();
-  return (results || []).reduce((total, row) => statsAddCounters(total, statsParseCounters(row)), {});
+  const total = (results || []).reduce((sum, row) => statsAddCounters(sum, statsParseCounters(row)), {});
+  // clone_job_items is the progress ledger, but a process can die after the
+  // canonical link insert and before its ledger row. Reconcile URLs from the
+  // durable association table so /stats reflects links actually added.
+  try {
+    const job = await env.DB.prepare('SELECT chat_id,target,community_id,user_id FROM index_jobs WHERE id=?').bind(id).first();
+    const owner = job?.target === 'personal' ? job.user_id : job?.community_id;
+    if (job?.chat_id && owner) {
+      const destination = `${job.target}:${owner}`;
+      const row = await env.DB.prepare("SELECT COUNT(*) AS links, COUNT(DISTINCT message_id) AS posts FROM clone_sources WHERE destination=? AND chat_id=? AND status='saved' AND content_key LIKE 'url:%'")
+        .bind(destination, job.chat_id).first();
+      total.savedLinks = Math.max(Number(total.savedLinks || 0), Number(row?.links || 0));
+      total.savedLinkPosts = Math.max(Number(total.savedLinkPosts || 0), Number(row?.posts || 0));
+    }
+  } catch (_) {}
+  return total;
 }
 
 async function capturePostIntoSinks(env, sinks, ctx) {
@@ -10245,13 +10260,21 @@ async function runHistoryIndexJob(env, initialJob, token, runtime = {}) {
             const topicId = String(job.thread_id || classification.topicId || (entity.forum ? '1' : ''));
             let downloaded, durable = true;
             const component = async (sink, key, save) => {
-              if (!await persistCloneComponent(env, { job, sink, message, classification, topicId, item, key, save, stopOnFlood: true })) durable = false;
+              for (let attempt = 0; attempt < 3; attempt++) {
+                if (await persistCloneComponent(env, { job, sink, message, classification, topicId, item, key, save, stopOnFlood: true })) return;
+                if (attempt < 2) await wait(500 * (attempt + 1));
+              }
+              durable = false;
             };
             for (const sink of sinks) {
-              try { await persistClonePost(env, job, sink, message, classification, topicId); }
-              catch (_) { recordCloneFailure(item, 'database'); durable = false; continue; }
-              for (const url of classification.urls) await component(sink, 'url:' + generateUrlHash(url), () => saveBackfillLink(env, job, sink, message, url));
+              let postSaved = false;
+              for (let attempt = 0; attempt < 3 && !postSaved; attempt++) {
+                try { await persistClonePost(env, job, sink, message, classification, topicId); postSaved = true; }
+                catch (_) { if (attempt < 2) await wait(500 * (attempt + 1)); }
+              }
+              if (!postSaved) { durable = false; continue; }
               const media = classification.media;
+              for (const url of classification.urls) await component(sink, 'url:' + generateUrlHash(url), () => saveBackfillLink(env, job, sink, message, url));
               if (media && media.kind !== 'video') await component(sink, 'media', async () => {
                 if (!downloaded) {
                   if (media.size > 2 * 1024 * 1024 * 1024) throw new Error('FILE_SIZE_LIMIT');
@@ -17054,7 +17077,22 @@ export async function buildStatsReport(env, _token = null, scope = null) {
         String(j.userbot_label || '') === pLabel && String(j.target || '') === pTarget &&
         String(j.community_id || '') === pCommunity && String(j.user_id || '') === pUser &&
         normalizeTgChatId(j.chat_id) === pChat);
-      const jobRows = mine.map((j) => ({ ...j, counters: statsParseCounters(j) }));
+      const jobRows = [];
+      for (const j of mine) {
+        const counters = statsParseCounters(j);
+        // A topic may save canonical rows before its final checkpoint fails.
+        try {
+          const owner = j.target === 'personal' ? j.user_id : j.community_id;
+          if (owner) {
+            const destination = `${j.target}:${owner}`;
+            const row = await env.DB.prepare("SELECT COUNT(*) AS links, COUNT(DISTINCT message_id) AS posts FROM clone_sources WHERE destination=? AND chat_id=? AND transfer_id=? AND status='saved' AND content_key LIKE 'url:%'")
+              .bind(destination, j.chat_id, j.id).first();
+            counters.savedLinks = Math.max(Number(counters.savedLinks || 0), Number(row?.links || 0));
+            counters.savedLinkPosts = Math.max(Number(counters.savedLinkPosts || 0), Number(row?.posts || 0));
+          }
+        } catch (_) {}
+        jobRows.push({ ...j, counters });
+      }
       const overall = jobRows.reduce((acc, j) => statsAddCounters(acc, j.counters), {});
       jobsByParent.set(String(p.id), { rows: jobRows, overall });
     }
