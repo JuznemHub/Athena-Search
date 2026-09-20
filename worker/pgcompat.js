@@ -34,7 +34,6 @@ export const PRIMARY_KEYS = {
   document_chunks: ['id'],
   oauth_states: ['state'],
   telegram_bots: ['bot_token'],
-  telegram_pending: ['id'],
   community_bans: ['community_id', 'platform', 'platform_user_id'],
   user_ai_config: ['user_id'],
   instance_storage_config: ['id'],

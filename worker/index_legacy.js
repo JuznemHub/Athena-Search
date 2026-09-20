@@ -1159,7 +1159,6 @@ async function clearCommunityLinksOnly(env, communityId) {
   }
   try { await env.DB.prepare('DELETE FROM links WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
   markMeiliScopeDirty(env, 'community', communityId);
-  try { await env.DB.prepare('DELETE FROM telegram_pending WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
   // Only the ACTIVE store is cleared. In GitHub mode that means the Markdown
   // too; the parked Cloudflare copy is deliberately left alone, and vice versa.
   await clearActiveStoreFolder(env, 'community', communityId);
@@ -2754,15 +2753,9 @@ async function verifyTelegramBotToken(token, expectedUsername) {
 }
 
 // Command menu registered with setMyCommands — what users see in Telegram's
-// "/" autocomplete. Staff-only commands stay out of everyone's menu on
-// purpose; /help lists them per rank.
-// Hidden but still handled (kept for compat, not in autocomplete):
-// group_copy, channel_target, channel_link/channel_unlink, topic_link,
-// topic_unlink, topic_list, topic_target, userbot_add, userbot_del,
-// userbot_follow, userbot_unfollow, userbot_disconnect, forcetags,
-// transfers/clone_sessions, clone_del, index, index_start, index_status,
-// index_stop, dumpsmart/dumpall, personal/community/mode, /perosnal alias
-// and all staff/admin/clear/sync/backup/community_verify handlers.
+// "/" autocomplete. Everyone gets TELEGRAM_COMMAND_MENU; the owner ids also
+// get TELEGRAM_GOD_COMMAND_MENU as a chat-scoped replacement, so staff commands
+// are not advertised to plain members.
 const TELEGRAM_COMMAND_MENU = [
   { command: 'start', description: 'Welcome / status' },
   { command: 'help', description: 'Help menu' },
@@ -6246,25 +6239,8 @@ async function handlePatchCommunityLink(request, user, env, corsHeaders) {
 }
 
 // ============================================================
-// Telegram Webhook — personal/community dump, search, delete, approve
+// Telegram Webhook — personal/community dump, search, delete
 // ============================================================
-
-async function ensurePendingTable(env) {
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS telegram_pending (
-      id TEXT PRIMARY KEY,
-      community_id TEXT NOT NULL,
-      url TEXT NOT NULL,
-      url_hash TEXT NOT NULL,
-      title TEXT,
-      notes TEXT,
-      proposed_by TEXT,
-      proposed_by_tg TEXT,
-      status TEXT NOT NULL DEFAULT 'pending',
-      created_at INTEGER NOT NULL
-    )`
-  ).run();
-}
 
 // Keep each HTML page comfortably below Telegram's 4096-character message
 // limit so the navigation keyboard stays attached to the complete result page.
@@ -6653,7 +6629,6 @@ async function deleteCommunityFully(env, communityId) {
   try { await env.DB.prepare('DELETE FROM community_admins WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
   try { await env.DB.prepare('DELETE FROM community_members WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
   try { await env.DB.prepare('DELETE FROM notifications WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
-  try { await env.DB.prepare('DELETE FROM telegram_pending WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
   try { await env.DB.prepare('DELETE FROM telegram_bots WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
   try { await ensureBanTable(env); await env.DB.prepare('DELETE FROM community_bans WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
   try { await ensurePendingDeletesTable(env); await env.DB.prepare('DELETE FROM pending_community_deletes WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
@@ -7969,9 +7944,9 @@ function helpTextForSection(section, isGod = false) {
       spacer,
       richParagraph('<b>Groups & forum topics</b>'),
       cmd(6, `${codeHtml('/clone')} ${codeHtml('[topic_id] [community|personal|both]')}`, 'Bot-only live clone: run inside a linked group where Athena is an administrator. No userbot is required; without a topic id it covers the group and all topics, with a topic id it covers one forum topic. Bot API history is unavailable, so only new posts are indexed.'),
-      cmd(7, `${codeHtml('/topic_link')} ${codeHtml('[community|personal|both]')}`, 'Bind the current forum topic to a brain.'),
-      cmd(8, `${codeHtml('/topic_list')} · ${codeHtml('/topic_unlink')}`, 'List topic bindings or unbind the current one.'),
-      cmd(9, `${codeHtml('/topic_target')} ${codeHtml('community|personal|both')}`, 'Switch the current topic\'s target brain.'),
+      cmd(7, `${codeHtml('/topic_link')} ${codeHtml('[community_id] [community|personal|both]')}`, 'Bind the current forum topic to a brain. Run it inside the topic; the community id is optional when the group is already linked with /community_verify. Alias: ' + codeHtml('/topic link') + '.'),
+      cmd(8, `${codeHtml('/topic_list')} · ${codeHtml('/topic_unlink')}`, 'List topic bindings, or unbind the current topic.'),
+      cmd(9, `${codeHtml('/topic_target')} ${codeHtml('<thread_id> community|personal|both')}`, 'Switch where a linked topic saves. Alias: ' + codeHtml('/topic target') + '.'),
       spacer,
       richParagraph('<b>Clone control</b>'),
       cmd(10, `${codeHtml('/clone_stop')} ${codeHtml('[chat_id]')}`, 'Stop a running history backfill.'),
@@ -8456,9 +8431,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
   if (data.startsWith('menu:')) {
     await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
     const action = data.slice(5);
-    if (action === 'help') {
-      await sendTelegramRichMessage(token, chatId, richHelpHtml('menu', tgUserId ? isInstanceOwnerTgId(tgUserId, env) : false), threadId, helpRichButtonRows(false, tgUserId ? isInstanceOwnerTgId(tgUserId, env) : false));
-    } else if (action === 'stats') {
+    if (action === 'stats') {
       try {
         const user = await resolveAthenaUserFromTg(env, tgUserId);
         const isGodCb = isGodTgId(tgUserId, env);
@@ -8545,86 +8518,9 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
-  await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id });
-
-  if (!data.startsWith('ca:') && !data.startsWith('cr:')) {
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-  const approve = data.startsWith('ca:');
-  const pendingId = data.slice(3);
-  await ensurePendingTable(env);
-  const pend = await env.DB.prepare('SELECT * FROM telegram_pending WHERE id = ?').bind(pendingId).first();
-  if (!pend || pend.status !== 'pending') {
-    if (chatId) await sendTelegramMessage(token, chatId, 'Already handled or not found.');
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-
-  const athenaUser = await resolveAthenaUserFromTg(env, tgUserId);
-  const staff = await isTgUserCommunityStaff(env, pend.community_id, tgUserId, athenaUser);
-  if (!staff) {
-    await telegramApi(token, 'answerCallbackQuery', {
-      callback_query_id: cq.id,
-      text: 'Only owner/admins can approve or reject',
-      show_alert: true
-    });
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-
-  if (approve) {
-    const again = await findExistingLink(env, 'links', 'community_id', pend.community_id, pend.url);
-    if (!again) {
-      const id = 'tg_' + Date.now().toString(36);
-      try {
-        const meta = await enrichLinkFields(env, pend.url, { title: pend.title, notes: pend.notes });
-        await ensureLinkMetaColumns(env);
-        try {
-          await env.DB.prepare(
-            `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
-              added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at, image_url, site_name)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'telegram', ?, 0, 0, ?, ?, ?)`
-          ).bind(
-            id, pend.community_id, pend.url, pend.url_hash, meta.title, meta.notes,
-            JSON.stringify(['telegram', 'approved']),
-            pend.proposed_by_tg || 'telegram', pend.proposed_by, pend.proposed_by_tg || 'telegram',
-            Date.now(), meta.image_url || null, meta.site_name || null
-          ).run();
-        } catch (_) {
-          await env.DB.prepare(
-            `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
-              added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'telegram', ?, 0, 0, ?)`
-          ).bind(
-            id, pend.community_id, pend.url, pend.url_hash, meta.title, meta.notes,
-            JSON.stringify(['telegram', 'approved']),
-            pend.proposed_by_tg || 'telegram', pend.proposed_by, pend.proposed_by_tg || 'telegram', Date.now()
-          ).run();
-        }
-      } catch (_) {
-        const cleanTitle = titleFromUrl(pend.url);
-        await env.DB.prepare(
-          'INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-        ).bind(id, pend.community_id, pend.url, pend.url_hash, cleanTitle, '', JSON.stringify(['telegram']), pend.proposed_by_tg || 'tg', Date.now()).run();
-      }
-    }
-    await env.DB.prepare(`UPDATE telegram_pending SET status = 'approved' WHERE id = ?`).bind(pendingId).run();
-    markMeiliScopeDirty(env, 'community', pend.community_id);
-    if (chatId && msgId) {
-      await telegramApi(token, 'editMessageText', {
-        chat_id: chatId,
-        message_id: msgId,
-        text: `Approved by ${cq.from?.first_name || 'admin'}\n${pend.url}`
-      });
-    }
-  } else {
-    await env.DB.prepare(`UPDATE telegram_pending SET status = 'rejected' WHERE id = ?`).bind(pendingId).run();
-    if (chatId && msgId) {
-      await telegramApi(token, 'editMessageText', {
-        chat_id: chatId,
-        message_id: msgId,
-        text: `Rejected by ${cq.from?.first_name || 'admin'}\n${pend.url}`
-      });
-    }
-  }
+  // No callback prefix is left unhandled; acknowledge so the client stops its
+  // spinner instead of leaving the button in a loading state.
+  await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
   return new Response('OK', { status: 200, headers: corsHeaders });
 }
 
@@ -9247,13 +9143,11 @@ function formatPreviewEst(est, sampleVal, sampleSize) {
 
 const STATS_BAR_FILLED = '█';
 const STATS_BAR_EMPTY = '░';
+// Topic lines per /stats page: the classic-HTML fallback must stay inside one
+// Telegram message, and the page split below also caps by rendered length.
+const STATS_TOPICS_PAGE_MAX = 100;
 
 const statsNum = (v) => String(Math.max(0, Math.floor(Number(v) || 0)));
-const statsFrac = (part, whole) => {
-  const w = Number(whole) || 0;
-  if (w <= 0) return null;
-  return Math.round((Math.min(w, Math.max(0, Number(part) || 0)) / w) * 100);
-};
 
 function statsProgressBar(percent, width = 18) {
   const pct = Math.max(0, Math.min(100, Number(percent) || 0));
@@ -9277,14 +9171,20 @@ function statsNormalizeCounters(obj) {
   return out;
 }
 
+/** "Other" bucket: every saved artefact that is neither a link nor a file. */
+function statsOtherCount(c) {
+  return Number(c.savedOther || 0) + Number(c.savedHtml || 0) + Number(c.savedJson || 0) +
+    Number(c.savedMarkdown || 0) + Number(c.savedImages || 0) + Number(c.savedAudio || 0);
+}
+
+/** Counters that mirror stored destination rows rather than this run's work. */
+const STATS_STORED_FIELDS = ['savedLinks', 'savedLinkPosts', 'savedFiles', 'savedDocs', 'savedOther',
+  'savedPdfs', 'savedMarkdown', 'savedJson', 'savedHtml', 'savedImages', 'savedAudio'];
+
 /** Compact counters backed by successful rows in the destination database. */
 function statsCountersText(c) {
-  const links = statsNum(c.savedLinks);
-  const posts = statsNum(c.savedLinkPosts);
-  const files = statsNum(c.savedFiles);
-  const other = statsNum(c.savedOther) + statsNum(c.savedHtml) + statsNum(c.savedJson) + statsNum(c.savedMarkdown) + statsNum(c.savedImages) + statsNum(c.savedAudio);
-  return richParagraph('🔗 Link Posts: ' + posts + '<br>🔗 URLs Indexed: ' + links +
-    '<br>📄 Files: ' + files + '<br>📦 Other: ' + other);
+  return richParagraph('🔗 Link Posts: ' + statsNum(c.savedLinkPosts) + '<br>🔗 URLs Indexed: ' + statsNum(c.savedLinks) +
+    '<br>📄 Files: ' + statsNum(c.savedFiles) + '<br>📦 Other: ' + statsNum(statsOtherCount(c)));
 }
 
 async function statsDatabaseCounters(env, target, owner, chatId) {
@@ -9319,73 +9219,146 @@ function statsSourceHtml(run) {
     : escHtml(name) + ' ' + codeHtml(escHtml(run.chat_id));
 }
 
-/** One compact stats page per clone run; topic counts stay aggregate. */
-function statsRunPage(run, pre = '') {
+function statsTopicLine(t) {
+  const title = t.title ? ' ' + escHtml(t.title) : '';
+  return '<li>' + codeHtml('#' + t.threadId) + title + '<br>' + statsProgressBar(t.percent) + '<br>' +
+    '🔗 ' + (t.total?.links || 0) + ' | 📄 ' + (t.total?.files || 0) + ' | 📦 ' + (t.total?.other || 0) + ' · ' + t.stateMark + '</li>';
+}
+
+/** Split topic lines so one page still fits the classic-HTML fallback message. */
+function statsTopicPages(topics) {
+  const pages = [[]];
+  let length = 0;
+  for (const topic of topics) {
+    const size = richHtmlToClassic(statsTopicLine(topic)).length;
+    if (pages.at(-1).length && (length + size > 2400 || pages.at(-1).length >= STATS_TOPICS_PAGE_MAX)) {
+      pages.push([]);
+      length = 0;
+    }
+    pages.at(-1).push(topic);
+    length += size;
+  }
+  return pages;
+}
+
+/** Two runs describe one source when chat, destination and owner all match. */
+function statsSourceKey(run) {
   const state = run.state || {};
-  const overall = statsNormalizeCounters(state.overall || state.counters || {});
+  const destination = state.target || run.target ||
+    (String(state.destinationName || '').toLowerCase().includes('personal') ? 'personal' : 'community');
+  return [run.chat_id, String(destination), state.requesterUserId || state.requesterTgId || ''].join('|');
+}
+
+/**
+ * Sum every run of one source. Stored counters mirror rows already in the
+ * destination database, so a re-clone of the same source would multiply them:
+ * those fields take the highest run value instead of a sum, while per-run work
+ * counters still add up.
+ */
+function statsSourceOverall(runs) {
+  const overall = {};
+  for (const run of runs) statsAddCounters(overall, statsNormalizeCounters(run.state?.overall || run.state?.counters || {}));
+  for (const field of STATS_STORED_FIELDS) {
+    overall[field] = Math.max(0, ...runs.map((run) => Number(run.state?.overall?.[field] || run.state?.counters?.[field] || 0)));
+  }
+  return overall;
+}
+
+/**
+ * Dashboard totals: every cloned channel, group and forum topic the requester
+ * owns, each source counted once. This is the number that grows as live clones
+ * capture new posts, independent of which run page is open.
+ */
+function statsTotalsText(runs) {
+  const bySource = new Map();
+  for (const run of runs) {
+    const key = statsSourceKey(run);
+    if (!bySource.has(key)) bySource.set(key, []);
+    bySource.get(key).push(run);
+  }
+  const overall = {};
+  for (const sourceRuns of bySource.values()) statsAddCounters(overall, statsSourceOverall(sourceRuns));
+  const live = runs.some((run) => run.live === true);
+  const sources = bySource.size;
+  return richParagraph('📈 All sources — ' + sources + (sources === 1 ? ' source' : ' sources') +
+    ' · 🔗 ' + statsNum(overall.savedLinkPosts) + ' link posts · 🔗 ' + statsNum(overall.savedLinks) + ' urls' +
+    ' · 📄 ' + statsNum(overall.savedFiles) + ' files · 📦 ' + statsNum(statsOtherCount(overall)) + ' other' +
+    ' · ' + (live ? '🟢 live on' : '🔴 live off'));
+}
+
+/** One stats page per run: dashboard totals, run counters, ≤100 topic lines. */
+function statsRunPage(run, topicPagesList, topicPage, pre = '', sourceRuns = [run], allRuns = [run]) {
+  const state = run.state || {};
+  const overall = statsSourceOverall(sourceRuns);
   const topics = state.isForum ? (run.topics || []) : [];
   const doneTopics = topics.filter((t) => t.done).length;
   const totalTopics = topics.length;
   const typeLabel = state.sourceType === 'channel' ? 'Channel'
     : state.isForum ? 'Group — Topics Enabled' : 'Group — No Topics';
+  const shown = topicPagesList[topicPage] || [];
   const lines = [];
   lines.push(richHeading(3, pre + '📊 CLONE STATS'));
+  lines.push(statsTotalsText(allRuns));
   lines.push(richParagraph('Source: ' + statsSourceHtml(run) + '<br>Type: ' + escHtml(typeLabel) +
     '<br>Destination: ' + escHtml(state.destinationName || run.target || '—') + ' · Account: ' + codeHtml(escHtml(state.label || '—'))));
-  if (state.isForum) {
-    lines.push(richParagraph('Topics: ' + doneTopics + ' / ' + totalTopics));
-    const frac = statsFrac(doneTopics, totalTopics);
-    if (frac != null) lines.push(richParagraph(statsProgressBar(frac)));
-  }
-  lines.push(statsCountersText(overall, run.live === true));
+  if (state.isForum) lines.push(richParagraph('Topics cloned: ' + doneTopics + ' / ' + totalTopics));
+  lines.push(statsCountersText(overall));
   lines.push(statsLiveLine(run.live === true));
+  if (state.isForum && topics.length) {
+    lines.push(richParagraph('📚 Topics — page ' + (topicPage + 1) + ' / ' + topicPagesList.length + ' · ' + totalTopics + ' total'));
+    lines.push('<ul>' + shown.map(statsTopicLine).join('') + '</ul>');
+  }
   return lines.join('\n');
 }
 
 function statsEmptyPage() {
   return richHeading(3, '📊 CLONE STATS') + '\n' +
-    richParagraph('No clones yet. Start one with ' + codeHtml('/uclone') + ' or ' + codeHtml('/clone') + ' — then this page shows<br>successful links / files / other and live progress for every clone you own.');
+    richParagraph('No clones yet. Start one with ' + codeHtml('/uclone') + ' or ' + codeHtml('/clone') + ' — then this page shows<br>total links / files / other for every channel, group and topic you clone.');
 }
 
-/** Render the /stats dashboard with no per-topic pagination. */
-function formatStatsRichReport(report, _pageIndex = 0) {
+/**
+ * Render the /stats dashboard. Totals for every cloned source sit above a page
+ * per run; the nav buttons carry the run index and the topic page so each run
+ * stays reachable. Every render rebuilds from the authoritative report, so the
+ * counters are never a stale snapshot.
+ */
+function formatStatsRichReport(report, pageIndex = 0) {
   const runs = (report?.runs || []);
-  const pages = 1;
-  const page = 0;
+  const pages = Math.max(1, runs.length);
+  const page = Math.max(0, Math.min(pages - 1, Number(pageIndex?.page ?? pageIndex) || 0));
   const rows = [];
   let html;
   if (!runs.length) {
     html = statsEmptyPage();
   } else {
-    // /stats is a source dashboard, not a report for only the newest retry.
-    // Repeated runs of the same source/destination are cumulative: a fresh
-    // retry commonly has zero new writes because the prior run already
-    // imported the links.
-    const destinationKey = (run) => {
-      const state = run.state || {};
-      if (state.target || run.target) return String(state.target || run.target);
-      const label = String(state.destinationName || '').toLowerCase();
-      return label.includes('personal') ? 'personal' : label.includes('community') ? 'community' : label;
-    };
-    const key = (run) => [run.chat_id, destinationKey(run), run.state?.requesterUserId || run.state?.requesterTgId || ''].join('|');
-    const first = runs[0];
-    const matching = runs.filter((run) => key(run) === key(first));
-    const overall = {};
-    for (const run of matching) statsAddCounters(overall, statsNormalizeCounters(run.state?.overall || run.state?.counters || {}));
-    // Stored destination totals are snapshots of one source, not per-run work.
-    // Re-cloning the same topic must not multiply rows already in the database.
-    for (const field of ['savedLinks', 'savedLinkPosts', 'savedFiles', 'savedDocs', 'savedOther', 'savedPdfs', 'savedMarkdown', 'savedJson', 'savedHtml', 'savedImages', 'savedAudio']) {
-      overall[field] = Math.max(...matching.map((run) => Number(run.state?.overall?.[field] || run.state?.counters?.[field] || 0)));
+    const run = runs[page];
+    const state = run.state || {};
+    const topicPagesList = state.isForum && run.topics?.length ? statsTopicPages(run.topics) : [[]];
+    const topicPage = Math.max(0, Math.min(topicPagesList.length - 1, Number(pageIndex?.topicPage) || 0));
+    const pre = pages > 1 ? 'Run ' + (page + 1) + ' / ' + pages + ' — ' : '';
+    html = statsRunPage(run, topicPagesList, topicPage, pre,
+      runs.filter((other) => statsSourceKey(other) === statsSourceKey(run)), runs);
+    if (topicPagesList.length > 1) {
+      rows.push([
+        { label: '◀ Previous', data: 'stats:run:' + page + ':' + Math.max(0, topicPage - 1) },
+        { label: '📚 Page ' + (topicPage + 1) + ' / ' + topicPagesList.length, data: 'stats:noop' },
+        { label: 'Next ▶', data: 'stats:run:' + page + ':' + Math.min(topicPagesList.length - 1, topicPage + 1) },
+      ]);
     }
-    const dashboard = { ...first, state: { ...first.state, overall }, live: matching.some((run) => run.live === true) };
-    html = statsRunPage(dashboard);
+    if (pages > 1) {
+      rows.push([
+        { label: '◀ Previous', data: 'stats:run:' + Math.max(0, page - 1) + ':0' },
+        { label: 'Page ' + (page + 1) + ' / ' + pages, data: 'stats:noop' },
+        { label: 'Next ▶', data: 'stats:run:' + Math.min(pages - 1, page + 1) + ':0' },
+      ]);
+    }
   }
   rows.push([
     { label: '🔄 Refresh', data: 'stats:refresh' },
     { label: '💻 Clone', data: 'menu:clone' },
     { label: '❌ Close', data: 'stats:close' },
   ]);
-  return { html, pages, page, totalRuns: runs.length, buttons: rows.map((r) => richButtonRow(r)).join('\n') };
+  return { html, pages, page, totalRuns: pages, buttons: rows.map((r) => richButtonRow(r)).join('\n') };
 }
 
 
@@ -10557,7 +10530,6 @@ for (const rawUrl of toSave) {
             if (gp?.handled && !gp.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${gp.error||'unknown'}`, forumThreadId); }
           } catch (_) {}
           reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: userTagsPersonal }, r.notes);
-          reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: userTagsPersonal }, r.notes);
         } else {
           const vocab = await recentTagsForScope(env, 'personal', athenaUser.id);
           const ai = await aiDescribeAndTag(env, rawUrl, {
@@ -11145,7 +11117,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   // Keep bot replies in the same forum topic as the user message (not General/#)
   const forumThreadId = msg.message_thread_id != null ? Number(msg.message_thread_id) : null;
 
-  const parts = text.split(/\s+/);
+  let parts = text.split(/\s+/);
   let cmd = (parts[0] || '').toLowerCase().replace(/@\w+$/, '');
   // typos
   if (cmd === '/perosnal') cmd = '/personal';
@@ -11908,9 +11880,19 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
+   // `/topic link|unlink|list|target` is the spelling people reach for; the
+   // handlers are `/topic_<sub>`. Fold the subcommand into the command name and
+   // drop it from the argument list so both spellings run one path.
+   if (cmd === '/topic' && ['link', 'unlink', 'list', 'target'].includes(String(parts[1] || '').toLowerCase())) {
+     cmd = '/topic_' + String(parts[1]).toLowerCase();
+     parts.splice(1, 1);
+   }
+
    // ---- /topic_link — clone a specific forum topic into the brain ----
    if (cmd === '/topic_link' || cmd === '/topiclink') {
-     if (!msg.is_topic_message || msg.message_thread_id == null) {
+     // General carries no is_topic_message flag but still has a thread id, so
+     // accept either signal; only a message with no thread at all is refused.
+     if (msg.message_thread_id == null || !(msg.is_topic_message || msg.chat?.is_forum)) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Use ${codeHtml('/topic_link')} inside the forum topic you want to clone.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
@@ -11918,11 +11900,18 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
-     const communityIdArg = (parts[1] || '').trim();
-     const targetArg = (parts[2] || '').trim().toLowerCase();
+     // `/topic_link [community_id] [community|personal|both]`, plus the short
+     // `/topic_link [target]` inside a group already linked by
+     // /community_verify — the linked community is the obvious destination, so
+     // the owner should not have to look up its id first.
+     const firstArg = (parts[1] || '').trim();
+     const targetOnly = CHANNEL_TARGETS.has(firstArg.toLowerCase());
+     let communityIdArg = targetOnly ? '' : firstArg;
+     const targetArg = targetOnly ? firstArg.toLowerCase() : (parts[2] || '').trim().toLowerCase();
+     if (!communityIdArg) communityIdArg = String(binding?.community_id || '');
      if (!communityIdArg) {
        await sendTelegramFormatted(token, chatId,
-         `Usage: ${codeHtml('/topic_link <community_id> [community|personal|both]')}\n${italicHtml('Run inside the topic. personal/both are GOD rank only.')}`,
+         `Usage: ${codeHtml('/topic_link [community_id] [community|personal|both]')}\n${italicHtml('Run inside the topic. The community id is optional once this group is linked with /community_verify. personal/both are GOD rank only.')}`,
          forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
@@ -11971,7 +11960,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
    if (cmd === '/topic_unlink' || cmd === '/topicunlink') {
      const threadArg = (parts[1] || '').trim() || (msg.message_thread_id != null ? String(msg.message_thread_id) : '');
      if (!threadArg) {
-       await sendTelegramFormatted(token, chatId, `Usage: ${codeHtml('/topic_unlink <thread_id>')}`, forumThreadId);
+       await sendTelegramFormatted(token, chatId, `Usage: ${codeHtml('/topic_unlink [thread_id]')}\n${italicHtml('Sent inside the topic, the argument can be omitted.')}`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      await ensureTopicBindingTable(env);
@@ -12045,9 +12034,9 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      }
      const cidArg = (parts[1] || '').trim();
      const tArg = (parts[2] || '').trim().toLowerCase();
-     if (!cidArg || !CHANNEL_TARGETS.has(tArg)) {
+     if (!cidArg || (tArg && !CHANNEL_TARGETS.has(tArg))) {
        await sendTelegramFormatted(token, chatId,
-         `Usage: ${codeHtml('/channel_target <channel_id> <community|personal|both>')}\nCurrent: reply with just ${codeHtml('/channel_target <channel_id>')}`,
+         `Usage: ${codeHtml('/channel_target <channel_id> <community|personal|both>')}\nCurrent: ${codeHtml('/channel_target <channel_id>')}`,
          forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
@@ -12057,6 +12046,16 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      ).bind(cidArg.startsWith('-') ? cidArg : `-100${cidArg.replace(/^-100/, '')}`).first();
      if (!row) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No linked channel ${codeHtml(cidArg)}. Link it first with ${codeHtml('/channel_link')}.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     // One argument is the documented "show current" form; the column is NULL
+     // for channels linked before it existed, which indexChannelPost reads as
+     // community.
+     if (!tArg) {
+       const current = CHANNEL_TARGETS.has(row.channel_target) ? row.channel_target : 'community';
+       await sendTelegramFormatted(token, chatId,
+         `${boldHtml('📢')} ${escHtml(row.group_name || cidArg)} indexes into: ${codeHtml(current)}\nChange it: ${codeHtml('/channel_target ' + cidArg + ' <community|personal|both>')}`,
+         forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      // personal/both write into the linking GOD's brain; the SELECT above must
@@ -12155,7 +12154,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      // ---- /clone (Bot API live mode) plus legacy /follow and /backfill aliases ----
      // /clone is handled here only after the bot/group checks below; the
      // aliases retain their older explicit userbot backfill behavior.
-     if (cmd === '/clone' || cmd === '/uclone' || cmd === '/ubclone' || cmd === '/follow' || cmd === '/backfill') {
+     if (cmd === '/clone' || cmd === '/follow' || cmd === '/backfill') {
      if (cmd === '/clone') {
        if (!chatId.startsWith('-')) {
          await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Bot clone')}\nRun ${codeHtml('/clone')} in the Telegram group where Athena is an administrator. The Bot API cannot read a channel or group history from a DM; ${codeHtml('/uclone <chat_id>')} is the separate userbot history wizard.`, forumThreadId);
@@ -12265,7 +12264,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
           // "all" — preview every topic, then ask before cloning. The old block
           // started N jobs with no preview and no ask. Route it through the
           // pending_clones gate: doCloneAfterConfirm then fans out topic-wise.
-          if (cloneAllTopics || cmd === '/uclone' || cmd === '/ubclone') {
+          if (cloneAllTopics) {
             const label = enabledAccounts[0].label;
             const preview = (await collectClonePreview(env, label, chatIdN).catch(() => null)) || { isForum: true, topics, topicCount: topics.length, totalMsgs: null, estLinks: null, estFiles: null, estUrls: null, sampleLinks: 0, sampleFiles: 0, sampleUrls: 0, sampleSize: 0 };
             const previewStats = { ...preview, isForum: true, topics, topicCount: topics.length, cloneAll: true };
@@ -12379,7 +12378,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     return new Response('OK', { status: 200, headers: corsHeaders });
      }
 
-   if (cmd === '/index_start' || cmd === '/indexstart' || cmd === '/backfill') {
+   if (cmd === '/index_start' || cmd === '/indexstart') {
      const dmOnly = !chatId.startsWith('-');
      if (!isSelfHosted(env)) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} History backfill runs on the self-hosted server (it needs the optional gramjs package). This instance is on Cloudflare Workers.`, forumThreadId);
@@ -12397,7 +12396,9 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      const usage = [
        `${boldHtml('🗂 History backfill')}`,
        '',
-       `Usage (in bot DM): ${codeHtml('/index_start <community_id> <chat_id> <api_id> <api_hash> <session_string> [thread_id]')}`,
+       `Usage (in bot DM): ${codeHtml('/index_start <community_id> <chat_id> [thread_id]')}`,
+       `${italicHtml('or')} ${codeHtml('/index_start <community_id> <chat_id> <api_id> <api_hash> <session_string> [thread_id]')}`,
+       `• the short form reuses the userbot account already connected with ${codeHtml('/userbot_add')}`,
        `• thread_id — optional; backfill only that forum topic`,
        '',
        `• chat_id — the group/channel to backfill (forward a post to ${linkHtml('https://t.me/userinfobot', '@userinfobot')}; channels are -100…)`,
@@ -12608,7 +12609,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      const targetArg = (parts[3] || '').trim().toLowerCase();
      if (!communityIdArg || !chatIdArg) {
        await sendTelegramFormatted(token, chatId,
-         `Usage: ${codeHtml('/userbot_follow <community_id> <chat_id> [community|personal|both]')}\n${italicHtml('The userbot account must be a member of that chat. personal/both are GOD rank only.')}`,
+         `Usage: ${codeHtml('/userbot_follow <community_id> <chat_id> [community|personal|both] [account_label]')}\n${italicHtml('The userbot account must be a member of that chat. personal/both are GOD rank only. The label defaults to the selected account.')}`,
          forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
@@ -13311,7 +13312,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     }
     const arg = rest.trim().split(/\s+/)[0] || binding?.community_id || '';
     if (!arg) {
-      await sendTelegramMessage(token, chatId, 'Usage: /clear_db <community_id>\n/community_list for ids.', forumThreadId);
+      await sendTelegramMessage(token, chatId, 'Usage: /clear_db [community_id]\nIn the linked group the community id can be omitted.\n/community_list for ids.', forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     const c = await resolveCommunityByIdOrName(env, athenaUser.id, arg);
@@ -13715,8 +13716,8 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     if (!topicArg) {
       await sendTelegramMessage(token, chatId,
         currentTopic
-          ? `Topic lock ON: ${currentTopic}\n/topic off to clear`
-          : `Topic lock OFF (whole group).\n/topic <id> to lock${msgThreadId ? `\nThis topic id: ${msgThreadId}` : ''}`, forumThreadId);
+          ? `Topic lock ON: ${currentTopic}\nThe bot only answers in that topic — this is not a clone binding.\n/topic off to clear · /topic_link to clone a topic into a brain`
+          : `Topic lock OFF (whole group).\nThe bot answers in every topic — this is not a clone binding.\n/topic <id> to lock · /topic_link to clone a topic into a brain${msgThreadId ? `\nThis topic id: ${msgThreadId}` : ''}`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
 
@@ -13735,11 +13736,11 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       ? msgThreadId
       : topicArg.replace(/[^\d]/g, '');
     if (!topicId) {
-      await sendTelegramMessage(token, chatId, 'Usage: /topic <topic_id> | /topic here | /topic off', forumThreadId);
+      await sendTelegramMessage(token, chatId, 'Usage: /topic <topic_id> | /topic here | /topic off\nTo clone a topic into a brain: /topic link', forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     await env.DB.prepare(`UPDATE community_bots SET topic_id = ? WHERE id = ?`).bind(topicId, targetBinding.id).run();
-    await sendTelegramMessage(token, chatId, `Topic lock set: ${topicId}\nOnly links in that topic are saved for this community.`, forumThreadId);
+    await sendTelegramMessage(token, chatId, `Topic lock set: ${topicId}\nThe bot now answers only in that topic. Links posted in other topics are ignored until /topic off.`, forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
@@ -14378,7 +14379,10 @@ Rules:
     // resolves after the file downloads (linked community, backup's own
     // community, memberships). Personal always → the importing GOD.
     let explicitCommunityId = rest.trim().split(/\s+/)[0] || '';
-    if (explicitCommunityId && !/^c_/.test(explicitCommunityId)) explicitCommunityId = '';
+    if (explicitCommunityId && !/^c_/.test(explicitCommunityId)) {
+      await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} ${codeHtml(escHtml(explicitCommunityId))} is not a community id — they start with ${codeHtml('c_')}. ${codeHtml('/community_list')} lists yours. Nothing was imported.`, forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
     if (explicitCommunityId) {
       const ok = await env.DB.prepare('SELECT id FROM communities WHERE id = ?').bind(explicitCommunityId).first().catch(() => null);
       if (!ok) {
@@ -17086,6 +17090,24 @@ export async function buildStatsReport(env, _token = null, scope = null) {
     const { results: followRows } = await env.DB.prepare('SELECT chat_id, label, community_id, target, created_by FROM userbot_follows').all();
     for (const f of followRows || []) liveFollowKeys.add([normalizeTgChatId(String(f.chat_id || '').split(':')[0]), String(f.label || ''), String(f.target || ''), String(f.community_id || ''), String(f.created_by || '')].join('|'));
   } catch (_) {}
+  // Bot-mode live bindings. A linked channel, a whole-group copy or a bound
+  // topic keeps ingesting after every backfill job has finished, so a run's
+  // LIVE flag has to come from the binding too — job status alone reports OFF
+  // between posts, which reads as "live clone stopped" while it is still on.
+  const liveBoundChats = new Set();
+  try {
+    const { results: bound } = await env.DB.prepare(
+      `SELECT group_id FROM community_bots
+        WHERE platform = 'telegram' AND group_id IS NOT NULL
+          AND (channel_target IS NOT NULL OR COALESCE(copy_text, 0) = 1)`
+    ).all();
+    for (const row of bound || []) liveBoundChats.add(normalizeTgChatId(row.group_id));
+  } catch (_) {}
+  try {
+    const { results: bound } = await env.DB.prepare('SELECT DISTINCT chat_id FROM telegram_topic_bindings').all();
+    for (const row of bound || []) liveBoundChats.add(normalizeTgChatId(row.chat_id));
+  } catch (_) {}
+  for (const key of liveFollowKeys) liveBoundChats.add(key.split('|')[0]);
   if (parents.length) {
     let rows = [];
     try {
@@ -17204,7 +17226,7 @@ export async function buildStatsReport(env, _token = null, scope = null) {
     const followKey = [normalizeTgChatId(p.chat_id), String(state.label || ''), String(p.target || ''), String(p.community_id || ''), String(p.requester_user_id || '')].join('|');
     runs.push({
       id: String(p.id), chat_id: normalizeTgChatId(p.chat_id), state: { ...state, overall, requesterTgId: String(p.requester_tg_id || ''), requesterUserId: String(p.requester_user_id || '') },
-      jobs: agg.rows, live: state.stage === 'running' || agg.rows.some((j) => j.status === 'running' || j.status === 'queued') || liveFollowKeys.has(followKey),
+      jobs: agg.rows, live: state.stage === 'running' || agg.rows.some((j) => j.status === 'running' || j.status === 'queued') || liveFollowKeys.has(followKey) || liveBoundChats.has(normalizeTgChatId(p.chat_id)),
       topics, standalone: false,
     });
   }
@@ -17224,7 +17246,7 @@ export async function buildStatsReport(env, _token = null, scope = null) {
       return { threadId, title: job.topic_name || null, total: { links: c.savedLinks || 0, files: c.savedFiles || 0, other: (c.savedOther || 0) + (c.savedHtml || 0) + (c.savedJson || 0) + (c.savedMarkdown || 0) + (c.savedImages || 0) + (c.savedAudio || 0) }, percent: done ? 100 : 0, done, stateMark: done ? '✅ COMPLETE' : active ? '🟢 LIVE' : '⏳ PENDING' };
     });
     const state = { ...s.state, isForum: topics.length > 0, stage: active ? 'running' : (s.jobs.some((j) => j.status === 'error') ? 'error' : 'done'), sourceType: topics.length ? 'group' : null, username: null, overall, requesterTgId: String(s.requester_tg_id || ''), requesterUserId: String(s.user_id || '') };
-    runs.push({ id: 'standalone:' + s.jobs.map((j) => j.id).sort().join(','), chat_id: normalizeTgChatId(s.chat_id), state, jobs: s.jobs, live: active || s.live, topics, standalone: true });
+    runs.push({ id: 'standalone:' + s.jobs.map((j) => j.id).sort().join(','), chat_id: normalizeTgChatId(s.chat_id), state, jobs: s.jobs, live: active || s.live || liveBoundChats.has(normalizeTgChatId(s.chat_id)), topics, standalone: true });
   }
 
   return { runs, chats: [], generatedAt: now };
@@ -17275,4 +17297,5 @@ export {
   syncAiConfigToPeer,
   syncSteroidToPeer,
   formatStatsRichReport,
+  STATS_TOPICS_PAGE_MAX,
 };

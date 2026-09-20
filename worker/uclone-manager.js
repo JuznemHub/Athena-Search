@@ -274,7 +274,7 @@ export function createUcloneManager(env, deps) {
     for (const [index, community] of run.state.communities.entries()) {
       if (index < page * 8 || index >= (page + 1) * 8) continue;
       const name = community.name || community.id;
-      rows.push([button(run, `${name} — community DB`, 'community', index)]);
+      rows.push([button(run, `${name} — community DB`, 'community', index), button(run, `${name} — Personal + community`, 'both', index)]);
     }
     if (page > 0) rows.push([button(run, 'Previous communities', 'destpage', page - 1)]);
     if ((page + 1) * 8 < run.state.communities.length) rows.push([button(run, 'More communities', 'destpage', page + 1)]);
