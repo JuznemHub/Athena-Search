@@ -31,6 +31,9 @@ import {
   resolveChatEndpoint,
   resultLimitClause,
   searchAllLinks,
+  telegramEntityMarkdown,
+  telegramRichMarkdown,
+  telegramRichNotesForSave,
   telegramSearchRowHtml
 } from '../worker/index.js';
 
@@ -470,5 +473,25 @@ assert.equal(await detectBackupCommunityId(mockEnvWith(['c_aaa']), `INSERT INTO 
     sqlite.close();
   }
 }
+// Faithful Telegram copy: hyperlinks and formatting stay in place, images dropped.
+assert.equal(
+  telegramEntityMarkdown('Get App here', [{ type: 'text_link', offset: 4, length: 3, url: 'https://example.com/app' }]),
+  'Get [App](https://example.com/app) here',
+);
+assert.equal(
+  telegramRichMarkdown({
+    text: 'Bold and link',
+    entities: [
+      { type: 'bold', offset: 0, length: 4 },
+      { type: 'text_link', offset: 9, length: 4, url: 'https://example.com/x' },
+    ],
+    reply_markup: { inline_keyboard: [[{ text: 'Open', url: 'https://example.com/btn' }]] },
+  }).includes('[link](https://example.com/x)'),
+  true,
+);
+assert.equal(
+  telegramRichNotesForSave({ caption: 'Photo caption with https://example.com/cap', photo: [{ file_id: 'abc' }] }).includes('https://example.com/cap'),
+  true,
+);
 
 console.log('retrieval tests passed');

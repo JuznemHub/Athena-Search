@@ -253,3 +253,15 @@ describe('proxy fallback exact doc_id matching', () => {
     assert.ok(hit.chunks[0].content.includes('body text'));
   });
 });
+
+describe('lightweight schema (no pgvector)', () => {
+  it('ensureChunksTable never touches vector/embedding', async () => {
+    const handler = await import('./mcp-athena.js');
+    const seen = [];
+    const fakePool = { query: async (sql) => { seen.push(String(sql)); return { rows: [] }; } };
+    await handler.ensureChunksTable(fakePool);
+    assert.ok(seen.some((s) => s.includes('document_chunks')));
+    assert.ok(!seen.some((s) => /VECTOR\s*\(/i.test(s) || /embedding/i.test(s) || /ivfflat/i.test(s) || /pgvector/i.test(s)));
+    assert.ok(seen.some((s) => /tsv/i.test(s)));
+  });
+});

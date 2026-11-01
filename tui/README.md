@@ -122,29 +122,17 @@ The e2e runs the real TUI in a pseudo-TTY (`script`) against a mock Athena
 API with a fake Chrome profile and asserts the full join → scan → dump → quit
 journey.
 
-## Advanced (opencode)
+## Advanced (MCP)
 
-Press `Tab` or choose `Advanced (opencode)` → full opencode TUI with `athena` MCP.
+Press `Tab` or choose `Advanced (MCP)` → prints a minimal MCP config that any
+agent (Hermes, Claude Code, Codex) can use. No vendor CLI required.
 
-- Any AI via `~/.config/opencode` (not website `user_ai_config`).
+- Works with `ATHENA_INSTANCE` + `ATHENA_TOKEN` only; `DATABASE_URL` optional.
 - Ranks enforced: `personal` GOD-only, `community` member-only.
 - Paragraph search: `what is paragraph 5 of story.pdf` → `athena_get_chunk` with `para_idx`.
-Requires `opencode` (`npm i -g opencode`) + `DATABASE_URL` + `pgvector`.
 
-### Session commands
-
-Each session ships with commands, conventions (`AGENTS.md`), and an
-`athena-researcher` subagent that pulls documents in parallel:
-
-- `/athena` — toggle strict mode (athena_search before any outside search);
-  `/athena <query>` — one-shot strict lookup.
-- `/athena-study <topic>` — deep study from your brain: searches both scopes,
-  reads the full documents, and compiles cross-linked study notes (key
-  concepts, verbatim passages, connections between docs, open questions) with
-  `[#doc_id]` citations — instead of the usual 1–2 line answer.
-- `/athena-ingest <content | file path | instruction>` — ingests into the
-  brain: dedupe check against `athena_list`, verbatim content, tagged metadata
-  header, hyphenated filename, then verifies with a search.
+Use `node src/mcp-athena.js --config` to print the JSON snippet, or
+`node src/mcp-athena.js --help` for Hermes setup.
 
 Rank gates apply to every tool call; a server 401/403 drops the cached rank
 immediately, and community scope without a joined community is rejected before

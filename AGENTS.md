@@ -20,6 +20,12 @@ Before making code changes, read and follow `CLAUDE.md`.
 - On `master`: after a squash-merge, sync `dev` to `origin/master` via `git merge origin/master` (no force-push — `dev` is protected).
 - The `dev` branch is never deleted; it is the one branch used to PR into master.
 
+## Agent tooling (vendor-neutral)
+
+- The TUI `Advanced (MCP)` mode no longer spawns opencode. It prints a minimal
+  MCP stdio config (`tui/src/mcp-athena.js --config`) for Hermes, Claude Code,
+  Codex, or any MCP host.
+
 ## OpenCode instance
 
 - This repo is configured for **OpenCode** (`opencode.json`) with the `superpowers` plugin and 110+ global skills in `~/.config/opencode/skills` (synced in via `~/.config/opencode/sync-skills.sh` — local sources only, no slow installs).

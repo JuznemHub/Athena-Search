@@ -6570,6 +6570,87 @@ function telegramUserNotes(msg) {
 }
 
 /**
+ * Faithful copy of a Telegram post as Markdown, minus the image bytes.
+ * Walks text/caption + entities in offset order so hyperlinks, bold, italic,
+ * code and pre blocks stay in place. Photos, stickers and file blobs are
+ * ignored — only their caption text is kept. Inline-keyboard button URLs are
+ * appended as [label](url) so dump channels that hide links behind buttons
+ * still save them. Offsets are UTF-16 code units, matching JS substr.
+ */
+function telegramEntityMarkdown(source, entities) {
+  const text = String(source || '');
+  const ents = Array.isArray(entities) ? entities.filter((e) => e && typeof e.offset === 'number') : [];
+  if (!ents.length) return text;
+  const sorted = [...ents].sort((a, b) => a.offset - b.offset || b.length - a.length);
+  let out = '';
+  let pos = 0;
+  const push = (s) => { out += s; };
+  for (const ent of sorted) {
+    const start = Math.max(0, ent.offset);
+    const end = Math.max(start, start + (ent.length || 0));
+    if (start < pos) continue; // overlapping entity — outer one already won
+    push(text.slice(pos, start));
+    const inner = text.slice(start, end);
+    switch (ent.type) {
+      case 'bold': push(`**${inner}**`); break;
+      case 'italic': push(`_${inner}_`); break;
+      case 'code': push(`\`${inner}\``); break;
+      case 'pre': push(inner.includes('\n') ? '```\n' + inner + '\n```' : `\`${inner}\``); break;
+      case 'strikethrough': push(`~~${inner}~~`); break;
+      case 'underline': push(inner); break;
+      case 'spoiler': push(inner); break;
+      case 'blockquote': push(`> ${inner}`); break;
+      case 'text_link': {
+        const url = String(ent.url || '').trim();
+        push(url ? `[${inner}](${url})` : inner);
+        break;
+      }
+      case 'url': {
+        let raw = inner;
+        const url = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+        // Keep visible text as-is; append the resolved URL only when the
+        // visible text is not already that URL.
+        push(raw.trim() === url.trim() ? raw : `[${raw}](${url})`);
+        break;
+      }
+      case 'text_mention': push(inner); break;
+      case 'custom_emoji': push(inner); break;
+      default: push(inner); break;
+    }
+    pos = end;
+  }
+  push(text.slice(pos));
+  return out;
+}
+
+function telegramRichMarkdown(msg) {
+  if (!msg) return '';
+  const parts = [];
+  if (msg.text) parts.push(telegramEntityMarkdown(msg.text, msg.entities));
+  if (msg.caption && msg.caption !== msg.text) parts.push(telegramEntityMarkdown(msg.caption, msg.caption_entities));
+  try {
+    const btns = [];
+    for (const row of msg.reply_markup?.inline_keyboard || []) {
+      for (const btn of row || []) {
+        if (btn?.url) {
+          const label = String(btn.text || btn.url).trim();
+          btns.push(`[${label}](${String(btn.url).trim()})`);
+        }
+      }
+    }
+    if (btns.length) parts.push(btns.join(' · '));
+  } catch (_) {}
+  return parts.filter(Boolean).join('\n').trim();
+}
+
+function telegramRichNotesForSave(msg, maxLen = 8000) {
+  const rich = telegramRichMarkdown(msg);
+  let s = String(rich || '').replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (s.length > maxLen) s = s.slice(0, maxLen - 1) + '…';
+  return s;
+}
+
+/**
  * Score a URL as primary resource for a multi-link channel post.
  * Higher = better candidate for the single brain entry.
  */
@@ -10128,7 +10209,12 @@ if (scope === 'community' && !binding.community_id) {
 }
 // Topic lock already applied early for all group traffic
 const fullPost = telegramFullPostText(msg);
+const richPost = telegramRichNotesForSave(msg) || fullPost;
 const linkMode = (binding.dump_link_mode || dumpLinkMode || 'smart').toLowerCase();
+// A forum topic post belongs to exactly one topic: never let AI grouping or
+// primary-picking mix it with other topics. Save every URL with the full
+// entity-preserving copy instead.
+const topicLocked = forumThreadId != null || msg.message_thread_id != null || !!msg.is_topic_message;
 
 let toSave = urls;
 let titleHint = '';
@@ -10137,7 +10223,8 @@ let groupPlan = null;
 
 // Batch posts (many links, one message): ask AI to group them under shared
 // headings/tags; heuristics cover AI-off time. Every URL still gets saved.
-if (urls.length > 1) {
+// Skipped for topic-locked posts so one topic never bleeds into another.
+if (urls.length > 1 && !topicLocked) {
   const vocab = scope === 'community'
     ? await recentTagsForScope(env, 'community', binding.community_id).catch(() => [])
     : await recentTagsForScope(env, 'personal', athenaUser?.id || '').catch(() => []);
@@ -10147,7 +10234,7 @@ const useGrouping = !!(groupPlan && groupPlan.groups && groupPlan.groups.some((g
 
 if (useGrouping) {
   const built = buildMultiLinkNotes(fullPost);
-  notesForSave = built.notes || captionNotes || fullPost;
+  notesForSave = richPost || built.notes || captionNotes || fullPost;
   titleHint = built.titleHint;
   for (const g of groupPlan.groups) {
     for (const rawUrl of g.urls) {
@@ -10178,19 +10265,23 @@ if (useGrouping) {
   return;
 }
 
-if (urls.length > 1 && linkMode !== 'all') {
+if (topicLocked && urls.length > 1) {
+  toSave = urls;
+  const built = buildMultiLinkNotes(fullPost);
+  notesForSave = richPost || fullPost;
+  titleHint = built.titleHint;
+} else if (urls.length > 1 && linkMode !== 'all') {
   const picked = selectPrimaryLinks(urls, fullPost);
   toSave = picked.primary;
   const built = buildMultiLinkNotes(fullPost);
-  notesForSave = built.notes;
+  notesForSave = richPost || built.notes;
   titleHint = built.titleHint;
 } else if (urls.length > 1 && linkMode === 'all') {
-  notesForSave = captionNotes || fullPost;
+  notesForSave = richPost || captionNotes || fullPost;
 } else {
-  notesForSave = isDetailedNotes(fullPost) ? fullPost : captionNotes;
+  notesForSave = isDetailedNotes(fullPost) ? richPost : (richPost || captionNotes);
   const built = buildMultiLinkNotes(fullPost);
   if (built.titleHint) titleHint = built.titleHint;
-  if (isDetailedNotes(fullPost)) notesForSave = fullPost;
 }
 
 for (const rawUrl of toSave) {
@@ -16952,6 +17043,9 @@ export {
   startBackfillJob,
   runHistoryIndexJob,
   wipeCloneVaultPaths,
+  telegramEntityMarkdown,
+  telegramRichMarkdown,
+  telegramRichNotesForSave,
   buildSearchBlob,
   cleanApiBase,
   compactAiContext,
