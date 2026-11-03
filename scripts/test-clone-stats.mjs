@@ -195,33 +195,38 @@ try {
   assert.ok(!report2.runs.some((r) => r.id === 'pc_wiz'), 'expired childless wizard parents add no page');
   assert.ok(!report2.runs.some((r) => r.jobs?.some((j) => j.id === 'ij_stale_zero')), 'stale zero-content failures drop off');
   assert.ok(report2.runs.some((r) => r.jobs?.some((j) => j.id === 'ij_fresh_zero')), 'fresh failures stay visible');
-  const chanRun2 = report2.runs.find((r) => r.id === 'pc_chan');
-  assert.equal(chanRun2.state.latest.links, 1, 'latest line counts only the last-24h intake');
-  const freshView = formatStatsRichReport(report2, { page: report2.runs.indexOf(chanRun2) });
-  assert.match(telegramText(freshView.html), /Fresh in the last 24h/, 'run page carries the latest-data status line');
+  const chanSrcIdx = report2.sources.findIndex((s) => s.chat_id === '-1008888888888');
+  assert.ok(chanSrcIdx >= 0, 'channel source present on the dashboard');
+  const chanSrc = report2.sources[chanSrcIdx];
+  assert.equal(chanSrc.fresh.links, 1, 'latest line counts only the last-24h intake');
+  assert.ok(chanSrc.recent.some((r) => /fresh/.test(r.url || '')), 'absolute latest link listed on the drill-down');
+  const drill2 = formatStatsRichReport(report2, { src: chanSrcIdx });
+  assert.match(telegramText(drill2.html), /Fresh in the last 24h/, 'drill-down carries the latest-data status line');
+  assert.match(drill2.html, /example\.com\/fresh/, 'drill-down links the absolute latest link');
 
-  // ---- Renderer: compact overview, live flag, per-run pages, buttons
+  // ---- Renderer: one dashboard row per source, drill-down per source
   const view = formatStatsRichReport(report);
-  assert.equal(view.totalRuns, 2);
+  assert.equal(view.totalRuns, 2, 'one dashboard row per cloned source');
   const text = telegramText(view.html);
   assert.match(text, /Stats Forum/);
-  assert.match(text, /LIVE CLONING: ON/);
-  // Overview aggregates the whole run (children counters_json summed).
+  assert.match(text, /🟢 LIVE/);
+  // Dashboard aggregates each source (children counters_json summed, stored max).
   assert.match(view.buttons, /stats:refresh/);
-  assert.match(view.buttons, /stats:run:1:0/, 'second run reachable by nav button');
+  assert.match(view.buttons, /stats:src:1/, 'second source reachable by nav button');
 
-  // Page navigation: run index clamps to the rendered run.
-  const page2 = formatStatsRichReport(report, { page: 1 });
-  assert.match(telegramText(page2.html), /Stats Channel/);
-  assert.match(page2.html, /LIVE CLONING: OFF/);
+  // Drill-down: source page carries topics + the absolute latest links.
+  const drill = formatStatsRichReport(report, { src: 0 });
+  assert.match(telegramText(drill.html), /Latest links \(24h\)/);
+  assert.match(drill.buttons, /stats:dashboard/, 'drill-down links back to the dashboard');
 
   // Topic pages must fit the classic fallback and preserve every topic.
   const bigTopics = Array.from({ length: 120 }, (_, i) => ({ threadId: String(i + 1), title: 'Topic ' + (i + 1), total: { links: 1, files: 0, other: 0 }, percent: 0, done: false, stateMark: '⏳ PENDING' }));
-  const bigReport = { runs: [{ ...forumRun, topics: bigTopics }, chanRun], generatedAt: Date.now() };
+  const bigSource = { key: 'k', chat_id: '-1001', target: 'community', owner: 'c', name: 'Big', destinationName: '', label: 'a', type: 'forum', isForum: true, topics: bigTopics, overall: { savedLinks: 120 }, fresh: { links: 0, files: 0 }, recent: [], live: false, auth: { tgIds: [], userIds: [] } };
+  const bigReport = { sources: [bigSource], generatedAt: Date.now() };
   const covered = [];
   for (let p = 0; covered.length < bigTopics.length; p++) {
     assert.ok(p < bigTopics.length, 'pagination must advance');
-    const v = formatStatsRichReport(bigReport, { page: 0, topicPage: p });
+    const v = formatStatsRichReport(bigReport, { src: 0, topicPage: p });
     assert.ok(telegramText(v.html).length <= 4096, 'classic fallback fits one message');
     assert.ok((v.html.match(/<li>/g) || []).length <= STATS_TOPICS_PAGE_MAX);
     for (const m of v.html.matchAll(/#(\d+)</g)) covered.push(Number(m[1]));
@@ -229,14 +234,14 @@ try {
   assert.deepEqual(covered, bigTopics.map((t) => Number(t.threadId)), 'pagination covers every topic exactly once');
 
   // Hostile strings stay escaped and inside the transport cap.
-  const hostile = { ...forumRun, state: { ...forumRun.state, sourceName: '<b>Evil</b> & "stuff"', username: null }, topics: [{ threadId: '1', title: '<script>alert(1)</script>', total: { links: 1, files: 2, other: 0 }, percent: 50, done: false, stateMark: '⏳ CLONING' }] };
-  const hostileView = formatStatsRichReport({ runs: [hostile] });
+  const hostileSrc = { key: 'h', chat_id: '-1009', target: 'community', owner: 'c', name: '<b>Evil</b> & "stuff"', destinationName: '', label: '', type: 'group', isForum: true, topics: [{ threadId: '1', title: '<script>alert(1)</script>', total: { links: 1, files: 2, other: 0 }, percent: 50, done: false, stateMark: '⏳ CLONING' }], overall: {}, fresh: { links: 0, files: 0 }, recent: [], live: false, auth: { tgIds: [], userIds: [] } };
+  const hostileView = formatStatsRichReport({ sources: [hostileSrc] }, { src: 0 });
   assert.ok(hostileView.html.includes('&lt;b&gt;Evil&lt;/b&gt;'));
   assert.ok(hostileView.html.includes('&lt;script&gt;'));
   telegramText(hostileView.html);
 
   // Empty report renders the friendly empty page.
-  const emptyView = formatStatsRichReport({ runs: [] });
+  const emptyView = formatStatsRichReport({ sources: [] });
   assert.match(telegramText(emptyView.html), /No clones yet/);
 
   // ---- End-to-end: signed webhook → /stats command → callback → same-message edit
@@ -259,15 +264,15 @@ try {
   const firstPageControls = buttonsOf(statsSend);
   assert.ok(firstPageControls.some(([, label]) => label === '🔄 Refresh'), 'refresh control present');
   assert.ok(firstPageControls.some(([, label]) => label === '❌ Close'), 'close control present');
-  assert.ok(firstPageControls.some(([data]) => data.startsWith('stats:run:')), 'run nav control present');
+  assert.ok(firstPageControls.some(([data]) => data.startsWith('stats:src:')), 'source nav control present');
 
   // Callback round-trip: nav button edits the SAME message.
   sent.length = 0;
-  await deliver({ callback_query: { id: 'stats-cb-1', from, data: 'stats:run:1:0', message: { message_id: statsSend.messageId, chat } } });
-  const edited = sent.findLast((c) => c.method === 'editMessageText' && /CLONE STATS/.test(c.body.rich_message?.html || ''));
-  assert.ok(edited, 'run callback edits the stats message in place');
+  await deliver({ callback_query: { id: 'stats-cb-1', from, data: 'stats:src:1:0', message: { message_id: statsSend.messageId, chat } } });
+  const edited = sent.findLast((c) => c.method === 'editMessageText' && /📊 Stats/.test(c.body.rich_message?.html || ''));
+  assert.ok(edited, 'source callback edits the stats message in place');
   assert.equal(edited.messageId, statsSend.messageId, 'pagination edits the same message');
-  assert.match(edited.body.rich_message.html, /Stats Channel/, 'nav landed on run 2');
+  assert.match(telegramText(edited.body.rich_message.html), /Stats Forum/, 'nav landed on the drilled-down source');
 
   // Refresh also edits the same message.
   sent.length = 0;
@@ -277,8 +282,8 @@ try {
   // Unauthorized user: no edit of someone else's stats message.
   sent.length = 0;
   const stranger = { id: 424242, first_name: 'Mallory' };
-  await deliver({ callback_query: { id: 'stats-cb-3', from: stranger, data: 'stats:run:0:0', message: { message_id: statsSend.messageId, chat } } });
-  assert.ok(!sent.some((c) => c.method === 'editMessageText' && /CLONE STATS/.test(c.body.rich_message?.html || '')), 'foreign callback must not re-render the run');
+  await deliver({ callback_query: { id: 'stats-cb-3', from: stranger, data: 'stats:src:0:0', message: { message_id: statsSend.messageId, chat } } });
+  assert.ok(!sent.some((c) => c.method === 'editMessageText' && /CLONE STATS/.test(c.body.rich_message?.html || '')), 'foreign callback must not re-render the source');
 
   // Bot API /clone is separate from userbot history: it works in a linked group,
   // creates a confirmation preview, and persists an active live binding without

@@ -8176,20 +8176,24 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       await answered();
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    if (action === 'refresh' || action === 'run') {
+    if (action === 'refresh' || action === 'dashboard' || action === 'src' || action === 'run') {
       try {
         const user = await resolveAthenaUserFromTg(env, tgUserId);
         const report = await buildStatsReport(env, token, { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user ? String(user.id) : '') });
-        let runIdx = 0, tp = 0;
-        if (action === 'run') { runIdx = Math.max(0, Number(parts[2]) || 0); tp = Math.max(0, Number(parts[3]) || 0); }
-        const run = action === 'run' ? (report.runs || [])[runIdx] : true;
-        const mine = (r) => r && (isGodCb || String(r.state?.requesterTgId || '') === String(tgUserId) || (r.state?.requesterUserId && String(r.state.requesterUserId) === String(user?.id || '')));
-        if (action === 'run' && (!run || !mine(run))) {
+        let sel;
+        if (action === 'src') {
+          const idx = Math.max(0, Number(parts[2]) || 0);
+          const tp = Math.max(0, Number(parts[3]) || 0);
+          sel = { src: idx, topicPage: tp };
+        }
+        const src = sel ? (report.sources || [])[sel.src] : true;
+        const mine = (s) => s && s.auth && (isGodCb || (s.auth.tgIds || []).includes(String(tgUserId)) || (user && (s.auth.userIds || []).includes(String(user.id))));
+        if (sel && (!src || !mine(src))) {
           await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Expired or not yours', show_alert: true }).catch(() => {});
           return new Response('OK', { status: 200, headers: corsHeaders });
         }
         await answered();
-        const view = formatStatsRichReport(report, action === 'run' ? { page: runIdx, topicPage: tp } : undefined);
+        const view = formatStatsRichReport(report, sel);
         await editTelegramRichMessage(token, chatId, msgId, view.html, threadId, view.buttons);
       } catch (e) {
         console.error('stats refresh failed', e?.message || e);
@@ -9015,13 +9019,6 @@ function statsTopicPages(topics) {
 }
 
 /** Two runs describe one source when chat, destination and owner all match. */
-function statsSourceKey(run) {
-  const state = run.state || {};
-  const destination = state.target || run.target ||
-    (String(state.destinationName || '').toLowerCase().includes('personal') ? 'personal' : 'community');
-  return [run.chat_id, String(destination), state.requesterUserId || state.requesterTgId || ''].join('|');
-}
-
 /**
  * Sum every run of one source. Stored counters mirror rows already in the
  * destination database, so a re-clone of the same source would multiply them:
@@ -9038,59 +9035,178 @@ function statsSourceOverall(runs) {
 }
 
 /**
- * Dashboard totals: every cloned channel, group and forum topic the requester
- * owns, each source counted once. This is the number that grows as live clones
- * capture new posts, independent of which run page is open.
+ * Fresh saved links for one source over the rolling 24h, newest first —
+ * the drill-down list on the /stats dashboard. Topic attribution comes from
+ * clone_sources where the link was saved by a clone; personal links and
+ * older rows without a source row simply carry no thread.
  */
-function statsTotalsText(runs) {
-  const bySource = new Map();
-  for (const run of runs) {
-    const key = statsSourceKey(run);
-    if (!bySource.has(key)) bySource.set(key, []);
-    bySource.get(key).push(run);
-  }
+async function statsRecentLinks(env, target, owner, chatId, limit = 8) {
+  const out = [];
+  if (!target || !owner || !chatId) return out;
+  const cap = Math.max(1, Math.min(12, Number(limit) || 8));
+  const since = Date.now() - 86400000;
+  try {
+    const norm = normalizeTgChatId(chatId);
+    const variants = [String(norm), String(norm).replace(/^-100/, '')];
+    const ph = variants.map(() => '?').join(',');
+    const mapRows = (rows) => (rows || []).map((x) => ({
+      title: String(x.title || x.url || 'untitled').slice(0, 80),
+      url: String(x.url || ''),
+      created_at: Number(x.created_at || 0),
+      thread: String(x.thread || ''),
+    }));
+    if (target === 'personal') {
+      const r = await env.DB.prepare(
+        `SELECT title, url, created_at, '' AS thread FROM personal_links WHERE user_id=? AND created_at>? ORDER BY created_at DESC LIMIT ${cap}`
+      ).bind(String(owner), since).all().catch(() => null);
+      return mapRows(r?.results || r || []).slice(0, cap);
+    }
+    try {
+      const dest = `community:${owner}`;
+      const r = await env.DB.prepare(
+        `SELECT l.title AS title, l.url AS url, l.created_at AS created_at, MAX(cs.topic_id) AS thread FROM links l
+         LEFT JOIN clone_sources cs ON cs.destination=? AND cs.chat_id IN (${ph}) AND cs.message_id=l.source_message_id AND cs.content_key LIKE 'url:%'
+         WHERE l.community_id=? AND l.source_chat_id IN (${ph}) AND l.created_at>?
+         GROUP BY l.id, l.title, l.url, l.created_at ORDER BY l.created_at DESC LIMIT ${cap}`
+      ).bind(dest, ...variants, String(owner), ...variants, since).all().catch(() => null);
+      if (r) return mapRows(r.results || r || []).slice(0, cap);
+    } catch (_) {}
+    // Older databases without source_chat_id: community-wide fallback.
+    const r = await env.DB.prepare(
+      `SELECT title, url, created_at, '' AS thread FROM links WHERE community_id=? AND created_at>? ORDER BY created_at DESC LIMIT ${cap}`
+    ).bind(String(owner), since).all().catch(() => null);
+    return mapRows(r?.results || r || []).slice(0, cap);
+  } catch (_) { return out; }
+}
+
+function statsAgo(ts) {
+  const s = Math.max(0, Math.floor((Date.now() - Number(ts || 0)) / 1000));
+  if (s < 60) return 'just now';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
+
+/** Dashboard totals across sources: counted once per source, grows with live clones. */
+function statsSourcesTotalsText(sources) {
   const overall = {};
-  for (const sourceRuns of bySource.values()) statsAddCounters(overall, statsSourceOverall(sourceRuns));
-  const live = runs.some((run) => run.live === true);
-  const sources = bySource.size;
-  return richParagraph('📈 All sources — ' + sources + (sources === 1 ? ' source' : ' sources') +
+  for (const s of sources) statsAddCounters(overall, s.overall || {});
+  const live = sources.some((s) => s.live === true);
+  return richParagraph('📈 All sources — ' + sources.length + (sources.length === 1 ? ' source' : ' sources') +
     ' · 🔗 ' + statsNum(overall.savedLinkPosts) + ' link posts · 🔗 ' + statsNum(overall.savedLinks) + ' urls' +
     ' · 📄 ' + statsNum(overall.savedFiles) + ' files · 📦 ' + statsNum(statsOtherCount(overall)) + ' other' +
     ' · ' + (live ? '🟢 live on' : '🔴 live off'));
 }
 
-/** One stats page per run: dashboard totals, run counters, ≤100 topic lines. */
-function statsRunPage(run, topicPagesList, topicPage, pre = '', sourceRuns = [run], allRuns = [run]) {
-  const state = run.state || {};
-  const overall = statsSourceOverall(sourceRuns);
-  const topics = state.isForum ? (run.topics || []) : [];
-  const doneTopics = topics.filter((t) => t.done).length;
-  const totalTopics = topics.length;
-  const typeLabel = state.sourceType === 'channel' ? 'Channel'
-    : state.isForum ? 'Group — Topics Enabled' : 'Group — No Topics';
-  const shown = topicPagesList[topicPage] || [];
-  const lines = [];
-  lines.push(richHeading(3, pre + '📊 CLONE STATS'));
-  lines.push(statsTotalsText(allRuns));
-  lines.push(richParagraph('Source: ' + statsSourceHtml(run) + '<br>Type: ' + escHtml(typeLabel) +
-    '<br>Destination: ' + escHtml(state.destinationName || run.target || '—') + ' · Account: ' + codeHtml(escHtml(state.label || '—'))));
-  if (state.isForum) lines.push(richParagraph('Topics cloned: ' + doneTopics + ' / ' + totalTopics));
-  lines.push(statsCountersText(overall));
-  lines.push(statsLiveLine(run.live === true));
-  {
-    const fresh = state.latest || {};
-    const freshLinks = Number(fresh.links || 0);
-    const freshFiles = Number(fresh.files || 0);
-    const freshText = freshLinks + freshFiles > 0
-      ? `+${freshLinks} links · +${freshFiles} files`
-      : 'nothing new';
-    lines.push(richParagraph('🆕 Fresh in the last 24h: ' + escHtml(freshText)));
+function statsSourceRowLine(s, index) {
+  const o = s.overall || {};
+  const liveMark = s.live ? '🟢 LIVE' : '🔴 off';
+  const typeMark = s.type === 'channel' ? '📡' : s.isForum ? '👥' : '👤';
+  const name = escHtml(String(s.name || s.chat_id || '?').slice(0, 60));
+  return `<b>${index + 1}. ${typeMark} ${name}</b> · ${liveMark}<br>` +
+    escHtml(String(s.chat_id || '') + ' → ' + String(s.destinationName || (s.target === 'personal' ? 'Personal brain' : 'community'))) + '<br>' +
+    '🔗 ' + statsNum(o.savedLinkPosts) + ' posts · 🔗 ' + statsNum(o.savedLinks) + ' urls' +
+    ' · 📄 ' + statsNum(o.savedFiles) + ' files · 📦 ' + statsNum(statsOtherCount(o)) +
+    ' · 🆕 +' + Number(s.fresh?.links || 0) + '/+' + Number(s.fresh?.files || 0);
+}
+
+/** One dashboard page: one row per cloned source, each with live state. */
+function statsDashboardPage(sources) {
+  const lines = [richHeading(3, '📊 CLONE STATS'), statsSourcesTotalsText(sources)];
+  if (!sources.length) {
+    lines.push(richParagraph('No clones yet. Start one with ' + codeHtml('/uclone') + ' or ' + codeHtml('/clone') + '.'));
+    return lines.join('\n');
   }
-  if (state.isForum && topics.length) {
-    lines.push(richParagraph('📚 Topics — page ' + (topicPage + 1) + ' / ' + topicPagesList.length + ' · ' + totalTopics + ' total'));
-    lines.push('<ul>' + shown.map(statsTopicLine).join('') + '</ul>');
+  lines.push(richParagraph('Tap a source for its topics and the absolute latest links (last 24h).'));
+  lines.push('<ul>' + sources.map((s, i) => `<li>${statsSourceRowLine(s, i)}</li>`).join('') + '</ul>');
+  return lines.join('\n');
+}
+
+/** Drill-down page for one source: topics (+fresh counts) and latest links. */
+function statsSourcePage(s, topicPagesList, topicPage) {
+  const o = s.overall || {};
+  const freshByThread = {};
+  for (const r of s.recent || []) {
+    const t = String(r.thread || '');
+    freshByThread[t] = (freshByThread[t] || 0) + 1;
+  }
+  const lines = [];
+  lines.push(richHeading(3, '📊 ' + escHtml(String(s.name || s.chat_id || '?').slice(0, 60))));
+  lines.push(richParagraph('Source: ' + statsSourceHtml({ chat_id: s.chat_id, state: { sourceName: s.name, label: s.label } }) +
+    '<br>Type: ' + escHtml(s.type === 'channel' ? 'Channel' : s.isForum ? 'Group — Topics Enabled' : s.target === 'personal' ? 'Personal brain' : 'Group — No Topics') +
+    '<br>Destination: ' + escHtml(String(s.destinationName || (s.target === 'personal' ? 'Personal brain' : 'community')))));
+  lines.push(statsCountersText(o));
+  lines.push(statsLiveLine(s.live === true));
+  const freshLinks = Number(s.fresh?.links || 0);
+  const freshFiles = Number(s.fresh?.files || 0);
+  lines.push(richParagraph('🆕 Fresh in the last 24h: ' + escHtml(freshLinks + freshFiles > 0 ? `+${freshLinks} links · +${freshFiles} files` : 'nothing new')));
+  if (s.isForum && s.topics?.length) {
+    const shown = topicPagesList[topicPage] || [];
+    lines.push(richParagraph('📚 Topics — page ' + (topicPage + 1) + ' / ' + topicPagesList.length + ' · ' + s.topics.length + ' total'));
+    lines.push('<ul>' + shown.map((t) => {
+      const f = freshByThread[String(t.threadId || '')] || 0;
+      return statsTopicLine(t) + (f > 0 ? ' ' + escHtml(`· 🆕 +${f}`) : '');
+    }).join('') + '</ul>');
+  }
+  const recent = s.recent || [];
+  if (recent.length) {
+    lines.push(richParagraph('🆕 Latest links (24h) — newest first'));
+    lines.push('<ul>' + recent.map((r) => {
+      const title = escHtml(r.title || r.url || 'untitled');
+      const threadBit = r.thread ? ' ' + escHtml('#' + r.thread) : '';
+      const linkBit = r.url ? `<a href="${escHtml(r.url)}">${title}</a>` : title;
+      return `<li>${linkBit}${threadBit} <i>${escHtml(statsAgo(r.created_at))}</i></li>`;
+    }).join('') + '</ul>');
+  } else {
+    lines.push(richParagraph('🆕 Latest links (24h): nothing new.'));
   }
   return lines.join('\n');
+}
+
+/**
+ * Render the /stats dashboard: one table row per cloned source (no run
+ * pages), each row with totals and live state; tapping a source opens its
+ * drill-down page with per-topic counters and the absolute latest links
+ * (last 24h). Every render rebuilds from the authoritative report, so the
+ * counters are never a stale snapshot.
+ */
+function formatStatsRichReport(report, sel = {}) {
+  const sources = report?.sources || [];
+  const rows = [];
+  let html;
+  let src = -1;
+  let topicPage;
+  let topicPagesList;
+  if (!sources.length) {
+    html = statsEmptyPage();
+  } else if (sel && sel.src != null && sources[Number(sel.src)]) {
+    const s = sources[Number(sel.src)];
+    src = Number(sel.src);
+    topicPagesList = s.isForum && s.topics?.length ? statsTopicPages(s.topics) : [[]];
+    topicPage = Math.max(0, Math.min(topicPagesList.length - 1, Number(sel.topicPage) || 0));
+    html = statsSourcePage(s, topicPagesList, topicPage);
+    if (topicPagesList.length > 1) {
+      rows.push([
+        { label: '◀ Previous', data: 'stats:src:' + src + ':' + Math.max(0, topicPage - 1) },
+        { label: '📚 Page ' + (topicPage + 1) + ' / ' + topicPagesList.length, data: 'stats:noop' },
+        { label: 'Next ▶', data: 'stats:src:' + src + ':' + Math.min(topicPagesList.length - 1, topicPage + 1) },
+      ]);
+    }
+    rows.push([{ label: '« All sources', data: 'stats:dashboard' }]);
+  } else {
+    html = statsDashboardPage(sources);
+    for (let i = 0; i < sources.length; i++) {
+      const s = sources[i];
+      const short = String(s.name || s.chat_id || '?').slice(0, 26);
+      rows.push([{ label: `${i + 1}. ${short} ▸`, data: 'stats:src:' + i }]);
+    }
+  }
+  rows.push([
+    { label: '🔄 Refresh', data: 'stats:refresh' },
+    { label: '💻 Clone', data: 'menu:clone' },
+    { label: '❌ Close', data: 'stats:close' },
+  ]);
+  return { html, pages: Math.max(1, sources.length), page: Math.max(0, src), totalRuns: sources.length, buttons: rows.map((r) => richButtonRow(r)).join('\n') };
 }
 
 function statsEmptyPage() {
@@ -9104,44 +9220,8 @@ function statsEmptyPage() {
  * stays reachable. Every render rebuilds from the authoritative report, so the
  * counters are never a stale snapshot.
  */
-function formatStatsRichReport(report, pageIndex = 0) {
-  const runs = (report?.runs || []);
-  const pages = Math.max(1, runs.length);
-  const page = Math.max(0, Math.min(pages - 1, Number(pageIndex?.page ?? pageIndex) || 0));
-  const rows = [];
-  let html;
-  if (!runs.length) {
-    html = statsEmptyPage();
-  } else {
-    const run = runs[page];
-    const state = run.state || {};
-    const topicPagesList = state.isForum && run.topics?.length ? statsTopicPages(run.topics) : [[]];
-    const topicPage = Math.max(0, Math.min(topicPagesList.length - 1, Number(pageIndex?.topicPage) || 0));
-    const pre = pages > 1 ? 'Run ' + (page + 1) + ' / ' + pages + ' — ' : '';
-    html = statsRunPage(run, topicPagesList, topicPage, pre,
-      runs.filter((other) => statsSourceKey(other) === statsSourceKey(run)), runs);
-    if (topicPagesList.length > 1) {
-      rows.push([
-        { label: '◀ Previous', data: 'stats:run:' + page + ':' + Math.max(0, topicPage - 1) },
-        { label: '📚 Page ' + (topicPage + 1) + ' / ' + topicPagesList.length, data: 'stats:noop' },
-        { label: 'Next ▶', data: 'stats:run:' + page + ':' + Math.min(topicPagesList.length - 1, topicPage + 1) },
-      ]);
-    }
-    if (pages > 1) {
-      rows.push([
-        { label: '◀ Previous', data: 'stats:run:' + Math.max(0, page - 1) + ':0' },
-        { label: 'Page ' + (page + 1) + ' / ' + pages, data: 'stats:noop' },
-        { label: 'Next ▶', data: 'stats:run:' + Math.min(pages - 1, page + 1) + ':0' },
-      ]);
-    }
-  }
-  rows.push([
-    { label: '🔄 Refresh', data: 'stats:refresh' },
-    { label: '💻 Clone', data: 'menu:clone' },
-    { label: '❌ Close', data: 'stats:close' },
-  ]);
-  return { html, pages, page, totalRuns: pages, buttons: rows.map((r) => richButtonRow(r)).join('\n') };
-}
+/* Legacy page-per-run /stats renderer removed: the dashboard renders one row
+ * per cloned source with per-source drill-down pages instead. */
 
 
 
@@ -17097,6 +17177,8 @@ export async function buildStatsReport(env, _token = null, scope = null) {
       id: String(p.id), chat_id: normalizeTgChatId(p.chat_id), state: { ...state, overall, latest, requesterTgId: String(p.requester_tg_id || ''), requesterUserId: String(p.requester_user_id || '') },
       jobs: agg.rows, live: state.stage === 'running' || agg.rows.some((j) => j.status === 'running' || j.status === 'queued') || liveFollowKeys.has(followKey) || liveBoundChats.has(normalizeTgChatId(p.chat_id)),
       topics, standalone: false,
+      target: p.target || 'community',
+      owner: (p.target || 'community') === 'personal' ? String(p.requester_user_id || '') : String(p.community_id || ''),
     });
   }
   for (const s of visibleStandalone) {
@@ -17119,11 +17201,60 @@ export async function buildStatsReport(env, _token = null, scope = null) {
     // Same rule as managed runs: stale terminal groups with zero saved content
     // are old logs, not status. Live or active groups always stay.
     if (!active && !s.live && !statsRunHasContent(overall) && now - newestJobAt > STALE_MS) continue;
+    // Remember the destination on the run so the report can group runs that
+    // belong to the same cloned source into one dashboard row.
+    s.target = s.target || 'community';
+    s.owner = s.target === 'personal' ? String(s.user_id || '') : String(s.community_id || '');
     const state = { ...s.state, isForum: topics.length > 0, stage: active ? 'running' : (s.jobs.some((j) => j.status === 'error') ? 'error' : 'done'), sourceType: topics.length ? 'group' : null, username: null, overall, latest, requesterTgId: String(s.requester_tg_id || ''), requesterUserId: String(s.user_id || '') };
-    runs.push({ id: 'standalone:' + s.jobs.map((j) => j.id).sort().join(','), chat_id: normalizeTgChatId(s.chat_id), state, jobs: s.jobs, live: active || s.live || liveBoundChats.has(normalizeTgChatId(s.chat_id)), topics, standalone: true });
+    runs.push({ id: 'standalone:' + s.jobs.map((j) => j.id).sort().join(','), chat_id: normalizeTgChatId(s.chat_id), state, jobs: s.jobs, live: active || s.live || liveBoundChats.has(normalizeTgChatId(s.chat_id)), topics, standalone: true, target: s.target || 'community', owner: s.owner || '' });
   }
 
-  return { runs, chats: [], generatedAt: now };
+  // One dashboard row per cloned source: merge every run (managed parents
+  // and standalone backfills) that saved into the same chat + destination.
+  const sources = [];
+  {
+    const byKey = new Map();
+    for (const run of runs) {
+      const key = [run.chat_id, String(run.target || 'community'), String(run.owner || '')].join('|');
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push(run);
+    }
+    for (const groupRuns of byKey.values()) {
+      const first = groupRuns[0];
+      const overall = statsSourceOverall(groupRuns);
+      const live = groupRuns.some((r) => r.live === true);
+      const fresh = { links: 0, files: 0 };
+      for (const r of groupRuns) {
+        fresh.links = Math.max(fresh.links, Number(r.state?.latest?.links || 0));
+        fresh.files = Math.max(fresh.files, Number(r.state?.latest?.files || 0));
+      }
+      const tmap = new Map();
+      for (const r of groupRuns) {
+        for (const t of r.topics || []) {
+          const cur = tmap.get(t.threadId);
+          if (!cur || (t.done && !cur.done) || (Number(t.total?.links || 0) > Number(cur.total?.links || 0))) tmap.set(t.threadId, t);
+        }
+      }
+      const topics = [...tmap.values()].sort((a, b) => String(a.threadId).localeCompare(String(b.threadId)));
+      const st0 = first.state || {};
+      const isForum = groupRuns.some((r) => r.state?.isForum) || topics.length > 0;
+      const type = st0.sourceType === 'channel' ? 'channel' : groupRuns.some((r) => r.state?.sourceType === 'channel') ? 'channel' : (isForum ? 'forum' : (first.target === 'personal' ? 'personal' : 'group'));
+      const recent = await statsRecentLinks(env, first.target || 'community', first.owner || '', first.chat_id, 8);
+      const auth = {
+        tgIds: [...new Set(groupRuns.map((r) => String(r.state?.requesterTgId || '')).filter(Boolean))],
+        userIds: [...new Set(groupRuns.map((r) => String(r.state?.requesterUserId || '')).filter(Boolean))],
+      };
+      sources.push({
+        key: [first.chat_id, String(first.target || 'community'), String(first.owner || '')].join('|'),
+        chat_id: first.chat_id, target: first.target || 'community', owner: first.owner || '',
+        name: st0.sourceName || first.chat_id, destinationName: st0.destinationName || '',
+        label: st0.label || '', type, isForum, topics, overall, fresh, recent, live, auth,
+      });
+    }
+    sources.sort((a, b) => String(a.name || a.chat_id).localeCompare(String(b.name || b.chat_id)));
+  }
+
+  return { runs, sources, chats: [], generatedAt: now };
 }
 
 export {
