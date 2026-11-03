@@ -16899,6 +16899,14 @@ async function statsLatestActivity(env, target, owner, chatId) {
   return out;
 }
 
+/** True when a run has actually saved something worth a page. */
+function statsRunHasContent(overall) {
+  if (!overall) return false;
+  return ['savedLinks', 'savedLinkPosts', 'savedFiles', 'savedDocs', 'savedPdfs',
+    'savedMarkdown', 'savedJson', 'savedHtml', 'savedImages', 'savedAudio', 'savedOther']
+    .some((k) => Number(overall[k] || 0) > 0);
+}
+
 export async function buildStatsReport(env, _token = null, scope = null) {
   const now = Date.now();
   await ensureUcloneTables(env).catch(() => {});
@@ -16999,7 +17007,10 @@ export async function buildStatsReport(env, _token = null, scope = null) {
         jobRows.push({ ...j, counters });
       }
       const overall = jobRows.reduce((acc, j) => statsAddCounters(acc, j.counters), {});
-      jobsByParent.set(String(p.id), { rows: jobRows, overall });
+      // Abandoned wizard shells (no child jobs, session expired) are not runs.
+      if (jobRows.length || String(p.state?.stage || '') === 'running' || Number(p.expires_at || 0) > now) {
+        jobsByParent.set(String(p.id), { rows: jobRows, overall });
+      }
     }
   }
 
@@ -17033,8 +17044,11 @@ export async function buildStatsReport(env, _token = null, scope = null) {
   });
 
   const runs = [];
+  const STALE_MS = 86400000;
   for (const p of parents) {
-    const agg = jobsByParent.get(String(p.id)) || { rows: [], overall: {} };
+    const agg = jobsByParent.get(String(p.id));
+    // Dropped earlier: abandoned wizard shells with no child jobs.
+    if (!agg) continue;
     const state = p.state || {};
     const overall = { ...agg.overall };
     if (!agg.rows.length) statsMergeCounters(overall, state.counters || {}); // measuring-stage snapshot fallback
@@ -17042,6 +17056,9 @@ export async function buildStatsReport(env, _token = null, scope = null) {
     const owner = target === 'personal' ? p.requester_user_id : (p.community_id || state.communityId);
     const stored = await statsDatabaseCounters(env, target, owner, p.chat_id);
     if (stored) Object.assign(overall, stored);
+    // Old terminal runs that never saved anything are old logs, not status.
+    if (['done', 'stopped', 'error', 'cancelled'].includes(String(state.stage || '')) &&
+        !statsRunHasContent(overall) && now - Number(p.created_at || 0) > STALE_MS) continue;
     const topics = [];
     if (state.isForum) {
       const chosenList = Array.isArray(state.chosen) ? state.chosen : [];
@@ -17098,6 +17115,10 @@ export async function buildStatsReport(env, _token = null, scope = null) {
       return { threadId, title: job.topic_name || null, total: { links: c.savedLinks || 0, files: c.savedFiles || 0, other: (c.savedOther || 0) + (c.savedHtml || 0) + (c.savedJson || 0) + (c.savedMarkdown || 0) + (c.savedImages || 0) + (c.savedAudio || 0) }, percent: done ? 100 : 0, done, stateMark: done ? '✅ COMPLETE' : active ? '🟢 LIVE' : '⏳ PENDING' };
     });
     const latest = await statsLatestActivity(env, s.target, s.target === 'personal' ? s.user_id : s.community_id, s.chat_id);
+    const newestJobAt = s.jobs.reduce((m, j) => Math.max(m, Number(j.updated_at || j.created_at || 0)), 0);
+    // Same rule as managed runs: stale terminal groups with zero saved content
+    // are old logs, not status. Live or active groups always stay.
+    if (!active && !s.live && !statsRunHasContent(overall) && now - newestJobAt > STALE_MS) continue;
     const state = { ...s.state, isForum: topics.length > 0, stage: active ? 'running' : (s.jobs.some((j) => j.status === 'error') ? 'error' : 'done'), sourceType: topics.length ? 'group' : null, username: null, overall, latest, requesterTgId: String(s.requester_tg_id || ''), requesterUserId: String(s.user_id || '') };
     runs.push({ id: 'standalone:' + s.jobs.map((j) => j.id).sort().join(','), chat_id: normalizeTgChatId(s.chat_id), state, jobs: s.jobs, live: active || s.live || liveBoundChats.has(normalizeTgChatId(s.chat_id)), topics, standalone: true });
   }

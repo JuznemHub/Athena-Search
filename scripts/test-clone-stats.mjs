@@ -106,10 +106,10 @@ try {
   const insertParent = (id, chatId, tgId, userId, stats, atMs = Date.now()) => sql.prepare(
     'INSERT INTO pending_clones (id,chat_id,thread_id,community_id,target,requester_tg_id,requester_user_id,stats_json,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
     .run(id, chatId, null, null, stats.target || null, tgId, userId, JSON.stringify(stats), atMs, atMs + 86400000);
-  const insertChild = (id, parentId, chatId, threadId, target, community, user, status, counters, topicName = '') => {
+  const insertChild = (id, parentId, chatId, threadId, target, community, user, status, counters, topicName = '', atMs = Date.now()) => {
     sql.prepare(`INSERT INTO index_jobs (id,community_id,chat_id,user_id,status,offset_id,progress_chat_id,created_at,updated_at,thread_id,chat_name,userbot_label,target,parent_id,total_messages,topic_name,counters_json)
       VALUES (?,?,?,?,?,0,'x',?,?,?,?,'alpha',?,?,?,?,?)`)
-      .run(id, community ?? '', chatId, user, status, Date.now(), Date.now(), threadId ?? '', 'Stats source', target, parentId, 10, topicName ?? '', JSON.stringify(counters));
+      .run(id, community ?? '', chatId, user, status, atMs, atMs, threadId ?? '', 'Stats source', target, parentId, 10, topicName ?? '', JSON.stringify(counters));
   };
   const countersA = { messages: 10, copiedMessages: 8, linkPosts: 6, links: 6, savedLinkPosts: 6, savedLinks: 6, files: 4, savedFiles: 3, savedDocs: 1, savedPdfs: 0, other: 2, savedOther: 2, markdown: 1, savedMarkdown: 1, json: 0, savedJson: 0, html: 0, savedHtml: 0, images: 0, savedImages: 0, audio: 0, savedAudio: 0, skippedVideos: 1, duplicates: 1, failed: 0, retries: 0 };
   const countersB = { messages: 5, copiedMessages: 5, linkPosts: 2, links: 2, savedLinkPosts: 2, savedLinks: 2, files: 1, savedFiles: 1, savedDocs: 0, savedPdfs: 0, other: 0, savedOther: 0, duplicates: 0, failed: 0, retries: 0 };
@@ -181,9 +181,20 @@ try {
     VALUES (?,?,?,?,?,?,?,?)`).run('ix_fresh1', 'u_stats', 'https://example.com/fresh', 'freshhash1', 'Fresh', '', '[]', Date.now() - 3600000);
   sql.prepare(`INSERT INTO personal_links (id,user_id,url,url_hash,title,notes,tags,created_at)
     VALUES (?,?,?,?,?,?,?,?)`).run('ix_stale1', 'u_stats', 'https://example.com/stale', 'stalehash1', 'Stale', '', '[]', Date.now() - 90000000);
+  // Abandoned wizard shells (expired, no child jobs) are not runs either.
+  insertParent('pc_wiz', 'accounts', '123456789', 'u_stats', {
+    manager: 'uclone', stage: 'preview', revision: 1, label: 'alpha', target: 'personal',
+    sourceName: 'Abandoned wizard', counters: {},
+  }, Date.now() - 90000000);
+  // Stale zero-content standalone failures drop off; a fresh one stays visible.
+  insertChild('ij_stale_zero', null, '-1005555555555', null, 'personal', '', 'u_stats', 'error', { messages: 3 }, '', Date.now() - 90000000);
+  insertChild('ij_fresh_zero', null, '-1006666666666', null, 'personal', '', 'u_stats', 'error', { messages: 3 }, '', Date.now() - 3600000);
   const report2 = await buildStatsReport(env, null, { requesterTgId: '123456789', athenaUserId: 'u_stats' });
-  assert.equal(report2.runs.length, 2, 'stale error parent of the same source adds no page');
+  assert.equal(report2.runs.length, 3, 'stale error parent of the same source adds no page');
   assert.ok(!report2.runs.some((r) => r.id === 'pc_chan_old'), 'only the newest parent per source survives');
+  assert.ok(!report2.runs.some((r) => r.id === 'pc_wiz'), 'expired childless wizard parents add no page');
+  assert.ok(!report2.runs.some((r) => r.jobs?.some((j) => j.id === 'ij_stale_zero')), 'stale zero-content failures drop off');
+  assert.ok(report2.runs.some((r) => r.jobs?.some((j) => j.id === 'ij_fresh_zero')), 'fresh failures stay visible');
   const chanRun2 = report2.runs.find((r) => r.id === 'pc_chan');
   assert.equal(chanRun2.state.latest.links, 1, 'latest line counts only the last-24h intake');
   const freshView = formatStatsRichReport(report2, { page: report2.runs.indexOf(chanRun2) });
