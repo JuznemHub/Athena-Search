@@ -96,6 +96,10 @@ function telegramText(html) {
 try {
   await ensureUcloneTables(env);
   await ensureIndexTables(env);
+  sql.exec(`CREATE TABLE IF NOT EXISTS userbot_follows (
+    chat_id TEXT PRIMARY KEY, label TEXT NOT NULL DEFAULT 'main',
+    community_id TEXT NOT NULL, target TEXT NOT NULL DEFAULT 'community',
+    created_by TEXT, created_at BIGINT NOT NULL)`);
 
   // ---- Fixture data: one running forum clone, one completed channel clone,
   // and another user's standalone clone. Scopes must never mix.
@@ -282,7 +286,18 @@ try {
   const botState = sql.prepare("SELECT stats_json FROM pending_clones WHERE id LIKE 'bc_%' ORDER BY created_at DESC LIMIT 1").get();
   assert.equal(JSON.parse(botState.stats_json).stage, 'running', 'confirmed bot clone remains a live run');
   assert.equal(sql.prepare('SELECT copy_text FROM community_bots WHERE id=?').get('b_bot').copy_text, 1, 'whole-group bot clone enables full-copy mode');
-  console.log('clone stats fixtures passed: managed parents+children counters, requester/destination/account isolation, compact overview with source links, LIVE flag from actual job state, successful vs copying counters, completed/pending/current topics with 100% and bars, 100-topic pagination, run pagination, callback round-trip with auth guard, telegram-safe HTML');
+
+  // /channel_target on a userbot-followed chat without a bot-mode link names
+  // the follow instead of sending the user to /channel_link for a chat that
+  // is already being indexed.
+  sql.prepare('INSERT INTO userbot_follows (chat_id,label,community_id,target,created_by,created_at) VALUES (?,?,?,?,?,?)')
+    .run('-1004444444444', 'alpha', 'c_bot', 'community', 'u_bot', Date.now());
+  sent.length = 0;
+  await deliver({ message: { message_id: 701, from, chat, text: '/channel_target -1004444444444' } });
+  const targetReply = sent.findLast((c) => c.method === 'sendMessage');
+  assert.ok(targetReply && /userbot/i.test(targetReply.body.text || ''), 'userbot-followed chat is named, not sent to /channel_link');
+  assert.match(targetReply.body.text || '', /-1004444444444/);
+  console.log('clone stats fixtures passed: managed parents+children counters, requester/destination/account isolation, compact overview with source links, LIVE flag from actual job state, successful vs copying counters, completed/pending/current topics with 100% and bars, 100-topic pagination, run pagination, callback round-trip with auth guard, telegram-safe HTML, userbot-aware channel_target');
 } finally {
   await drain();
   hooks.deregister();
