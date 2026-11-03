@@ -269,19 +269,37 @@ export function createUcloneManager(env, deps) {
     run.state.stage = 'destination';
     run.state.revision++;
     run.state.communities = await deps.listCommunities({ id: run.requester_user_id });
+    // Auto-detect: when this exact chat is already followed by the userbot,
+    // pin its community first — picking it continues into the same brain
+    // instead of scattering a second copy elsewhere.
+    let followedName = '';
+    try {
+      const norm = String(run.chat_id || '');
+      const bare = norm.replace(/^-100/, '');
+      const follow = await db.prepare(
+        `SELECT community_id FROM userbot_follows WHERE chat_id IN (?, ?) OR chat_id LIKE ? ORDER BY chat_id LIMIT 1`
+      ).bind(norm, bare, `${norm}:%`).first().catch(() => null);
+      const followedId = follow?.community_id ? String(follow.community_id) : '';
+      if (followedId) {
+        run.state.communities.sort((a, b) => (String(b.id) === followedId) - (String(a.id) === followedId));
+        const pinned = run.state.communities[0];
+        if (pinned && String(pinned.id) === followedId) followedName = pinned.name || pinned.id;
+      }
+    } catch (_) {}
     const page = Math.max(0, Number(run.state.destinationPage || 0));
     const rows = [[button(run, 'Personal', 'personal')]];
     for (const [index, community] of run.state.communities.entries()) {
       if (index < page * 8 || index >= (page + 1) * 8) continue;
       const name = community.name || community.id;
-      rows.push([button(run, `${name} — community DB`, 'community', index), button(run, `${name} — Personal + community`, 'both', index)]);
+      const pin = followedName && String(community.id) === String(run.state.communities[0]?.id) && index === 0 ? '📌 ' : '';
+      rows.push([button(run, `${pin}${name} — community DB`, 'community', index), button(run, `${name} — Personal + community`, 'both', index)]);
     }
     if (page > 0) rows.push([button(run, 'Previous communities', 'destpage', page - 1)]);
     if ((page + 1) * 8 < run.state.communities.length) rows.push([button(run, 'More communities', 'destpage', page + 1)]);
     rows.push([button(run, 'Back to topic statistics', 'topics'), button(run, 'Cancel', 'stop')]);
     const counters = run.state.chosen.reduce((sum, topic) => { for (const key of Object.keys(sum)) sum[key] += Number(topic.counters?.[key] || 0); return sum; }, emptyCloneCounters());
     run.state.total = counters.messages;
-    await edit(run, token, renderCloneStatistics({ sourceName: run.state.sourceName, chatId: run.chat_id, username: run.state.username, members: run.state.members, topic: run.state.chosen.length === 1 && run.state.isForum ? run.state.chosen[0] : null, counters, complete: true, measurement: 'accessible-history' }) + '\n\nChoose a destination. Personal is your private brain; community DB is the selected community. Nothing has been copied yet.', rows, true);
+    await edit(run, token, renderCloneStatistics({ sourceName: run.state.sourceName, chatId: run.chat_id, username: run.state.username, members: run.state.members, topic: run.state.chosen.length === 1 && run.state.isForum ? run.state.chosen[0] : null, counters, complete: true, measurement: 'accessible-history' }) + '\n\nChoose a destination. Personal is your private brain; community DB is the selected community. Nothing has been copied yet.' + (followedName ? `\n📌 Already followed → ${esc(followedName)} is pinned first: picking it continues into the same brain.` : (run.state.communities.length ? '' : '\n⚠️ No community available: only your Personal brain can receive this clone. Ask a community owner to make you owner/admin first.')), rows, true);
   }
   async function returnToTopics(run, token) {
     run.state.cancelled = false;

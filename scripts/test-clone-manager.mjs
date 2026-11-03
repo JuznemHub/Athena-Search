@@ -307,6 +307,20 @@ await scenario('combined destination selects Community B and personal without an
   assert.equal(finalCounters(f)['Encountered messages'], 3, 'combined destination does not double-count source messages');
 });
 
+await scenario('already-followed chat pins its community first', {}, async f => {
+  f.sql.exec(`CREATE TABLE userbot_follows (chat_id TEXT PRIMARY KEY, label TEXT NOT NULL DEFAULT 'main', community_id TEXT NOT NULL, target TEXT NOT NULL DEFAULT 'community', created_by TEXT, created_at BIGINT NOT NULL);`);
+  f.sql.prepare('INSERT INTO userbot_follows (chat_id,label,community_id,target,created_at) VALUES (?,?,?,?,?)')
+    .run('-1001234567890', 'beta', 'c_b', 'community', 1);
+  await f.preview();
+  const names = f.buttons().map((b) => b.text);
+  const pinned = names.findIndex((t) => t.includes('Community B'));
+  assert.ok(pinned >= 0, 'followed community listed');
+  assert.ok(names[pinned].startsWith('📌'), 'followed community pinned first with a marker');
+  assert.ok(names.indexOf('Community B — community DB') === -1, 'pinned row carries the marker');
+  const lastEdit = f.edits().at(-1)?.body?.rich_message?.html || '';
+  assert.match(lastEdit, /Already followed/, 'destination step names the existing follow');
+});
+
 await scenario('combined destination enforces authorization before copying and between topics', { forum: true }, async f => {
   await f.preview(); await f.click('All topics');
   const communityIndex = f.buttons().findIndex(b => b.text.startsWith('Community A'));

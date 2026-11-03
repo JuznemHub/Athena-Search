@@ -7691,7 +7691,7 @@ function helpTextForSection(section, isGod = false) {
       cmd(13, `${codeHtml('/delete')} ${codeHtml('<chat_id> [topic_id]')}`, 'Delete a cloned chat or topic and stop its live follow (' + codeHtml('/del') + ' is the same). With a URL instead of a chat id it deletes one saved link.'),
       spacer,
       richParagraph('<b>Userbot mode — history + live (GOD, DM setup)</b>'),
-      cmd(14, `${codeHtml('/uclone')} ${codeHtml('<chat_id> [topic_id]')}`, 'Guided wizard: scans history, shows statistics, lets you pick one topic or all, then the destination. Completed runs return to topic statistics. Live indexing stays on for the chosen scope. Also written ' + codeHtml('/ubclone') + '.'),
+      cmd(14, `${codeHtml('/uclone')} ${codeHtml('<chat_id> [topic_id]')}`, 'Guided wizard: scans history, shows statistics, lets you pick one topic or all, then the destination (Personal or a community you created or staff as owner/admin — nothing shows means neither). A chat the userbot already follows gets its community pinned first. Also written ' + codeHtml('/ubclone') + '.'),
       cmd(15, `${codeHtml('/index_start')} ${codeHtml('<community_id> <chat_id> [thread_id]')}`, 'Same engine without the wizard: reuses the connected userbot account straight away.'),
       cmd(16, `${codeHtml('/userbot_add')} ${codeHtml('<label> <api_id> <api_hash> <session>')}`, 'Connect an account (also written ' + codeHtml('/userbotconnect <api_id> <api_hash> <session>') + ', label defaults to main). Re-authenticate with the same label; adding another account never changes the selection.'),
       cmd(17, `${codeHtml('/userbot_accounts')} · ${codeHtml('/userbot_select')} · ${codeHtml('/userbot_status')}`, 'List and switch accounts; health dashboard: identities, live connection, saved follows, backfill and per-topic progress, recent errors. Covers userbot follows only.'),
@@ -8785,12 +8785,15 @@ function ucloneManager(env) {
       return !!community && !!fullUser && (await isGodUserAsync(fullUser, env) || await ensureOwnerOrAdmin(id, user.id, env));
     },
     listCommunities: async (user) => {
-      // Clone destinations are the communities this user created.  The default
-      // system community and unrelated communities are not valid personal
-      // destinations, even for GOD users.
+      // Clone destinations are the communities this user created or staffs
+      // (owner/admin membership).  The default system community and unrelated
+      // communities are not valid destinations, even for GOD users.
       const { results } = await env.DB.prepare(
-        `SELECT id,name FROM communities WHERE id != 'default' AND creator_id = ? ORDER BY name,id`
-      ).bind(user.id).all();
+        `SELECT DISTINCT c.id, c.name FROM communities c
+         LEFT JOIN community_members m ON m.community_id = c.id AND m.user_id = ?
+         WHERE c.id != 'default' AND (c.creator_id = ? OR m.role IN ('owner','admin'))
+         ORDER BY c.name, c.id`
+      ).bind(user.id, user.id).all();
       return results || [];
     },
     telegram: telegramApi,
