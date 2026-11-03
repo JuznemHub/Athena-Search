@@ -52,6 +52,11 @@ assert.equal(resolveChatEndpoint('https://api.openai.com/v1', 'openai', 'gpt-4o-
 assert.equal(resolveChatEndpoint('https://api.anthropic.com', 'anthropic', 'claude-sonnet-4-20250514'), 'https://api.anthropic.com/v1/messages');
 assert.match(helpTextForSection('personal'), /<code>\/search<\/code>\s*<code>&lt;query&gt;<\/code>/);
 assert.match(helpTextForSection('community'), /<code>\/clear_db &lt;id&gt;<\/code>/);
+// Docs hygiene: same-purpose commands share one entry instead of two cryptic ones.
+assert.match(helpTextForSection('personal'), /dumpsmart[\s\S]*?dumpall on/);
+assert.match(helpTextForSection('community'), /<p><b>9\.[\s\S]*?\/kick[\s\S]*?\/clear[\s\S]*?<\/p>/);
+assert.match(helpTextForSection('channels'), /<p><b>11\.[\s\S]*?index_stop[\s\S]*?clone_stop[\s\S]*?<\/p>/);
+assert.match(helpTextForSection('god', true), /forcetags[\s\S]*?tag_untagged/);
 
 const replyEdit = parseTelegramEditPayload('| title: Correct title | notes: Correct notes', {
   text: 'Saved link https://example.com/item'

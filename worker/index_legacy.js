@@ -7622,15 +7622,17 @@ function helpTextForSection(section, isGod = false) {
   if (section === 'personal') {
     return [
       richHeading(3, '👤 Personal brain'),
-      richParagraph('<i>GOD rank only — your private second brain, separate from every community.</i>'),
+      richParagraph('<i>GOD rank only — your private second brain, separate from every community. Dump target is per chat: ' + codeHtml('/mode') + ' shows it, ' + codeHtml('/personal') + ' and ' + codeHtml('/community') + ' switch it (needs a linked chat).</i>'),
       spacer,
-      cmd(1, `${codeHtml('/personal')} · ${codeHtml('/community')}`, 'Switch where dumps go. Personal saves links only you can search; community shares them with members.'),
-      cmd(2, `${codeHtml('/search')} ${codeHtml('<query>')}`, 'Search titles, notes and documents in the active brain. Results come as pages with prev/next buttons.'),
-      cmd(3, `${codeHtml('/ai')} ${codeHtml('<question>')}`, 'Ask your saved content. Answers cite your links and fall back to "no saved link" when nothing matches.'),
-      cmd(4, codeHtml('/export'), 'Export guide: Bot API export by default, session history backfill optional.'),
-      cmd(5, `${codeHtml('/delete')} ${codeHtml('<url>')}`, 'Delete one saved link. Works as a reply too. Personal mode deletes from your brain.'),
-      cmd(6, `${codeHtml('/edit')} ${codeHtml('<url>')} | title: … | notes: …`, "Rewrite a link's title and notes by hand."),
-      cmd(7, `${codeHtml('/dumpall')} ${codeHtml('on|off')} · ${codeHtml('/dumpsmart')}`, 'Multi-link posts: save every URL separately (all) or the primary one only (smart, default).'),
+      richParagraph('<b>Find things</b>'),
+      cmd(1, `${codeHtml('/search')} ${codeHtml('<query>')}`, 'Search titles, notes and documents. Results come as pages with prev/next buttons.'),
+      cmd(2, `${codeHtml('/ai')} ${codeHtml('<question>')}`, 'Ask your saved content. Answers cite your links and say so when nothing matches.'),
+      spacer,
+      richParagraph('<b>Change things</b>'),
+      cmd(3, codeHtml('/export'), 'Export guide: Bot API export by default, session history backfill optional.'),
+      cmd(4, `${codeHtml('/delete')} ${codeHtml('<url>')}`, 'Delete one saved link. Works as a reply too.'),
+      cmd(5, `${codeHtml('/edit')} ${codeHtml('<url>')} | title: … | notes: …`, "Rewrite a link's title and notes by hand."),
+      cmd(6, `${codeHtml('/dumpsmart')} · ${codeHtml('/dumpall on')} · ${codeHtml('/dumpall off')}`, 'One dump-mode setting for multi-link posts: smart keeps the primary link only (default), on saves every URL separately, off goes back to smart.'),
       spacer,
       richParagraph(`<i>Setup: website Settings → Bot — GOD pastes the bot token + ${codeHtml('/id')} from this chat.</i>`)
     ].join('\n');
@@ -7656,8 +7658,8 @@ function helpTextForSection(section, isGod = false) {
       cmd(5, `${codeHtml('/delete')} ${codeHtml('<url>')}`, 'Remove a link from the community brain (reply to a result works too).'),
       cmd(6, `${codeHtml('/edit')} ${codeHtml('<url>')} | notes: …`, 'Fix a title or notes.'),
       cmd(7, `${codeHtml('/topic')} ${codeHtml('<id>|off|here')}`, '<b>Lock, not link.</b> Restricts where the bot replies — dumps from other topics are ignored until ' + codeHtml('/topic off') + '. To copy a topic into a brain use ' + codeHtml('/topic link') + '.'),
-      cmd(8, `${codeHtml('/topic link')} ${codeHtml('[community_id] [community|personal|both]')}`, 'Bind the topic you send it in to a brain: every new post there is copied automatically. Run it inside the topic — the community id defaults to this group\'s.'),
-      cmd(9, `${codeHtml('/kick')} ${codeHtml('<@user|id>')} · ${codeHtml('/clear')}`, 'Remove a member\'s access — they can rejoin later.'),
+      cmd(8, `${codeHtml('/topic_link')} ${codeHtml('[community_id] [community|personal|both]')}`, 'Bind the topic you send it in to a brain: every new post there is copied automatically (also written ' + codeHtml('/topic link') + '). The community id defaults to this group\'s.'),
+      cmd(9, `${codeHtml('/kick')} ${codeHtml('<@user|id>')}`, 'Remove a member\'s access — they can rejoin later. ' + codeHtml('/clear') + ' is the same command.'),
       cmd(10, `${codeHtml('/admin')} · ${codeHtml('/demote')}`, 'Promote or demote — reply to the member\'s message. Owner/GOD only.'),
       spacer,
       richParagraph(`<b>Owner:</b> ${codeHtml('/clear_db <id>')} wipes the community brain · ${codeHtml('/community_delete <id>')} deletes it (reply ${codeHtml('YES_DELETE_…')} to confirm). <i>Cloning lives in 📡 Channels.</i>`)
@@ -7667,37 +7669,34 @@ function helpTextForSection(section, isGod = false) {
   if (section === 'channels') {
     return [
       richHeading(3, '📡 Cloning channels, groups & topics'),
-      richParagraph('<i>Copy accessible Telegram history into a brain. Live indexing is a separate channel/topic binding.</i>'),
+      richParagraph('<i>Two ways to copy Telegram into a brain. <b>Bot mode</b> needs Athena as admin and only sees new posts. <b>Userbot mode</b> (GOD, self-hosted) reads full history through your account and keeps indexing new posts.</i>'),
       spacer,
-      richParagraph('<b>Channels</b>'),
-      cmd(1, 'Add Athena as admin', 'Channel → Manage → Administrators — give it post access.'),
+      richParagraph('<b>Bot live mode — new posts only</b>'),
+      cmd(1, 'Add Athena as admin', 'Channel → Manage → Administrators — give it post access. Groups: run ' + codeHtml('/community_verify') + ' inside the group first.'),
       cmd(2, `${codeHtml('/channel_link')} ${codeHtml('<community_id> <channel_id>')}`, 'Links the channel: every new post is indexed live. IDs start with -100 — forward a post to @userinfobot to find one.'),
       cmd(3, `${codeHtml('/channel_unlink')} ${codeHtml('<channel_id>')}`, 'Stop indexing a channel.'),
-      cmd(4, `${codeHtml('/channel_target')} ${codeHtml('<channel_id> [community|personal|both]')}`, 'Re-route where a linked channel saves (personal/both: GOD only). One argument shows the current target.'),
+      cmd(4, `${codeHtml('/channel_target')} ${codeHtml('<channel_id> [community|personal|both]')}`, 'Re-route where a bot-linked channel saves (personal/both: GOD only). One argument shows the current target. Userbot follows are separate — see /userbot_status.'),
       cmd(5, `${codeHtml('/group_copy')} ${codeHtml('on|off')}`, 'Whole-group copy mode — index everything posted, not just links.'),
       spacer,
-      richParagraph('<b>Groups & forum topics</b>'),
-      cmd(6, `${codeHtml('/clone')} ${codeHtml('[topic_id] [community|personal|both]')}`, 'Bot-only live clone: run inside a linked group where Athena is an administrator. No userbot is required; without a topic id it covers the group and all topics, with a topic id it covers one forum topic. Bot API history is unavailable, so only new posts are indexed.'),
+      richParagraph('<b>Bot live mode — groups & forum topics</b>'),
+      cmd(6, `${codeHtml('/clone')} ${codeHtml('[topic_id] [community|personal|both]')}`, 'Run inside the linked group where Athena is an administrator. Without a topic id it covers the group and all topics; with one it covers that forum topic. History is unavailable to the bot, so only new posts are indexed.'),
       cmd(7, `${codeHtml('/topic_link')} ${codeHtml('[community_id] [community|personal|both]')}`, 'Bind the current forum topic to a brain. Run it inside the topic; the community id is optional when the group is already linked with /community_verify. Alias: ' + codeHtml('/topic link') + '.'),
-      cmd(8, `${codeHtml('/topic_list')} · ${codeHtml('/topic_unlink')}`, 'List topic bindings, or unbind the current topic.'),
-      cmd(9, `${codeHtml('/topic_target')} ${codeHtml('<thread_id> community|personal|both')}`, 'Switch where a linked topic saves. Alias: ' + codeHtml('/topic target') + '.'),
+      cmd(8, `${codeHtml('/topic_list')} · ${codeHtml('/topic_unlink')} · ${codeHtml('/topic_target')} ${codeHtml('<thread_id> target')}`, 'List topic bindings, unbind the current topic, or switch where a linked topic saves (' + codeHtml('/topic target') + ' also works).'),
       spacer,
-      richParagraph('<b>Clone control</b>'),
-      cmd(10, `${codeHtml('/clone_stop')} ${codeHtml('[chat_id]')}`, 'Stop running clones — every one you own, or just that chat\'s.'),
-      cmd(11, `${codeHtml('/stats')}`, 'Totals across every source you clone (links, files, other), then one page per run with topic pages. Bound channels, groups and topics report 🟢 LIVE CLONING: ON and their counts grow as new posts land.'),
-      cmd(12, `${codeHtml('/index_status')} ${codeHtml('[all]')}`, 'Backfill jobs with their ids. ' + codeHtml('all') + ' lists every user\'s jobs (GOD).'),
-      cmd(13, `${codeHtml('/clone_del')} ${codeHtml('<transfer_id>')}`, "Delete everything one clone imported."),
-      cmd(14, `${codeHtml('/delete')} ${codeHtml('<chat_id> [topic_id]')}`, 'Delete a cloned chat or topic (alias: ' + codeHtml('/del') + ').'),
+      richParagraph('<b>Watch & clean up</b>'),
+      cmd(9, `${codeHtml('/stats')}`, 'Newest-first dashboard, one page per source: totals, a fresh-in-24h line, live ON/OFF, and per-topic pages. Counts grow as new posts land.'),
+      cmd(10, `${codeHtml('/index_status')} ${codeHtml('[all]')}`, 'Running and recent backfill jobs with their ids. ' + codeHtml('all') + ' lists every user\'s jobs (GOD).'),
+      cmd(11, `${codeHtml('/index_stop')} ${codeHtml('[chat_id]')}`, 'Stop running backfills — all of yours, or just that chat\'s. ' + codeHtml('/clone_stop') + ' does the same thing.'),
+      cmd(12, `${codeHtml('/clone_del')} ${codeHtml('<job_id|chat_id> [files]')}`, 'Delete everything one clone session imported — or every session for a chat.'),
+      cmd(13, `${codeHtml('/delete')} ${codeHtml('<chat_id> [topic_id]')}`, 'Delete a cloned chat or topic and stop its live follow (' + codeHtml('/del') + ' is the same). With a URL instead of a chat id it deletes one saved link.'),
       spacer,
-      richParagraph('<b>Userbot history + live mode</b> — GOD, self-hosted, DM setup; the selected account must be able to read the source chat'),
-      cmd(15, `${codeHtml('/uclone')} ${codeHtml('<chat_id> [topic_id]')}`, 'Scans accessible history exactly, shows statistics, lets you choose one topic or all topics, then lists Personal or each community database. The destination screen has Back; completed runs return to topic statistics so another topic can be cloned. Live indexing is enabled for the selected scope. Alias: /ubclone. You can also run ' + codeHtml('/uclone <chat_id>') + ' and choose a topic from the buttons.'),
-      cmd(16, `${codeHtml('/userbot_accounts')} · ${codeHtml('/userbot_select')}`, 'GOD, DM only: add, list, select, check status, remove or reauthenticate saved accounts. Setup verifies username, name, ID and masked phone; encrypted credentials and your selection survive restart. Reauthenticate using the same label; adding another account never changes an existing selection.'),
-      cmd(17, `${codeHtml('/userbot_status')}`, 'GOD, DM only: verified account identities, live connection state, saved follows, backfill progress, per-topic progress and deduplicated recent errors. It reports userbot follows only; /clone is the separate Bot API live-clone command.'),
-      cmd(18, `${codeHtml('/userbot_follow')} · ${codeHtml('/userbot_unfollow')}`, 'Add or remove live-follow chats for the userbot. Use /uclone when you want history plus live indexing.'),
-      cmd(19, `${codeHtml('/userbot_disconnect')} · ${codeHtml('/userbot_del')}`, 'Delete all saved accounts, or remove one with ' + codeHtml('/userbot_del <label>') + '. Sessions and follows are deleted, running clones stop, and no replacement account is selected.'),
-      spacer,
-      richParagraph('<b>Legacy backfill</b>'),
-      cmd(20, `${codeHtml('/index_start')} · ${codeHtml('/index_status')} · ${codeHtml('/index_stop')}`, 'Older session-based history backfill. Use /uclone for the guided wizard; /index_start also accepts the short form ' + codeHtml('/index_start <community_id> <chat_id> [topic_id]') + ', which reuses the connected userbot account.'),
+      richParagraph('<b>Userbot mode — history + live (GOD, DM setup)</b>'),
+      cmd(14, `${codeHtml('/uclone')} ${codeHtml('<chat_id> [topic_id]')}`, 'Guided wizard: scans history, shows statistics, lets you pick one topic or all, then the destination. Completed runs return to topic statistics. Live indexing stays on for the chosen scope. Also written ' + codeHtml('/ubclone') + '.'),
+      cmd(15, `${codeHtml('/index_start')} ${codeHtml('<community_id> <chat_id> [thread_id]')}`, 'Same engine without the wizard: reuses the connected userbot account straight away.'),
+      cmd(16, `${codeHtml('/userbot_add')} ${codeHtml('<label> <api_id> <api_hash> <session>')}`, 'Connect an account (also written ' + codeHtml('/userbotconnect <api_id> <api_hash> <session>') + ', label defaults to main). Re-authenticate with the same label; adding another account never changes the selection.'),
+      cmd(17, `${codeHtml('/userbot_accounts')} · ${codeHtml('/userbot_select')} · ${codeHtml('/userbot_status')}`, 'List and switch accounts; health dashboard: identities, live connection, saved follows, backfill and per-topic progress, recent errors. Covers userbot follows only.'),
+      cmd(18, `${codeHtml('/userbot_follow')} ${codeHtml('<chat_id>')} · ${codeHtml('/userbot_unfollow')} ${codeHtml('<chat_id>')}`, 'Add or remove live-follow chats. Prefer /uclone when you also want history.'),
+      cmd(19, `${codeHtml('/userbot_del')} ${codeHtml('<label>')} · ${codeHtml('/userbot_disconnect')}`, 'Remove one account, or disconnect all of them. Follows and running clones stop too.'),
       spacer,
       richParagraph(`<b>Recipes:</b> bot live clone: ${codeHtml('/community_verify')} → run ${codeHtml('/clone')} in the group → ${codeHtml('/stats')}; userbot history + live: ${codeHtml('/userbot_add')} → ${codeHtml('/userbot_select')} → ${codeHtml('/uclone <chat_id>')} → choose destination → ${codeHtml('/stats')}`),
       richParagraph('<i>Cloning never edits the source chat. Bot mode needs Athena in the group; userbot mode needs the selected account in the source chat.</i>')
@@ -7712,11 +7711,11 @@ function helpTextForSection(section, isGod = false) {
       richParagraph('<b>Brains & targets</b>'),
       cmd(1, `${codeHtml('/personal')} · ${codeHtml('/community')} · ${codeHtml('/mode')}`, 'Where your dumps land: private brain or the linked community.'),
       cmd(2, `${codeHtml('/channel_target')} ${codeHtml('<channel_id> community|personal|both')}`, 'Re-route a linked channel\'s indexing target.'),
-      cmd(3, `${codeHtml('/dumpall')} ${codeHtml('on|off')} · ${codeHtml('/dumpsmart')}`, 'Every URL in a post, or the primary one only.'),
+      cmd(3, `${codeHtml('/dumpsmart')} · ${codeHtml('/dumpall on|off')}`, 'One dump-mode setting: smart keeps the primary link only (default), on saves every URL.'),
       spacer,
       richParagraph('<b>Tagging & structure</b>'),
-      cmd(4, `${codeHtml('/forcetags')} ${codeHtml('[community_id]')}`, 'AI tags links that have no tags yet, up to 150 per run — run it again to continue. Links that already carry tags are left alone.'),
-      cmd(5, codeHtml('/tag_untagged'), 'Tags only rows with no real tags — cheap first pass.'),
+      cmd(4, `${codeHtml('/forcetags')} ${codeHtml('[community_id]')}`, 'AI-tag untagged links, 150 per run — run again to continue. Add a community id to stay inside one brain.'),
+      cmd(5, codeHtml('/tag_untagged'), 'Same idea, whole database, background pass with no per-run limit. Either command leaves already-tagged links alone.'),
       cmd(6, codeHtml('/structure'), 'One-pass DB cleanup: strips tracking URLs, merges near-duplicate links, cleans titles and notes, trims multi-link notes to each link’s own section. Runs in the background with live progress.'),
       spacer,
       richParagraph('<b>Backup & import</b>'),
@@ -7730,7 +7729,7 @@ function helpTextForSection(section, isGod = false) {
       cmd(9, `${codeHtml('/setlogchannel')} ${codeHtml('<chat_id>')} ${codeHtml('(/setlog)')}`, 'Mirror operational events to a log channel.'),
       cmd(10, `${codeHtml('/log')} ${codeHtml('[n|clear|dokploy [app] [n]|buildlogs [app] [n]|--json [n]]')}`, 'Real runtime logs: app log tail (default 30), Dokploy container logs, last deployment build output, or machine-readable JSON. AI agents: GET /api/logs?follow=1 (NDJSON).'),
       cmd(11, `${codeHtml('/dok')} ${codeHtml('[apps|status|logs|buildlogs|deploy|redeploy|restart|stop|start]')}`, 'Dokploy control (self-host). deploy/redeploy confirm the accepted request only — follow /dok buildlogs and /dok status.'),
-      cmd(12, `${codeHtml('/db')} · ${codeHtml('/clear_personal_db')} · ${codeHtml('/restart')}`, 'Storage info · wipe your personal brain (confirm with YES) · restart the self-host service.'),
+      cmd(12, `${codeHtml('/db')} · ${codeHtml('/restart')} · ${codeHtml('/clear_personal_db')}`, 'Storage info · restart the service · <b>wipes your personal brain</b> (asks for YES first).'),
       spacer,
       richParagraph('<i>Website Settings → AI keys, bot binding, storage.</i>')
     ].join('\n');
@@ -7743,7 +7742,7 @@ function helpTextForSection(section, isGod = false) {
     `• ${boldHtml('👥 Community')} — setup, joining, moderation`,
     `• ${boldHtml('📡 Channels')} — cloning channels, groups, topics`
   ];
-  if (isGod) sections.push(`• ${boldHtml('🛡 GOD tools')} — structure, import, backup, tagging, logs`);
+  if (isGod) sections.push(`• ${boldHtml('🛡 GOD tools')} — tagging, dupe cleanup, backup, logs, instance`);
   return [
     richHeading(3, '🧭 Athena help'),
     richParagraph('<i>Your second brain: dump links, search them, ask AI.</i>'),
@@ -9078,6 +9077,15 @@ function statsRunPage(run, topicPagesList, topicPage, pre = '', sourceRuns = [ru
   if (state.isForum) lines.push(richParagraph('Topics cloned: ' + doneTopics + ' / ' + totalTopics));
   lines.push(statsCountersText(overall));
   lines.push(statsLiveLine(run.live === true));
+  {
+    const fresh = state.latest || {};
+    const freshLinks = Number(fresh.links || 0);
+    const freshFiles = Number(fresh.files || 0);
+    const freshText = freshLinks + freshFiles > 0
+      ? `+${freshLinks} links · +${freshFiles} files`
+      : 'nothing new';
+    lines.push(richParagraph('🆕 Fresh in the last 24h: ' + escHtml(freshText)));
+  }
   if (state.isForum && topics.length) {
     lines.push(richParagraph('📚 Topics — page ' + (topicPage + 1) + ' / ' + topicPagesList.length + ' · ' + totalTopics + ' total'));
     lines.push('<ul>' + shown.map(statsTopicLine).join('') + '</ul>');
@@ -9754,10 +9762,21 @@ function cloneWriteCounters() {
     savedMarkdown: 0, savedJson: 0, savedHtml: 0, savedOther: 0, savedImages: 0, savedAudio: 0 };
 }
 
-function recordCloneFailure(counters, category) {
+function cloneCheckpointError(counters) {
+  const sample = String(counters?.errorSample || '').trim();
+  return 'Database associations/checkpoints could not be saved. Retry resumes from the last safe page.' +
+    (sample ? ` First failure: ${sample}` : '');
+}
+
+function recordCloneFailure(counters, category, detail) {
   counters.failed++;
   counters.errorCategories ||= {};
   counters.errorCategories[category] = (counters.errorCategories[category] || 0) + 1;
+  // Keep the first concrete message so a failed run says WHAT failed instead
+  // of only showing the generic checkpoint error on /stats and /index_status.
+  if (detail && !counters.errorSample) {
+    counters.errorSample = String(detail?.message ?? detail).replace(/\s+/g, ' ').trim().slice(0, 180) || String(category);
+  }
 }
 
 function addCloneCounters(total, item) {
@@ -10020,7 +10039,7 @@ async function runHistoryIndexJob(env, initialJob, token, runtime = {}) {
         for (;;) {
           if (await stopped()) { await patch({ status: 'stopped' }); break; }
           const messages = await request(() => client.getMessages(job.chat_id, { limit: INDEX_BATCH, offsetId: offset, ...(job.thread_id && String(job.thread_id) !== '1' ? { replyTo: Number(job.thread_id) } : {}) }));
-          if (!messages?.length) { await patch({ status: incomplete ? 'error' : 'done', ...(incomplete ? { error: 'Database associations/checkpoints could not be saved. Retry resumes from the last safe page.' } : {}) }); break; }
+          if (!messages?.length) { await patch({ status: incomplete ? 'error' : 'done', ...(incomplete ? { error: cloneCheckpointError(counters) } : {}) }); break; }
           let next = offset || Infinity;
           for (const message of messages) {
             const mid = Number(message.id);
@@ -10031,7 +10050,7 @@ async function runHistoryIndexJob(env, initialJob, token, runtime = {}) {
             if (job.thread_id && (String(job.thread_id) === '1' ? classification.topicId != null && classification.topicId !== '1' : classification.topicId !== String(job.thread_id))) continue;
             try {
               if (await cloneDatabaseWrite(() => env.DB.prepare('SELECT message_id FROM clone_job_items WHERE job_id=? AND message_id=?').bind(job.id, String(mid)).first())) continue;
-            } catch (_) { incomplete = true; recordCloneFailure(counters, 'database'); continue; }
+            } catch (err) { incomplete = true; recordCloneFailure(counters, 'database', err); continue; }
             const item = cloneWriteCounters();
             countCloneMessage(item, message);
             if (!item.messages) continue;
@@ -10047,11 +10066,12 @@ async function runHistoryIndexJob(env, initialJob, token, runtime = {}) {
             };
             for (const sink of sinks) {
               let postSaved = false;
+              let postError = null;
               for (let attempt = 0; attempt < 3 && !postSaved; attempt++) {
                 try { await persistClonePost(env, job, sink, message, classification, topicId); postSaved = true; }
-                catch (_) { if (attempt < 2) await wait(500 * (attempt + 1)); }
+                catch (err) { postError = err; if (attempt < 2) await wait(500 * (attempt + 1)); }
               }
-              if (!postSaved) { durable = false; continue; }
+              if (!postSaved) { durable = false; recordCloneFailure(counters, 'database', postError); continue; }
               const media = classification.media;
               for (const url of classification.urls) await component(sink, 'url:' + generateUrlHash(url), () => saveBackfillLink(env, job, sink, message, url));
               if (media && media.kind !== 'video') await component(sink, 'media', async () => {
@@ -10080,7 +10100,7 @@ async function runHistoryIndexJob(env, initialJob, token, runtime = {}) {
             }
             if (durable) {
               try { await cloneDatabaseWrite(() => env.DB.prepare('INSERT INTO clone_job_items (job_id,message_id,counters_json) VALUES (?,?,?) ON CONFLICT(job_id,message_id) DO NOTHING').bind(job.id, String(mid), JSON.stringify(item)).run()); }
-              catch (_) { recordCloneFailure(item, 'database'); durable = false; }
+              catch (err) { recordCloneFailure(item, 'database', err); durable = false; }
             }
             if (!durable) incomplete = true;
             addCloneCounters(counters, item);
@@ -10090,7 +10110,7 @@ async function runHistoryIndexJob(env, initialJob, token, runtime = {}) {
           offset = next;
           await cloneDatabaseWrite(() => patch({ ...(!incomplete ? { offset_id: offset } : {}), processed: counters.messages, saved_links: counters.savedLinks, saved_files: counters.savedFiles, saved_docs: counters.savedDocs, saved_pdfs: counters.savedPdfs, skipped_media: counters.skippedVideos, urls_seen: counters.links, dupes_skipped: counters.duplicates, errors: counters.failed, retries: counters.retries, counters_json: JSON.stringify(counters) }));
           await progress();
-          if (job.min_id && offset <= Number(job.min_id)) { await patch({ status: incomplete ? 'error' : 'done', ...(incomplete ? { error: 'Database associations/checkpoints could not be saved. Retry resumes from the last safe page.' } : {}) }); break; }
+          if (job.min_id && offset <= Number(job.min_id)) { await patch({ status: incomplete ? 'error' : 'done', ...(incomplete ? { error: cloneCheckpointError(counters) } : {}) }); break; }
           await wait(INDEX_BATCH_DELAY_MS);
         }
         await progress(true);
@@ -11826,6 +11846,23 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        `SELECT id, group_name, created_by, channel_target FROM community_bots WHERE platform = 'telegram' AND group_id = ? AND community_id IS NOT NULL`
      ).bind(cidArg.startsWith('-') ? cidArg : `-100${cidArg.replace(/^-100/, '')}`).first();
      if (!row) {
+       // The chat may still be cloned through a userbot follow rather than a
+       // bot-mode link — say so plainly instead of sending the user to
+       // /channel_link for a chat that is already being indexed.
+       try {
+         await ensureUserbotTables(env);
+         const normCid = normalizeTgChatId(cidArg.startsWith('-') ? cidArg : `-100${cidArg.replace(/^-100/, '')}`);
+         const follow = await env.DB.prepare(
+           `SELECT label, community_id, target FROM userbot_follows WHERE chat_id = ? OR chat_id LIKE ? LIMIT 1`
+         ).bind(normCid, `${normCid}:%`).first().catch(() => null);
+         if (follow) {
+           await sendTelegramFormatted(token, chatId,
+             `${boldHtml('📡')} ${codeHtml(cidArg)} is cloned by userbot ${codeHtml(follow.label || '?')} → ${codeHtml(follow.community_id || '?')} (${codeHtml(follow.target || 'community')}).\n` +
+             `${italicHtml('/channel_target only re-routes bot-linked channels. This one follows the userbot follow — see /userbot_status.')}`,
+             forumThreadId);
+           return new Response('OK', { status: 200, headers: corsHeaders });
+         }
+       } catch (_) {}
        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No linked channel ${codeHtml(cidArg)}. Link it first with ${codeHtml('/channel_link')}.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
@@ -16826,6 +16863,42 @@ function statsAddCounters(a, b) {
  * Scope: stats for runs owned by tgUserId (falls back to every run when omitted,
  * as GOD dashboards previously saw everything).
  */
+/**
+ * Fresh intake for one source over the rolling 24h, straight from the
+ * destination tables — this is the "latest data" line on the /stats page,
+ * independent of whichever historical run page is open.
+ */
+async function statsLatestActivity(env, target, owner, chatId) {
+  const out = { links: 0, files: 0 };
+  if (!target || !owner || !chatId) return out;
+  const since = Date.now() - 86400000;
+  try {
+    const norm = normalizeTgChatId(chatId);
+    const variants = [String(norm), String(norm).replace(/^-100/, '')];
+    if (target === 'personal') {
+      const r = await env.DB.prepare(
+        'SELECT COUNT(*) AS c FROM personal_links WHERE user_id=? AND created_at>?'
+      ).bind(String(owner), since).first().catch(() => null);
+      out.links = Number(r?.c || 0);
+      const d = await env.DB.prepare(
+        "SELECT COUNT(*) AS c FROM uploaded_documents WHERE scope='personal' AND user_id=? AND created_at>?"
+      ).bind(String(owner), since).first().catch(() => null);
+      out.files = Number(d?.c || 0);
+    } else {
+      const ph = variants.map(() => '?').join(',');
+      const r = await env.DB.prepare(
+        `SELECT COUNT(*) AS c FROM links WHERE community_id=? AND source_chat_id IN (${ph}) AND created_at>?`
+      ).bind(String(owner), ...variants, since).first().catch(() => null);
+      out.links = Number(r?.c || 0);
+      const d = await env.DB.prepare(
+        `SELECT COUNT(*) AS c FROM uploaded_documents WHERE community_id=? AND source_chat_id IN (${ph}) AND created_at>?`
+      ).bind(String(owner), ...variants, since).first().catch(() => null);
+      out.files = Number(d?.c || 0);
+    }
+  } catch (_) {}
+  return out;
+}
+
 export async function buildStatsReport(env, _token = null, scope = null) {
   const now = Date.now();
   await ensureUcloneTables(env).catch(() => {});
@@ -16846,6 +16919,18 @@ export async function buildStatsReport(env, _token = null, scope = null) {
     parents = (r.results || r || []).map((row) => {
       try { const state = JSON.parse(row.stats_json); return ['uclone', 'botclone'].includes(state?.manager) ? { ...row, state } : null; } catch (_) { return null; }
     }).filter((p) => p && (Number(p.expires_at || 0) > now || ['done', 'stopped', 'error'].includes(String(p.state?.stage || ''))));
+    // One page per source, not per run: an old error/stopped transfer must not
+    // linger next to the newer retry of the same chat + destination + owner.
+    // Rows arrive newest-first, so the first row per source key wins.
+    {
+      const seen = new Set();
+      parents = parents.filter((p) => {
+        const key = [normalizeTgChatId(p.chat_id), String(p.target || ''), String(p.community_id || ''), String(p.requester_user_id || '')].join('|');
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
   } catch (_) {}
 
   const ph = (ids) => ids.length ? ids.map(() => '?').join(',') : '';
@@ -16990,8 +17075,9 @@ export async function buildStatsReport(env, _token = null, scope = null) {
       }
     }
     const followKey = [normalizeTgChatId(p.chat_id), String(state.label || ''), String(p.target || ''), String(p.community_id || ''), String(p.requester_user_id || '')].join('|');
+    const latest = await statsLatestActivity(env, p.target, p.target === 'personal' ? p.requester_user_id : p.community_id, p.chat_id);
     runs.push({
-      id: String(p.id), chat_id: normalizeTgChatId(p.chat_id), state: { ...state, overall, requesterTgId: String(p.requester_tg_id || ''), requesterUserId: String(p.requester_user_id || '') },
+      id: String(p.id), chat_id: normalizeTgChatId(p.chat_id), state: { ...state, overall, latest, requesterTgId: String(p.requester_tg_id || ''), requesterUserId: String(p.requester_user_id || '') },
       jobs: agg.rows, live: state.stage === 'running' || agg.rows.some((j) => j.status === 'running' || j.status === 'queued') || liveFollowKeys.has(followKey) || liveBoundChats.has(normalizeTgChatId(p.chat_id)),
       topics, standalone: false,
     });
@@ -17011,7 +17097,8 @@ export async function buildStatsReport(env, _token = null, scope = null) {
       const done = job.status === 'done';
       return { threadId, title: job.topic_name || null, total: { links: c.savedLinks || 0, files: c.savedFiles || 0, other: (c.savedOther || 0) + (c.savedHtml || 0) + (c.savedJson || 0) + (c.savedMarkdown || 0) + (c.savedImages || 0) + (c.savedAudio || 0) }, percent: done ? 100 : 0, done, stateMark: done ? '✅ COMPLETE' : active ? '🟢 LIVE' : '⏳ PENDING' };
     });
-    const state = { ...s.state, isForum: topics.length > 0, stage: active ? 'running' : (s.jobs.some((j) => j.status === 'error') ? 'error' : 'done'), sourceType: topics.length ? 'group' : null, username: null, overall, requesterTgId: String(s.requester_tg_id || ''), requesterUserId: String(s.user_id || '') };
+    const latest = await statsLatestActivity(env, s.target, s.target === 'personal' ? s.user_id : s.community_id, s.chat_id);
+    const state = { ...s.state, isForum: topics.length > 0, stage: active ? 'running' : (s.jobs.some((j) => j.status === 'error') ? 'error' : 'done'), sourceType: topics.length ? 'group' : null, username: null, overall, latest, requesterTgId: String(s.requester_tg_id || ''), requesterUserId: String(s.user_id || '') };
     runs.push({ id: 'standalone:' + s.jobs.map((j) => j.id).sort().join(','), chat_id: normalizeTgChatId(s.chat_id), state, jobs: s.jobs, live: active || s.live || liveBoundChats.has(normalizeTgChatId(s.chat_id)), topics, standalone: true });
   }
 

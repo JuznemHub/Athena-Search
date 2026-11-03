@@ -167,6 +167,24 @@ try {
   // Non-GOD scope never sees the other user's standalone clone.
   assert.ok(!report.runs.some((r) => r.chat_id === '-1009999999999'), 'foreign standalone job excluded by requester scope');
 
+  // Old runs of the same source collapse: an earlier error parent for the same
+  // chat + destination + owner must not add another page next to the retry.
+  insertParent('pc_chan_old', '-1008888888888', '123456789', 'u_stats', {
+    manager: 'uclone', stage: 'error', revision: 3, label: 'alpha', target: 'personal', sourceType: 'channel',
+    sourceName: 'Stats Channel', isForum: false, destinationName: 'Personal brain', counters: countersB,
+  }, Date.now() - 86400000);
+  sql.prepare(`INSERT INTO personal_links (id,user_id,url,url_hash,title,notes,tags,created_at)
+    VALUES (?,?,?,?,?,?,?,?)`).run('ix_fresh1', 'u_stats', 'https://example.com/fresh', 'freshhash1', 'Fresh', '', '[]', Date.now() - 3600000);
+  sql.prepare(`INSERT INTO personal_links (id,user_id,url,url_hash,title,notes,tags,created_at)
+    VALUES (?,?,?,?,?,?,?,?)`).run('ix_stale1', 'u_stats', 'https://example.com/stale', 'stalehash1', 'Stale', '', '[]', Date.now() - 90000000);
+  const report2 = await buildStatsReport(env, null, { requesterTgId: '123456789', athenaUserId: 'u_stats' });
+  assert.equal(report2.runs.length, 2, 'stale error parent of the same source adds no page');
+  assert.ok(!report2.runs.some((r) => r.id === 'pc_chan_old'), 'only the newest parent per source survives');
+  const chanRun2 = report2.runs.find((r) => r.id === 'pc_chan');
+  assert.equal(chanRun2.state.latest.links, 1, 'latest line counts only the last-24h intake');
+  const freshView = formatStatsRichReport(report2, { page: report2.runs.indexOf(chanRun2) });
+  assert.match(telegramText(freshView.html), /Fresh in the last 24h/, 'run page carries the latest-data status line');
+
   // ---- Renderer: compact overview, live flag, per-run pages, buttons
   const view = formatStatsRichReport(report);
   assert.equal(view.totalRuns, 2);
