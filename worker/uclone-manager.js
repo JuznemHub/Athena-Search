@@ -542,8 +542,30 @@ export function createUcloneManager(env, deps) {
       if (!label) return true;
       if (action === 'select') {
         await account(label);
+        const previous = await db.prepare('SELECT label FROM userbot_selections WHERE requester_tg_id=?').bind(run.requester_tg_id).first().catch(() => null);
         await db.prepare('INSERT INTO userbot_selections (requester_tg_id,label,updated_at) VALUES (?,?,?) ON CONFLICT(requester_tg_id) DO UPDATE SET label=excluded.label,updated_at=excluded.updated_at').bind(run.requester_tg_id, label, clock()).run();
+        // Live follows are bound to an account label. Move this requester's
+        // follows (or the ones on their previous selection) to the newly
+        // selected account wherever it can see the chat, so live cloning
+        // continues without a separate /userbot_follow per chat.
+        let moved = 0; const stuck = [];
+        try {
+          const prevLabel = previous?.label ? String(previous.label) : '';
+          const rows = await db.prepare('SELECT chat_id, label FROM userbot_follows WHERE created_by=? OR label=?').bind(run.requester_user_id, prevLabel).all();
+          for (const f of rows?.results || rows || []) {
+            if (String(f.label) === label) continue;
+            const base = String(f.chat_id || '').split(':')[0];
+            let visible = false;
+            try { visible = await deps.canSeeChat?.(label, base); } catch (_) { visible = false; }
+            if (visible) { await db.prepare('UPDATE userbot_follows SET label=? WHERE chat_id=?').bind(label, f.chat_id).run(); moved++; }
+            else stuck.push(String(f.chat_id));
+          }
+        } catch (_) {}
         await accounts(run, context.token);
+        if (moved || stuck.length) {
+          await send(context, `<b>🔁 Live follows moved to ${esc(label)}:</b> ${moved} chat${moved === 1 ? '' : 's'}` +
+            (stuck.length ? `\n${esc(stuck.length)} not visible to ${esc(label)}, kept on the old account: ${esc(stuck.slice(0, 5).join(', '))}${stuck.length > 5 ? '…' : ''}` : ''));
+        }
       } else if (action === 'remove') {
         run.state.revision++;
         await edit(run, context.token, `Remove account <code>${esc(label)}</code>? Active clones using it will stop.`, [[button(run, 'Confirm removal', 'removeok', index), button(run, 'Keep account', 'accounts', run.state.page)]], true);

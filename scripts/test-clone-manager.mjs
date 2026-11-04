@@ -76,6 +76,7 @@ async function fixture({ forum = false, sourceClass = 'Channel', topics = [7, 9]
     ensureTables: async () => {},
     startAccount: async label => { f.connections.push(label); return { ok: true }; },
     getClient: label => { f.clientLabels.push(label); return client; },
+    canSeeChat: async (label, chat) => !(f.blindChats || []).includes(String(chat)),
     beforeRequest: async () => {}, onFlood: async (_label, seconds) => { f.now += seconds * 1000; },
     listCommunities: async () => [{ id: 'c_a', name: 'Community A' }, { id: 'c_b', name: 'Community B' }],
     authorizeCommunity: async (user, id) => user.id === 'u_fixture' && !f.denied.has(id) && ['c_a', 'c_b'].includes(id),
@@ -362,6 +363,24 @@ await scenario('rich account callbacks and classic rejection fallback retain ide
   await f.click('Back');
   await f.click('Add Account');
   assert.match(f.edits().at(-1).body.text, /\/userbot_add/);
+});
+
+await scenario('selecting an account migrates live follows it can see', {}, async f => {
+  f.sql.exec(`CREATE TABLE userbot_follows (chat_id TEXT PRIMARY KEY, label TEXT, community_id TEXT, target TEXT, created_by TEXT, created_at INTEGER);`);
+  // Setup already selected beta; move to alpha, seed follows, then select beta.
+  await f.select('alpha');
+  f.sql.prepare('INSERT INTO userbot_follows (chat_id,label,community_id,target,created_by,created_at) VALUES (?,?,?,?,?,?)')
+    .run('-100111', 'alpha', 'c_a', 'community', 'u_fixture', f.now);
+  f.sql.prepare('INSERT INTO userbot_follows (chat_id,label,community_id,target,created_by,created_at) VALUES (?,?,?,?,?,?)')
+    .run('-100222', 'alpha', 'c_a', 'community', 'u_fixture', f.now);
+  f.blindChats = ['-100222'];
+  await f.select('beta');
+  const labels = Object.fromEntries(f.sql.prepare('SELECT chat_id, label FROM userbot_follows').all().map(r => [r.chat_id, r.label]));
+  assert.equal(labels['-100111'], 'beta', 'visible follow moves to the selected account');
+  assert.equal(labels['-100222'], 'alpha', 'chat the new account cannot see stays put');
+  const summary = f.sent.map(s => s.body?.rich_message?.html || s.body?.text || '').join('\n');
+  assert.match(summary, /Live follows moved to beta/, 'migration is reported');
+  assert.match(summary, /-100222/, 'unmoved chat is named');
 });
 
 console.log(`clone manager workflow tests passed (${passed.length} cases):\n${passed.join('\n')}`);

@@ -39,7 +39,7 @@ const hooks = registerHooks({ resolve(specifier, context, nextResolve) {
 } });
 
 const { default: worker, ensureIndexTables, ensureUcloneTables } = await import('../worker/index.js');
-const { buildStatsReport, formatStatsRichReport, resolveJobLabel, STATS_TOPICS_PAGE_MAX } = await import('../worker/index_legacy.js');
+const { buildStatsReport, formatStatsRichReport, resolveJobLabel, STATS_TOPICS_PAGE_MAX, ensureChatFollow } = await import('../worker/index_legacy.js');
 
 const sql = new DatabaseSync(':memory:');
 sql.exec(readFileSync(new URL('../worker/schema.sql', import.meta.url), 'utf8')
@@ -243,6 +243,15 @@ try {
   const litSrc = report4.sources.find((s) => s.chat_id === '-1001313131313');
   assert.ok(darkSrc && darkSrc.live === false, 'topic binding without capture path reports LIVE OFF');
   assert.ok(litSrc && litSrc.live === true, 'topic binding with a follow reports LIVE ON');
+
+  // Cloning implies live: the shared follow helper upserts the chat under the
+  // cloning account (and binds the single topic), so backfills never end dark.
+  const followed = await ensureChatFollow(env, { chatId: '-1007777777777', threadId: '', label: 'beta', communityId: 'c_x', target: 'community', createdBy: 'u_stats' });
+  assert.equal(followed, '-1007777777777');
+  assert.equal(sql.prepare('SELECT label, community_id FROM userbot_follows WHERE chat_id=?').get('-1007777777777').label, 'beta', 'backfill subscribes the chat under its own account');
+  await ensureChatFollow(env, { chatId: '-1007777777777', threadId: '9', label: 'beta', communityId: 'c_x', target: 'community', createdBy: 'u_stats' });
+  assert.ok(sql.prepare('SELECT chat_id FROM userbot_follows WHERE chat_id=?').get('-1007777777777:9'), 'single-topic backfill follows the topic key');
+  assert.ok(sql.prepare('SELECT chat_id FROM telegram_topic_bindings WHERE chat_id=? AND thread_id=?').get('-1007777777777', '9'), 'topic backfill binds the topic');
   const chanSrcIdx = report2.sources.findIndex((s) => s.chat_id === '-1008888888888');
   assert.ok(chanSrcIdx >= 0, 'channel source present on the dashboard');
   const chanSrc = report2.sources[chanSrcIdx];

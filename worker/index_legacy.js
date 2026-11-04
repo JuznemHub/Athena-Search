@@ -8758,26 +8758,43 @@ async function ensureIndexJobColumns(env) {
 }
 
 const UCLONE_MANAGERS = new WeakMap();
+
+/**
+ * Subscribing a chat for live capture under the account that clones it.
+ * Cloning a chat must imply live indexing afterwards — otherwise a backfill
+ * finishes and the chat goes dark with no follow row to explain why. Shared
+ * by the uclone wizard, /index_start, range clones and account migration.
+ */
+export async function ensureChatFollow(env, { chatId, threadId = '', label, communityId = '', target = 'community', createdBy = '' }) {
+  const followChat = `${normalizeTgChatId(chatId)}${threadId ? ':' + threadId : ''}`;
+  await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at)
+    VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET label=excluded.label, community_id=excluded.community_id,
+    target=excluded.target, created_by=excluded.created_by`).bind(followChat, label, communityId || '', target, createdBy, Date.now()).run();
+  if (threadId) {
+    await ensureTopicBindingTable(env);
+    await env.DB.prepare(`INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at)
+      VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id) DO UPDATE SET community_id=excluded.community_id,
+      target=excluded.target, created_by=excluded.created_by`).bind('tb_' + Date.now().toString(36) + '_' + randomToken().slice(0, 5), normalizeTgChatId(chatId), threadId, communityId || '', target, createdBy, Date.now()).run();
+  }
+  return followChat;
+}
+
 function ucloneManager(env) {
   if (UCLONE_MANAGERS.has(env)) return UCLONE_MANAGERS.get(env);
   const manager = createUcloneManager(env, {
     ensureTables: async () => { await ensureUserbotTables(env); await ensureIndexTables(env); },
     startAccount: (label) => startUserbotAccount(env, label),
     getClient: (label) => USERBOT_ACCOUNTS.get(label)?.client,
+    canSeeChat: async (label, chatId) => {
+      try {
+        const acc = USERBOT_ACCOUNTS.get(label);
+        if (!acc?.client) return false;
+        return await primeEntity(acc.client, normalizeTgChatId(chatId), 15_000);
+      } catch (_) { return false; }
+    },
     stopAccount: (label) => stopUserbotAccount(env, label),
     startJob: (options) => startBackfillJob(env, options),
-    ensureFollow: async ({ chatId, threadId = '', label, communityId = '', target, createdBy }) => {
-      const followChat = `${normalizeTgChatId(chatId)}${threadId ? ':' + threadId : ''}`;
-      await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at)
-        VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET label=excluded.label, community_id=excluded.community_id,
-        target=excluded.target, created_by=excluded.created_by`).bind(followChat, label, communityId || '', target, createdBy, Date.now()).run();
-      if (threadId) {
-        await ensureTopicBindingTable(env);
-        await env.DB.prepare(`INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at)
-          VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id) DO UPDATE SET community_id=excluded.community_id,
-          target=excluded.target, created_by=excluded.created_by`).bind('tb_' + Date.now().toString(36) + '_' + randomToken().slice(0, 5), normalizeTgChatId(chatId), threadId, communityId || '', target, createdBy, Date.now()).run();
-      }
-    },
+    ensureFollow: async (opts) => ensureChatFollow(env, opts),
     runJob: (job, token) => runHistoryIndexJob(env, job, token),
     authorizeCommunity: async (user, id) => {
       const fullUser = await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(user.id).first();
@@ -9817,6 +9834,12 @@ async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser,
     VALUES (?,?,?,?,'queued',0,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`)
     .bind(jobId, communityIdArg || '', cid, athenaUser.id, chatId, Date.now(), Date.now(), threadArg || null, minId ? Number(minId) : null, maxId == null || maxId === '' ? null : Number(maxId), chatName, userbotLabel, target, parentId, silentProgress ? 1 : 0, knownTotal == null ? 0 : Number(knownTotal), knownTotal == null ? 0 : 1, progressMsgId, forumThreadId == null ? null : String(forumThreadId), topicName).run();
   const job = await env.DB.prepare('SELECT * FROM index_jobs WHERE id=?').bind(jobId).first();
+  // A backfill subscribes the chat for live capture under the same account:
+  // cloning a chat implies live indexing afterwards, or the chat goes dark
+  // the moment history ends. Upsert follows the chat (or the single topic).
+  try {
+    await ensureChatFollow(env, { chatId: cid, threadId: threadArg || '', label: userbotLabel, communityId: target === 'personal' ? '' : communityIdArg || '', target, createdBy: athenaUser.id });
+  } catch (_) {}
   runInBackground(env, runHistoryIndexJob(env, job, token));
   if (!silentProgress) await sendTelegramFormatted(token, chatId, `Backfill started: ${codeHtml(cid)} → ${escHtml(communityName || communityIdArg || 'Personal brain')}. Use /index_stop to stop.`, forumThreadId);
   return { ok: true, jobId };
