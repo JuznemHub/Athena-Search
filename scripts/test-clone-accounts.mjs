@@ -167,7 +167,7 @@ try {
   const unsignedCalls = sent.length;
   await deliver({ message: { message_id: 1, from, chat, text: '/userbot_accounts' } }, env, false);
   assert.equal(sent.length, unsignedCalls, 'Unsigned delivery cannot touch Telegram');
-  for (const alias of ['/userbot_add', '/userbotadd', '/userbot_connect', '/userbotconnect', '/index_start', '/indexstart', '/backfill']) {
+  for (const alias of ['/userbot_add', '/userbotadd', '/userbot_connect', '/userbotconnect', '/index_start', '/indexstart']) {
     await deliver({ edited_message: { message_id: updateId + 1, from, chat,
       text: `  ${alias.toUpperCase()}@FixtureBot fixture-api-hash fixture-session-expired` } });
   }

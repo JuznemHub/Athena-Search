@@ -360,17 +360,22 @@ try {
   assert.equal(JSON.parse(botState.stats_json).stage, 'running', 'confirmed bot clone remains a live run');
   assert.equal(sql.prepare('SELECT copy_text FROM community_bots WHERE id=?').get('b_bot').copy_text, 1, 'whole-group bot clone enables full-copy mode');
 
-  // /channel_target on a userbot-followed chat without a bot-mode link names
-  // the follow instead of sending the user to /channel_link for a chat that
-  // is already being indexed.
+  // One-arg /channel_link inspects: on a userbot-followed chat without a
+  // bot-mode link it names the follow instead of bouncing the user to link
+  // a chat that is already being indexed. Re-running the full form re-routes.
+  // /clone_stop is a real alias of /index_stop (the help panel promises it).
+  sent.length = 0;
+  await deliver({ message: { message_id: 702, from, chat, text: '/clone_stop' } });
+  const stopReply = sent.findLast((c) => c.method === 'sendMessage');
+  assert.ok(stopReply && /No running backfill jobs/.test(stopReply.body.text || ''), '/clone_stop reaches the stop handler');
   sql.prepare('INSERT INTO userbot_follows (chat_id,label,community_id,target,created_by,created_at) VALUES (?,?,?,?,?,?)')
     .run('-1004444444444', 'alpha', 'c_bot', 'community', 'u_bot', Date.now());
   sent.length = 0;
-  await deliver({ message: { message_id: 701, from, chat, text: '/channel_target -1004444444444' } });
+  await deliver({ message: { message_id: 701, from, chat, text: '/channel_link -1004444444444' } });
   const targetReply = sent.findLast((c) => c.method === 'sendMessage');
-  assert.ok(targetReply && /userbot/i.test(targetReply.body.text || ''), 'userbot-followed chat is named, not sent to /channel_link');
+  assert.ok(targetReply && /userbot/i.test(targetReply.body.text || ''), 'userbot-followed chat is named by the inspect form');
   assert.match(targetReply.body.text || '', /-1004444444444/);
-  console.log('clone stats fixtures passed: managed parents+children counters, requester/destination/account isolation, compact overview with source links, LIVE flag from actual job state, successful vs copying counters, completed/pending/current topics with 100% and bars, 100-topic pagination, run pagination, callback round-trip with auth guard, telegram-safe HTML, userbot-aware channel_target');
+  console.log('clone stats fixtures passed: managed parents+children counters, requester/destination/account isolation, compact overview with source links, LIVE flag from actual job state, successful vs copying counters, completed/pending/current topics with 100% and bars, 100-topic pagination, run pagination, callback round-trip with auth guard, telegram-safe HTML, single-command link inspect');
 } finally {
   await drain();
   hooks.deregister();

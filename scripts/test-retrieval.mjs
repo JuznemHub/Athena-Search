@@ -54,7 +54,10 @@ assert.match(helpTextForSection('personal'), /<code>\/search<\/code>\s*<code>&lt
 assert.match(helpTextForSection('community'), /<code>\/clear_db &lt;id&gt;<\/code>/);
 // Docs hygiene: same-purpose commands share one entry instead of two cryptic ones.
 assert.match(helpTextForSection('personal'), /dumpsmart[\s\S]*?dumpall on/);
-assert.match(helpTextForSection('community'), /<p><b>9\.[\s\S]*?\/kick[\s\S]*?\/clear[\s\S]*?<\/p>/);
+assert.match(helpTextForSection('community'), /<p><b>9\.[\s\S]*?\/kick[\s\S]*?<\/p>/);
+assert.doesNotMatch(helpTextForSection('community'), /<code>\/clear<\/code>/, 'removed /clear dupe stays out of help');
+assert.doesNotMatch(helpTextForSection('channels'), /<code>\/follow<\/code>|<code>\/backfill<\/code>/, 'removed legacy spellings stay out of help');
+assert.doesNotMatch(helpTextForSection('god', true), /<code>\/restore<\/code>/, 'removed /restore dupe stays out of help');
 assert.match(helpTextForSection('channels'), /<p><b>11\.[\s\S]*?index_stop[\s\S]*?clone_stop[\s\S]*?<\/p>/);
 assert.match(helpTextForSection('god', true), /forcetags[\s\S]*?tag_untagged/);
 
