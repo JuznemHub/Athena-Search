@@ -15,6 +15,7 @@ export function cloneFailure(error) {
   const text = String(error?.errorMessage || error?.message || error || '');
   if (/AUTH_KEY|SESSION_|USER_DEACTIVATED|UNAUTHORIZED|decrypt/i.test(text)) return { category: 'session', message: 'Selected account needs reauthentication. In a DM, use /userbot_add with the same label, then retry this clone.' };
   if (/CHANNEL_PRIVATE|CHAT_FORBIDDEN|CHANNEL_INVALID|CHAT_ADMIN_REQUIRED|permission|cannot see/i.test(text)) return { category: 'permission', message: 'The selected account cannot read this source. Restore its access, then retry.' };
+  if (/input entity|Could not find|ENTITY_NOT_FOUND|PEER_ID_INVALID|USERNAME_INVALID|USERNAME_NOT_OCCUPIED/i.test(text)) return { category: 'permission', message: 'The selected account has never seen this chat. Open it once in that account (join if private), or run the clone with an account that already has it.' };
   if (/FLOOD|429/i.test(text) || Number(error?.seconds) > 0) return { category: 'flood', message: 'Telegram requested a pause. This clone will wait before retrying.' };
   if (/timeout|ECONN|network|disconnect/i.test(text)) return { category: 'network', message: 'Telegram connection failed after bounded retries. Retry the clone when the connection is restored.' };
   if (/CONVERSION|convert/i.test(text)) return { category: 'conversion', message: 'The original file could not be converted. Its failure is recorded; other items continue.' };

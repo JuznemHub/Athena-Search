@@ -39,7 +39,7 @@ const hooks = registerHooks({ resolve(specifier, context, nextResolve) {
 } });
 
 const { default: worker, ensureIndexTables, ensureUcloneTables } = await import('../worker/index.js');
-const { buildStatsReport, formatStatsRichReport, STATS_TOPICS_PAGE_MAX } = await import('../worker/index_legacy.js');
+const { buildStatsReport, formatStatsRichReport, resolveJobLabel, STATS_TOPICS_PAGE_MAX } = await import('../worker/index_legacy.js');
 
 const sql = new DatabaseSync(':memory:');
 sql.exec(readFileSync(new URL('../worker/schema.sql', import.meta.url), 'utf8')
@@ -100,6 +100,16 @@ try {
     chat_id TEXT PRIMARY KEY, label TEXT NOT NULL DEFAULT 'main',
     community_id TEXT NOT NULL, target TEXT NOT NULL DEFAULT 'community',
     created_by TEXT, created_at BIGINT NOT NULL)`);
+  // Backfill account choice honors the requester's own selection first.
+  sql.exec(`CREATE TABLE IF NOT EXISTS userbot_selections (requester_tg_id TEXT PRIMARY KEY, label TEXT NOT NULL, updated_at BIGINT NOT NULL);`);
+  sql.prepare(`INSERT INTO userbot_accounts (label, enabled) VALUES ('beta', 1) ON CONFLICT(label) DO UPDATE SET enabled=1`).run();
+  sql.prepare(`INSERT INTO users (id, username, created_at, provider, provider_id, telegram_api_id) VALUES (?,?,?,?,?,?)`)
+    .run('u_sel', 'sel', Date.now(), 'telegram', '999000111', '999000111');
+  sql.prepare(`INSERT INTO userbot_selections (requester_tg_id, label, updated_at) VALUES (?,?,?)`)
+    .run('999000111', 'beta', Date.now());
+  assert.equal(await resolveJobLabel(env, 'u_sel'), 'beta', 'requester selection wins over alphabetical first');
+  assert.equal(await resolveJobLabel(env, 'u_stats'), 'alpha', 'no selection falls back to first enabled account');
+  assert.equal(await resolveJobLabel(env, 'u_missing'), 'alpha', 'unknown user falls back to first enabled account');
 
   // ---- Fixture data: one running forum clone, one completed channel clone,
   // and another user's standalone clone. Scopes must never mix.

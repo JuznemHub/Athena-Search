@@ -7692,7 +7692,7 @@ function helpTextForSection(section, isGod = false) {
       spacer,
       richParagraph('<b>Userbot mode — history + live (GOD, DM setup)</b>'),
       cmd(14, `${codeHtml('/uclone')} ${codeHtml('<chat_id> [topic_id]')}`, 'Guided wizard: scans history, shows statistics, lets you pick one topic or all, then the destination (Personal or a community you created or staff as owner/admin — nothing shows means neither). A chat the userbot already follows gets its community pinned first. Also written ' + codeHtml('/ubclone') + '.'),
-      cmd(15, `${codeHtml('/index_start')} ${codeHtml('<community_id> <chat_id> [thread_id]')}`, 'Same engine without the wizard: reuses the connected userbot account straight away.'),
+      cmd(15, `${codeHtml('/index_start')} ${codeHtml('<community_id> <chat_id> [thread_id]')}`, 'Same engine without the wizard: runs as your selected userbot account (' + codeHtml('/userbot_select') + '), first enabled account if none.'),
       cmd(16, `${codeHtml('/userbot_add')} ${codeHtml('<label> <api_id> <api_hash> <session>')}`, 'Connect an account (also written ' + codeHtml('/userbotconnect <api_id> <api_hash> <session>') + ', label defaults to main). Re-authenticate with the same label; adding another account never changes the selection.'),
       cmd(17, `${codeHtml('/userbot_accounts')} · ${codeHtml('/userbot_select')} · ${codeHtml('/userbot_status')}`, 'List and switch accounts; health dashboard: identities, live connection, saved follows, backfill and per-topic progress, recent errors. Covers userbot follows only.'),
       cmd(18, `${codeHtml('/userbot_follow')} ${codeHtml('<chat_id>')} · ${codeHtml('/userbot_unfollow')} ${codeHtml('<chat_id>')}`, 'Add or remove live-follow chats. Prefer /uclone when you also want history.'),
@@ -9804,7 +9804,7 @@ async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser,
   await ensureUserbotTables(env);
   await ensureIndexTables(env);
   const cid = normalizeTgChatId(chatIdArg);
-  if (!userbotLabel) userbotLabel = (await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled=1 ORDER BY label LIMIT 1').first())?.label;
+  if (!userbotLabel) userbotLabel = await resolveJobLabel(env, athenaUser?.id);
   if (!userbotLabel) return { ok: false, reason: 'No saved account. Use /userbot_add in a DM.' };
   if (!CHANNEL_TARGETS.has(target) || !athenaUser?.id || (target !== 'personal' && !communityIdArg)) throw new Error('Invalid clone destination');
   const active = await env.DB.prepare("SELECT id FROM index_jobs WHERE chat_id=? AND COALESCE(thread_id,'')=COALESCE(?,'') AND userbot_label=? AND target=? AND community_id=? AND user_id=? AND COALESCE(parent_id,'')=COALESCE(?,'') AND status IN ('queued','running','stopping')")
@@ -9849,6 +9849,31 @@ function cloneCheckpointError(counters) {
   const sample = String(counters?.errorSample || '').trim();
   return 'Database associations/checkpoints could not be saved. Retry resumes from the last safe page.' +
     (sample ? ` First failure: ${sample}` : '');
+}
+
+/**
+ * Which userbot account a backfill should run as: the requester's own
+ * selection first (their /userbot_select choice), the first enabled account
+ * only as a fallback.  Picking alphabetically first silently runs other
+ * people's jobs on the wrong account — e.g. ripper failing on a chat only
+ * the requester's account can see.
+ */
+async function resolveJobLabel(env, athenaUserId) {
+  try {
+    if (athenaUserId) {
+      const u = await env.DB.prepare('SELECT telegram_api_id FROM users WHERE id=?').bind(String(athenaUserId)).first().catch(() => null);
+      const tg = u?.telegram_api_id ? String(u.telegram_api_id) : '';
+      if (tg) {
+        const sel = await env.DB.prepare('SELECT label FROM userbot_selections WHERE requester_tg_id=?').bind(tg).first().catch(() => null);
+        if (sel?.label) {
+          const ok = await env.DB.prepare('SELECT label FROM userbot_accounts WHERE label=? AND enabled=1').bind(sel.label).first().catch(() => null);
+          if (ok) return sel.label;
+        }
+      }
+    }
+  } catch (_) {}
+  const first = await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled=1 ORDER BY label LIMIT 1').first().catch(() => null);
+  return first?.label || '';
 }
 
 function recordCloneFailure(counters, category, detail) {
@@ -10042,8 +10067,7 @@ async function runHistoryIndexJob(env, initialJob, token, runtime = {}) {
     const job = await env.DB.prepare('SELECT * FROM index_jobs WHERE id=?').bind(initialJob.id).first();
     if (!job || ['done', 'stopped', 'error'].includes(job.status)) return;
     if (!job.userbot_label) {
-      const selected = await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled=1 ORDER BY label LIMIT 1').first();
-      job.userbot_label = selected?.label || '';
+      job.userbot_label = await resolveJobLabel(env, job.user_id);
       await env.DB.prepare('UPDATE index_jobs SET userbot_label=? WHERE id=?').bind(job.userbot_label, job.id).run();
     }
     return withCloneAccount(job.userbot_label, async () => {
@@ -17310,5 +17334,6 @@ export {
   syncAiConfigToPeer,
   syncSteroidToPeer,
   formatStatsRichReport,
+  resolveJobLabel,
   STATS_TOPICS_PAGE_MAX,
 };
