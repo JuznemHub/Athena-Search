@@ -222,6 +222,27 @@ try {
   assert.ok(!report3.runs.some((r) => r.id === 'pc_idle_dest'), 'idle destination shells are not runs');
   assert.ok(!report3.sources.some((s) => s.chat_id === 'accounts'), 'no accounts row on the dashboard');
   assert.equal(report3.sources.filter((s) => s.chat_id === '-1007777777777').length, 1, 'unfinished wizard adds no second row for the same chat');
+  // A topic binding alone ingests nothing: bot updates only reach chats the
+  // bot is in, userbot posts only match userbot_follows rows. A topic-bound
+  // chat whose follows left with their account must report LIVE OFF, while
+  // the same binding with a live follow stays ON.
+  sql.exec(`CREATE TABLE IF NOT EXISTS telegram_topic_bindings (
+    id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, thread_id TEXT,
+    community_id TEXT, target TEXT NOT NULL DEFAULT 'community',
+    created_by TEXT, created_at BIGINT NOT NULL)`);
+  insertChild('ij_dark', null, '-1001212121212', null, 'community', 'c_bot', 'u_stats', 'done', { messages: 4, savedLinks: 3, savedLinkPosts: 2 });
+  sql.prepare('INSERT INTO telegram_topic_bindings (id,chat_id,thread_id,community_id,target,created_by,created_at) VALUES (?,?,?,?,?,?,?)')
+    .run('tb_dark', '-1001212121212', '1', 'c_bot', 'community', 'u_stats', Date.now());
+  insertChild('ij_lit', null, '-1001313131313', null, 'community', 'c_bot', 'u_stats', 'done', { messages: 4, savedLinks: 3, savedLinkPosts: 2 });
+  sql.prepare('INSERT INTO telegram_topic_bindings (id,chat_id,thread_id,community_id,target,created_by,created_at) VALUES (?,?,?,?,?,?,?)')
+    .run('tb_lit', '-1001313131313', '1', 'c_bot', 'community', 'u_stats', Date.now());
+  sql.prepare('INSERT INTO userbot_follows (chat_id,label,community_id,target,created_by,created_at) VALUES (?,?,?,?,?,?)')
+    .run('-1001313131313', 'alpha', 'c_bot', 'community', 'u_stats', Date.now());
+  const report4 = await buildStatsReport(env, null, { requesterTgId: '123456789', athenaUserId: 'u_stats' });
+  const darkSrc = report4.sources.find((s) => s.chat_id === '-1001212121212');
+  const litSrc = report4.sources.find((s) => s.chat_id === '-1001313131313');
+  assert.ok(darkSrc && darkSrc.live === false, 'topic binding without capture path reports LIVE OFF');
+  assert.ok(litSrc && litSrc.live === true, 'topic binding with a follow reports LIVE ON');
   const chanSrcIdx = report2.sources.findIndex((s) => s.chat_id === '-1008888888888');
   assert.ok(chanSrcIdx >= 0, 'channel source present on the dashboard');
   const chanSrc = report2.sources[chanSrcIdx];

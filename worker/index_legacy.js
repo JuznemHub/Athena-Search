@@ -17065,24 +17065,34 @@ export async function buildStatsReport(env, _token = null, scope = null) {
     const { results: followRows } = await env.DB.prepare('SELECT chat_id, label, community_id, target, created_by FROM userbot_follows').all();
     for (const f of followRows || []) liveFollowKeys.add([normalizeTgChatId(String(f.chat_id || '').split(':')[0]), String(f.label || ''), String(f.target || ''), String(f.community_id || ''), String(f.created_by || '')].join('|'));
   } catch (_) {}
-  // Bot-mode live bindings. A linked channel, a whole-group copy or a bound
-  // topic keeps ingesting after every backfill job has finished, so a run's
-  // LIVE flag has to come from the binding too — job status alone reports OFF
-  // between posts, which reads as "live clone stopped" while it is still on.
+  // Bot-mode live bindings. A linked channel, a whole-group copy or a
+  // followed chat keeps ingesting after every backfill job has finished, so
+  // a run's LIVE flag has to come from the binding too — job status alone
+  // reports OFF between posts, which reads as "live clone stopped" while it
+  // is still on. A topic binding alone is NOT a capture path: bot updates
+  // only reach chats the bot is in and userbot posts only match
+  // userbot_follows rows, so a topic-bound chat with no follow or bot
+  // binding (e.g. its follows were deleted along with their account) must
+  // not report LIVE ON.
   const liveBoundChats = new Set();
+  const captureChats = new Set();
   try {
     const { results: bound } = await env.DB.prepare(
       `SELECT group_id FROM community_bots
         WHERE platform = 'telegram' AND group_id IS NOT NULL
           AND (channel_target IS NOT NULL OR COALESCE(copy_text, 0) = 1)`
     ).all();
-    for (const row of bound || []) liveBoundChats.add(normalizeTgChatId(row.group_id));
+    for (const row of bound || []) captureChats.add(normalizeTgChatId(row.group_id));
   } catch (_) {}
+  for (const key of liveFollowKeys) captureChats.add(key.split('|')[0]);
+  for (const c of captureChats) liveBoundChats.add(c);
   try {
     const { results: bound } = await env.DB.prepare('SELECT DISTINCT chat_id FROM telegram_topic_bindings').all();
-    for (const row of bound || []) liveBoundChats.add(normalizeTgChatId(row.chat_id));
+    for (const row of bound || []) {
+      const c = normalizeTgChatId(row.chat_id);
+      if (captureChats.has(c)) liveBoundChats.add(c);
+    }
   } catch (_) {}
-  for (const key of liveFollowKeys) liveBoundChats.add(key.split('|')[0]);
   if (parents.length) {
     let rows = [];
     try {
