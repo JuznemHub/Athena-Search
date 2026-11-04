@@ -9384,6 +9384,7 @@ async function ubWaitForRelease(label) {
 }
 function ubReportFlood(label, seconds) {
   if (!label || !(seconds > 0)) return;
+  try { console.info(`[userbot:${label}] flood wait ${seconds}s`); } catch (_) {}
   const until = Date.now() + seconds * 1000;
   const k = String(label);
   const w = UB_FLOOD_WAIT.get(k);

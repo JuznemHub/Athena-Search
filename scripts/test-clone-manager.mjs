@@ -49,6 +49,7 @@ async function fixture({ forum = false, sourceClass = 'Channel', topics = [7, 9]
     },
     async getMessages(_chat, opts) {
       f.historyRequests.push(opts);
+      if (f.floodOnce) { f.floodOnce = false; f.now += 9000; throw Object.assign(new Error('FLOOD_WAIT_TEST'), { seconds: 0 }); }
       return history.filter(m => (!opts.offsetId || m.id < opts.offsetId) && (!opts.replyTo || m.replyTo?.replyToTopId === Number(opts.replyTo))).slice(0, opts.limit);
     }
   };
@@ -319,6 +320,14 @@ await scenario('already-followed chat pins its community first', {}, async f => 
   assert.ok(names.indexOf('Community B — community DB') === -1, 'pinned row carries the marker');
   const lastEdit = f.edits().at(-1)?.body?.rich_message?.html || '';
   assert.match(lastEdit, /Already followed/, 'destination step names the existing follow');
+});
+
+await scenario('flood waits surface as progress instead of a frozen scan', {}, async f => {
+  f.floodOnce = true;
+  await f.preview();
+  const texts = f.edits().map((e) => e.body?.rich_message?.html || '');
+  assert.ok(texts.some((t) => /Rate-limited by Telegram/.test(t)), 'flood wait announced on the progress message');
+  assert.ok(f.run().state.snapshot > 0, 'scan completes after the flood wait');
 });
 
 await scenario('combined destination enforces authorization before copying and between topics', { forum: true }, async f => {

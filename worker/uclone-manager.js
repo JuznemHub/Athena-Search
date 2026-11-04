@@ -215,9 +215,14 @@ export function createUcloneManager(env, deps) {
         await edit(run, token, '<b>Measuring accessible history</b>\nYou can cancel during discovery or scanning.', [[button(run, 'Cancel scan', 'stop')]], true);
         run.state.topics = entity.forum ? await listTopics(client, run.chat_id, run.state.label, (n) => scanning({}, null, `Discovering topics: ${n}`)) : [];
         run.state.measurement = 'accessible-history';
+        let lastCounters = {};
+        const floodNote = (seconds, topic = null, what = null) => {
+          deps.onFlood(run.state.label, seconds);
+          scanning(lastCounters, topic, `Rate-limited by Telegram: waiting ${seconds}s before continuing${what ? ` (${what})` : ''}…`);
+        };
         const result = await scanCloneHistory(client, run.chat_id, {
-          beforeRequest: async () => { await checkCancelled(); await deps.beforeRequest(run.state.label); }, onFlood: (seconds) => deps.onFlood(run.state.label, seconds),
-          onProgress: (progress) => scanning(progress.counters || progress),
+          beforeRequest: async () => { await checkCancelled(); await deps.beforeRequest(run.state.label); }, onFlood: (seconds) => floodNote(seconds),
+          onProgress: (progress) => { lastCounters = progress.counters || progress; scanning(lastCounters); },
         });
         run.state.snapshot = result.maxId;
         run.state.counters = result.counters;
@@ -227,8 +232,8 @@ export function createUcloneManager(env, deps) {
             if (current?.state.cancelled) throw new Error('CANCELLED');
             const scan = await scanCloneHistory(client, run.chat_id, {
               threadId: topic.id, maxId: result.maxId,
-              beforeRequest: async () => { await checkCancelled(); await deps.beforeRequest(run.state.label); }, onFlood: (seconds) => deps.onFlood(run.state.label, seconds),
-              onProgress: (progress) => scanning(progress.counters || progress, topic, `Measuring topic ${topic.name}`),
+              beforeRequest: async () => { await checkCancelled(); await deps.beforeRequest(run.state.label); }, onFlood: (seconds) => floodNote(seconds, topic, topic.name),
+              onProgress: (progress) => { lastCounters = progress.counters || progress; scanning(lastCounters, topic, `Measuring topic ${topic.name}`); },
             });
             topic.counters = scan.counters;
           }
