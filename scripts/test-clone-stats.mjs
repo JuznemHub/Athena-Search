@@ -205,6 +205,23 @@ try {
   assert.ok(!report2.runs.some((r) => r.id === 'pc_wiz'), 'expired childless wizard parents add no page');
   assert.ok(!report2.runs.some((r) => r.jobs?.some((j) => j.id === 'ij_stale_zero')), 'stale zero-content failures drop off');
   assert.ok(report2.runs.some((r) => r.jobs?.some((j) => j.id === 'ij_fresh_zero')), 'fresh failures stay visible');
+  // Unexpired account-browser and idle destination shells are not sources:
+  // the /userbot_accounts browser stores chat_id 'accounts', and an
+  // unfinished wizard carries no destination/owner yet — neither may add a
+  // dashboard row next to the finished clone of the same chat.
+  insertParent('pc_accts_live', 'accounts', '123456789', 'u_stats', {
+    manager: 'uclone', stage: 'accounts', revision: 1, label: 'alpha',
+    sourceName: 'Saved userbot accounts', counters: {},
+  });
+  insertParent('pc_idle_dest', '-1007777777777', '123456789', 'u_stats', {
+    manager: 'uclone', stage: 'destination', revision: 2, label: 'alpha',
+    sourceName: 'Stats Forum', isForum: true, counters: {},
+  });
+  const report3 = await buildStatsReport(env, null, { requesterTgId: '123456789', athenaUserId: 'u_stats' });
+  assert.ok(!report3.runs.some((r) => r.id === 'pc_accts_live'), 'live account-browser shells are not runs');
+  assert.ok(!report3.runs.some((r) => r.id === 'pc_idle_dest'), 'idle destination shells are not runs');
+  assert.ok(!report3.sources.some((s) => s.chat_id === 'accounts'), 'no accounts row on the dashboard');
+  assert.equal(report3.sources.filter((s) => s.chat_id === '-1007777777777').length, 1, 'unfinished wizard adds no second row for the same chat');
   const chanSrcIdx = report2.sources.findIndex((s) => s.chat_id === '-1008888888888');
   assert.ok(chanSrcIdx >= 0, 'channel source present on the dashboard');
   const chanSrc = report2.sources[chanSrcIdx];

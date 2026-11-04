@@ -17033,7 +17033,15 @@ export async function buildStatsReport(env, _token = null, scope = null) {
     // Expired parents whose clone reached a terminal stage stay visible with
     // their final totals; only non-terminal runs drop off after expiry.
     parents = (r.results || r || []).map((row) => {
-      try { const state = JSON.parse(row.stats_json); return ['uclone', 'botclone'].includes(state?.manager) ? { ...row, state } : null; } catch (_) { return null; }
+      try {
+        const state = JSON.parse(row.stats_json);
+        if (!['uclone', 'botclone'].includes(state?.manager)) return null;
+        // The /userbot_accounts browser stores its wizard shell with a
+        // literal chat_id of 'accounts' — it is account management UI, never
+        // a cloned source, and must not appear on the dashboard.
+        if (String(row.chat_id || '') === 'accounts') return null;
+        return { ...row, state };
+      } catch (_) { return null; }
     }).filter((p) => p && (Number(p.expires_at || 0) > now || ['done', 'stopped', 'error'].includes(String(p.state?.stage || ''))));
     // One page per source, not per run: an old error/stopped transfer must not
     // linger next to the newer retry of the same chat + destination + owner.
@@ -17116,7 +17124,15 @@ export async function buildStatsReport(env, _token = null, scope = null) {
       }
       const overall = jobRows.reduce((acc, j) => statsAddCounters(acc, j.counters), {});
       // Abandoned wizard shells (no child jobs, session expired) are not runs.
-      if (jobRows.length || String(p.state?.stage || '') === 'running' || Number(p.expires_at || 0) > now) {
+      // Idle shells are not runs either: a wizard parked at destination/topic
+      // picking with no destination saved yet must not add a second,
+      // zero-content row next to the finished clone of the same chat. Only
+      // actively working shells (measuring, queued, cloning) and recent
+      // error feedback stay visible without child jobs.
+      const shellStage = String(p.state?.stage || '');
+      const shellActive = ['scanning', 'queued', 'running', 'stopping'].includes(shellStage);
+      const shellRecentError = shellStage === 'error' && Number(p.expires_at || 0) > now;
+      if (jobRows.length || shellActive || shellRecentError) {
         jobsByParent.set(String(p.id), { rows: jobRows, overall });
       }
     }
