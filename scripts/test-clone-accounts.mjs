@@ -167,10 +167,13 @@ try {
   const unsignedCalls = sent.length;
   await deliver({ message: { message_id: 1, from, chat, text: '/userbot_accounts' } }, env, false);
   assert.equal(sent.length, unsignedCalls, 'Unsigned delivery cannot touch Telegram');
-  for (const alias of ['/userbot_add', '/userbotadd', '/userbot_connect', '/userbotconnect', '/index_start', '/indexstart']) {
+  for (const alias of ['/userbot_add', '/userbotadd', '/userbot_connect', '/userbotconnect']) {
     await deliver({ edited_message: { message_id: updateId + 1, from, chat,
       text: `  ${alias.toUpperCase()}@FixtureBot fixture-api-hash fixture-session-expired` } });
   }
+  // /clone takes chat ids, never credentials: exercise its uppercase @Bot
+  // spelling with benign args so the receipt log has no secret to redact.
+  await deliver({ edited_message: { message_id: updateId + 1, from, chat, text: '  /CLONE@FixtureBot' } });
 
   await command('/userbot_add rejected 12345 fixture-api-hash fixture-session-alpha', { ...env, STORAGE_KEY: '' });
   assert.equal(account('rejected'), undefined, 'No storage key must refuse to persist the credentials');

@@ -39,7 +39,7 @@ const hooks = registerHooks({ resolve(specifier, context, nextResolve) {
 } });
 
 const { default: worker, ensureIndexTables, ensureUcloneTables } = await import('../worker/index.js');
-const { buildStatsReport, formatStatsRichReport, resolveJobLabel, STATS_TOPICS_PAGE_MAX, ensureChatFollow } = await import('../worker/index_legacy.js');
+const { buildStatsReport, formatStatsRichReport, resolveJobLabel, STATS_TOPICS_PAGE_MAX, ensureChatFollow, USERBOT_ACCOUNTS } = await import('../worker/index_legacy.js');
 
 const sql = new DatabaseSync(':memory:');
 sql.exec(readFileSync(new URL('../worker/schema.sql', import.meta.url), 'utf8')
@@ -67,6 +67,12 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.hostname === 'api.telegram.org') {
     const method = url.pathname.split('/').at(-1);
     const body = JSON.parse(init.body || '{}');
+    if (method === 'getChat' && String(body.chat_id) === '-10077778888') {
+      return Response.json({ ok: true, result: { id: -10077778888, type: 'channel', title: 'Fixture Channel' } });
+    }
+    if (method === 'getChatMember' && String(body.chat_id) === '-10077778888') {
+      return Response.json({ ok: true, result: { status: 'administrator' } });
+    }
     const messageId = method === 'editMessageText' ? body.message_id : ++outgoingId;
     sent.push({ method, body, messageId });
     return Response.json({ ok: true, result: { message_id: messageId, id: 42, is_bot: true, username: 'FixtureBot' } });
@@ -123,15 +129,15 @@ try {
   };
   const countersA = { messages: 10, copiedMessages: 8, linkPosts: 6, links: 6, savedLinkPosts: 6, savedLinks: 6, files: 4, savedFiles: 3, savedDocs: 1, savedPdfs: 0, other: 2, savedOther: 2, markdown: 1, savedMarkdown: 1, json: 0, savedJson: 0, html: 0, savedHtml: 0, images: 0, savedImages: 0, audio: 0, savedAudio: 0, skippedVideos: 1, duplicates: 1, failed: 0, retries: 0 };
   const countersB = { messages: 5, copiedMessages: 5, linkPosts: 2, links: 2, savedLinkPosts: 2, savedLinks: 2, files: 1, savedFiles: 1, savedDocs: 0, savedPdfs: 0, other: 0, savedOther: 0, duplicates: 0, failed: 0, retries: 0 };
-  insertParent('pc_forum', '-1007777777777', '123456789', 'u_stats', {
+  insertParent('pc_forum', '-1006666666666', '123456789', 'u_stats', {
     manager: 'uclone', stage: 'running', revision: 9, label: 'alpha', target: 'personal',
     sourceName: 'Stats Forum', username: 'statsforum', sourceType: 'group', isForum: true, cursor: 1,
     destinationName: 'Personal brain', progressChatId: '123456789', progressMessageId: 501,
     chosen: [ { id: '10', name: 'General', counters: { messages: 4 } }, { id: '20', name: 'Legal Research', counters: { messages: 3 } }, { id: '30', name: 'Development', counters: { messages: 3 } } ],
     counters: countersA,
   }, Date.now() - 60000);
-  insertChild('ij_forum_1', 'pc_forum', '-1007777777777', '10', 'personal', '', 'u_stats', 'done', countersA, 'General');
-  insertChild('ij_forum_2', 'pc_forum', '-1007777777777', '30', 'personal', '', 'u_stats', 'running', { messages: 2, links: 1, savedLinks: 1, savedLinkPosts: 1 }, 'Development');
+  insertChild('ij_forum_1', 'pc_forum', '-1006666666666', '10', 'personal', '', 'u_stats', 'done', countersA, 'General');
+  insertChild('ij_forum_2', 'pc_forum', '-1006666666666', '30', 'personal', '', 'u_stats', 'running', { messages: 2, links: 1, savedLinks: 1, savedLinkPosts: 1 }, 'Development');
   insertParent('pc_chan', '-1008888888888', '123456789', 'u_stats', {
     manager: 'uclone', stage: 'done', revision: 12, label: 'alpha', target: 'personal', sourceType: 'channel',
     sourceName: 'Stats Channel', username: 'statschannel', isForum: false, destinationName: 'Personal brain',
@@ -213,7 +219,7 @@ try {
     manager: 'uclone', stage: 'accounts', revision: 1, label: 'alpha',
     sourceName: 'Saved userbot accounts', counters: {},
   });
-  insertParent('pc_idle_dest', '-1007777777777', '123456789', 'u_stats', {
+  insertParent('pc_idle_dest', '-1006666666666', '123456789', 'u_stats', {
     manager: 'uclone', stage: 'destination', revision: 2, label: 'alpha',
     sourceName: 'Stats Forum', isForum: true, counters: {},
   });
@@ -221,7 +227,7 @@ try {
   assert.ok(!report3.runs.some((r) => r.id === 'pc_accts_live'), 'live account-browser shells are not runs');
   assert.ok(!report3.runs.some((r) => r.id === 'pc_idle_dest'), 'idle destination shells are not runs');
   assert.ok(!report3.sources.some((s) => s.chat_id === 'accounts'), 'no accounts row on the dashboard');
-  assert.equal(report3.sources.filter((s) => s.chat_id === '-1007777777777').length, 1, 'unfinished wizard adds no second row for the same chat');
+  assert.equal(report3.sources.filter((s) => s.chat_id === '-1006666666666').length, 1, 'unfinished wizard adds no second row for the same chat');
   // A topic binding alone ingests nothing: bot updates only reach chats the
   // bot is in, userbot posts only match userbot_follows rows. A topic-bound
   // chat whose follows left with their account must report LIVE OFF, while
@@ -246,12 +252,12 @@ try {
 
   // Cloning implies live: the shared follow helper upserts the chat under the
   // cloning account (and binds the single topic), so backfills never end dark.
-  const followed = await ensureChatFollow(env, { chatId: '-1007777777777', threadId: '', label: 'beta', communityId: 'c_x', target: 'community', createdBy: 'u_stats' });
-  assert.equal(followed, '-1007777777777');
-  assert.equal(sql.prepare('SELECT label, community_id FROM userbot_follows WHERE chat_id=?').get('-1007777777777').label, 'beta', 'backfill subscribes the chat under its own account');
-  await ensureChatFollow(env, { chatId: '-1007777777777', threadId: '9', label: 'beta', communityId: 'c_x', target: 'community', createdBy: 'u_stats' });
-  assert.ok(sql.prepare('SELECT chat_id FROM userbot_follows WHERE chat_id=?').get('-1007777777777:9'), 'single-topic backfill follows the topic key');
-  assert.ok(sql.prepare('SELECT chat_id FROM telegram_topic_bindings WHERE chat_id=? AND thread_id=?').get('-1007777777777', '9'), 'topic backfill binds the topic');
+  const followed = await ensureChatFollow(env, { chatId: '-1006666666666', threadId: '', label: 'beta', communityId: 'c_x', target: 'community', createdBy: 'u_stats' });
+  assert.equal(followed, '-1006666666666');
+  assert.equal(sql.prepare('SELECT label, community_id FROM userbot_follows WHERE chat_id=?').get('-1006666666666').label, 'beta', 'backfill subscribes the chat under its own account');
+  await ensureChatFollow(env, { chatId: '-1006666666666', threadId: '9', label: 'beta', communityId: 'c_x', target: 'community', createdBy: 'u_stats' });
+  assert.ok(sql.prepare('SELECT chat_id FROM userbot_follows WHERE chat_id=?').get('-1006666666666:9'), 'single-topic backfill follows the topic key');
+  assert.ok(sql.prepare('SELECT chat_id FROM telegram_topic_bindings WHERE chat_id=? AND thread_id=?').get('-1006666666666', '9'), 'topic backfill binds the topic');
   const chanSrcIdx = report2.sources.findIndex((s) => s.chat_id === '-1008888888888');
   assert.ok(chanSrcIdx >= 0, 'channel source present on the dashboard');
   const chanSrc = report2.sources[chanSrcIdx];
@@ -360,22 +366,109 @@ try {
   assert.equal(JSON.parse(botState.stats_json).stage, 'running', 'confirmed bot clone remains a live run');
   assert.equal(sql.prepare('SELECT copy_text FROM community_bots WHERE id=?').get('b_bot').copy_text, 1, 'whole-group bot clone enables full-copy mode');
 
-  // One-arg /channel_link inspects: on a userbot-followed chat without a
-  // bot-mode link it names the follow instead of bouncing the user to link
-  // a chat that is already being indexed. Re-running the full form re-routes.
-  // /clone_stop is a real alias of /index_stop (the help panel promises it).
-  sent.length = 0;
-  await deliver({ message: { message_id: 702, from, chat, text: '/clone_stop' } });
-  const stopReply = sent.findLast((c) => c.method === 'sendMessage');
-  assert.ok(stopReply && /No running backfill jobs/.test(stopReply.body.text || ''), '/clone_stop reaches the stop handler');
+  // Removed commands fall through to the unknown-command reply.
+  let deadMid = 720;
+  for (const dead of ['/channel_link x', '/channel_unlink x', '/channel_target x', '/topic_target x', '/index x', '/index_status', '/index_stop', '/clone_stop', '/clone_del x', '/userbot_follow x', '/userbotfollow', '/backfill', '/follow', '/clear', '/restore']) {
+    sent.length = 0;
+    await deliver({ message: { message_id: ++deadMid, from, chat, text: dead } });
+    const unknownReply = sent.findLast((c) => c.method === 'sendMessage');
+    assert.ok(unknownReply && /Unknown command/.test(unknownReply.body.text || ''), `${dead} is gone`);
+  }
+
+  // One-arg /clone inspects: on a userbot-followed chat without a bot-mode
+  // link it names the follow instead of bouncing the user to link a chat
+  // that is already being indexed. Re-running the full form re-routes.
   sql.prepare('INSERT INTO userbot_follows (chat_id,label,community_id,target,created_by,created_at) VALUES (?,?,?,?,?,?)')
     .run('-1004444444444', 'alpha', 'c_bot', 'community', 'u_bot', Date.now());
   sent.length = 0;
-  await deliver({ message: { message_id: 701, from, chat, text: '/channel_link -1004444444444' } });
+  await deliver({ message: { message_id: 701, from, chat, text: '/clone -1004444444444' } });
   const targetReply = sent.findLast((c) => c.method === 'sendMessage');
   assert.ok(targetReply && /userbot/i.test(targetReply.body.text || ''), 'userbot-followed chat is named by the inspect form');
   assert.match(targetReply.body.text || '', /-1004444444444/);
-  console.log('clone stats fixtures passed: managed parents+children counters, requester/destination/account isolation, compact overview with source links, LIVE flag from actual job state, successful vs copying counters, completed/pending/current topics with 100% and bars, 100-topic pagination, run pagination, callback round-trip with auth guard, telegram-safe HTML, single-command link inspect');
+
+  // /status replaces /index + /index_status: overview plus running/recent jobs.
+  sent.length = 0;
+  await deliver({ message: { message_id: 703, from, chat, text: '/status' } });
+  const statusReply = sent.findLast((c) => c.method === 'sendMessage');
+  assert.ok(statusReply && /Backfill jobs/.test(statusReply.body.text || ''), '/status lists backfill jobs');
+  assert.ok(statusReply && !/index_stop|clone_del/.test(statusReply.body.text || ''), '/status never points at removed commands');
+
+  // /clone <community> <chat> userbot: bot is not an admin here, so history
+  // + live follow-up runs under the selected account and subscribes the follow.
+  USERBOT_ACCOUNTS.set('alpha', { client: new TelegramClient(), startedAt: Date.now() });
+  sent.length = 0;
+  await deliver({ message: { message_id: 704, from, chat, text: '/clone c_bot -1005555555555 userbot' } });
+  const backfillReply = sent.findLast((c) => c.method === 'sendMessage' && /Backfill started/.test(c.body.text || ''));
+  assert.ok(backfillReply, '/clone userbot form starts the backfill');
+  assert.ok(sql.prepare('SELECT id FROM index_jobs WHERE chat_id=?').get('-1005555555555'), 'userbot backfill job stored');
+  assert.equal(sql.prepare('SELECT label FROM userbot_follows WHERE chat_id=?').get('-1005555555555')?.label, 'alpha', 'userbot backfill subscribes the follow');
+
+  // /clone <community> <chat> bot: the bot IS an admin here (fixture), so it
+  // links the channel instead of backfilling.
+  sent.length = 0;
+  await deliver({ message: { message_id: 705, from, chat, text: '/clone c_bot -10077778888' } });
+  const linkReply = sent.findLast((c) => c.method === 'sendMessage' && /linked to/.test(c.body.text || ''));
+  assert.ok(linkReply, '/clone bot form links the channel');
+  assert.ok(sql.prepare('SELECT id FROM community_bots WHERE group_id=?').get('-10077778888'), 'bot link row stored');
+  assert.ok(!sql.prepare('SELECT id FROM index_jobs WHERE chat_id=?').get('-10077778888'), 'bot link starts no backfill job');
+  USERBOT_ACCOUNTS.delete('alpha');
+
+  // ⏹ button on a live /stats row stops live capture (follows removed, row
+  // goes dark) and running backfills, while keeping saved history.
+  // Self-contained under u_bot scope: finished job + follow + bot binding make
+  // the source visible and live; the running job is what the button stops.
+  sql.prepare('INSERT INTO community_bots (id,community_id,platform,bot_username,group_id,group_name,created_by,created_at) VALUES (?,?,?,?,?,?,?,?)')
+    .run('b_stop', 'c_bot', 'telegram', 'FixtureBot', '-1001414141414', 'Stop Channel', 'u_bot', Date.now());
+  sql.prepare('INSERT INTO userbot_follows (chat_id,label,community_id,target,created_by,created_at) VALUES (?,?,?,?,?,?)')
+    .run('-1001414141414', 'alpha', 'c_bot', 'community', 'u_bot', Date.now());
+  sql.prepare(`INSERT INTO index_jobs (id,community_id,chat_id,user_id,status,offset_id,progress_chat_id,created_at,updated_at,thread_id,chat_name,userbot_label,target,parent_id,total_messages,topic_name,counters_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run('ij_stopdone', 'c_bot', '-1001414141414', 'u_bot', 'done', 0, '31337', Date.now() - 1000, Date.now() - 1000, null, 'Stop Channel', 'alpha', 'community', null, 10, null, JSON.stringify({ messages: 4, savedLinks: 3, savedLinkPosts: 2 }));
+  sql.prepare(`INSERT INTO index_jobs (id,community_id,chat_id,user_id,status,offset_id,progress_chat_id,created_at,updated_at,thread_id,chat_name,userbot_label,target,parent_id,total_messages,topic_name,counters_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run('ij_stoprun', 'c_bot', '-1001414141414', 'u_bot', 'running', 0, '31337', Date.now(), Date.now(), null, 'Stop Channel', 'alpha', 'community', null, 10, null, JSON.stringify({ messages: 1 }));
+  assert.ok(sql.prepare('SELECT chat_id FROM userbot_follows WHERE chat_id = ?').get('-1001414141414'), 'follow exists before stop');
+  const litIdx = ((await buildStatsReport(env, null, { requesterTgId: null, athenaUserId: null })).sources || [])
+    .findIndex((s) => s.chat_id === '-1001414141414');
+  assert.ok(litIdx >= 0, 'lit source present for the stop test');
+  sent.length = 0;
+  await deliver({ message: { message_id: 706, from, chat, text: '/stats' } });
+  const dashSend = sent.findLast((c) => c.method === 'sendRichMessage' && /CLONE STATS/.test(c.body.rich_message?.html || ''));
+  assert.ok(dashSend, 'dashboard renders for the stop test');
+  const stopBtn = buttonsOf(dashSend).find(([d]) => d === 'stats:stop:' + litIdx);
+  assert.ok(stopBtn, 'live sources carry a stop button');
+  sent.length = 0;
+  await deliver({ callback_query: { id: 'stats-stop-1', from, data: stopBtn[0], message: { message_id: dashSend.messageId, chat } } });
+  const stoppedEdit = sent.findLast((c) => c.method === 'editMessageText');
+  const stoppedText = telegramText(stoppedEdit?.body?.rich_message?.html || stoppedEdit?.body?.text || '');
+  assert.ok(/Stopped for/.test(stoppedText), 'stop reports what it removed');
+  assert.ok(!sql.prepare('SELECT chat_id FROM userbot_follows WHERE chat_id = ? OR chat_id LIKE ?').get('-1001414141414', '-1001414141414:%'), 'follows removed by stop');
+  assert.equal(sql.prepare("SELECT status FROM index_jobs WHERE id='ij_stoprun'").get()?.status, 'stopping', 'running backfill stopped');
+
+  // Bare /delete opens the picker: options → chat list → confirm → deleted.
+  sent.length = 0;
+  await deliver({ message: { message_id: 707, from, chat, text: '/delete' } });
+  const picker = sent.findLast((c) => c.method === 'sendRichMessage' && /What do you want to delete/.test(c.body.rich_message?.html || ''));
+  assert.ok(picker, 'bare /delete opens the options picker');
+  const chatBtn = buttonsOf(picker).find(([d]) => d === 'del:chats');
+  assert.ok(chatBtn, 'picker offers cloned chats');
+  sent.length = 0;
+  await deliver({ callback_query: { id: 'del-cb-1', from, data: 'del:chats', message: { message_id: picker.messageId, chat } } });
+  const chatList = sent.findLast((c) => c.method === 'editMessageText');
+  const pickBtn = buttonsOf(chatList).find(([d]) => d.startsWith('del:chat:'));
+  assert.ok(pickBtn, 'picker lists cloned chats');
+  const pickKey = pickBtn[0].slice('del:chat:'.length);
+  const pickChat = pickKey.split('|')[0];
+  sent.length = 0;
+  await deliver({ callback_query: { id: 'del-cb-2', from, data: pickBtn[0], message: { message_id: picker.messageId, chat } } });
+  const confirmMsg = sent.findLast((c) => c.method === 'editMessageText');
+  const yesBtn = buttonsOf(confirmMsg).find(([d]) => d.startsWith('del:chatyes:'));
+  assert.ok(yesBtn, 'chat delete asks for confirmation');
+  sent.length = 0;
+  await deliver({ callback_query: { id: 'del-cb-3', from, data: yesBtn[0], message: { message_id: picker.messageId, chat } } });
+  const doneMsg = sent.findLast((c) => c.method === 'editMessageText');
+  assert.ok(doneMsg && /Deleted/.test(telegramText(doneMsg.body.rich_message?.html || doneMsg.body.text || '')), 'confirmed chat delete runs');
+  assert.ok(!sql.prepare("SELECT id FROM index_jobs WHERE chat_id=? AND status IN ('queued','running')").get(pickChat), 'no active backfills left for the deleted chat');
+  assert.ok(!sql.prepare('SELECT chat_id FROM userbot_follows WHERE chat_id = ? OR chat_id LIKE ?').get(pickChat, pickChat + ':%'), 'no live follows left for the deleted chat');
+  console.log('clone stats fixtures passed: managed parents+children counters, requester/destination/account isolation, compact overview with source links, LIVE flag from actual job state, successful vs copying counters, completed/pending/current topics with 100% and bars, 100-topic pagination, run pagination, callback round-trip with auth guard, telegram-safe HTML, single-command link inspect, removed commands fall through, /status overview+jobs, unified /clone bot+userbot routing, stats stop button, /delete picker with confirm');
 } finally {
   await drain();
   hooks.deregister();

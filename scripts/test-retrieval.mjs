@@ -58,7 +58,8 @@ assert.match(helpTextForSection('community'), /<p><b>9\.[\s\S]*?\/kick[\s\S]*?<\
 assert.doesNotMatch(helpTextForSection('community'), /<code>\/clear<\/code>/, 'removed /clear dupe stays out of help');
 assert.doesNotMatch(helpTextForSection('channels'), /<code>\/follow<\/code>|<code>\/backfill<\/code>/, 'removed legacy spellings stay out of help');
 assert.doesNotMatch(helpTextForSection('god', true), /<code>\/restore<\/code>/, 'removed /restore dupe stays out of help');
-assert.match(helpTextForSection('channels'), /<p><b>11\.[\s\S]*?index_stop[\s\S]*?clone_stop[\s\S]*?<\/p>/);
+assert.match(helpTextForSection('channels'), /<p><b>10\.[\s\S]*?\/status[\s\S]*?<\/p>/);
+assert.doesNotMatch(helpTextForSection('channels'), /<code>\/index_start<\/code>|<code>\/index_status<\/code>|<code>\/index_stop<\/code>|<code>\/clone_stop<\/code>|<code>\/channel_link<\/code>|<code>\/channel_unlink<\/code>|<code>\/clone_del<\/code>|<code>\/userbot_follow<\/code>/, 'removed commands stay out of the channels panel');
 assert.match(helpTextForSection('god', true), /forcetags[\s\S]*?tag_untagged/);
 
 const replyEdit = parseTelegramEditPayload('| title: Correct title | notes: Correct notes', {

@@ -137,18 +137,17 @@ Bot API mode is the default and safest mode:
 - video is excluded; full-copy channel/topic/group capture also stores photos, audio and other non-video files;
 - every insert is deduplicated — canonical URL hash per brain (community or personal), plus `chat_id + message_id` identity for channel documents, so replays and cross-posts never create duplicates.
 
-Session mode is optional and self-host-only. It uses a Telegram user session to backfill older history with `/index_start`; the encrypted session is kept only for the job and removed when the job finishes or is stopped. Treat a session string like a password: it can grant access to the Telegram account that created it.
+Userbot mode is optional and self-host-only. It uses a saved Telegram user session (see `/userbot_add`) to backfill older history and keep indexing new posts. Treat a session string like a password: it can grant access to the Telegram account that created it.
 
 Athena accepts compatible Telethon/Pyrogram-style StringSession values for this bridge. It does not vendor or execute the full [Ultroid](https://github.com/TeamUltroid/Ultroid) userbot; Ultroid can remain a separate session generator/client if you already use one.
 
 ### Channels: full-copy indexing with rank-aware targets
 
-Link any public or private channel; from then on every post is cloned into a brain automatically.
+Link any public or private channel; from then on every post is cloned into a brain automatically. One command does it all — it links when the bot is an admin there, otherwise it backfills history with your userbot account:
 
 ```text
-/channel_link <community_id> <channel_id> [community|personal|both]  # re-run to re-route
-/channel_link <channel_id>                                           # inspect: where it saves
-/channel_unlink <channel_id>
+/clone <community_id> <channel_id> [thread_id] [bot|userbot] [community|personal|both]
+/clone <channel_id>     # inspect: where it saves (bot link, userbot follow, or nothing)
 ```
 
 | Target | Who can set | Where content lands |
@@ -176,37 +175,31 @@ Groups work out of the box once bound with `/community_verify`: member links and
 /topic_link [community_id] [community|personal|both]   # run inside the topic
 /topic link                                            # same command, the spelling people reach for
 /topic_list                                            # linked topics in this group
-/topic_unlink [thread_id]                                # re-run /topic_link to re-route
+/topic_unlink [thread_id]
 # (re-running /topic_link inside the topic with a new target re-routes it)
 ```
 
 New posts in a linked topic are indexed in real time; existing topic history is pulled in by the backfill below (pass the thread id as the last argument).
 
-For the guided Bot API flow, run `/clone` inside the linked group. Confirming `/clone` enables live copying without a userbot: omit the topic id to cover the group and all topics, or pass a topic id (or run it inside that topic) to bind one forum topic. The Bot API still cannot read earlier history; use `/uclone` or `/index_start` for history.
+For the guided Bot API flow, run `/clone` inside the linked group. Confirming `/clone` enables live copying without a userbot: omit the topic id to cover the group and all topics, or pass a topic id (or run it inside that topic) to bind one forum topic. The Bot API still cannot read earlier history; use `/clone <community_id> <chat_id>` (userbot path, same command) or `/uclone` for history.
 
 ### History backfill (one-time, self-hosted)
 
-Bots cannot read old messages. To clone everything already in a channel/group/topic, run a one-time backfill with your own session:
-
-```bash
-node scripts/gen-session.js   # on the server — prints a gramjs StringSession
-```
-
-Then in a **private bot DM**:
+Bots cannot read old messages. To clone everything already in a channel/group/topic, first connect a userbot account once (`/userbot_add`), then run one command from anywhere:
 
 ```text
-/index_start <community_id> <chat_id> <api_id> <api_hash> <session_string> [thread_id]
+/clone <community_id> <chat_id> [thread_id] [bot|userbot] [community|personal|both]
 ```
 
 - pass `thread_id` to clone a single forum topic instead of the whole chat;
 - starting the backfill subscribes the chat (or the single topic) for live indexing under the same account — history and live follow-up come from one command;
-- pacing honors Telegram flood-waits; progress every 300 messages (`/index_status`, or `/index_status all` for every user's jobs);
-- `/index_stop` (also `/clone_stop`) cancels; jobs resume from their cursor;
-- the session is AES-GCM encrypted at rest (`STORAGE_KEY`) and auto-deleted when the job completes.
+- pacing honors Telegram flood-waits; progress every 300 messages (`/status`, or `/status all` for every user's jobs);
+- stop anytime from the ⏹ button beside the source on `/stats`; jobs resume from their cursor;
+- no per-command session strings: the account lives encrypted on the server.
 
 ### Managed userbot mode: persistent accounts and the clone wizard
 
-The one-session userbot commands above still work. For several accounts or a guided flow, self-hosted Athena also has a managed mode with a persistent account store and an interactive wizard in the bot DM:
+Self-hosted Athena keeps a persistent account store and an interactive wizard in the bot DM:
 
 ```text
 /userbot_add <label> <api_id> <api_hash> <session_string>  # save an encrypted account
@@ -226,7 +219,7 @@ The destination picker is intentionally explicit: `Personal` is the private brai
 - forum groups list their topics with pagination (more than 100 topics work); choosing "All topics, sequentially" clones topic by topic, one live progress card;
 - videos are excluded by design; links, documents (pdf/epub/md/…), images and audio are cloned with per-message provenance, so re-cloning the same source never duplicates rows;
 - a failed item is recorded and cloning continues; Telegram flood-waits are honored; interrupted jobs resume from their cursor after restart;
-- `/index_status [all]` lists clone sessions with their ids, `/clone_del <id> [files]` removes everything one clone imported.
+- `/status [all]` lists backfill jobs with their ids; `/delete` opens a picker (one link, one cloned chat, one backfill session — each with confirm).
 - `/stats` reads persisted run and per-message checkpoints and shows dashboard totals before the per-run detail. Preview counts describe encountered content; saved counters describe successful writes.
 - URL search returns the original source post, including the other URLs in that message. Source bodies, entity offsets and reply metadata are preserved separately from canonical URL rows.
 
@@ -256,7 +249,7 @@ Then move the webhook once: call `logOut` on the cloud API, restart Athena, and 
 
 ### Exporting into the bot
 
-Use `/export` for the complete setup guide. A Telegram export is normally imported in bot format through the TUI or `/index_start` workflow; it does not require changing the bot into a userbot. The bot’s normal link/document dump path remains available in both personal and community scopes.
+Use `/export` for the complete setup guide. A Telegram export is normally imported in bot format through the TUI or `/clone` workflow; it does not require changing the bot into a userbot. The bot’s normal link/document dump path remains available in both personal and community scopes.
 
 Useful commands:
 
@@ -266,21 +259,19 @@ Useful commands:
 | `/search <query>` | Search only matching links/documents with page buttons. |
 | `/ai <question>` | Ask the configured model over the active brain. |
 | `/export` | Explain bot-mode export and optional session-history import. |
-| `/channel_link <community_id> <channel_id> [target]` | Clone a channel (re-run to re-route); GOD may pick `personal`/`both`. One chat id alone inspects where it saves. |
-| `/channel_unlink <channel_id>` | Stop channel indexing. |
-| `/group_copy on\|off` | Owner: full-copy text posts for this group. |
+| `/clone <community_id> <channel_id> [thread_id] [bot|userbot] [target]` | Clone a channel or chat: bot link when the bot is admin there, else userbot history + live follow-up (re-run to re-route). |
+| `/clone <chat_id>` | Inspect where a chat saves (bot link, userbot follow, or nothing). |
+| `/group_copy on|off` | Owner: full-copy text posts for this group. |
 | `/topic_link [community_id] [target]` | Clone the forum topic you are in (re-run to re-route). The community id defaults to this group's; `/topic link` is the same command. |
 | `/topic_list` / `/topic_unlink` | List or remove topic bindings. |
-| `/index` | Show indexing status and available backfill actions. |
-| `/index_start ...` | Start optional self-hosted history backfill (optional `thread_id`); subscribes the live follow the same way `/uclone` does. |
-| `/index_status [all]` / `/index_stop` (`/clone_stop`) | Inspect or cancel a backfill; `all` lists every user's jobs (GOD). |
+| `/status [all]` | What is indexing right now plus running and recent backfill jobs; `all` lists every user's jobs (GOD). Stopping happens from the ⏹ button on `/stats`. |
 | `/community_join <id>` | Join a community after joining its Telegram group. |
 | `/clone [topic_id] [community|personal|both]` | Owner/GOD: inside a linked group, preview and confirm Bot API live indexing for the whole group or one forum topic; no userbot and no old-history access. |
-| `/stats` | Dashboard totals across every cloned source, one page per run with topic pages, run navigation, live state and a refresh control. |
+| `/stats` | Dashboard totals across every cloned source with a ⏹ stop button per live row, per-source drill-downs, live state and a refresh control. |
 | `/userbot_status` | GOD, DM only: show account identity, actual connection state, saved userbot follows, backfill/topic progress and recent normalized errors. |
 | `/uclone <chat_id>` | GOD: clone a channel/group via the account wizard (personal/community/both); confirming the destination subscribes the live follow, and switching accounts later moves it along. |
 | `/personal` / `/community` | Switch the GOD user’s dump target. |
-| `/delete <url>` | Delete a link, or reply to a saved link with `/delete`. |
+| `/delete` | Picker (one link, one cloned chat, one backfill session — each with confirm); `/delete <url>` removes a link, `/delete <chat_id> [thread_id]` a whole clone. |
 
 `/search` is deliberately scoped: every page contains only results matching the query, and **Next page** loads the next matching slice before the close button. Unrelated recent bookmarks are never appended to the result list.
 
