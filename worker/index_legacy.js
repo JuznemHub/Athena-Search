@@ -12041,8 +12041,8 @@ async function runChannelLink(env, ctx) {
   const me = await telegramApi(token, 'getMe', {});
   const botId = me?.result?.id;
   const chk = await telegramApi(token, 'getChat', { chat_id: cid });
-  if (!chk?.ok || chk?.result?.type !== 'channel') {
-    await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} ${codeHtml(cid)} is not a reachable channel for this bot — add the bot as ADMIN first.\n${italicHtml('No admin anywhere? Use the userbot path instead: connect an account (/userbot_add), then re-run the same /clone command — it switches engines automatically.')}`, forumThreadId);
+  if (!chk?.ok || !['channel', 'supergroup', 'group'].includes(chk?.result?.type)) {
+    await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} ${codeHtml(cid)} is not a reachable chat for this bot — add the bot as ADMIN first.\n${italicHtml('No admin anywhere? Use the userbot path instead: connect an account (/userbot_add), then re-run the same /clone command — it switches engines automatically.')}`, forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
   const member = botId ? await telegramApi(token, 'getChatMember', { chat_id: cid, user_id: botId }) : null;
@@ -12385,7 +12385,8 @@ async function runChannelLink(env, ctx) {
        const botId = me?.result?.id;
        if (!botId) return false;
        const chk = await telegramApi(token, 'getChat', { chat_id: chatId });
-       if (!chk?.ok || chk?.result?.type !== 'channel') return false;
+       const chatType = chk?.result?.type;
+       if (!chk?.ok || !['channel', 'supergroup', 'group'].includes(chatType)) return false;
        const member = await telegramApi(token, 'getChatMember', { chat_id: chatId, user_id: botId });
        return ['administrator', 'creator'].includes(member?.result?.status || '');
      } catch (_) { return false; }

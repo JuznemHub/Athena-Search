@@ -220,6 +220,22 @@ export function createUcloneManager(env, deps) {
           deps.onFlood(run.state.label, seconds);
           scanning(lastCounters, topic, `Rate-limited by Telegram: waiting ${seconds}s before continuing${what ? ` (${what})` : ''}…`);
         };
+        // A prescribed topic id skips the whole-chat scan and the topic
+        // chooser: measure just that topic, then go to destinations.
+        const prescribed = String(run.state.prescribedThread || '');
+        const onlyTopic = run.state.isForum && prescribed ? run.state.topics.find((t) => String(t.id) === prescribed) : null;
+        if (onlyTopic) {
+          const scan = await scanCloneHistory(client, run.chat_id, {
+            threadId: onlyTopic.id,
+            beforeRequest: async () => { await checkCancelled(); await deps.beforeRequest(run.state.label); }, onFlood: (seconds) => floodNote(seconds, onlyTopic, onlyTopic.name),
+            onProgress: (progress) => { lastCounters = progress.counters || progress; scanning(lastCounters, onlyTopic, `Measuring topic ${onlyTopic.name}`); },
+          });
+          onlyTopic.counters = scan.counters;
+          run.state.snapshot = scan.maxId;
+          run.state.counters = scan.counters;
+          run.state.chosen = [onlyTopic];
+          await destinations(run, token);
+        } else {
         const result = await scanCloneHistory(client, run.chat_id, {
           beforeRequest: async () => { await checkCancelled(); await deps.beforeRequest(run.state.label); }, onFlood: (seconds) => floodNote(seconds),
           onProgress: (progress) => { lastCounters = progress.counters || progress; scanning(lastCounters); },
@@ -244,6 +260,7 @@ export function createUcloneManager(env, deps) {
           run.state.chosen = [{ id: null, name: run.state.sourceName, counters: result.counters }];
           await destinations(run, token);
         }
+        } // end prescribed-topic shortcut else-branch
       } catch (error) {
         const cancelled = (await load(run.id))?.state.cancelled;
         run.state.stage = cancelled ? 'stopped' : 'error';
@@ -451,7 +468,7 @@ export function createUcloneManager(env, deps) {
     try { await operation; } finally { activeRuns.delete(id); }
   }
   async function command(context) {
-    const [raw, source] = String(context.text || '').trim().split(/\s+/);
+    const [raw, source, topicArg] = String(context.text || '').trim().split(/\s+/);
     const cmd = raw?.split('@')[0].toLowerCase();
     if (!['/uclone', '/ubclone', '/userbot_accounts', '/userbot_select'].includes(cmd)) return false;
     if (!context.isGod || !context.user) { await send(context, 'GOD rank and an Athena login are required.'); return true; }
@@ -463,11 +480,12 @@ export function createUcloneManager(env, deps) {
       await accounts(run, context.token);
       return true;
     }
-    if (!/^-?\d+$/.test(source || '')) { await send(context, 'Usage: <code>/uclone &lt;channel_or_group_id&gt;</code>\nChoose a saved account with /userbot_accounts first.'); return true; }
+    if (!/^-?\d+$/.test(source || '')) { await send(context, 'Usage: <code>/uclone &lt;channel_or_group_id&gt; [topic_id]</code>\nChoose a saved account with /userbot_accounts first.'); return true; }
+    const prescribedThread = /^\d{1,9}$/.test(String(topicArg || '').trim()) ? String(topicArg).trim() : null;
     const selected = await db.prepare('SELECT label FROM userbot_selections WHERE requester_tg_id=?').bind(String(context.tgUserId)).first();
     if (!selected) { await send(context, 'No account selected. In a DM, open /userbot_accounts and select an account.'); return true; }
     const chat = /^\d{9,}$/.test(source) ? `-100${source}` : source;
-    const run = await create(context, chat, { label: selected.label, stage: 'scanning', cursor: 0, cancelled: false });
+    const run = await create(context, chat, { label: selected.label, stage: 'scanning', cursor: 0, cancelled: false, prescribedThread });
     background(preview(run, context.token));
     return true;
   }
