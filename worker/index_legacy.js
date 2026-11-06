@@ -11,6 +11,29 @@ function cloneDisplayName(chatTitle, chatType, flowThread, topicTitle) {
   return `${base}[${topicTitle || '#' + flowThread}]`;
 }
 
+async function resolveCloneChat(env, token, chatId) {
+  // Best-effort title + type for stats naming. Bot API first (knows the type);
+  // fall back to any connected userbot account (sees chats the bot is not in).
+  try {
+    const chk = await telegramApi(token, 'getChat', { chat_id: chatId });
+    if (chk?.ok && chk.result) {
+      const t = String(chk.result.type || '');
+      const title = chk.result.title || (chk.result.username ? '@' + chk.result.username : chatId);
+      return { title, type: t };
+    }
+  } catch (_) {}
+  try {
+    const acc = [...USERBOT_ACCOUNTS.values()].find((a) => a?.client);
+    const ent = acc ? await acc.client.getEntity(chatId).catch(() => null) : null;
+    if (ent) {
+      const title = ent.title || (ent.username ? '@' + ent.username : chatId);
+      const type = ent.className === 'Channel' ? (ent.broadcast ? 'channel' : 'supergroup') : (ent.className === 'Chat' ? 'group' : '');
+      return { title, type };
+    }
+  } catch (_) {}
+  return { title: chatId, type: '' };
+}
+
 async function resolveForumTopicTitle(env, label, chatId, threadId) {
   try {
     const client = USERBOT_ACCOUNTS.get(label)?.client;
@@ -8155,11 +8178,8 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       }
       let topicTitle = '';
       if (pend.thread_id) topicTitle = await resolveForumTopicTitle(env, label, pend.chat_id, pend.thread_id);
-      let chatTitle2 = pend.chat_id, chatType2 = '';
-      try {
-        const chk = await telegramApi(token, 'getChat', { chat_id: pend.chat_id });
-        if (chk?.ok && chk.result) { chatType2 = String(chk.result.type || ''); chatTitle2 = chk.result.title || (chk.result.username ? '@' + chk.result.username : pend.chat_id); }
-      } catch (_) {}
+      const resolved2 = await resolveCloneChat(env, token, pend.chat_id);
+      const chatTitle2 = resolved2.title, chatType2 = resolved2.type;
       const display = cloneDisplayName(chatTitle2, chatType2, pend.thread_id || '', topicTitle);
       const target = isPersonal ? 'personal' : 'community';
       st.destinationName = isPersonal ? 'Personal' : (communityName || communityId);
@@ -12087,14 +12107,8 @@ async function cloneEligibleCommunities(env, athenaUser, isGod) {
 
 async function startCloneTargetAsk(env, ctx) {
   const { token, chatId, forumThreadId, tgUserId, athenaUser, isGod, flowChat, flowThread, communityArg } = ctx;
-  let chatTitle = flowChat, chatType = '';
-  try {
-    const chk = await telegramApi(token, 'getChat', { chat_id: flowChat });
-    if (chk?.ok && chk.result) {
-      chatType = String(chk.result.type || '');
-      chatTitle = chk.result.title || (chk.result.username ? '@' + chk.result.username : flowChat);
-    }
-  } catch (_) {}
+  const resolved = await resolveCloneChat(env, token, flowChat);
+  const chatTitle = resolved.title, chatType = resolved.type;
   if (communityArg) {
     const ok = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityArg).first().catch(() => null);
     if (!ok || (!isGod && !(await ensureOwnerOrAdmin(communityArg, athenaUser.id, env)))) {
