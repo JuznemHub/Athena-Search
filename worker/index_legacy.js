@@ -5,6 +5,25 @@ import { dokployConfigured, dokployApps, dokployStatus, dokployLogSnapshot, dokp
 import { handleLogApi } from './log-api.js';
 import { runtimeLogs, redactLog, writeRuntimeLog } from './runtime-logs.js';
 
+function cloneDisplayName(chatTitle, chatType, flowThread, topicTitle) {
+  const base = String(chatTitle || '');
+  if (!flowThread) return chatType === 'channel' ? `[${base}]` : base;
+  return `${base}[${topicTitle || '#' + flowThread}]`;
+}
+
+async function resolveForumTopicTitle(env, label, chatId, threadId) {
+  try {
+    const client = USERBOT_ACCOUNTS.get(label)?.client;
+    if (!client || !threadId) return '';
+    const { Api } = await import('telegram');
+    const res = await client.invoke(new Api.channels.GetForumTopicsByID({ channel: chatId, topics: [Number(threadId)] }));
+    const list = res?.topics || [];
+    const found = list.find((t) => String(t?.id) === String(threadId)) || list[0];
+    return String(found?.title || '');
+  } catch (_) { return ''; }
+}
+
+
 /**
  * Cloudflare Worker: Athena (auth + API + static)
  * Telegram + Discord OAuth, session-gated APIs, community bot bindings
@@ -2759,7 +2778,7 @@ const TELEGRAM_COMMAND_MENU = [
   { command: 'community_list', description: 'Your communities' },
   { command: 'edit', description: 'Edit title/notes of a link' },
   { command: 'delete', description: 'Delete a saved link' },
-  { command: 'clone', description: 'Clone a chat: bot live here, or IDs for bot link / userbot history' },
+  { command: 'clone', description: 'Clone chat/topic history + live (community-scoped)' },
   { command: 'stats', description: 'Persisted clone stats and live state' },
   { command: 'userbot_status', description: 'Userbot account and follow health (DM)' },
 ];
@@ -2777,10 +2796,9 @@ const TELEGRAM_GOD_COMMAND_MENU = [
   { command: 'admin', description: 'Promote a member (reply)' },
   { command: 'demote', description: 'Demote a member (reply)' },
   { command: 'status', description: 'What is indexing + backfill jobs' },
-  { command: 'uclone', description: 'Userbot history wizard with topic chooser' },
+  { command: 'uclone', description: 'Userbot history wizard: topic + community' },
   { command: 'userbot_accounts', description: 'Select or verify saved accounts (DM)' },
-  { command: 'group_copy', description: 'Copy group messages' },
-  { command: 'topic_link', description: 'Bind a forum topic to a target' },
+  { command: 'clone', description: 'Clone chat/topic history + live (community-scoped)' },
   { command: 'topic_list', description: 'List topic bindings' },
   { command: 'userbotconnect', description: 'Connect userbot session (GOD)' },
   { command: 'userbot_disconnect', description: 'Disconnect userbot' },
@@ -7654,26 +7672,26 @@ function helpTextForSection(section, isGod = false) {
       cmd(9, `${codeHtml('/kick')} ${codeHtml('<@user|id>')}`, 'Remove a member\'s access — they can rejoin later.'),
       cmd(10, `${codeHtml('/admin')} · ${codeHtml('/demote')}`, 'Promote or demote — reply to the member\'s message. Owner/GOD only.'),
       spacer,
-      richParagraph(`<b>Topics live in 📡 Channels:</b> ${codeHtml('/topic_link')} binds the topic you send it in, ${codeHtml('/topic_list')} lists bindings, ${codeHtml('/topic_unlink')} removes one. <b>Owner danger zone:</b> ${codeHtml('/clear_db <id>')} wipes the community brain · ${codeHtml('/community_delete <id>')} deletes the community (reply ${codeHtml('YES_DELETE_…')} to confirm).`)
+      richParagraph(`<b>Topics live in 📡 Channels:</b> ${codeHtml('/clone')} inside a topic clones it with history + live follow, ${codeHtml('/topic_list')} lists bindings, ${codeHtml('/topic_unlink')} removes one. <b>Owner danger zone:</b> ${codeHtml('/clear_db <id>')} wipes the community brain · ${codeHtml('/community_delete <id>')} deletes the community (reply ${codeHtml('YES_DELETE_…')} to confirm).`)
     ].join('\n');
   }
 
   if (section === 'channels') {
     return [
       richHeading(3, '📡 Cloning channels, groups & topics'),
-      richParagraph('<i>Two commands do everything. <b>/clone</b> with nothing (in a linked group) is Bot API live mode — new posts only. <b>/clone</b> with IDs links a channel or backfills a chat with history, picking the engine itself. <b>/uclone</b> is the guided wizard over the same engines. Every finished clone subscribes its chat for live indexing — no follow command exists.</i>'),
+      richParagraph('<i>Two commands do everything. <b>/clone</b> backfills history first, then follows live; <b>/uclone</b> is the guided wizard with per-topic statistics. Community id always goes LAST, and every run asks Personal vs community before starting. Stats show Group[Topic] / [Channel] with the usual ⏹ button.</i>'),
       spacer,
-      richParagraph('<b>/clone — the one clone command</b>'),
-      cmd(1, `${codeHtml('/clone')}`, 'Run with nothing inside a linked group: Bot API live indexing, new posts only. Needs Athena as admin there. In a DM it explains the ID forms below.'),
-      cmd(2, `${codeHtml('/clone')} ${codeHtml('<community_id> <channel_id> [target]')}`, 'Link a channel for bot live indexing (every new post is copied). IDs start with -100. Re-running re-routes it. Personal/both targets: GOD only.'),
-      cmd(3, `${codeHtml('/clone')} ${codeHtml('<community_id> <chat_id> [thread_id] [bot|userbot] [target]')}`, 'Backfill a chat with full history + live follow-up. Runs as your selected account (' + codeHtml('/userbot_select') + '), first enabled if none. A thread id backfills only that forum topic. The engine auto-selects (bot admin → bot link, else userbot) unless you force it.'),
-      cmd(4, `${codeHtml('/clone')} ${codeHtml('<chat_id>')}`, 'Read-only inspect: shows where that chat saves — bot link, userbot follow, or nothing.'),
-      cmd(5, `${codeHtml('/group_copy')} ${codeHtml('on|off')}`, 'Whole-group copy mode — index everything posted, not just links.'),
+      richParagraph('<b>/clone — history + live, community-scoped</b>'),
+      cmd(1, `${codeHtml('/clone')}`, 'Run with nothing inside a topic: clones that topic. In General: the whole group. In a DM it explains the ID forms below.'),
+      cmd(2, `${codeHtml('/clone')} ${codeHtml('<community_id>')}`, 'Inside a topic: clone that topic into this community.'),
+      cmd(3, `${codeHtml('/clone')} ${codeHtml('<chat_id> <community_id>')}`, 'Whole chat (channels show as [Channel]): history first, then live. Runs as your selected account (' + codeHtml('/userbot_select') + '), first enabled if none.'),
+      cmd(4, `${codeHtml('/clone')} ${codeHtml('<topic_id> <community_id>')}`, 'That topic of THIS group.'),
+      cmd(5, `${codeHtml('/clone')} ${codeHtml('<chat_id> <topic_id> <community_id>')}`, 'That topic of that chat — the DM-friendly form.'),
       spacer,
       richParagraph('<b>Forum topics</b>'),
-      cmd(6, `${codeHtml('/clone')} ${codeHtml('[topic_id]')}`, 'In a linked group: Bot API live indexing for the whole group, or one forum topic with its id. New posts only — no history.'),
-      cmd(7, `${codeHtml('/topic_link')} ${codeHtml('[community_id] [community|personal|both]')}`, 'Bind the topic you send it in: every new post there is copied. Re-running it re-routes. Community id defaults to this group\'s. Also written ' + codeHtml('/topic link') + '.'),
-      cmd(8, `${codeHtml('/topic_list')} · ${codeHtml('/topic_unlink')}`, 'List bindings or remove one.'),
+      cmd(6, `${codeHtml('/clone')} ${codeHtml('[topic_id] [community_id]')}`, 'In a group: that topic of this group, into the community. Bare /clone in a topic does the same.'),
+      cmd(7, `${codeHtml('/topic_list')} · ${codeHtml('/topic_unlink')}`, 'List bindings or remove one. Binding happens automatically when a clone runs.'),
+      cmd(8, `${codeHtml('/uclone')} ${codeHtml('<chat_id> [topic_id] [community_id]')}`, 'Guided wizard: measures history, shows per-topic statistics, then asks the destination (given community pinned first). Also written ' + codeHtml('/ubclone') + '.'),
       spacer,
       richParagraph('<b>Watch & stop</b>'),
       cmd(9, `${codeHtml('/stats')}`, 'Newest-first dashboard, one row per cloned source: totals, fresh-in-24h line, live ON/OFF, per-topic pages. LIVE means a real capture path exists. The ⏹ button beside a live row stops its live capture AND its running backfills — saved history stays.'),
@@ -7681,14 +7699,13 @@ function helpTextForSection(section, isGod = false) {
       cmd(11, `${codeHtml('/delete')}`, 'One delete command with a picker: one saved link, one whole cloned chat (imports + live capture, with confirm), or one backfill session (imports only, with confirm). Direct forms still work: ' + codeHtml('/delete <url>') + ' removes a link, ' + codeHtml('/delete <chat_id> [thread_id]') + ' removes a whole clone.'),
       spacer,
       richParagraph('<b>Userbot accounts (GOD)</b>'),
-      cmd(12, `${codeHtml('/uclone')} ${codeHtml('<chat_id> [topic_id]')}`, 'Guided wizard: measures accessible history, shows per-topic statistics, lets you pick one topic or all, then the destination. Confirming subscribes live indexing under the account that ran it. Also written ' + codeHtml('/ubclone') + '.'),
-      cmd(13, `${codeHtml('/userbot_add')} ${codeHtml('<label> <api_id> <api_hash> <session>')}`, 'Connect an account (label defaults to main). Re-authenticate with the same label; adding another account never changes the selection. Sessions stay encrypted on the server — DM only.'),
-      cmd(14, `${codeHtml('/userbot_accounts')} · ${codeHtml('/userbot_select')} · ${codeHtml('/userbot_status')}`, 'List and switch accounts, and open the health dashboard: identities, live connection, saved follows, backfill and per-topic progress, recent errors. Switching accounts moves your live follows to the new account wherever it can see the chat.'),
-      cmd(15, `${codeHtml('/userbot_unfollow')} ${codeHtml('<chat_id>')}`, 'Stop live capture for one chat (keeps its history). The ⏹ button on /stats does the same thing with one tap.'),
+      cmd(12, `${codeHtml('/userbot_add')} ${codeHtml('<label> <api_id> <api_hash> <session>')}`, 'Connect an account (label defaults to main). Re-authenticate with the same label; adding another account never changes the selection. Sessions stay encrypted on the server — DM only.'),
+      cmd(13, `${codeHtml('/userbot_accounts')} · ${codeHtml('/userbot_select')} · ${codeHtml('/userbot_status')}`, 'List and switch accounts, and open the health dashboard: identities, live connection, saved follows, backfill and per-topic progress, recent errors. Switching accounts moves your live follows to the new account wherever it can see the chat.'),
+      cmd(14, `${codeHtml('/userbot_unfollow')} ${codeHtml('<chat_id> <community_id>')}`, 'Stop live capture for one chat in one community (keeps its history). The ⏹ button on /stats does the same thing with one tap.'),
       cmd(16, `${codeHtml('/userbot_del')} ${codeHtml('<label>')} · ${codeHtml('/userbot_disconnect')}`, 'Remove one account, or disconnect all of them. Their follows and running clones stop too — switch accounts (14) instead if you just want to move live cloning elsewhere.'),
       spacer,
-      richParagraph(`<b>Recipes:</b> bot live: ${codeHtml('/community_verify')} → ${codeHtml('/clone')} in the group → ${codeHtml('/stats')}; channel: ${codeHtml('/clone <community_id> <-100…>')} → ${codeHtml('/stats')}; history + live: ${codeHtml('/userbot_add')} → ${codeHtml('/userbot_select')} → ${codeHtml('/uclone <chat_id>')} or ${codeHtml('/clone <community_id> <chat_id>')} → ${codeHtml('/stats')}`),
-      richParagraph('<i>Cloning never edits the source chat. Bot mode needs Athena in the group; userbot mode needs the selected account in the source chat.</i>')
+      richParagraph(`<b>Recipes:</b> group: ${codeHtml('/community_verify')} → ${codeHtml('/clone')} in the group → ${codeHtml('/stats')}; channel: ${codeHtml('/clone <-100…> <community_id>')} → ${codeHtml('/stats')}; history + live: ${codeHtml('/userbot_add')} → ${codeHtml('/userbot_select')} → ${codeHtml('/uclone <chat_id> [topic_id] [community_id]')} → ${codeHtml('/stats')}`),
+      richParagraph('<i>Cloning never edits the source chat. The selected userbot account must see the source chat; every run asks Personal vs community first.</i>')
     ].join('\n');
   }
 
@@ -7699,7 +7716,7 @@ function helpTextForSection(section, isGod = false) {
       spacer,
       richParagraph('<b>Brains & targets</b>'),
       cmd(1, `${codeHtml('/personal')} · ${codeHtml('/community')} · ${codeHtml('/mode')}`, 'Where YOUR dumps land: private brain or the linked community. Same switch as in 👥 Community — repeated here because only GOD has a personal brain.'),
-      cmd(2, `${codeHtml('/channel_link')} ${codeHtml('<community_id> <channel_id> [community|personal|both]')}`, 'Create, re-route (re-run), or inspect (one chat id) a channel link. Full create/change/remove split lives in 📡 Channels.'),
+      cmd(2, `${codeHtml('/clone')} ${codeHtml('<channel_id> <community_id>')}`, 'Clone a channel: full history first, then live indexing. Full create/change/remove split lives in 📡 Channels.'),
       cmd(3, `${codeHtml('/dumpsmart')} · ${codeHtml('/dumpall on|off')}`, 'One dump-mode setting: smart keeps the primary link only (default), on saves every URL.'),
       spacer,
       richParagraph('<b>Tagging & structure</b>'),
@@ -8101,10 +8118,66 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       await editTelegramMessage(token, chatId, msgId, `${boldHtml('❌ Cancelled.')}`, null, threadId);
       return new Response('OK',{status:200, headers:corsHeaders});
     }
+    if(action==='target'){
+      const choice = parts.slice(3).join(':');
+      const cbIsGod = tgUserId ? isInstanceOwnerTgId(tgUserId, env) : false;
+      const athenaUser2 = await resolveAthenaUserFromTg(env, tgUserId);
+      if (!athenaUser2) {
+        await deletePendingClone(env, pendingId);
+        await editTelegramMessage(token, chatId, msgId, `${boldHtml('⚠️')} Login at ${await getWebsiteDisplayUrl(env)} first.`, null, threadId);
+        return new Response('OK',{status:200, headers:corsHeaders});
+      }
+      const st = JSON.parse(pend.stats_json||'{}');
+      if (st.manager !== 'botclone' || st.stage !== 'choice') {
+        await editTelegramMessage(token, chatId, msgId, `${boldHtml('⚠️')} This prompt expired — run ${codeHtml('/clone')} again.`, null, threadId);
+        return new Response('OK',{status:200, headers:corsHeaders});
+      }
+      const isPersonal = choice === 'personal';
+      const communityId = isPersonal ? '' : choice;
+      if (isPersonal && !cbIsGod) {
+        await telegramApi(token,'answerCallbackQuery',{callback_query_id: cq.id, text:'Personal brain is GOD only', show_alert:true}).catch(()=>{});
+        return new Response('OK',{status:200, headers:corsHeaders});
+      }
+      let communityName = '';
+      if (!isPersonal) {
+        const c = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityId).first().catch(()=>null);
+        if (!c || (!cbIsGod && !(await ensureOwnerOrAdmin(communityId, athenaUser2.id, env)))) {
+          await editTelegramMessage(token, chatId, msgId, `${boldHtml('🔒')} Community not found or not yours.`, null, threadId);
+          return new Response('OK',{status:200, headers:corsHeaders});
+        }
+        communityName = c.name || communityId;
+      }
+      const label = await resolveJobLabel(env, athenaUser2.id)
+        || (await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled = 1 ORDER BY label LIMIT 1').first().catch(() => null))?.label;
+      if (!label) {
+        await editTelegramMessage(token, chatId, msgId, `${boldHtml('🤖')} No userbot account connected yet. GOD: ${codeHtml('/userbot_add <label> <api_id> <api_hash> <session>')}`, null, threadId);
+        return new Response('OK',{status:200, headers:corsHeaders});
+      }
+      let topicTitle = '';
+      if (pend.thread_id) topicTitle = await resolveForumTopicTitle(env, label, pend.chat_id, pend.thread_id);
+      let chatTitle2 = pend.chat_id, chatType2 = '';
+      try {
+        const chk = await telegramApi(token, 'getChat', { chat_id: pend.chat_id });
+        if (chk?.ok && chk.result) { chatType2 = String(chk.result.type || ''); chatTitle2 = chk.result.title || (chk.result.username ? '@' + chk.result.username : pend.chat_id); }
+      } catch (_) {}
+      const display = cloneDisplayName(chatTitle2, chatType2, pend.thread_id || '', topicTitle);
+      const target = isPersonal ? 'personal' : 'community';
+      st.destinationName = isPersonal ? 'Personal' : (communityName || communityId);
+      st.sourceName = display; st.stage = 'queued';
+      if (pend.thread_id) st.topics = [{ id: String(pend.thread_id), name: topicTitle || undefined }];
+      await env.DB.prepare(`UPDATE pending_clones SET stats_json = ?, target = ?, community_id = ? WHERE id = ?`).bind(JSON.stringify(st), target, communityId || null, pendingId).run();
+      const res = await startBackfillJob(env, { token, chatId, forumThreadId: threadId, athenaUser: athenaUser2, communityIdArg: communityId, chatIdArg: pend.chat_id, threadArg: pend.thread_id || '', communityName, userbotLabel: label, target, topicName: topicTitle, silentProgress: true });
+      if (!res?.ok) {
+        await editTelegramMessage(token, chatId, msgId, `${boldHtml('❌')} Clone failed: ${escHtml(String(res?.reason || 'unknown'))}`, null, threadId);
+        return new Response('OK',{status:200, headers:corsHeaders});
+      }
+      await editTelegramMessage(token, chatId, msgId, `${boldHtml('✅ Cloning')} ${escHtml(display)} → ${escHtml(st.destinationName)}. History first, then live — progress in ${codeHtml('/stats')}.`, null, threadId);
+      return new Response('OK',{status:200, headers:corsHeaders});
+    }
     if(action==='yes'){
       const stats = JSON.parse(pend.stats_json||'{}');
       const athenaUser2 = await resolveAthenaUserFromTg(env, tgUserId);
-      if (stats.manager === 'botclone') {
+      if (stats.manager === 'botclone' && stats.stage !== 'choice') {
         if (!athenaUser2) {
           await editTelegramMessage(token, chatId, msgId, `${boldHtml('⚠️')} Login at ${await getWebsiteDisplayUrl(env)} first.`, null, threadId);
           return new Response('OK',{status:200, headers:corsHeaders});
@@ -8213,7 +8286,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
           return new Response('OK', { status: 200, headers: corsHeaders });
         }
         await answered();
-        const stopped = await stopLiveCapture(env, src.chat_id);
+        const stopped = await stopLiveCapture(env, src.chat_id, src.community || '');
         const bits = [];
         if (stopped.followsRemoved) bits.push(`${stopped.followsRemoved} follow${stopped.followsRemoved === 1 ? '' : 's'}`);
         if (stopped.linksRemoved) bits.push(`${stopped.linksRemoved} bot link${stopped.linksRemoved === 1 ? '' : 's'}`);
@@ -8221,9 +8294,10 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
         // them too (own jobs, or any job on this chat for GOD). Saved history stays.
         let jobsStopped = 0;
         try {
+          const stopComm = String(src.community || '');
           const jobRows = await env.DB.prepare(
-            `SELECT id FROM index_jobs WHERE status IN ('queued','running') AND (chat_id = ? OR chat_id = ?)`
-          ).bind(stopped.chatId, stopped.chatId.replace(/^-100/, '')).all().catch(() => ({ results: [] }));
+            `SELECT id FROM index_jobs WHERE status IN ('queued','running') AND (chat_id = ? OR chat_id = ?) AND (community_id = ? OR ? = '')`
+          ).bind(stopped.chatId, stopped.chatId.replace(/^-100/, ''), stopComm, stopComm).all().catch(() => ({ results: [] }));
           for (const j of jobRows?.results || jobRows || []) {
             if (!isGodCb) {
               const owner = await env.DB.prepare('SELECT user_id FROM index_jobs WHERE id = ?').bind(j.id).first().catch(() => null);
@@ -8409,7 +8483,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       await sendTelegramRichMessage(token, chatId, [
         richHeading(3, '🧬 Clone a chat'),
         '',
-        richParagraph(`• ${codeHtml('/clone')} — in a linked group: Bot API live indexing<br>• ${codeHtml('/clone <community_id> <chat_id>')} — bot link if admin, else userbot history + live<br>• ${codeHtml('/uclone <chat_id> [topic_id]')} — guided wizard: scan, topic chooser, destination, live follow<br>• ${codeHtml('/stats')} — counters, live state, ⏹ stop button · ${codeHtml('/status')} — what is indexing + jobs<br>• ${codeHtml('/delete')} — picker: one link, one cloned chat, or one backfill session`)
+        richParagraph(`• ${codeHtml('/clone')} — in a topic clones that topic, in General the whole group<br>• ${codeHtml('/clone <chat_id> <community_id>')} — whole chat ([Channel] for channels)<br>• ${codeHtml('/clone <chat_id> <topic_id> <community_id>')} — that topic of that chat<br>• ${codeHtml('/uclone <chat_id> [topic_id] [community_id]')} — guided wizard with per-topic stats<br>• ${codeHtml('/stats')} — counters, live state, ⏹ stop button · ${codeHtml('/status')} — what is indexing + jobs<br>• ${codeHtml('/delete')} — picker: one link, one cloned chat, or one backfill session`)
       ].join('\n'), threadId);
     }
     return new Response('OK', { status: 200, headers: corsHeaders });
@@ -8635,8 +8709,41 @@ async function ensureTopicBindingTable(env) {
      )`
   ).run();
   await env.DB.prepare(
-    'CREATE UNIQUE INDEX IF NOT EXISTS idx_topic_bind_chat_thread ON telegram_topic_bindings(chat_id, thread_id)'
+    'DROP INDEX IF EXISTS idx_topic_bind_chat_thread'
   ).run().catch(() => {});
+  await env.DB.prepare(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_topic_bind_chat_thread_community ON telegram_topic_bindings(chat_id, thread_id, community_id)'
+  ).run().catch(() => {});
+}
+
+// One chat can now feed many communities: rebuild single-community keys.
+async function tablePkCols(env, table) {
+  try {
+    const r = await env.DB.prepare(
+      `SELECT kcu.column_name AS c FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema WHERE tc.table_name = ? AND tc.constraint_type = 'PRIMARY KEY' ORDER BY kcu.ordinal_position`
+    ).bind(table).all();
+    return (((r && r.results) || r) || []).map((x) => String(x.c || ''));
+  } catch (_) { return []; }
+}
+async function migrateFollowKeys(env) {
+  let pk;
+  try {
+    pk = await tablePkCols(env, 'userbot_follows');
+  } catch (_) {
+    return;
+  }
+  if (!pk || !pk.length) return; // fresh table (already new shape) or unreadable — nothing to rebuild
+  if (pk.includes('chat_id') && pk.includes('community_id')) return;
+  try {
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS userbot_follows_new (chat_id TEXT NOT NULL, label TEXT NOT NULL DEFAULT 'main', community_id TEXT NOT NULL DEFAULT '', target TEXT NOT NULL DEFAULT 'community', created_by TEXT, created_at BIGINT NOT NULL, last_seen_at BIGINT, PRIMARY KEY (chat_id, community_id))`
+    ).run();
+    await env.DB.prepare(
+      `INSERT INTO userbot_follows_new (chat_id, label, community_id, target, created_by, created_at, last_seen_at) SELECT chat_id, label, community_id, target, created_by, created_at, last_seen_at FROM userbot_follows`
+    ).run();
+    await env.DB.prepare(`DROP TABLE userbot_follows`).run();
+    await env.DB.prepare(`ALTER TABLE userbot_follows_new RENAME TO userbot_follows`).run();
+  } catch (e) { console.error('follow key migration', e?.message || e); }
 }
 
 /** Shared by channel indexing and history backfill. Returns {error?} or {saved} or null on skip. */
@@ -8949,23 +9056,32 @@ const UCLONE_MANAGERS = new WeakMap();
 // link row(s) and every userbot follow (base chat and per-topic keys).
 // Saved history is untouched — this only stops future posts. Used by the
 // ⏹ button on /stats rows (unlinking moved there when /channel_unlink went away).
-export async function stopLiveCapture(env, chatIdArg) {
+export async function stopLiveCapture(env, chatIdArg, communityId = '') {
   const cid = normalizeTgChatId(String(chatIdArg || ''));
   const bare = cid.replace(/^-100/, '');
+  const comm = String(communityId || '').trim();
   let followsRemoved = 0;
   let linksRemoved = 0;
   try {
     await ensureUserbotTables(env);
-    const r = await env.DB.prepare(
-      `DELETE FROM userbot_follows WHERE chat_id = ? OR chat_id = ? OR chat_id LIKE ? OR chat_id LIKE ?`
-    ).bind(cid, bare, `${cid}:%`, `${bare}:%`).run().catch(() => null);
+    const r = comm
+      ? await env.DB.prepare(
+        `DELETE FROM userbot_follows WHERE (chat_id = ? OR chat_id = ? OR chat_id LIKE ? OR chat_id LIKE ?) AND community_id = ?`
+      ).bind(cid, bare, `${cid}:%`, `${bare}:%`, comm).run().catch(() => null)
+      : await env.DB.prepare(
+        `DELETE FROM userbot_follows WHERE chat_id = ? OR chat_id = ? OR chat_id LIKE ? OR chat_id LIKE ?`
+      ).bind(cid, bare, `${cid}:%`, `${bare}:%`).run().catch(() => null);
     followsRemoved = Number(r?.meta?.changes ?? r?.changes ?? 0);
   } catch (_) {}
   try {
     await ensureBotBindingColumns(env);
-    const rows = await env.DB.prepare(
-      `SELECT id FROM community_bots WHERE platform = 'telegram' AND group_id IN (?, ?) AND community_id IS NOT NULL`
-    ).bind(cid, bare).all().catch(() => ({ results: [] }));
+    const rows = comm
+      ? await env.DB.prepare(
+        `SELECT id FROM community_bots WHERE platform = 'telegram' AND group_id IN (?, ?) AND community_id = ?`
+      ).bind(cid, bare, comm).all().catch(() => ({ results: [] }))
+      : await env.DB.prepare(
+        `SELECT id FROM community_bots WHERE platform = 'telegram' AND group_id IN (?, ?) AND community_id IS NOT NULL`
+      ).bind(cid, bare).all().catch(() => ({ results: [] }));
     for (const row of rows?.results || rows || []) {
       await env.DB.prepare('DELETE FROM community_bots WHERE id = ?').bind(row.id).run().catch(() => null);
       linksRemoved++;
@@ -9116,12 +9232,12 @@ async function deleteSessionImports(env, { jobId, withFiles }) {
 export async function ensureChatFollow(env, { chatId, threadId = '', label, communityId = '', target = 'community', createdBy = '' }) {
   const followChat = `${normalizeTgChatId(chatId)}${threadId ? ':' + threadId : ''}`;
   await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at)
-    VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET label=excluded.label, community_id=excluded.community_id,
+    VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id, community_id) DO UPDATE SET label=excluded.label,
     target=excluded.target, created_by=excluded.created_by`).bind(followChat, label, communityId || '', target, createdBy, Date.now()).run();
   if (threadId) {
     await ensureTopicBindingTable(env);
     await env.DB.prepare(`INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at)
-      VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id) DO UPDATE SET community_id=excluded.community_id,
+      VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id, community_id) DO UPDATE SET
       target=excluded.target, created_by=excluded.created_by`).bind('tb_' + Date.now().toString(36) + '_' + randomToken().slice(0, 5), normalizeTgChatId(chatId), threadId, communityId || '', target, createdBy, Date.now()).run();
   }
   return followChat;
@@ -9201,7 +9317,7 @@ async function activateBotClone(env, { pendingId, stats, chatId, token, messageI
   if (thread) {
     await ensureTopicBindingTable(env);
     await env.DB.prepare(`INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at)
-      VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id) DO UPDATE SET community_id=excluded.community_id,
+      VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id, community_id) DO UPDATE SET
       target=excluded.target, created_by=excluded.created_by`).bind('tb_' + Date.now().toString(36) + '_' + randomToken().slice(0, 5), sourceChat, thread, communityId, target, user.id, Date.now()).run();
   } else {
     const binding = await env.DB.prepare("SELECT id FROM community_bots WHERE platform='telegram' AND group_id=? ORDER BY created_at DESC LIMIT 1").bind(sourceChat).first();
@@ -9586,7 +9702,7 @@ async function doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUs
   const cloneChatName = await resolveChatTitle(env, token, chatIdN);
   const cloneWhere = `${cloneChatName ? `${boldHtml(escHtml(cloneChatName))} ` : ''}${codeHtml(chatIdN)}`;
   if(_minId || _maxId){
-    await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET label=excluded.label, community_id=excluded.community_id, target=excluded.target, created_by=excluded.created_by`).bind(chatIdN, label, communityIdArg || null, targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
+    await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id, community_id) DO UPDATE SET label=excluded.label, target=excluded.target, created_by=excluded.created_by`).bind(chatIdN, label, communityIdArg || '', targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
     await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: '', communityName, userbotLabel: label, minId: _minId, maxId: _maxId, target: targetArg || 'community' });
     await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning range')} ${codeHtml(_minId||'0')}→${codeHtml(_maxId||'∞')} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}\n${codeHtml('⏹ on its /stats row')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
     return;
@@ -9609,15 +9725,15 @@ ${codeHtml('⏹ on its /stats row')} to stop · ${codeHtml('/del ' + chatIdN)} t
   // whole-chat clone — that imports every topic's history. Clone that thread.
   if (threadArg) {
     const thr = String(threadArg);
-    await env.DB.prepare(`INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id) DO UPDATE SET community_id=excluded.community_id, target=excluded.target`).bind('tb_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), chatIdN, thr, communityIdArg || 'personal', targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
-    await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET label=excluded.label, community_id=excluded.community_id, target=excluded.target, created_by=excluded.created_by`).bind(chatIdN+':'+thr, label, communityIdArg || null, targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
+    await env.DB.prepare(`INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id, community_id) DO UPDATE SET target=excluded.target`).bind('tb_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), chatIdN, thr, communityIdArg || 'personal', targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
+    await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id, community_id) DO UPDATE SET label=excluded.label, target=excluded.target, created_by=excluded.created_by`).bind(chatIdN+':'+thr, label, communityIdArg || '', targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
     await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: thr, communityName, userbotLabel: label, silentProgress: true, target: targetArg || 'community' });
     await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning topic')} ${codeHtml('#'+thr)} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}\n• Live: every new post in this topic lands automatically\n${codeHtml('⏹ on its /stats row')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
     if (chatId) await startForumCloneCard(env, { token, chatId: chatIdN, chatName: cloneChatName || chatIdN, progressChatId: chatId, forumThreadId });
     return;
   }
   // non-forum: single
-  await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET label=excluded.label, community_id=excluded.community_id, target=excluded.target, created_by=excluded.created_by`).bind(chatIdN, label, communityIdArg || null, targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
+  await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id, community_id) DO UPDATE SET label=excluded.label, target=excluded.target, created_by=excluded.created_by`).bind(chatIdN, label, communityIdArg || '', targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
   await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: '', communityName, userbotLabel: label, target: targetArg || 'community' });
   await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning this chat')} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}
 • Live: every new post lands automatically
@@ -10037,8 +10153,8 @@ async function startForumCloneSequential(env, { token, chatId, chatName = '', pr
       if (await anyStopping()) break; // stop requested — end the whole sequence
       const thr = String(topicIds[i]);
       try {
-        await env.DB.prepare(`INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id) DO UPDATE SET community_id=excluded.community_id, target=excluded.target`).bind('tb_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), normalizeTgChatId(chatId), thr, communityIdArg || 'personal', targetArg || 'community', athenaUser.id, Date.now()).run().catch(() => {});
-        await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET label=excluded.label, community_id=excluded.community_id, target=excluded.target, created_by=excluded.created_by`).bind(normalizeTgChatId(chatId) + ':' + thr, label, communityIdArg || null, targetArg || 'community', athenaUser.id, Date.now()).run().catch(() => {});
+        await env.DB.prepare(`INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id, community_id) DO UPDATE SET target=excluded.target`).bind('tb_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), normalizeTgChatId(chatId), thr, communityIdArg || 'personal', targetArg || 'community', athenaUser.id, Date.now()).run().catch(() => {});
+        await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id, community_id) DO UPDATE SET label=excluded.label, target=excluded.target, created_by=excluded.created_by`).bind(normalizeTgChatId(chatId) + ':' + thr, label, communityIdArg || '', targetArg || 'community', athenaUser.id, Date.now()).run().catch(() => {});
       } catch (_) {}
       let jobId = '';
       try {
@@ -11346,7 +11462,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
           await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Login at ${await getWebsiteDisplayUrl(env)} first.`, forumThreadId).catch(()=>{});
           return new Response('OK', {status:200, headers: corsHeaders});
         }
-        if (stats.manager === 'botclone') {
+        if (stats.manager === 'botclone' && stats.stage !== 'choice') {
           try {
             await activateBotClone(env, { pendingId: pend.id, stats, chatId: pend.chat_id, token, messageId: msg.message_id, threadId: forumThreadId, user: athenaUser });
           } catch (cloneErr) {
@@ -11947,242 +12063,80 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
-   // ---- /channel_link — index a channel's new posts into a community ----
-   // Owner/GOD only. The bot must already be an admin of the channel; the
-   // check runs server-side via this bot's own token, so a channel cannot be
-   // linked by anyone who merely knows its id.
-// ---- channel linking core: create, re-route (re-run) or inspect ----
-// Shared by /clone. Re-running the full form with a different target
-// re-routes an existing link; one chat id alone only inspects.
-async function runChannelLink(env, ctx) {
-  // parts mirrors a link command's argv: [cmd, community_id?, chat_id?, target?].
-  // Callers (today: /clone) build it explicitly instead of parsing user text twice.
-  const { token, chatId, forumThreadId, msg, athenaUser, isGod, parts } = ctx;
-  if (!athenaUser) {
-    await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-  // One chat-id argument is the read-only form: show where this chat saves
-  // (bot link, userbot follow, or nothing). Re-running the full form with a
-  // different target re-routes an existing link — no separate command needed.
-  if (parts[1] && !parts[2] && !msg.reply_to_message?.sender_chat?.id && /^-?\d{8,}$/.test(String(parts[1]).trim())) {
-    const showCid = normalizeTgChatId(String(parts[1]).trim());
-    await ensureBotBindingColumns(env);
-    const row = await env.DB.prepare(
-      `SELECT group_name, community_id, channel_target FROM community_bots WHERE platform = 'telegram' AND group_id IN (?, ?) AND community_id IS NOT NULL`
-    ).bind(showCid, showCid.replace(/^-100/, '')).first().catch(() => null);
-    if (row) {
-      const current = CHANNEL_TARGETS.has(row.channel_target) ? row.channel_target : 'community';
-      await sendTelegramFormatted(token, chatId,
-        `${boldHtml('📢')} ${escHtml(row.group_name || showCid)} → ${escHtml(row.community_id || '?')} (${codeHtml(current)})\n` +
-        `Change it: ${codeHtml('/clone ' + (row.community_id || '<community_id>') + ' ' + showCid + ' <community|personal|both>')}`,
-        forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
+// ---- /clone shared flow: ask Personal vs community, then backfill + follow ----
+function cloneUsageHtml() {
+  return [
+    `In a topic: ${codeHtml('/clone')} or ${codeHtml('/clone <community_id>')} clones that topic.`,
+    `Whole chat: ${codeHtml('/clone <chat_id> <community_id>')}.`,
+    `One topic: ${codeHtml('/clone <chat_id> <topic_id> <community_id>')} (or ${codeHtml('/clone <topic_id> <community_id>')} inside its group).`,
+    `Guided tour with per-topic stats: ${codeHtml('/uclone <chat_id> [topic_id] [community_id]')}.`,
+  ].join('\n');
+}
+
+async function cloneEligibleCommunities(env, athenaUser, isGod) {
+  const out = [];
+  try {
+    const rows = await env.DB.prepare(`SELECT id, name FROM communities WHERE id != 'default' ORDER BY created_at DESC`).all();
+    for (const c of (rows?.results || rows || [])) {
+      if (!c?.id) continue;
+      if (isGod || await ensureOwnerOrAdmin(c.id, athenaUser?.id || '', env)) out.push(c);
     }
-    await ensureUserbotTables(env).catch(() => {});
-    const follow = await env.DB.prepare(
-      `SELECT label, community_id, target FROM userbot_follows WHERE chat_id = ? OR chat_id LIKE ? LIMIT 1`
-    ).bind(showCid, `${showCid}:%`).first().catch(() => null);
-    if (follow) {
-      await sendTelegramFormatted(token, chatId,
-        `${boldHtml('📡')} ${codeHtml(showCid)} is cloned by userbot ${codeHtml(follow.label || '?')} → ${codeHtml(follow.community_id || '?')} (${codeHtml(follow.target || 'community')}).\n` +
-        `${italicHtml('Live follows are managed per account — see /userbot_status.')}`,
-        forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
+  } catch (_) {}
+  return out;
+}
+
+async function startCloneTargetAsk(env, ctx) {
+  const { token, chatId, forumThreadId, tgUserId, athenaUser, isGod, flowChat, flowThread, communityArg } = ctx;
+  let chatTitle = flowChat, chatType = '';
+  try {
+    const chk = await telegramApi(token, 'getChat', { chat_id: flowChat });
+    if (chk?.ok && chk.result) {
+      chatType = String(chk.result.type || '');
+      chatTitle = chk.result.title || (chk.result.username ? '@' + chk.result.username : flowChat);
     }
-    await sendTelegramFormatted(token, chatId,
-      `${boldHtml('⚠️')} ${codeHtml(showCid)} is not linked anywhere. Link it: ${codeHtml('/channel_link <community_id> ' + showCid)}`,
-      forumThreadId);
-    return new Response('OK', { status: 200, headers: corsHeaders });
+  } catch (_) {}
+  if (communityArg) {
+    const ok = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityArg).first().catch(() => null);
+    if (!ok || (!isGod && !(await ensureOwnerOrAdmin(communityArg, athenaUser.id, env)))) {
+      await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(communityArg)} not found or not yours.`, forumThreadId);
+      return;
+    }
   }
-  const communityIdArg = (parts[1] || '').trim();
-  const channelIdArg = (parts[2] || '').trim() || (msg.reply_to_message?.sender_chat?.id ? String(msg.reply_to_message.sender_chat.id) : '');
-  const targetArg = (parts[3] || '').trim().toLowerCase();
-  if (targetArg && !CHANNEL_TARGETS.has(targetArg)) {
-    await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Target must be ${codeHtml('community')}, ${codeHtml('personal')} or ${codeHtml('both')}.`, forumThreadId);
-    return new Response('OK', { status: 200, headers: corsHeaders });
+  const eligible = await cloneEligibleCommunities(env, athenaUser, isGod);
+  if (!eligible.length) {
+    await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No community available — ask a community owner to make you owner/admin first.`, forumThreadId);
+    return;
   }
-  if ((targetArg === 'personal' || targetArg === 'both') && !isGod) {
-    await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} ${codeHtml('personal')}/${codeHtml('both')} targets are GOD rank only.`, forumThreadId);
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-  const channelTarget = targetArg || 'community';
-  if (!communityIdArg || !channelIdArg) {
-    await sendTelegramFormatted(token, chatId, [
-      `${boldHtml('📢 Link a channel for auto-indexing')}`,
-      '',
-      `Usage: ${codeHtml('/clone <community_id> <channel_id> [community|personal|both]')}`,
-      `${codeHtml('personal')}/${codeHtml('both')} are GOD rank only.`,
-      `Or: forward a channel post here, reply to it with ${codeHtml('/clone <community_id>')}`,
-      '',
-      'Requires: community owner/GOD, and this bot added as ADMIN of the channel.',
-      'New channel posts (links + pdf/docx/md/json/… files) are indexed in real time.',
-      `Channel ID: forward a channel post to ${linkHtml('https://t.me/userinfobot', '@userinfobot')}`,
-      `Stop live indexing from the ⏹ button on its /stats row`
-    ].join('\n'), forumThreadId);
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-  if (!(await ensureOwnerOrAdmin(communityIdArg, athenaUser.id, env)) && !isGod) {
-    await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-  const community = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityIdArg).first();
-  if (!community) {
-    await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(communityIdArg)} not found.`, forumThreadId);
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-  const cid = channelIdArg.startsWith('-') ? channelIdArg : `-100${channelIdArg.replace(/^-100/, '')}`;
-  if (!/^-\d+$/.test(cid)) {
-    await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Invalid channel ID (use -100…).`, forumThreadId);
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-  await ensureUserbotTables(env);
-  // Validate: channel exists, bot is admin — with THIS bot's token.
-  const me = await telegramApi(token, 'getMe', {});
-  const botId = me?.result?.id;
-  const chk = await telegramApi(token, 'getChat', { chat_id: cid });
-  if (!chk?.ok || !['channel', 'supergroup', 'group'].includes(chk?.result?.type)) {
-    await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} ${codeHtml(cid)} is not a reachable chat for this bot — add the bot as ADMIN first.\n${italicHtml('No admin anywhere? Use the userbot path instead: connect an account (/userbot_add), then re-run the same /clone command — it switches engines automatically.')}`, forumThreadId);
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-  const member = botId ? await telegramApi(token, 'getChatMember', { chat_id: cid, user_id: botId }) : null;
-  const botStatus = member?.result?.status || '';
-  if (!['administrator', 'creator'].includes(botStatus)) {
-    await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} This bot is not an admin of that channel (status: ${escHtml(botStatus || 'unknown')}). Promote it and retry.`, forumThreadId);
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-  await ensureBotBindingColumns(env);
-  const channelTitle = chk.result.title || cid;
-  const existingBinding = await env.DB.prepare(
-    `SELECT id, community_id FROM community_bots WHERE platform = 'telegram' AND group_id = ?`
-  ).bind(cid).first();
-  if (existingBinding) {
-    await env.DB.prepare('UPDATE community_bots SET community_id = ?, group_name = ?, channel_target = COALESCE(?, channel_target) WHERE id = ?')
-      .bind(communityIdArg, channelTitle, channelTarget, existingBinding.id).run();
-  } else {
-    const id = 'cb_' + Date.now().toString(36) + '_' + randomToken().slice(0, 6);
-    await env.DB.prepare(
-      `INSERT INTO community_bots (id, community_id, platform, bot_username, group_id, group_name, created_by, created_at, scope, user_id, bot_token, channel_target)
-       VALUES (?, ?, 'telegram', ?, ?, ?, ?, ?, 'community', NULL, NULL, ?)`
-    ).bind(id, communityIdArg, me?.result?.username || null, cid, channelTitle, athenaUser.id, Date.now(), channelTarget).run();
-  }
-  await sendTelegramFormatted(token, chatId, [
-    `${boldHtml('✅')} Channel ${boldHtml(escHtml(channelTitle))} linked to ${boldHtml(escHtml(community.name || communityIdArg))}.`,
+  const pinned = communityArg ? eligible.filter((c) => String(c.id) === communityArg) : [];
+  const rest = eligible.filter((c) => String(c.id) !== communityArg);
+  const display = cloneDisplayName(chatTitle, chatType, flowThread, '');
+  const pendingId = 'bc_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  const stats = { manager: 'botclone', stage: 'choice', sourceName: display, threadId: flowThread || null, communityId: communityArg || null, target: null, isForum: !!flowThread, sourceType: chatType === 'channel' ? 'channel' : 'group', label: '', destinationName: '', requesterTgId: String(tgUserId || ''), requesterUserId: String(athenaUser.id), topics: flowThread ? [{ id: flowThread }] : [], createdAt: Date.now() };
+  await storePendingClone(env, { id: pendingId, chat_id: flowChat, thread_id: flowThread || null, community_id: communityArg || null, target: null, requester_tg_id: String(tgUserId || ''), requester_user_id: String(athenaUser.id), stats, created_at: Date.now(), expires_at: Date.now() + 15 * 60 * 1000 });
+  const rows = [];
+  if (isGod) rows.push(richButtonRow([{ label: '📥 Personal brain', data: `clone:target:${pendingId}:personal` }]));
+  for (const c of [...pinned, ...rest].slice(0, 8)) rows.push(richButtonRow([{ label: `🗂 ${String(c.name || c.id).slice(0, 40)}`, data: `clone:target:${pendingId}:${c.id}` }]));
+  rows.push(richButtonRow([{ label: '❌ Cancel', data: `clone:no:${pendingId}` }]));
+  await sendTelegramRichMessage(token, chatId, [
+    richHeading(3, `🧬 Clone ${flowThread ? 'topic' : (chatType === 'channel' ? 'channel' : 'group')}`),
     '',
-    `${boldHtml('Target:')} ${codeHtml(channelTarget)}${channelTarget !== 'community' ? italicHtml(' (GOD personal brain included)') : ''}`,
-    `${boldHtml('From now on')} every new post is copied automatically — links, captions, documents (pdf/docx/md/…), and text-only announcements. Video/audio/apk are skipped.`,
-    '',
-    `${boldHtml('Copy the existing history too')} (everything already in the channel): connect a userbot account once (${codeHtml('/userbot_add')}), then run:`,
-    `${codeHtml('/clone ' + communityIdArg + ' ' + cid)}`,
-    `• history + live follow-up in one run · progress: ${codeHtml('/status')} · stop live anytime from the ⏹ button on its /stats row`
-  ].join('\n'), forumThreadId);
-  return new Response('OK', { status: 200, headers: corsHeaders });
+    richParagraph(`Source: ${escHtml(display)} ${codeHtml(flowChat)}`),
+    richParagraph('Where should it land? History backfills first, then live indexing follows.'),
+  ].join('\n'), forumThreadId, rows.join('\n'));
 }
 
 
-   // ---- /group_copy — GOD toggles full-copy (text posts) for this group ----
-   if (cmd === '/group_copy' || cmd === '/groupcopy') {
-     if (!binding?.community_id) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Not a linked community group. ${codeHtml('/community_verify')} first.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (!isGod && !(await ensureOwnerOrAdmin(binding.community_id, athenaUser?.id || '', env))) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const arg = (parts[1] || '').trim().toLowerCase();
-     await ensureBotBindingColumns(env);
-     if (arg === 'on' || arg === 'off') {
-       const val = arg === 'on' ? 1 : 0;
-       await env.DB.prepare('UPDATE community_bots SET copy_text = ? WHERE id = ?').bind(val, binding.id).run();
-       await sendTelegramFormatted(token, chatId,
-         `${boldHtml('✅')} Group full-copy ${arg === 'on' ? 'ON' : 'OFF'}.` +
-         (arg === 'on' ? `\n${italicHtml('Text-only posts are now saved too. Target:')} ${codeHtml(binding.channel_target || 'community')} ${italicHtml('(re-route: re-run /channel_link with a new target)')}` : ''),
-         forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const cur = Number(binding.copy_text || 0) === 1;
-     await sendTelegramFormatted(token, chatId,
-       `${boldHtml('Group full-copy:')} ${cur ? 'ON' : 'OFF'}\n${codeHtml('/group_copy on')} — also save text-only posts\n${codeHtml('/group_copy off')} — links & documents only`,
-       forumThreadId);
-     return new Response('OK', { status: 200, headers: corsHeaders });
-   }
+   // /group_copy removed: forums are auto-detected, clone/uclone copy per flow.
 
    // `/topic link|unlink|list|target` is the spelling people reach for; the
    // handlers are `/topic_<sub>`. Fold the subcommand into the command name and
    // drop it from the argument list so both spellings run one path.
-   if (cmd === '/topic' && ['link', 'unlink', 'list', 'target'].includes(String(parts[1] || '').toLowerCase())) {
+   if (cmd === '/topic' && ['unlink', 'list', 'target'].includes(String(parts[1] || '').toLowerCase())) {
      cmd = '/topic_' + String(parts[1]).toLowerCase();
      parts.splice(1, 1);
    }
 
-   // ---- /topic_link — clone a specific forum topic into the brain ----
-   if (cmd === '/topic_link' || cmd === '/topiclink') {
-     // General carries no is_topic_message flag but still has a thread id, so
-     // accept either signal; only a message with no thread at all is refused.
-     if (msg.message_thread_id == null || !(msg.is_topic_message || msg.chat?.is_forum)) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Use ${codeHtml('/topic_link')} inside the forum topic you want to clone.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (!athenaUser) {
-       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     // `/topic_link [community_id] [community|personal|both]`, plus the short
-     // `/topic_link [target]` inside a group already linked by
-     // /community_verify — the linked community is the obvious destination, so
-     // the owner should not have to look up its id first.
-     const firstArg = (parts[1] || '').trim();
-     const targetOnly = CHANNEL_TARGETS.has(firstArg.toLowerCase());
-     let communityIdArg = targetOnly ? '' : firstArg;
-     const targetArg = targetOnly ? firstArg.toLowerCase() : (parts[2] || '').trim().toLowerCase();
-     if (!communityIdArg) communityIdArg = String(binding?.community_id || '');
-     if (!communityIdArg) {
-       await sendTelegramFormatted(token, chatId,
-         `Usage: ${codeHtml('/topic_link [community_id] [community|personal|both]')}\n${italicHtml('Run inside the topic. The community id is optional once this group is linked with /community_verify. personal/both are GOD rank only.')}`,
-         forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (targetArg && !CHANNEL_TARGETS.has(targetArg)) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Target must be ${codeHtml('community')}, ${codeHtml('personal')} or ${codeHtml('both')}.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if ((targetArg === 'personal' || targetArg === 'both') && !isGod) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} ${codeHtml('personal')}/${codeHtml('both')} targets are GOD rank only.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (!(await ensureOwnerOrAdmin(communityIdArg, athenaUser.id, env)) && !isGod) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const community = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityIdArg).first();
-     if (!community) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(communityIdArg)} not found.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     await ensureTopicBindingTable(env);
-     const threadIdStr = String(msg.message_thread_id);
-     const existing = await env.DB.prepare(
-       'SELECT id FROM telegram_topic_bindings WHERE chat_id = ? AND thread_id = ?'
-     ).bind(chatId, threadIdStr).first();
-     if (existing) {
-       await env.DB.prepare('UPDATE telegram_topic_bindings SET community_id = ?, target = COALESCE(NULLIF(?, \'\'), target), created_by = ? WHERE id = ?')
-         .bind(communityIdArg, targetArg, athenaUser.id, existing.id).run();
-     } else {
-       await env.DB.prepare(
-         `INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`
-       ).bind('tb_' + Date.now().toString(36) + '_' + randomToken().slice(0, 5), chatId, threadIdStr, communityIdArg, targetArg || 'community', athenaUser.id, Date.now()).run();
-     }
-     // Backfill pointer for this topic
-     await sendTelegramFormatted(token, chatId, [
-       `${boldHtml('✅')} Topic ${codeHtml('#' + threadIdStr)} linked to ${boldHtml(escHtml(community.name || communityIdArg))} · target ${codeHtml(targetArg || 'community')}.`,
-       `${italicHtml('New posts in this topic are copied automatically (links, files, text).')}`,
-       `History: ${codeHtml('/index_start <community_id> <chat_id> <api_id> <api_hash> <session> ' + threadIdStr)} ${italicHtml('(last arg = thread)')}`,
-       `Manage: re-run ${codeHtml('/topic_link')} in the topic with a new target · ${codeHtml('/topic_unlink ' + threadIdStr)}`
-     ].join('\n'), forumThreadId);
-     return new Response('OK', { status: 200, headers: corsHeaders });
-   }
+   // /topic_link removed: /clone and /uclone bind topics with history + live follow.
 
    // ---- /topic_unlink ----
    if (cmd === '/topic_unlink' || cmd === '/topicunlink') {
@@ -12215,7 +12169,7 @@ async function runChannelLink(env, ctx) {
        'SELECT thread_id, community_id, target FROM telegram_topic_bindings WHERE chat_id = ? ORDER BY thread_id'
      ).bind(chatId).all();
      if (!results?.length) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No topics linked in this group yet. ${codeHtml('/topic_link <community_id>')} inside a topic.`, forumThreadId);
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No topics linked in this group yet. Run ${codeHtml('/clone')} inside a topic.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      const lines = results.map((r) => `• ${codeHtml('#' + r.thread_id)} → ${escHtml(r.community_id)} · ${codeHtml(r.target || 'community')}`);
@@ -12249,7 +12203,7 @@ async function runChannelLink(env, ctx) {
         `${boldHtml('Default: Bot API mode')}`,
         'New channel posts, links, captions, and supported documents are exported into the linked community brain as the webhook receives them.',
         channels.length ? `${boldHtml('Linked channels')}\n${channels.join('\n')}` : 'No channels linked yet.',
-        `Enable it with ${codeHtml('/channel_link <community_id> <channel_id>')} after promoting this bot to channel admin.`,
+        `Enable it with ${codeHtml('/clone <channel_id> <community_id>')} after promoting this bot to channel admin.`,
         '',
         `${boldHtml('Optional: session mode')}`,
         `Use ${codeHtml('/export session')} for the private history-backfill guide. Bots cannot read old history; a short-lived encrypted user session is required for that one task.`
@@ -12289,182 +12243,55 @@ async function runChannelLink(env, ctx) {
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
-   // ---- unified /clone engine: bot link when the bot is admin, else userbot ----
-   // /clone <community_id> <chat_id> [thread_id|target|engine] [target|engine].
-   // A thread forces the userbot (only it does history); 'bot'/'userbot'
-   // keywords override; otherwise a bot-admin chat gets a bot live link and
-   // everything else runs the userbot (history + live follow-up, which
-   // startBackfillJob subscribes automatically). Replaces /channel_link and
-   // /index_start — /uclone stays as the guided wizard over the same engine.
-   async function cloneChatUnified(env, ctx) {
-     const { token, chatId, forumThreadId, msg, athenaUser, isGod, parts } = ctx;
-     if (!athenaUser) {
-       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const communityIdArg = String(parts[1] || '').trim();
-     let chatIdArg = '';
-     let threadArg = '';
-     let targetArg = 'community';
-     let engine = '';
-     for (const a of parts.slice(2)) {
-       const v = String(a || '').trim();
-       const low = v.toLowerCase();
-       if (!chatIdArg && (/^-?\d{8,}$/.test(v) || v.startsWith('@'))) chatIdArg = v;
-       else if (!threadArg && /^\d{1,7}$/.test(v)) threadArg = v;
-       else if (!engine && (low === 'bot' || low === 'userbot')) engine = low;
-       else if (CHANNEL_TARGETS.has(low) && targetArg === 'community') targetArg = low;
-       else if (!chatIdArg) chatIdArg = v;
-     }
-     if (!communityIdArg || !chatIdArg) {
-       await sendTelegramFormatted(token, chatId, [
-         `${boldHtml('🧬 Clone a chat')}`,
-         '',
-         `Usage: ${codeHtml('/clone <community_id> <chat_id> [thread_id] [bot|userbot] [target]')}`,
-         `• thread_id — backfill only that forum topic (always userbot)`,
-         `• bot|userbot — force an engine, or omit to auto-select`,
-         `• target — community (default), personal, both (GOD only for the last two)`,
-         `Chat id: forward a post to ${linkHtml('https://t.me/userinfobot', '@userinfobot')}`,
-       ].join('\n'), forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if ((targetArg === 'personal' || targetArg === 'both') && !isGod) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} ${codeHtml('personal')}/${codeHtml('both')} targets are GOD rank only.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const community = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityIdArg).first();
-     if (!community) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(communityIdArg)} not found.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (!(await ensureOwnerOrAdmin(communityIdArg, athenaUser.id, env)) && !isGod) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
-       return new Response('OK', { status: 200, headers:corsHeaders });
-     }
-     const cid = normalizeTgChatId(chatIdArg);
-     if (!/^-\d+$/.test(cid) && !cid.startsWith('@')) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Invalid chat_id (use -100…).`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (!engine) {
-       if (threadArg) {
-         engine = 'userbot';
-       } else {
-         engine = await botCanAdmin(env, token, cid) ? 'bot' : 'userbot';
-       }
-     }
-     if (engine === 'bot') {
-       return await runChannelLink(env, { token, chatId, forumThreadId, msg, athenaUser, isGod, parts: ['/clone', communityIdArg, cid, targetArg] });
-     }
-     if (!isSelfHosted(env)) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Userbot mode runs on the self-hosted server only.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const label = await resolveJobLabel(env, athenaUser.id)
-       || (await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled = 1 ORDER BY label LIMIT 1').first().catch(() => null))?.label;
-     if (!label) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🤖')} No userbot account connected yet. GOD: ${codeHtml('/userbot_add <label> <api_id> <api_hash> <session>')}`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     try { await startUserbotAccount(env, label); } catch (_) {}
-     const probeClient = USERBOT_ACCOUNTS.get(label)?.client;
-     if (probeClient) {
-       const visible = await primeEntity(probeClient, cid, 30_000).catch(() => false);
-       if (!visible) {
-         await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Account ${codeHtml(label)} cannot see ${codeHtml(cid)} — join the chat with that account first (or pick one that can: ${codeHtml('/userbot_accounts')}).`, forumThreadId);
-         return new Response('OK', { status: 200, headers: corsHeaders });
-       }
-     }
-     await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: cid, threadArg: threadArg || '', communityName: community.name || communityIdArg, userbotLabel: label, target: targetArg });
-     return new Response('OK', { status: 200, headers: corsHeaders });
-   }
-
-   async function botCanAdmin(env, token, chatId) {
-     try {
-       const me = await telegramApi(token, 'getMe', {});
-       const botId = me?.result?.id;
-       if (!botId) return false;
-       const chk = await telegramApi(token, 'getChat', { chat_id: chatId });
-       const chatType = chk?.result?.type;
-       if (!chk?.ok || !['channel', 'supergroup', 'group'].includes(chatType)) return false;
-       const member = await telegramApi(token, 'getChatMember', { chat_id: chatId, user_id: botId });
-       return ['administrator', 'creator'].includes(member?.result?.status || '');
-     } catch (_) { return false; }
-   }
-     // ---- /clone — the one clone command ----
-     // No args inside a linked group: Bot API live mode (new posts only).
-     // With IDs, from anywhere: /clone <community_id> <chat_id> [thread_id|target|engine] [target|engine].
-     // Engine auto-selection: a thread forces the userbot (only it does history);
-     // otherwise the bot links the chat when it is an admin there, else the
-     // userbot runs history + live. 'bot' / 'userbot' keywords override.
-     // This absorbed /channel_link (bot link, incl. its re-route) and
-     // /index_start (userbot backfill); /uclone remains the guided wizard.
+   // (clone engine selection lives in the /clone command + startBackfillJob now.)
+    // ---- /clone — history backfill + live follow, community-scoped ----
+    // Grammar (community id always LAST):
+    //   /clone                                      in a topic = that topic; General/DM = whole chat or usage
+    //   /clone <community_id>                       in a topic = that topic into this community
+    //   /clone <chat_id> <community_id>             whole chat ([Channel] for channels)
+    //   /clone <topic_id> <community_id>            that topic of THIS group
+    //   /clone <chat_id> <topic_id> <community_id>  that topic of that chat (DM-friendly)
+    // Every run asks Personal vs community first, backfills history, then
+    // follows live. Stats show Group[Topic] / [Channel] with the usual ⏹.
     if (cmd === '/clone') {
-     const looksUnified = (() => {
-       if (parts.length < 3) return false;
-       if (/^c_/.test(String(parts[1] || ''))) return true;
-       return /^-?\d{8,}$/.test(String(parts[2] || ''));
-     })();
-     const looksInspect = parts.length === 2 && /^-?\d{8,}$/.test(String(parts[1] || '').trim()) && !msg.reply_to_message?.sender_chat?.id;
-     const looksReplyLink = parts.length === 2 && msg.reply_to_message?.sender_chat?.id && /^c_/.test(String(parts[1] || ''));
-     if (looksUnified) {
-       return await cloneChatUnified(env, { token, chatId, forumThreadId, msg, tgUserId, athenaUser, isGod, binding, parts });
-     }
-     // One chat id alone: inspect where it saves (bot link, userbot follow, or nothing).
-     if (looksInspect) {
-       return await runChannelLink(env, { token, chatId, forumThreadId, msg, athenaUser, isGod, parts: ['/clone', String(parts[1]).trim()] });
-     }
-     // Reply-to-forwarded-post form: /clone <community_id> on the reply links that chat.
-     if (looksReplyLink) {
-       return await runChannelLink(env, { token, chatId, forumThreadId, msg, athenaUser, isGod, parts: ['/clone', String(parts[1]).trim(), String(msg.reply_to_message.sender_chat.id)] });
-     }
-     if (!chatId.startsWith('-')) {
-       await sendTelegramFormatted(token, chatId, [
-         `${boldHtml('🧬 Clone a chat')}`,
-         '',
-         `In a linked group with no arguments: Bot API live indexing (new posts only).`,
-         `From anywhere with IDs: ${codeHtml('/clone <community_id> <chat_id> [thread_id] [bot|userbot] [target]')}`,
-         `• a thread, or no bot admin → userbot history + live follow-up`,
-         `• bot admin, no thread → bot live link (re-running re-routes it)`,
-         `• one chat id alone inspects: ${codeHtml('/clone <chat_id>')} shows where it saves`,
-         '',
-         `Guided tour with topic stats: ${codeHtml('/uclone <chat_id>')}`,
-       ].join('\n'), forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (!chatId.startsWith('-')) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Bot clone')}\nThis command needs a linked group (run it there), or IDs: ${codeHtml('/clone <community_id> <chat_id>')}. The Bot API cannot read a channel or group history from a DM without IDs; ${codeHtml('/uclone <chat_id>')} is the guided userbot history wizard.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (!binding?.community_id) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} This group is not linked to a community. Run ${codeHtml('/community_verify')} first.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (!athenaUser || (!isGod && !(await ensureOwnerOrAdmin(binding.community_id, athenaUser.id, env)))) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     let target = 'community';
-     let thread = msg.is_topic_message && forumThreadId != null ? String(forumThreadId) : '';
-     for (const arg of parts.slice(1)) {
-       const value = String(arg || '').trim().toLowerCase();
-       if (CHANNEL_TARGETS.has(value)) target = value;
-       else if (/^\d{1,9}$/.test(value)) thread = value;
-     }
-     if ((target === 'personal' || target === 'both') && !isGod) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} ${codeHtml('personal')}/${codeHtml('both')} targets are GOD rank only.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const sourceChat = normalizeTgChatId(chatId);
-     const pendingId = 'bc_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-     const sourceName = binding.group_name || msg.chat?.title || sourceChat;
-     await storePendingClone(env, { id: pendingId, chat_id: sourceChat, thread_id: thread || null, community_id: binding.community_id, target, requester_tg_id: String(tgUserId || ''), requester_user_id: athenaUser.id, stats: { manager: 'botclone', stage: 'preview', sourceName, threadId: thread, communityId: binding.community_id, target, isForum: !!thread, chosen: thread ? [{ id: thread, name: `Topic ${thread}`, counters: { messages: 0 } }] : [], createdAt: Date.now() }, created_at: Date.now(), expires_at: Date.now() + 10 * 60 * 1000 });
-     const destination = target === 'community' ? `${sourceName} (community DB)` : target === 'both' ? 'Personal + community' : 'Personal';
-     const scope = thread ? `this forum topic ${codeHtml('#' + thread)}` : 'this group and all its topics';
-     const preview = `${richHeading(3, '🔍 Bot clone preview')}\n${richParagraph(`Source: ${boldHtml(escHtml(sourceName))} ${codeHtml(sourceChat)}<br>Scope: ${escHtml(scope)}<br>Destination: ${boldHtml(escHtml(destination))}<br><br>${italicHtml('History is not available to the Bot API. Confirm to index new links, files and text posts as they arrive.')}`)}`;
-     const controls = richButtonRow([{ label: thread ? '✅ Clone this topic' : '✅ Clone this group', data: `clone:yes:${pendingId}` }, { label: '❌ Cancel', data: `clone:no:${pendingId}` }]);
-     await sendTelegramRichMessage(token, chatId, preview, forumThreadId, controls);
-     return new Response('OK', { status: 200, headers: corsHeaders });
+      const args = parts.slice(1).map((a) => String(a || '').trim()).filter(Boolean);
+      const communityArg = args.find((a) => /^c_/i.test(a)) || '';
+      const chatArg = args.find((a) => /^-?\d{8,}$/.test(a)) || '';
+      const topicArg = args.find((a) => /^\d{1,7}$/.test(a) && a !== chatArg) || '';
+      const flagArg = args.find((a) => /^(bot|userbot|personal|community|both)$/i.test(a)) || '';
+      if (flagArg) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Engine/target flags are gone — every /clone asks Personal vs community from buttons, then backfills history and follows live.\n${cloneUsageHtml()}`, forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      // Old community-first order is removed: community goes last now.
+      if (args.length >= 2 && /^c_/i.test(args[0]) && /^-?\d{8,}$/.test(args[1])) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} That order is removed — community id goes LAST now: ${codeHtml('/clone ' + args[1] + ' ' + args[0])}.\n${cloneUsageHtml()}`, forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      // Single chat id alone (old inspect form) is removed.
+      if (args.length === 1 && /^-?\d{8,}$/.test(args[0])) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} The inspect form is gone — clone it instead:\n${cloneUsageHtml()}`, forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      const inGroup = chatId.startsWith('-');
+      const threadCtx = (msg.is_topic_message && forumThreadId != null) ? String(forumThreadId) : '';
+      const flowChat = chatArg ? normalizeTgChatId(chatArg) : (inGroup ? normalizeTgChatId(chatId) : '');
+      if (!flowChat) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Clone a chat')}\n${cloneUsageHtml()}`, forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      let flowThread = topicArg || '';
+      if (!flowThread && inGroup && !chatArg && threadCtx && threadCtx !== '1') flowThread = threadCtx;
+      if (!athenaUser) {
+        await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      if (!isSelfHosted(env)) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Cloning runs on the self-hosted server only.`, forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      await startCloneTargetAsk(env, { token, chatId, forumThreadId, msg, tgUserId, athenaUser, isGod, flowChat, flowThread, communityArg });
+      return new Response('OK', { status: 200, headers: corsHeaders });
     }
 
 
@@ -12580,15 +12407,20 @@ async function runChannelLink(env, ctx) {
    // ---- /userbot_unfollow ----
    if (cmd === '/userbot_unfollow' || cmd === '/userbotunfollow') {
      const cidArg = normalizeTgChatId((parts[1] || '').trim());
-     if (!cidArg) {
-       await sendTelegramFormatted(token, chatId, `Usage: ${codeHtml('/userbot_unfollow <chat_id>')}`, forumThreadId);
+     const commArg = String(parts[2] || '').trim();
+     if (!cidArg || !/^c_/i.test(commArg)) {
+       await sendTelegramFormatted(token, chatId, `Usage: ${codeHtml('/userbot_unfollow <chat_id> <community_id>')}`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      await ensureUserbotTables(env);
      // /userbot_follow stores the normalized id, so normalize here too or the
      // delete matches nothing while the follow keeps cloning the chat.
-     const r = await env.DB.prepare('DELETE FROM userbot_follows WHERE chat_id = ?').bind(cidArg).run();
-     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Unfollowed ${codeHtml(cidArg)}${rowsChanged(r) ? '' : italicHtml(' (was not followed)')}.`, forumThreadId);
+     // Community-scoped: the same chat can feed several communities.
+     const bareUnf = cidArg.replace(/^-100/, '');
+     const r = await env.DB.prepare(
+       `DELETE FROM userbot_follows WHERE (chat_id = ? OR chat_id = ? OR chat_id LIKE ? OR chat_id LIKE ?) AND community_id = ?`
+     ).bind(cidArg, bareUnf, `${cidArg}:%`, `${bareUnf}:%`, commArg).run();
+     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Unfollowed ${codeHtml(cidArg)} in ${codeHtml(commArg)}${rowsChanged(r) ? '' : italicHtml(' (was not followed)')}.`, forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
@@ -13533,8 +13365,8 @@ async function runChannelLink(env, ctx) {
     if (!topicArg) {
       await sendTelegramMessage(token, chatId,
         currentTopic
-          ? `Topic lock ON: ${currentTopic}\nThe bot only answers in that topic — this is not a clone binding.\n/topic off to clear · /topic_link to clone a topic into a brain`
-          : `Topic lock OFF (whole group).\nThe bot answers in every topic — this is not a clone binding.\n/topic <id> to lock · /topic_link to clone a topic into a brain${msgThreadId ? `\nThis topic id: ${msgThreadId}` : ''}`, forumThreadId);
+          ? `Topic lock ON: ${currentTopic}\nThe bot only answers in that topic — this is not a clone binding.\n/topic off to clear · /clone to clone a topic into a brain`
+          : `Topic lock OFF (whole group).\nThe bot answers in every topic — this is not a clone binding.\n/topic <id> to lock · /clone to clone a topic into a brain${msgThreadId ? `\nThis topic id: ${msgThreadId}` : ''}`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
 
@@ -16302,9 +16134,10 @@ async function ensureUserbotTables(env) {
   }
   await env.DB.prepare(
     `CREATE TABLE IF NOT EXISTS userbot_follows (
-       chat_id TEXT PRIMARY KEY, label TEXT NOT NULL DEFAULT 'main',
-       community_id TEXT NOT NULL, target TEXT NOT NULL DEFAULT 'community',
-       created_by TEXT, created_at BIGINT NOT NULL)`
+       chat_id TEXT NOT NULL, label TEXT NOT NULL DEFAULT 'main',
+       community_id TEXT NOT NULL DEFAULT '', target TEXT NOT NULL DEFAULT 'community',
+       created_by TEXT, created_at BIGINT NOT NULL,
+       PRIMARY KEY (chat_id, community_id))`
   ).run();
   await env.DB.prepare(
     `CREATE TABLE IF NOT EXISTS userbot_errors (
@@ -16315,6 +16148,8 @@ async function ensureUserbotTables(env) {
   try { await env.DB.prepare("ALTER TABLE userbot_follows ADD COLUMN label TEXT DEFAULT 'main'").run(); } catch (_) {}
   // persisted liveness for the 🟢/⚪ follow indicator (memory-only before)
   try { await env.DB.prepare('ALTER TABLE userbot_follows ADD COLUMN last_seen_at BIGINT').run(); } catch (_) {}
+  // one-chat-one-community → one chat in many communities: rebuild the key.
+  await migrateFollowKeys(env);
   // one-time migration from the old singleton table
   try {
     const legacy = await env.DB.prepare("SELECT * FROM userbot_state WHERE id = 'singleton' AND enabled = 1").first().catch(() => null);
@@ -16471,27 +16306,36 @@ export async function startUserbotAccount(env, label = 'main') {
         const variants = [chatId];
         if (/^-100\d+$/.test(chatId)) variants.push(chatId.slice(4)); // bare channel id
         else if (/^\d{9,}$/.test(chatId)) variants.push(`-100${chatId}`);
-        let follow = null;
+        // One chat can feed many communities: capture into EVERY matching
+        // follow (whole-chat keys, then topic keys) instead of the first.
+        const follows = [];
+        const seenFollowKeys = new Set();
         for (const v of variants) {
-          follow = await env.DB.prepare('SELECT * FROM userbot_follows WHERE chat_id = ? AND label = ?').bind(v, label).first();
-          if (follow) break;
+          const rows = await env.DB.prepare('SELECT * FROM userbot_follows WHERE chat_id = ? AND label = ?').bind(v, label).all().catch(() => null);
+          for (const r of (rows?.results || rows || [])) {
+            const k = `${r.chat_id}|${r.community_id}|${r.target}`;
+            if (!seenFollowKeys.has(k)) { seenFollowKeys.add(k); follows.push(r); }
+          }
         }
         // Forum topics: also try chatId:threadId when this message is in a topic
-        if (!follow) {
+        {
           const _tid = message?.replyTo?.replyToTopId != null ? String(message.replyTo.replyToTopId) : null;
           if (_tid) {
             for (const v of variants) {
               const tk = `${v}:${_tid}`;
-              const tf = await env.DB.prepare('SELECT * FROM userbot_follows WHERE chat_id = ? AND label = ?').bind(tk, label).first();
-              if (tf) { follow = tf; break; }
+              const rows = await env.DB.prepare('SELECT * FROM userbot_follows WHERE chat_id = ? AND label = ?').bind(tk, label).all().catch(() => null);
+              for (const r of (rows?.results || rows || [])) {
+                const k = `${r.chat_id}|${r.community_id}|${r.target}`;
+                if (!seenFollowKeys.has(k)) { seenFollowKeys.add(k); follows.push(r); }
+              }
             }
           }
         }
-        if (DEBUG_UB) console.log(`[userbot:${label}] msg from ${chatId} → ${follow ? 'FOLLOWED' : 'not followed'}`);
-        if (!follow) return;
+        if (DEBUG_UB) console.log(`[userbot:${label}] msg from ${chatId} → ${follows.length ? `FOLLOWED x${follows.length}` : 'not followed'}`);
+        if (!follows.length) return;
         // scrape + AI-tagging inside saveIndexedLinks can take seconds — run
         // it detached so it never blocks gramJS's update dispatch loop.
-        runInBackground(env, captureGramjsMessage(env, follow, message));
+        for (const follow of follows) runInBackground(env, captureGramjsMessage(env, follow, message));
       } catch (e) {
         if (e && typeof e.seconds === 'number') await sleep(Math.min(e.seconds * 1000, 300_000));
         else await userbotLogError(env, label, chatId, e);
@@ -17029,8 +16873,8 @@ export async function buildStatsReport(env, _token = null, scope = null) {
         userIds: [...new Set(groupRuns.map((r) => String(r.state?.requesterUserId || '')).filter(Boolean))],
       };
       sources.push({
-        key: [first.chat_id, String(first.target || 'community'), String(first.owner || '')].join('|'),
-        chat_id: first.chat_id, target: first.target || 'community', owner: first.owner || '',
+        key: [first.chat_id, String(first.target || 'community'), String(first.community_id || ''), String(first.owner || '')].join('|'),
+        chat_id: first.chat_id, target: first.target || 'community', community: first.community_id || '', owner: first.owner || '',
         name: st0.sourceName || first.chat_id, destinationName: st0.destinationName || '',
         label: st0.label || '', type, isForum, topics, overall, fresh, recent, live, auth,
       });

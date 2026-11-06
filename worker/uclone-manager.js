@@ -309,6 +309,14 @@ export function createUcloneManager(env, deps) {
         if (pinned && String(pinned.id) === followedId) followedName = pinned.name || pinned.id;
       }
     } catch (_) {}
+    // Prescribed community from /uclone <chat> [topic] <community>: pin first.
+    try {
+      const prescribed = String(run.state.prescribedCommunity || '');
+      if (prescribed && run.state.communities.some((c) => String(c.id) === prescribed)) {
+        run.state.communities.sort((a, b) => (String(b.id) === prescribed) - (String(a.id) === prescribed));
+        if (!followedName) followedName = run.state.communities[0]?.name || prescribed;
+      }
+    } catch (_) {}
     const page = Math.max(0, Number(run.state.destinationPage || 0));
     const rows = [[button(run, 'Personal', 'personal')]];
     for (const [index, community] of run.state.communities.entries()) {
@@ -468,7 +476,7 @@ export function createUcloneManager(env, deps) {
     try { await operation; } finally { activeRuns.delete(id); }
   }
   async function command(context) {
-    const [raw, source, topicArg] = String(context.text || '').trim().split(/\s+/);
+    const [raw, source, topicArg, communityArg] = String(context.text || '').trim().split(/\s+/);
     const cmd = raw?.split('@')[0].toLowerCase();
     if (!['/uclone', '/ubclone', '/userbot_accounts', '/userbot_select'].includes(cmd)) return false;
     if (!context.isGod || !context.user) { await send(context, 'GOD rank and an Athena login are required.'); return true; }
@@ -480,12 +488,15 @@ export function createUcloneManager(env, deps) {
       await accounts(run, context.token);
       return true;
     }
-    if (!/^-?\d+$/.test(source || '')) { await send(context, 'Usage: <code>/uclone &lt;channel_or_group_id&gt; [topic_id]</code>\nChoose a saved account with /userbot_accounts first.'); return true; }
+    if (!/^-?\d+$/.test(source || '')) { await send(context, 'Usage: <code>/uclone &lt;channel_or_group_id&gt; [topic_id] [community_id]</code>\nChoose a saved account with /userbot_accounts first.'); return true; }
     const prescribedThread = /^\d{1,9}$/.test(String(topicArg || '').trim()) ? String(topicArg).trim() : null;
+    // Community may sit in 3rd position, or 2nd when no topic is given.
+    const prescribedCommunity = /^c_/i.test(String(communityArg || '').trim()) ? String(communityArg).trim()
+      : (/^c_/i.test(String(topicArg || '').trim()) ? String(topicArg).trim() : null);
     const selected = await db.prepare('SELECT label FROM userbot_selections WHERE requester_tg_id=?').bind(String(context.tgUserId)).first();
     if (!selected) { await send(context, 'No account selected. In a DM, open /userbot_accounts and select an account.'); return true; }
     const chat = /^\d{9,}$/.test(source) ? `-100${source}` : source;
-    const run = await create(context, chat, { label: selected.label, stage: 'scanning', cursor: 0, cancelled: false, prescribedThread });
+    const run = await create(context, chat, { label: selected.label, stage: 'scanning', cursor: 0, cancelled: false, prescribedThread, prescribedCommunity });
     background(preview(run, context.token));
     return true;
   }
