@@ -111,9 +111,19 @@ export function createUcloneManager(env, deps) {
   const button = (run, text, action, index = '') => ({ text: String(text).slice(0, 48), callback_data: `uc:${run.id}:${run.state.revision}:${action}${index === '' ? '' : ':' + index}` });
   async function edit(run, token, text, rows = [], force = false) {
     if (!force && clock() < Number(run.state.nextEditAt || 0)) { await persist(run); return; }
-    const response = await deliver(token, 'editMessageText', {
-      chat_id: run.state.progressChatId, message_id: run.state.progressMessageId,
-    }, text, rows);
+    let response;
+    try {
+      response = await deliver(token, 'editMessageText', {
+        chat_id: run.state.progressChatId, message_id: run.state.progressMessageId,
+      }, text, rows);
+    } catch (error) {
+      // A progress ping must never kill a multi-minute scan — Telegram edit
+      // races ("canceled by new edit message request") are transient.
+      deps.log?.(`progress-edit: ${cloneFailure(error).category}`);
+      run.state.nextEditAt = clock() + 15000;
+      await persist(run);
+      return;
+    }
     const retry = Number(response?.parameters?.retry_after || 0);
     run.state.nextEditAt = clock() + Math.max(8000, retry * 1000);
     await persist(run);
