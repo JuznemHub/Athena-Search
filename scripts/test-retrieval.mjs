@@ -28,6 +28,8 @@ import {
   restartLiveMode,
   dedupeEligibleCommunities,
   stopLiveCapture,
+  pickVerifyTarget,
+  linkGroupToCommunity,
   isGroundedAiAnswer,
   normalizeModelId,
   parseAiDescribeResponse,
@@ -87,6 +89,30 @@ assert.match(helpTextForSection('god', true), /forcetags[\s\S]*?tag_untagged/);
   const idleDash = formatStatsRichReport({ sources: [{ ...fakeReport.sources[0], live: false }] });
   assert.match(idleDash.buttons, /stats:start:0/, 'idle row shows the ▶️ restart button');
   assert.doesNotMatch(idleDash.buttons, /stats:stop/, 'idle row has no stop button');
+}
+// pickVerifyTarget: no arg + one owned -> link it; multi -> ask; explicit id -> link; new/empty -> create.
+assert.deepEqual(pickVerifyTarget([{ id: 'c1' }], ''), { action: 'link', id: 'c1' });
+assert.deepEqual(pickVerifyTarget([{ id: 'c1' }, { id: 'c2' }], '').action, 'ask');
+assert.deepEqual(pickVerifyTarget([{ id: 'c1' }, { id: 'c2' }], 'c2'), { action: 'link', id: 'c2' });
+assert.deepEqual(pickVerifyTarget([{ id: 'c1' }], 'new'), { action: 'create' });
+assert.deepEqual(pickVerifyTarget([], ''), { action: 'create' });
+// linkGroupToCommunity: repairs the binding in place, never duplicates.
+{
+  const sql = new DatabaseSync(':memory:');
+  sql.exec(`CREATE TABLE community_bots (id TEXT PRIMARY KEY, community_id TEXT, platform TEXT, bot_username TEXT, group_id TEXT, group_name TEXT, created_by TEXT, created_at BIGINT, scope TEXT, user_id TEXT, bot_token TEXT);`);
+  const DB = { prepare(query) {
+    const bind = (values = []) => ({ bind(...args) { return bind(args.map(v => v ?? null)); },
+      async first() { return sql.prepare(query).get(...values) || null; },
+      async all() { return { results: sql.prepare(query).all(...values) }; },
+      async run() { const r = sql.prepare(query).run(...values); return { meta: { changes: Number(r.changes) } }; }
+    }); return bind();
+  } };
+  const env = { DB };
+  const b1 = await linkGroupToCommunity(env, { chatId: '-1009', chatTitle: 'G', communityId: 'c1', ownerId: 'u1', personal: null });
+  assert.ok(b1?.id);
+  const b2 = await linkGroupToCommunity(env, { chatId: '-1009', chatTitle: 'G', communityId: 'c1', ownerId: 'u1', personal: null });
+  assert.equal(b2.id, b1.id, 'relink updates the same row');
+  assert.equal(sql.prepare(`SELECT COUNT(*) AS n FROM community_bots`).get().n, 1);
 }
 // stopLiveCapture: stops follows + bot-mode live but keeps the binding row
 // (group link, topic lock, token) — deleting it unlinked the group and

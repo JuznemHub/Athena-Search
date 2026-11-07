@@ -7677,7 +7677,7 @@ function helpTextForSection(section, isGod = false) {
       richParagraph('<i>One group = one shared brain. Members dump links, everyone searches them.</i>'),
       spacer,
       richParagraph('<b>Setup (owner, once per group)</b>'),
-      cmd(1, codeHtml('/community_verify'), 'Run inside the group. Creates the community, registers the bot, and makes you the owner. Nothing else creates a community.'),
+      cmd(1, codeHtml('/community_verify'), 'Run inside the group. Creates the community, registers the bot, and makes you the owner — or links your existing community when you already own one (never duplicates). Nothing else creates a community.'),
       cmd(2, codeHtml('/mode'), 'Show where dumps in this chat land right now, or switch it between Personal and community.'),
       spacer,
       richParagraph('<b>Joining (members)</b>'),
@@ -9219,6 +9219,43 @@ export function dedupeEligibleCommunities(rows) {
     if (Number(c?.created_at || 0) < Number(cur?.created_at || 0)) byName.set(key, c);
   }
   return [...byName.values()];
+}
+
+/**
+ * Decide what /community_verify should do when the group is not linked yet.
+ * Pure: owned = [{id, name}] the requester owns, arg = optional word after
+ * the command. Never mints a duplicate when an owned community exists.
+ */
+export function pickVerifyTarget(owned, arg) {
+  const list = (owned || []).filter((c) => c && c.id);
+  const a = String(arg || '').trim();
+  if (a && a.toLowerCase() !== 'new') return { action: 'link', id: a };
+  if (a.toLowerCase() === 'new' || list.length === 0) return { action: 'create' };
+  if (list.length === 1) return { action: 'link', id: String(list[0].id) };
+  return { action: 'ask', list: list.map((c) => ({ id: String(c.id), name: String(c.name || c.id) })) };
+}
+
+/** Create (or repair) the group↔community binding row. Never mints communities. */
+export async function linkGroupToCommunity(env, { chatId, chatTitle, communityId, ownerId, personal }) {
+  const botUname = personal?.bot_username || 'bot';
+  const storeToken = (personal?.bot_token && await decryptBotToken(env, personal.bot_token)) || null;
+  const encStore = storeToken ? await encryptSecret(env, storeToken) : null;
+  const existing = await env.DB.prepare(
+    `SELECT * FROM community_bots WHERE platform = 'telegram' AND group_id = ?`
+  ).bind(String(chatId)).first().catch(() => null);
+  const now = Date.now();
+  if (existing) {
+    await env.DB.prepare(
+      `UPDATE community_bots SET community_id = ?, scope = 'community', group_name = ?, created_by = ?, user_id = ?, bot_token = COALESCE(?, bot_token), bot_username = COALESCE(?, bot_username) WHERE id = ?`
+    ).bind(communityId, chatTitle, ownerId, ownerId, encStore, botUname, existing.id).run();
+    return env.DB.prepare('SELECT * FROM community_bots WHERE id = ?').bind(existing.id).first();
+  }
+  const botId = 'bot_' + now.toString(36);
+  await env.DB.prepare(
+    `INSERT INTO community_bots (id, community_id, platform, bot_username, group_id, group_name, created_by, created_at, scope, user_id, bot_token)
+     VALUES (?, ?, 'telegram', ?, ?, ?, ?, ?, 'community', ?, ?)`
+  ).bind(botId, communityId, botUname, String(chatId), chatTitle, ownerId, now, ownerId, encStore).run();
+  return env.DB.prepare('SELECT * FROM community_bots WHERE id = ?').bind(botId).first();
 }
 
 /** Ownership check shared by the /stats beside toggle and drill-down buttons. */
@@ -13099,7 +13136,46 @@ async function startCloneTargetAsk(env, ctx) {
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
 
+      // Group not linked yet: reuse an owned community instead of minting a
+      // duplicate (re-verify after an unlink used to create a new one).
       const chatTitle = (msg.chat?.title || 'Telegram group').slice(0, 80);
+      const verifyArg = String(parts[1] || '').trim();
+      const ownedRows = await env.DB.prepare(
+        `SELECT DISTINCT c.id, c.name FROM communities c
+         LEFT JOIN community_members m ON m.community_id = c.id AND m.user_id = ?
+         WHERE c.id != 'default' AND (c.creator_id = ? OR (m.user_id IS NOT NULL AND m.role = 'owner'))`
+      ).bind(owner.id, owner.id).all().catch(() => ({ results: [] }));
+      const owned = (ownedRows?.results || ownedRows || []).filter((c) => c?.id);
+      const pick = pickVerifyTarget(owned, verifyArg);
+      if (pick.action === 'link') {
+        const target = await resolveCommunityByIdOrName(env, owner.id, pick.id);
+        if (!target || !(await ensureOwnerOrAdmin(target.id, owner.id, env))) {
+          await sendTelegramMessage(replyToken, chatId, `Community not found or not yours: ${codeHtml(pick.id)}`, forumThreadId);
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        binding = await linkGroupToCommunity(env, { chatId, chatTitle, communityId: target.id, ownerId: owner.id, personal });
+        await logOperationalEvent(env, '🔗 Community relinked', `${chatTitle} → ${target.name || target.id} (${target.id}) by ${owner.username || owner.display_name || owner.id}`, owner.id);
+        await sendTelegramMessage(replyToken, chatId, [
+          'Group linked to your existing community ✓ (no duplicate created)',
+          `${target.name || 'Community'} | ${target.id}`,
+          '',
+          'Members must:',
+          `1) Login at ${await getWebsiteDisplayUrl(env)}`,
+          `2) DM bot → /community_join ${target.id}`,
+          'Then they can dump links (group or site).',
+          '',
+          'You: /community to dump · /personal · /admin · /topic · /community_list',
+        ].join('\n'), forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      if (pick.action === 'ask') {
+        await sendTelegramMessage(replyToken, chatId, [
+          'You own more than one community. Reply with which one to link:',
+          ...pick.list.map((c) => `• ${c.name} — ${codeHtml(`/community_verify ${c.id}`)}`),
+          `• or ${codeHtml('/community_verify new')} to create a fresh one.`,
+        ].join('\n'), forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
       const id = 'c_' + Date.now().toString(36) + '_' + randomToken().slice(0, 4);
       const now = Date.now();
       await env.DB.prepare(
@@ -13107,22 +13183,7 @@ async function startCloneTargetAsk(env, ctx) {
       ).bind(id, chatTitle, owner.id, now).run();
       await upsertCommunityMember(env, id, owner.id, 'owner');
 
-      const storeToken = (await decryptBotToken(env, personal.bot_token)) || replyToken || null;
-      const botUname = personal.bot_username || 'bot';
-      const encStore = storeToken ? await encryptSecret(env, storeToken) : null;
-      if (existingGroup) {
-        await env.DB.prepare(
-          `UPDATE community_bots SET community_id = ?, scope = 'community', group_name = ?, created_by = ?, user_id = ?, bot_token = COALESCE(?, bot_token), bot_username = COALESCE(?, bot_username) WHERE id = ?`
-        ).bind(id, chatTitle, owner.id, owner.id, encStore, botUname, existingGroup.id).run();
-        binding = await env.DB.prepare('SELECT * FROM community_bots WHERE id = ?').bind(existingGroup.id).first();
-      } else {
-        const botId = 'bot_' + Date.now().toString(36);
-        await env.DB.prepare(
-          `INSERT INTO community_bots (id, community_id, platform, bot_username, group_id, group_name, created_by, created_at, scope, user_id, bot_token)
-           VALUES (?, ?, 'telegram', ?, ?, ?, ?, ?, 'community', ?, ?)`
-        ).bind(botId, id, botUname, chatId, chatTitle, owner.id, now, owner.id, encStore).run();
-        binding = await env.DB.prepare('SELECT * FROM community_bots WHERE id = ?').bind(botId).first();
-      }
+      binding = await linkGroupToCommunity(env, { chatId, chatTitle, communityId: id, ownerId: owner.id, personal });
 
       await logOperationalEvent(env, '🆕 Community created', `${chatTitle} (${id}) by ${owner.username || owner.display_name || owner.id}`, owner.id);
       await sendTelegramMessage(replyToken, chatId, [
