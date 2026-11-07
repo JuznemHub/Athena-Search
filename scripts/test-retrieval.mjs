@@ -38,6 +38,9 @@ import {
   resolveChatEndpoint,
   resultLimitClause,
   searchAllLinks,
+  smartFallbackTags,
+  parseStoredTags,
+  normalizeTagList,
   telegramEntityMarkdown,
   telegramRichMarkdown,
   telegramRichNotesForSave,
@@ -76,7 +79,8 @@ assert.doesNotMatch(helpTextForSection('channels'), /<code>\/clone<\/code>\s*<co
 assert.doesNotMatch(helpTextForSection('channels'), /<b>\d+\. <code>\/clone<\/code><\/b>/, 'bare /clone stays out of help');
 assert.doesNotMatch(helpTextForSection('god', true), /<code>\/clone<\/code>/, 'channel clone form lives in 📡 Channels, not GOD');
 assert.doesNotMatch(helpTextForSection('channels'), /<code>\/index_start<\/code>|<code>\/index_status<\/code>|<code>\/index_stop<\/code>|<code>\/clone_stop<\/code>|<code>\/channel_link<\/code>|<code>\/channel_unlink<\/code>|<code>\/clone_del<\/code>|<code>\/userbot_follow<\/code>/, 'removed commands stay out of the channels panel');
-assert.match(helpTextForSection('god', true), /forcetags[\s\S]*?tag_untagged/);
+assert.match(helpTextForSection('god', true), /forcetags[\s\S]*?retag review/);
+assert.doesNotMatch(helpTextForSection('god', true), /tag_untagged|taguntagged|tag_missing/, 'removed /tag_untagged stays out of help');
 // /stats: forum groups show Group[topic], and the drill-down page offers Remove live.
 {
   const fakeReport = { sources: [{ chat_id: '-100123', name: 'MyGroup', type: 'forum', isForum: true, live: true, target: 'community', community: 'c1', owner: 'c1', destinationName: 'Test community', overall: {}, fresh: {}, recent: [], topics: [{ threadId: '2', title: 'General', total: { links: 1, files: 0, other: 0 }, percent: 100, done: true, stateMark: '✅ COMPLETE' }], auth: { tgIds: [], userIds: [] } }] };
@@ -678,5 +682,27 @@ assert.equal(
   telegramRichNotesForSave({ caption: 'Photo caption with https://example.com/cap', photo: [{ file_id: 'abc' }] }).includes('https://example.com/cap'),
   true,
 );
+
+// /forcetags rule fallback: junk dropped, platform + topic added.
+assert.deepEqual(parseStoredTags('["backfill", "Telegram"]'), ['backfill', 'telegram']);
+assert.deepEqual(parseStoredTags(''), []);
+assert.deepEqual(normalizeTagList(['Music', 'music', '#Pop']), ['music', 'pop']);
+{
+  const r = smartFallbackTags('https://example.com/super-music.apk', { title: 'Super Music Player', notes: 'Best android music app, free apk download', content: '' }, ['backfill', 'telegram', 'music']);
+  assert.ok(r.removed.includes('backfill') && r.removed.includes('telegram'), 'junk drops when content is not about it');
+  assert.ok(r.kept.includes('music'), 'fitting tag kept');
+  assert.ok(r.tags.includes('android'), 'platform detected');
+  assert.ok(r.tags.includes('app'), 'app type detected');
+}
+{
+  const r = smartFallbackTags('https://t.me/mybot', { title: 'Telegram bot client', notes: '', content: '' }, ['backfill', 'telegram']);
+  assert.ok(!r.removed.includes('telegram'), 'telegram kept for Telegram content');
+  assert.ok(r.removed.includes('backfill'), 'backfill always junk');
+  assert.ok(r.tags.includes('bot'), 'bot topic detected');
+}
+{
+  const r = smartFallbackTags('https://example.com/x', { title: '', notes: '', content: '' }, ['backfill', 'dump']);
+  assert.equal(r.removed.length, 2, 'content-free rows lose all junk');
+}
 
 console.log('retrieval tests passed');

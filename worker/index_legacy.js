@@ -2826,8 +2826,7 @@ const TELEGRAM_GOD_COMMAND_MENU = [
   { command: 'userbotconnect', description: 'Connect userbot session (GOD)' },
   { command: 'userbot_disconnect', description: 'Disconnect userbot' },
   { command: 'userbot_del', description: 'Delete userbot session' },
-  { command: 'forcetags', description: 'AI-tag untagged links (GOD)' },
-  { command: 'tag_untagged', description: 'Tag every untagged link (GOD)' },
+  { command: 'forcetags', description: 'AI retag review: fix tags (GOD)' },
   { command: 'structure', description: 'Tidy the DB (notes + titles)' },
   { command: 'import', description: 'Restore links from a backup (GOD)' },
   { command: 'backup', description: 'Back up the database (GOD)' },
@@ -6882,6 +6881,104 @@ function normalizeTagList(tags) {
   return out;
 }
 
+/** Provenance/ingest stamps, not topics. Dropped on review unless the
+ *  content itself is about that word (e.g. telegram stays for Telegram
+ *  clients/bots, backfill never stays). */
+const RETAG_JUNK_TAGS = new Set([
+  'backfill', 'dump', 'untagged', 'duplicate', 'duplicates', 'saved', 'link',
+  'links', 'file', 'files', 'community', 'personal', 'post', 'posts', 'message',
+  'messages', 'channel', 'channels', 'group', 'groups', 'feed', 'feeds',
+  'bookmark', 'bookmarks', 'archive', 'archived', 'auto', 'import', 'imported',
+  'shared', 'share', 'forward', 'forwarded', 'media', 'attachment', 'attachments',
+  'document', 'documents', 'upload', 'uploads', 'rss', 'bot-api', 'untagged-link',
+  'telegram'
+]);
+
+function parseStoredTags(raw) {
+  if (Array.isArray(raw)) return normalizeTagList(raw);
+  if (typeof raw === 'string') {
+    const t = raw.trim();
+    if (!t || t === 'null') return [];
+    try {
+      const arr = JSON.parse(t);
+      if (Array.isArray(arr)) return normalizeTagList(arr);
+    } catch (_) {}
+    if (t.startsWith('#')) return normalizeTagList(t.split(/\s+/));
+  }
+  return [];
+}
+
+/** No-AI retag: drop junk tags the content never mentions, keep the rest,
+ *  add platform + topic tags from keyword rules. Returns { tags, kept,
+ *  added, removed }. */
+function smartFallbackTags(rawUrl, meta, currentTags) {
+  const bag = `${meta?.title || ''} ${meta?.notes || ''} ${meta?.content || ''} ${rawUrl || ''}`.toLowerCase();
+  const word = (w) => new RegExp(`(^|[^a-z0-9])${w}([^a-z0-9]|$)`).test(bag);
+  const kept = [];
+  const removed = [];
+  for (const t of normalizeTagList(currentTags)) {
+    if (RETAG_JUNK_TAGS.has(t) && !word(t.replace(/-/g, ' ')) && !bag.includes(t)) removed.push(t);
+    else if (!kept.includes(t)) kept.push(t);
+  }
+  const tags = [...kept];
+  const added = [];
+  const add = (t) => { if (t && !tags.includes(t)) { tags.push(t); added.push(t); } };
+  // Platform — only for software (app/client/apk/download), never for articles.
+  const isSoftware = word('app') || word('apk') || word('appstore') || bag.includes('play store') || word('software') || word('client') || word('download') || word('mobile') || /\.apk(\b|\/)/.test(bag) || /\.ipa(\b|\/)/.test(bag);
+  if (isSoftware) {
+    const android = word('android') || bag.includes('play store') || bag.includes('.apk');
+    const ios = word('ios') || word('iphone') || word('ipad') || bag.includes('app store') || bag.includes('.ipa');
+    const desktop = word('windows') || word('macos') || word('linux') || word('ubuntu');
+    if ((android && ios) || ((android || ios) && desktop) || /multiplatform|cross-platform|all platforms/.test(bag)) add('multiplatform');
+    else if (android) add('android');
+    else if (ios) add('ios');
+  }
+  const TOPIC_RULES = [
+    ['music', ['music', 'song', 'songs', 'mp3', 'spotify', 'album', 'playlist']],
+    ['video', ['video', 'videos', 'youtube', 'mp4', 'streaming']],
+    ['movie', ['movie', 'movies', 'film', 'films', 'cinema', 'bollywood', 'web-series', 'tv-show']],
+    ['game', ['game', 'games', 'gaming', 'mod', 'mods', 'emulator', 'rom']],
+    ['anime', ['anime', 'manga', 'manhwa']],
+    ['book', ['book', 'books', 'ebook', 'novel', 'pdf']],
+    ['ai', ['artificial intelligence', 'llm', 'chatgpt', 'machine learning', 'stable diffusion', 'midjourney']],
+    ['bot', ['telegram bot', 'bot api', 'discord bot', 'chatbot']],
+    ['telegram', ['telegram']],
+    ['privacy', ['privacy', 'adblock', 'ublock', 'tracker', 'fingerprint']],
+    ['vpn', ['vpn', 'proxy', 'proxies']],
+    ['security', ['security', 'malware', 'exploit', 'vulnerability']],
+    ['crypto', ['crypto', 'bitcoin', 'blockchain', 'web3']],
+    ['coding', ['github', 'programming', 'developer', 'api', 'sdk', 'library', 'framework', 'python', 'javascript']],
+    ['tool', ['tool', 'tools', 'utility', 'converter', 'downloader', 'generator']],
+    ['app', ['app']],
+    ['website', ['website', 'homepage', 'landing']],
+    ['news', ['news', 'breaking']],
+    ['tutorial', ['tutorial', 'guide', 'how-to', 'howto', 'course']],
+    ['wallpaper', ['wallpaper', 'wallpapers']],
+    ['sticker', ['sticker', 'stickers']],
+    ['font', ['font', 'fonts', 'typeface']],
+    ['photo', ['photo', 'photos', 'photography', 'camera']],
+    ['design', ['design', 'ui', 'ux', 'figma']],
+  ];
+  if (word('ai')) add('ai');
+  for (const [tag, keys] of TOPIC_RULES) {
+    if (keys.some((k) => bag.includes(k))) add(tag);
+  }
+  // Host identity (github, arxiv…) is topical for code/papers.
+  try {
+    const u = new URL(String(rawUrl || '').startsWith('http') ? rawUrl : `https://${rawUrl}`);
+    const host = u.hostname.replace(/^www\./, '').toLowerCase();
+    const base = host.split('.').slice(-2, -1)[0] || '';
+    if (base && base.length >= 3 && !['com', 'net', 'org', 'io'].includes(base) && !RETAG_JUNK_TAGS.has(base)) add(base);
+  } catch (_) {}
+  // Title words for the long tail (same stopword discipline as before).
+  if (tags.length < 5) {
+    const words = String(meta?.title || '').toLowerCase().match(/[a-z]{4,15}/g) || [];
+    const stop = new Set(['the', 'and', 'with', 'from', 'this', 'that', 'client', 'project', 'independent', 'for', 'are', 'was', 'were', 'have', 'has', 'with', 'your', 'free', 'best', 'download', 'official', 'ultimate', 'guide', 'using', 'user', 'users']);
+    for (const w of words) { if (!stop.has(w)) add(w); if (tags.length >= 8) break; }
+  }
+  return { tags: tags.slice(0, 8), kept, added: added.slice(0, 8), removed };
+}
+
 /**
  * Clean multi-link channel captions into readable notes.
  * Keep: title + description (+ optional special thanks).
@@ -7813,8 +7910,7 @@ function helpTextForSection(section, isGod = false) {
       cmd(2, `${codeHtml('/dumpsmart')} · ${codeHtml('/dumpall on|off')}`, 'One dump-mode setting: smart keeps the primary link only (default), on saves every URL. Channel cloning lives in 📡 Channels.'),
       spacer,
       richParagraph('<b>Tagging & structure</b>'),
-      cmd(3, `${codeHtml('/forcetags')} ${codeHtml('[community_id]')}`, 'AI-tag untagged links, 150 per run — run again to continue. Add a community id to stay inside one brain.'),
-      cmd(4, codeHtml('/tag_untagged'), 'Same idea, whole database, background pass with no per-run limit. Either command leaves already-tagged links alone.'),
+      cmd(3, `${codeHtml('/forcetags')} ${codeHtml('[community_id]')}`, 'AI retag review, 150 links per run — run again to continue. Drops junk tags, fixes wrong ones, scrapes thin links, then reports every change. Add a community id to stay inside one brain.'),
       cmd(5, codeHtml('/structure'), 'One-pass DB cleanup: strips tracking URLs, merges near-duplicate links, cleans titles and notes, trims multi-link notes to each link’s own section. Runs in the background with live progress.'),
       spacer,
       richParagraph('<b>Backup & import</b>'),
@@ -12823,11 +12919,14 @@ async function startCloneTargetAsk(env, ctx) {
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
-   // ---- /forcetags — GOD: backfill tags for every untagged link ----
+   // ---- /forcetags — GOD: AI-native retag review of every link in scope ----
+   // Drops junk/provenance tags, fixes wrong ones, scrapes thin links, then
+   // reports every change. Tags that already fit are left untouched.
    if (cmd === '/forcetags') {
      if (!isGod) { await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId); return new Response('OK', { status: 200, headers: corsHeaders }); }
      await ensureAiConfigTable(env);
      const cfgFt = await getInstanceAiConfig(env);
+     const aiMode = !!cfgFt?.api_key;
      const BATCH = 150;
      // Scope: /forcetags [community|personal|both|<community_id>] (default both)
      let scopeArg = '';
@@ -12838,16 +12937,17 @@ async function startCloneTargetAsk(env, ctx) {
        else if (/^c_/.test(t)) scopeCommunity = t;
      }
      scopeArg = scopeArg || 'both';
-     const think = await sendTelegramFormatted(token, chatId, `${boldHtml('🏷')} Scanning (${scopeArg}${scopeCommunity ? ` · ${scopeCommunity}` : ''})…`, forumThreadId);
+     const think = await sendTelegramFormatted(token, chatId, `${boldHtml('🏷')} Retag review (${scopeArg}${scopeCommunity ? ` · ${codeHtml(escHtml(scopeCommunity))}` : ''})… ${aiMode ? 'AI on' : 'no AI key → rule fallback'}`, forumThreadId);
      const thinkId = think?.message_id;
      const targets = [];
+     const junkLike = [...RETAG_JUNK_TAGS].slice(0, 14).map((j) => `tags LIKE '%${j}%'`).join(' OR ');
      const pick = async (table, col) => {
        await ensureSearchColumns(env);
        const extra = (table === 'links' && scopeCommunity) ? ` AND community_id = '${scopeCommunity.replace(/'/g, '')}'` : '';
        const { results } = await env.DB.prepare(
-         `SELECT id, url, title, notes, search_blob FROM ${table}
-          WHERE COALESCE(tags,'') IN ('', '[]', 'null') OR metadata_version IS NULL OR metadata_version < 1${extra}
-          ORDER BY created_at DESC LIMIT ${BATCH}`
+         `SELECT id, url, title, notes, tags, search_blob FROM ${table}
+          WHERE 1=1${extra}
+          ORDER BY CASE WHEN COALESCE(tags,'') IN ('', '[]', 'null', '["untagged"]') THEN 0 WHEN ${junkLike} THEN 1 ELSE 2 END, created_at DESC LIMIT ${BATCH}`
        ).all();
        for (const r of results || []) targets.push({ table, col, row: r });
      };
@@ -12864,76 +12964,94 @@ async function startCloneTargetAsk(env, ctx) {
        if (godId) await pick('personal_links', godId);
      }
      if (!targets.length) {
-       if (thinkId) await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: thinkId, text: `${boldHtml('✅')} Every link already has tags.`, parse_mode: 'HTML' }).catch(() => {});
+       if (thinkId) await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: thinkId, text: `${boldHtml('✅')} Nothing to review — no links in scope.`, parse_mode: 'HTML' }).catch(() => {});
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
-     let done = 0, aiHits = 0, ctxHits = 0;
+     let done = 0, changed = 0, aiHits = 0, ruleHits = 0;
+     const addedCounts = {}, removedCounts = {};
+     const changeLines = [];
      const editProgress = async () => {
        const pct = Math.min(100, Math.round((done / targets.length) * 100));
        const filled = Math.round((pct / 100) * 18);
        const bar = '▮'.repeat(filled) + '▯'.repeat(18 - filled);
        await telegramApi(token, 'editMessageText', {
          chat_id: chatId, message_id: thinkId, parse_mode: 'HTML',
-         text: `${boldHtml('🏷 Force tags')}\n${codeHtml(bar + ' ' + pct + '%')}\n${done}/${targets.length} · AI ${aiHits} · context ${ctxHits}`
+         text: `${boldHtml('🏷 Force tags')}\n${codeHtml(bar + ' ' + pct + '%')}\n${done}/${targets.length} · changed ${changed} · AI ${aiHits} · rules ${ruleHits}`
        }).catch(() => {});
      };
      for (const t of targets) {
        try {
          const r = t.row;
-         const meta = { title: r.title || '', notes: r.notes || '', content: r.search_blob || '' };
-         let tags = null; let title = r.title || ''; let notes = r.notes || '';
-         if (cfgFt?.api_key) {
+         const current = parseStoredTags(r.tags);
+         let title = r.title || ''; let notes = r.notes || '';
+         let meta = { title, notes, content: r.search_blob || '' };
+         // Thin link: scrape the page so the review (AI or rules) reads facts.
+         if (!meta.title && !meta.notes && !meta.content && /^https?:\/\//i.test(r.url || '')) {
            try {
-             const vocab = await recentTagsForScope(env, t.table === 'links' ? 'community' : 'personal', t.col);
-             const ai = await aiDescribeAndTag(env, r.url, meta, vocab, cfgFt);
-             if (ai) {
-               aiHits++;
-               title = ai.title || title;
-               notes = ai.description || notes;
-               tags = ai.tags || [];
+             const sc = await scrapeLinkMetadata(r.url, env);
+             if (sc) {
+               if (!title && sc.title) title = String(sc.title).slice(0, 200);
+               if (!notes && sc.description) notes = String(sc.description).slice(0, 600);
+               meta = { title, notes, content: String(sc.content || '').slice(0, 4000) };
              }
            } catch (_) {}
          }
-         if (!tags?.length) {
-           tags = fallbackTagsFromMeta(r.url, meta);
-           ctxHits++;
+         let newTags = null, added = [], removed = [], usedAi = false;
+         if (aiMode) {
+           try {
+             const vocab = await recentTagsForScope(env, t.table === 'links' ? 'community' : 'personal', t.col);
+             const ai = await aiDescribeAndTag(env, r.url, meta, vocab, cfgFt, current);
+             if (ai?.tags?.length) {
+               usedAi = true; aiHits++;
+               newTags = normalizeTagList(ai.tags);
+               if (ai.title && !title) title = String(ai.title).slice(0, 200);
+               if (ai.description && !notes) notes = String(ai.description).slice(0, 600);
+             }
+           } catch (_) {}
          }
-         if (!tags.length) tags = ['untagged'];
-         await env.DB.prepare(
-           `UPDATE ${t.table} SET tags = ?, title = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
-         ).bind(JSON.stringify(tags), title, notes, r.id).run();
-         markMeiliScopeDirty(env, t.table === 'links' ? 'community' : 'personal', t.col);
+         if (!usedAi) {
+           const fb = smartFallbackTags(r.url, meta, current);
+           newTags = fb.tags; added = fb.added; removed = fb.removed; ruleHits++;
+         } else {
+           const after = new Set(newTags);
+           added = newTags.filter((x) => !current.includes(x));
+           removed = current.filter((x) => !after.has(x));
+         }
+         const metaRescued = title !== (r.title || '') || notes !== (r.notes || '');
+         if (added.length || removed.length || metaRescued) {
+           await env.DB.prepare(
+             `UPDATE ${t.table} SET tags = ?, title = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
+           ).bind(JSON.stringify(newTags.length ? newTags : current), title, notes, r.id).run();
+           markMeiliScopeDirty(env, t.table === 'links' ? 'community' : 'personal', t.col);
+           changed++;
+           for (const a of added) addedCounts[a] = (addedCounts[a] || 0) + 1;
+           for (const x of removed) removedCounts[x] = (removedCounts[x] || 0) + 1;
+           if (changeLines.length < 40) {
+             const bits = [...added.map((a) => `+${a}`), ...removed.map((x) => `−${x}`)].join(' ');
+             changeLines.push(`<li><b>${escHtml((title || r.url || 'link').slice(0, 70))}</b> ${escHtml(bits)}${metaRescued && !added.length && !removed.length ? ' (title/notes rescued)' : ''}</li>`);
+           }
+         }
        } catch (_) {}
        done++;
        if (done % 10 === 0) await editProgress();
      }
      await editProgress();
-     await sendTelegramFormatted(token, chatId,
-       `${boldHtml('✅')} Tagged ${done} link(s): ${aiHits} via AI · ${ctxHits} via context fallback.\n${italicHtml(targets.length >= BATCH ? 'More remain — run /forcetags again to continue.' : 'All caught up.')}`,
-       forumThreadId);
+     const top = (m) => Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([tag, c]) => `${escHtml(tag)}×${c}`).join(', ');
+     const totalAdded = Object.values(addedCounts).reduce((a, b) => a + b, 0);
+     const totalRemoved = Object.values(removedCounts).reduce((a, b) => a + b, 0);
+     const reportHtml = [
+       richHeading(3, '🏷 Force tags — report'),
+       `<p>Mode: ${aiMode ? 'AI review' : 'rule fallback (no AI key)'} · Scope: ${escHtml(scopeArg)}${scopeCommunity ? ` · ${codeHtml(escHtml(scopeCommunity))}` : ''}</p>`,
+       `<p>Reviewed ${done} · Changed ${changed} · Unchanged ${done - changed} (AI ${aiHits} · rules ${ruleHits})</p>`,
+       `<p>Tags added: ${totalAdded}${top(addedCounts) ? ` (${top(addedCounts)})` : ''} · Removed: ${totalRemoved}${top(removedCounts) ? ` (${top(removedCounts)})` : ''}</p>`,
+       changeLines.length ? `<ul>${changeLines.join('')}</ul>` : '<p>No tag changes needed — everything already fits.</p>',
+       targets.length >= BATCH ? '<p><i>More remain — run /forcetags again to continue.</i></p>' : (changed ? '' : '<p>All caught up.</p>'),
+     ].join('\n');
+     await sendTelegramRichMessage(token, chatId, reportHtml, forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
-   // ---- /tag_untagged — GOD: tag every link with no real tags, AI first, context fallback, never touches tagged rows ----
-  if (cmd === '/tag_untagged' || cmd === '/taguntagged' || cmd === '/tag_missing') {
-    if (!isGod) { await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId); return new Response('OK', { status: 200, headers: corsHeaders }); }
-    await ensureAiConfigTable(env);
-    const cfgU = await getInstanceAiConfig(env);
-    const thinkU = await sendTelegramFormatted(token, chatId, `${boldHtml('🏷')} Tagging every untagged link… (AI ${cfgU?.api_key ? 'on' : 'OFF → context tags'})`, forumThreadId);
-    const thinkIdU = thinkU?.message_id;
-    let totalU = 0;
-    try { const cU = await env.DB.prepare(`SELECT COUNT(*) AS n FROM links WHERE tags IS NULL OR tags = '' OR tags = '[]' OR tags = 'null'`).first(); totalU += Number(cU?.n || 0); } catch (_) {}
-    try { const cU2 = await env.DB.prepare(`SELECT COUNT(*) AS n FROM personal_links WHERE tags IS NULL OR tags = '' OR tags = '[]' OR tags = 'null'`).first(); totalU += Number(cU2?.n || 0); } catch (_) {}
-    if (!totalU) {
-      if (thinkIdU) await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: thinkIdU, text: '✅ Every link already has tags.', parse_mode: 'HTML' }).catch(() => {});
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-    runInBackground(env, tagUntaggedLinksInBackground(env, token, chatId, forumThreadId, thinkIdU, totalU, cfgU));
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-
-
-   // ---- /userbot_status — the one dashboard: accounts, channels, live + backfill status ----
+    // ---- /userbot_status — the one dashboard: accounts, channels, live + backfill status ----
      // ---- /stats — clone dashboard (channel + per-topic) ----
   if (cmd === '/stats') {
     try {
@@ -16209,88 +16327,6 @@ async function enrichLinksInBackground(env, scope, key, links) {
   await Promise.all(Array.from({ length: CONCURRENCY }, run));
 }
 
-/** Background full-DB tag sweep for /tag_untagged (GOD). Only rows whose
- *  tags are empty/[]/null are touched; every tagged link is left alone.
- *  AI first when the instance AI is configured, else context fallback. */
-async function tagUntaggedLinksInBackground(env, token, chatId, forumThreadId, thinkId, total, cfg) {
-  const BATCH = 200;
-  let done = 0, aiHits = 0, ctxHits = 0, errors = 0;
-  const edit = async () => {
-    const pct = Math.min(100, Math.round((done / Math.max(1, total)) * 100));
-    const filled = Math.round((pct / 100) * 18);
-    const bar = '▮'.repeat(filled) + '▯'.repeat(18 - filled);
-    await telegramApi(token, 'editMessageText', {
-      chat_id: chatId, message_id: thinkId, parse_mode: 'HTML',
-      text: `${boldHtml('🏷 Tag untagged')}\n${codeHtml(bar + ' ' + pct + '%')}\n${done}/${total} · AI ${aiHits} · context ${ctxHits}`
-    }).catch(() => {});
-  };
-  await ensureSearchColumns(env);
-  const emptyTags = `(tags IS NULL OR tags = '' OR tags = '[]' OR tags = 'null')`;
-  // Community table: re-query first BATCH each pass — updated rows drop out, so
-  // the sweep is resumable and never revisits a tagged link.
-  for (;;) {
-    let rows = [];
-    try {
-      const { results } = await env.DB.prepare(`SELECT id, community_id, url, title, notes, search_blob FROM links WHERE ${emptyTags} ORDER BY created_at DESC LIMIT ${BATCH}`).all();
-      rows = results || [];
-    } catch (_) {}
-    if (!rows.length) break;
-    for (const r of rows) {
-      try {
-        const meta = { title: r.title || '', notes: r.notes || '', content: r.search_blob || '' };
-        let tags = null; let title = r.title || ''; let notes = r.notes || '';
-        if (cfg?.api_key) {
-          try {
-            const vocab = await recentTagsForScope(env, 'community', r.community_id);
-            const ai = await aiDescribeAndTag(env, r.url, meta, vocab, cfg);
-            if (ai) { aiHits++; title = ai.title || title; notes = ai.description || notes; tags = ai.tags || []; }
-          } catch (_) {}
-        }
-        if (!tags?.length) { tags = fallbackTagsFromMeta(r.url, meta); ctxHits++; }
-        if (!tags.length) tags = ['untagged'];
-        await env.DB.prepare(`UPDATE links SET tags = ?, title = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
-          .bind(JSON.stringify(tags), title, notes, r.id).run().catch(() => {});
-        markMeiliScopeDirty(env, 'community', r.community_id);
-      } catch (_) { errors++; }
-      done++;
-      if (done % 10 === 0) await edit();
-    }
-  }
-  // Personal table: every user's brain, same filter.
-  for (;;) {
-    let rows = [];
-    try {
-      const { results } = await env.DB.prepare(`SELECT id, user_id, url, title, notes, search_blob FROM personal_links WHERE ${emptyTags} ORDER BY created_at DESC LIMIT ${BATCH}`).all();
-      rows = results || [];
-    } catch (_) {}
-    if (!rows.length) break;
-    for (const r of rows) {
-      try {
-        const meta = { title: r.title || '', notes: r.notes || '', content: r.search_blob || '' };
-        let tags = null; let title = r.title || ''; let notes = r.notes || '';
-        if (cfg?.api_key) {
-          try {
-            const vocab = await recentTagsForScope(env, 'personal', r.user_id);
-            const ai = await aiDescribeAndTag(env, r.url, meta, vocab, cfg);
-            if (ai) { aiHits++; title = ai.title || title; notes = ai.description || notes; tags = ai.tags || []; }
-          } catch (_) {}
-        }
-        if (!tags?.length) { tags = fallbackTagsFromMeta(r.url, meta); ctxHits++; }
-        if (!tags.length) tags = ['untagged'];
-        await env.DB.prepare(`UPDATE personal_links SET tags = ?, title = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
-          .bind(JSON.stringify(tags), title, notes, r.id).run().catch(() => {});
-        markMeiliScopeDirty(env, 'personal', r.user_id);
-      } catch (_) { errors++; }
-      done++;
-      if (done % 10 === 0) await edit();
-    }
-  }
-  await edit();
-  await sendTelegramFormatted(token, chatId,
-    `${boldHtml('✅')} Tagged ${done} untagged link(s): ${aiHits} via AI · ${ctxHits} via context${errors ? ` · ${errors} errors` : ''}.`,
-    forumThreadId);
-}
-
 function queueMissingLinkEnrichment(env, scope, key, rows) {
   const missing = (rows || [])
     .filter(row => row?.url && Number(row.metadata_version || 0) < AI_METADATA_VERSION)
@@ -16388,7 +16424,7 @@ let AI_DOWN_UNTIL = 0;
 const AI_DOWN_COOLDOWN_MS = 60_000;
 function aiTrip() { AI_DOWN_UNTIL = Date.now() + AI_DOWN_COOLDOWN_MS; }
 
-async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], config = undefined) {
+async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], config = undefined, reviewTags = null) {
   if (Date.now() < AI_DOWN_UNTIL) return null;
   let cfg;
   if (config === undefined) {
@@ -16419,6 +16455,7 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
     .filter((tag, index, all) => all.indexOf(tag) === index);
   const mode = (cfg.mode || 'openai').toLowerCase();
 
+  const reviewing = Array.isArray(reviewTags);
   const system = [
     'You are a bookmarking assistant for a link archive.',
     'Translate the title, summary, and tags to English before returning them, even when the source page is in another language.',
@@ -16427,14 +16464,18 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
     'Choose 3-7 short lowercase English tags (no #, no spaces) that describe the content.',
     'Reuse an existing tag exactly whenever it fits; do not invent a synonym for an existing tag.',
     'Derive tags from the extracted page content, title, URL, and existing vocabulary; never use a fixed application taxonomy.',
+    reviewing
+      ? 'REVIEW the current tags: DROP ingest junk (backfill, dump, untagged, duplicate, saved, link, file, community, personal, post, channel, feed, archive, auto, import, share, forward, media, attachment, document, upload, rss) and anything unrelated to the content; KEEP every current tag that truly describes it (e.g. keep telegram only for Telegram-related links); ADD missing topic and platform tags. For apps include the platform: android, ios, or multiplatform when it runs on several OSes.'
+      : '',
     'Reply with ONLY one JSON object: {"title": "...", "description": "...", "tags": ["a", "b", "c"]}'
-  ].join(' ');
+  ].filter(Boolean).join(' ');
 
   const user = [
     `Title: ${title || '(unknown)'}`,
     `URL: ${rawUrl}`,
     snippet ? `Page content: ${snippet}` : '',
     vocab.length ? `Existing tags: ${vocab.join(', ')}` : '',
+    reviewing ? `Current tags on this bookmark: ${reviewTags.join(', ') || '(none)'}` : '',
     '',
     'JSON:'
   ].filter(Boolean).join('\n');
@@ -17330,6 +17371,9 @@ export {
   capturePostIntoSinks,
   hydrateSourcePosts,
   hydrateMeiliRows,
+  parseStoredTags,
+  normalizeTagList,
+  smartFallbackTags,
   searchAllLinks,
   telegramSearchRowHtml,
   handleSearchLinks,
