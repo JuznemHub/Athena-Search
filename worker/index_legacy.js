@@ -8342,7 +8342,15 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
         await answered();
         const display = statsSourceDisplayName(src, 60);
         const fail = async (why) => {
-          await editTelegramMessage(token, chatId, msgId, `${boldHtml('❌ Live clone failed:')} ${escHtml(why)}`, null, threadId).catch(() => {});
+          // Keep the dashboard alive under the error so the user can retry
+          // without sending /stats again.
+          try {
+            const fresh = await buildStatsReport(env, token, scope);
+            const view = formatStatsRichReport(fresh);
+            await editTelegramRichMessage(token, chatId, msgId, `${boldHtml('❌ Live clone failed:')} ${escHtml(why)}` + '\n\n' + view.html, threadId, view.buttons);
+          } catch (_) {
+            await editTelegramMessage(token, chatId, msgId, `${boldHtml('❌ Live clone failed:')} ${escHtml(why)}`, null, threadId).catch(() => {});
+          }
         };
         const label = await resolveJobLabel(env, user.id).catch(() => '');
         if (!label) { await fail('no enabled userbot account. Connect one with /userbot_add in a DM, then retry.'); return new Response('OK', { status: 200, headers: corsHeaders }); }
@@ -8388,7 +8396,14 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
         await editTelegramRichMessage(token, chatId, msgId, note + '\n\n' + view.html, threadId, view.buttons);
       } catch (e) {
         console.error('stats start failed', e?.message || e);
-        await editTelegramMessage(token, chatId, msgId, boldHtml('❌') + ' Live clone failed: ' + codeHtml(escHtml(String(e?.message || e).slice(0, 160))), null, threadId).catch(() => {});
+        try {
+          const user2 = await resolveAthenaUserFromTg(env, tgUserId);
+          const scope2 = { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user2 ? String(user2.id) : '') };
+          const view = formatStatsRichReport(await buildStatsReport(env, token, scope2));
+          await editTelegramRichMessage(token, chatId, msgId, boldHtml('❌') + ' Live clone failed: ' + codeHtml(escHtml(String(e?.message || e).slice(0, 160))) + '\n\n' + view.html, threadId, view.buttons);
+        } catch (_) {
+          await editTelegramMessage(token, chatId, msgId, boldHtml('❌') + ' Live clone failed: ' + codeHtml(escHtml(String(e?.message || e).slice(0, 160))), null, threadId).catch(() => {});
+        }
       }
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
