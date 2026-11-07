@@ -9221,44 +9221,48 @@ async function stopSourceLiveJobs(env, src, { isGodCb, user }) {
 }
 
 /**
- * Remove one /stats source from the display only: its parent run rows and
- * every job for the same chat + destination + owner. Saved links, files and
- * vault media stay — live capture is stopped separately via
- * stopSourceLiveJobs. Pure record surgery, exported for tests.
+ * Remove one /stats source from the display only. Prefers the exact run ids
+ * the report attached to the source (precise even for target-less error
+ * shells that group under a normalized destination); without ids it falls
+ * back to the chat + destination + owner key. Saved links, files and vault
+ * media stay — live capture is stopped separately via stopSourceLiveJobs.
+ * Pure record surgery, exported for tests.
  */
 export async function hideSourceFromStats(env, src) {
-  const cid = normalizeTgChatId(String(src?.chat_id || ''));
-  if (!cid) return { parents: 0, jobs: 0, sessions: 0, items: 0 };
-  const bare = cid.replace(/^-100/, '');
-  const target = String(src?.target || 'community');
-  const owner = String(src?.owner || '');
   const out = { parents: 0, jobs: 0, sessions: 0, items: 0 };
   const num = (r) => Number(r?.meta?.changes ?? r?.changes ?? 0);
-  let parentIds = [];
-  try {
-    const prow = await env.DB.prepare(
-      `SELECT id FROM pending_clones WHERE (chat_id = ? OR chat_id = ?) AND target = ? AND (community_id = ? OR requester_user_id = ?)`
-    ).bind(cid, bare, target, owner, owner).all().catch(() => ({ results: [] }));
-    parentIds = (prow?.results || prow || []).map((p) => String(p.id)).filter(Boolean);
-  } catch (_) {}
-  let jobIds = [];
-  try {
-    const jrow = await env.DB.prepare(
-      `SELECT id FROM index_jobs WHERE (chat_id = ? OR chat_id LIKE ? OR chat_id = ? OR chat_id LIKE ?) AND target = ? AND (community_id = ? OR user_id = ?)`
-    ).bind(cid, `${cid}:%`, bare, `${bare}:%`, target, owner, owner).all().catch(() => ({ results: [] }));
-    jobIds = (jrow?.results || jrow || []).map((j) => String(j.id)).filter(Boolean);
-  } catch (_) {}
-  try {
-    if (parentIds.length) {
-      const kids = await env.DB.prepare(
-        `SELECT id FROM index_jobs WHERE parent_id IN (${parentIds.map(() => '?').join(',')})`
-      ).bind(...parentIds).all().catch(() => ({ results: [] }));
-      for (const k of kids?.results || kids || []) {
-        const id = String(k.id);
-        if (!jobIds.includes(id)) jobIds.push(id);
+  let parentIds = [...new Set(((src?.ids?.parents || []).map(String)).filter(Boolean))];
+  let jobIds = [...new Set(((src?.ids?.jobs || []).map(String)).filter(Boolean))];
+  if (!parentIds.length && !jobIds.length) {
+    const cid = normalizeTgChatId(String(src?.chat_id || ''));
+    if (!cid) return out;
+    const bare = cid.replace(/^-100/, '');
+    const target = String(src?.target || 'community');
+    const owner = String(src?.owner || '');
+    try {
+      const prow = await env.DB.prepare(
+        `SELECT id FROM pending_clones WHERE (chat_id = ? OR chat_id = ?) AND COALESCE(target, '') = ? AND (COALESCE(community_id, '') = ? OR COALESCE(requester_user_id, '') = ?)`
+      ).bind(cid, bare, target, owner, owner).all().catch(() => ({ results: [] }));
+      parentIds = (prow?.results || prow || []).map((p) => String(p.id)).filter(Boolean);
+    } catch (_) {}
+    try {
+      const jrow = await env.DB.prepare(
+        `SELECT id FROM index_jobs WHERE (chat_id = ? OR chat_id LIKE ? OR chat_id = ? OR chat_id LIKE ?) AND COALESCE(target, '') = ? AND (COALESCE(community_id, '') = ? OR COALESCE(user_id, '') = ?)`
+      ).bind(cid, `${cid}:%`, bare, `${bare}:%`, target, owner, owner).all().catch(() => ({ results: [] }));
+      jobIds = (jrow?.results || jrow || []).map((j) => String(j.id)).filter(Boolean);
+    } catch (_) {}
+    try {
+      if (parentIds.length) {
+        const kids = await env.DB.prepare(
+          `SELECT id FROM index_jobs WHERE parent_id IN (${parentIds.map(() => '?').join(',')})`
+        ).bind(...parentIds).all().catch(() => ({ results: [] }));
+        for (const k of kids?.results || kids || []) {
+          const id = String(k.id);
+          if (!jobIds.includes(id)) jobIds.push(id);
+        }
       }
-    }
-  } catch (_) {}
+    } catch (_) {}
+  }
   try {
     for (const id of jobIds) {
       out.sessions += num(await env.DB.prepare('DELETE FROM telegram_index_sessions WHERE id = ?').bind(id).run().catch(() => null));
@@ -17033,6 +17037,7 @@ export async function buildStatsReport(env, _token = null, scope = null) {
       id: String(p.id), chat_id: normalizeTgChatId(p.chat_id), state: { ...state, overall, latest, requesterTgId: String(p.requester_tg_id || ''), requesterUserId: String(p.requester_user_id || '') },
       jobs: agg.rows, live: state.stage === 'running' || agg.rows.some((j) => j.status === 'running' || j.status === 'queued') || liveFollowKeys.has(followKey) || liveBoundChats.has(normalizeTgChatId(p.chat_id)),
       topics, standalone: false,
+      ids: { parents: [String(p.id)], jobs: (agg.rows || []).map((j) => String(j.id)) },
       target: p.target || 'community',
       owner: (p.target || 'community') === 'personal' ? String(p.requester_user_id || '') : String(p.community_id || ''),
     });
@@ -17062,7 +17067,7 @@ export async function buildStatsReport(env, _token = null, scope = null) {
     s.target = s.target || 'community';
     s.owner = s.target === 'personal' ? String(s.user_id || '') : String(s.community_id || '');
     const state = { ...s.state, isForum: topics.length > 0, stage: active ? 'running' : (s.jobs.some((j) => j.status === 'error') ? 'error' : 'done'), sourceType: topics.length ? 'group' : null, username: null, overall, latest, requesterTgId: String(s.requester_tg_id || ''), requesterUserId: String(s.user_id || '') };
-    runs.push({ id: 'standalone:' + s.jobs.map((j) => j.id).sort().join(','), chat_id: normalizeTgChatId(s.chat_id), state, jobs: s.jobs, live: active || s.live || liveBoundChats.has(normalizeTgChatId(s.chat_id)), topics, standalone: true, target: s.target || 'community', owner: s.owner || '' });
+    runs.push({ id: 'standalone:' + s.jobs.map((j) => j.id).sort().join(','), chat_id: normalizeTgChatId(s.chat_id), state, jobs: s.jobs, live: active || s.live || liveBoundChats.has(normalizeTgChatId(s.chat_id)), topics, standalone: true, ids: { parents: [], jobs: (s.jobs || []).map((j) => String(j.id)) }, target: s.target || 'community', owner: s.owner || '' });
   }
 
   // One dashboard row per cloned source: merge every run (managed parents
@@ -17100,11 +17105,18 @@ export async function buildStatsReport(env, _token = null, scope = null) {
         tgIds: [...new Set(groupRuns.map((r) => String(r.state?.requesterTgId || '')).filter(Boolean))],
         userIds: [...new Set(groupRuns.map((r) => String(r.state?.requesterUserId || '')).filter(Boolean))],
       };
+      const idParents = new Set();
+      const idJobs = new Set();
+      for (const r of groupRuns) {
+        for (const id of r.ids?.parents || []) idParents.add(String(id));
+        for (const id of r.ids?.jobs || []) idJobs.add(String(id));
+      }
       sources.push({
         key: [first.chat_id, String(first.target || 'community'), String(first.community_id || ''), String(first.owner || '')].join('|'),
         chat_id: first.chat_id, target: first.target || 'community', community: first.community_id || '', owner: first.owner || '',
         name: st0.sourceName || first.chat_id, destinationName: st0.destinationName || '',
         label: st0.label || '', type, isForum, topics, overall, fresh, recent, live, auth,
+        ids: { parents: [...idParents], jobs: [...idJobs] },
       });
     }
     sources.sort((a, b) => String(a.name || a.chat_id).localeCompare(String(b.name || b.chat_id)));

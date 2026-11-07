@@ -113,6 +113,29 @@ assert.match(helpTextForSection('god', true), /forcetags[\s\S]*?tag_untagged/);
   assert.equal(sql.prepare(`SELECT id FROM pending_clones ORDER BY id`).all().map((r) => r.id).join(','), 'p2,p3');
   assert.equal(sql.prepare(`SELECT id FROM index_jobs ORDER BY id`).all().map((r) => r.id).join(','), 'j3,j4');
 }
+// ids path: exact run ids from the report — precise for target-less error
+// shells that group under a normalized destination.
+{
+  const sql = new DatabaseSync(':memory:');
+  sql.exec(`CREATE TABLE pending_clones (id TEXT PRIMARY KEY, chat_id TEXT, thread_id TEXT, community_id TEXT, target TEXT, requester_tg_id TEXT, requester_user_id TEXT, stats_json TEXT, created_at INTEGER, expires_at INTEGER);
+    CREATE TABLE index_jobs (id TEXT PRIMARY KEY, community_id TEXT, chat_id TEXT, user_id TEXT, status TEXT, parent_id TEXT, target TEXT, thread_id TEXT, userbot_label TEXT);
+    CREATE TABLE telegram_index_sessions (id TEXT PRIMARY KEY, user_id TEXT, community_id TEXT, chat_id TEXT);
+    CREATE TABLE clone_job_items (job_id TEXT, message_id TEXT, counters_json TEXT);`);
+  const DB = { prepare(query) {
+    const bind = (values = []) => ({ bind(...args) { return bind(args.map(v => v ?? null)); },
+      async first() { return sql.prepare(query).get(...values) || null; },
+      async all() { return { results: sql.prepare(query).all(...values) }; },
+      async run() { const r = sql.prepare(query).run(...values); return { meta: { changes: Number(r.changes) } }; }
+    }); return bind();
+  } };
+  const env = { DB };
+  sql.prepare(`INSERT INTO pending_clones (id, chat_id, community_id, target, requester_user_id) VALUES ('e1','869708',NULL,NULL,'telegram_u1'),('e2','869708',NULL,NULL,'telegram_u1'),('k1','-1001','c1','community','telegram_u1')`).run();
+  sql.prepare(`INSERT INTO index_jobs (id, community_id, chat_id, user_id, status, target, parent_id) VALUES ('j9','c1','-1001','u1','done','community','k1')`).run();
+  const out = await hideSourceFromStats(env, { chat_id: '869708', target: 'community', owner: '', ids: { parents: ['e1', 'e2'], jobs: [] } });
+  assert.deepEqual(out, { parents: 2, jobs: 0, sessions: 0, items: 0 });
+  assert.equal(sql.prepare(`SELECT COUNT(*) AS n FROM pending_clones`).get().n, 1);
+  assert.equal(sql.prepare(`SELECT COUNT(*) AS n FROM index_jobs`).get().n, 1);
+}
 
 const replyEdit = parseTelegramEditPayload('| title: Correct title | notes: Correct notes', {
   text: 'Saved link https://example.com/item'
