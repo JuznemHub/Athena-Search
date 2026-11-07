@@ -7705,29 +7705,27 @@ function helpTextForSection(section, isGod = false) {
       richParagraph('<i>Two commands do everything. <b>/clone</b> backfills history first, then follows live; <b>/uclone</b> is the guided wizard with per-topic statistics. Community id always goes LAST, and every run asks Personal vs community before starting. Stats show Group[Topic] / [Channel] with the usual ⏹ button.</i>'),
       spacer,
       richParagraph('<b>/clone — history + live, community-scoped</b>'),
-      cmd(1, `${codeHtml('/clone')}`, 'Run with nothing inside a topic: clones that topic. In General: the whole group. In a DM it explains the ID forms below.'),
-      cmd(2, `${codeHtml('/clone')} ${codeHtml('<community_id>')}`, 'Inside a topic: clone that topic into this community.'),
-      cmd(3, `${codeHtml('/clone')} ${codeHtml('<chat_id> <community_id>')}`, 'Whole chat (channels show as [Channel]): history first, then live. Runs as your selected account (' + codeHtml('/userbot_select') + '), first enabled if none.'),
-      cmd(4, `${codeHtml('/clone')} ${codeHtml('<topic_id> <community_id>')}`, 'That topic of THIS group.'),
-      cmd(5, `${codeHtml('/clone')} ${codeHtml('<chat_id> <topic_id> <community_id>')}`, 'That topic of that chat — the DM-friendly form.'),
+      cmd(1, `${codeHtml('/clone')} ${codeHtml('<chat_id> <community_id>')}`, 'Whole chat (channels show as [Channel]): history first, then live. Runs as your selected account (' + codeHtml('/userbot_select') + '), first enabled if none.'),
+      cmd(2, `${codeHtml('/clone')} ${codeHtml('<chat_id> <topic_id> <community_id>')}`, 'That topic of that chat.'),
+      cmd(3, `${codeHtml('/clone')} ${codeHtml('<channel_id> <community_id>')}`, 'Clone a channel: full history first, then live indexing.'),
       spacer,
       richParagraph('<b>Forum topics</b>'),
-      cmd(6, `${codeHtml('/clone')} ${codeHtml('[topic_id] [community_id]')}`, 'In a group: that topic of this group, into the community. Bare /clone in a topic does the same.'),
-      cmd(7, `${codeHtml('/topic_list')} · ${codeHtml('/topic_unlink')}`, 'List bindings or remove one. Binding happens automatically when a clone runs.'),
-      cmd(8, `${codeHtml('/uclone')} ${codeHtml('<chat_id> [topic_id] [community_id]')}`, 'Guided wizard: measures history, shows per-topic statistics, then asks the destination (given community pinned first). Also written ' + codeHtml('/ubclone') + '.'),
+      cmd(4, `${codeHtml('/topic_list')} · ${codeHtml('/topic_unlink')}`, 'List bindings or remove one. Binding happens automatically when a clone runs.'),
+      cmd(5, `${codeHtml('/uclone')} ${codeHtml('<chat_id> [topic_id] [community_id]')}`, 'Guided wizard: measures history, shows per-topic statistics, then asks the destination (given community pinned first). Also written ' + codeHtml('/ubclone') + '.'),
+      cmd(6, `${codeHtml('/uclone')} ${codeHtml('<chat_id> <community_id>')}`, 'Guided wizard for a whole chat: same measuring and stats, straight to the destination picker.'),
       spacer,
       richParagraph('<b>Watch & stop</b>'),
-      cmd(9, `${codeHtml('/stats')}`, 'Newest-first dashboard, one row per cloned source: totals, fresh-in-24h line, live ON/OFF, per-topic pages. LIVE means a real capture path exists. The ⏹ button beside a live row stops its live capture AND its running backfills — saved history stays.'),
-      cmd(10, `${codeHtml('/status')} ${codeHtml('[all]')}`, 'What is indexing right now plus running and recent backfill jobs (' + codeHtml('all') + ' lists every user\'s jobs, GOD). There is no stop command — stopping happens from the ⏹ button on /stats.'),
-      cmd(11, `${codeHtml('/delete')}`, 'One delete command with a picker: one saved link, one whole cloned chat (imports + live capture, with confirm), or one backfill session (imports only, with confirm). Direct forms still work: ' + codeHtml('/delete <url>') + ' removes a link, ' + codeHtml('/delete <chat_id> [thread_id]') + ' removes a whole clone.'),
+      cmd(7, `${codeHtml('/stats')}`, 'Newest-first dashboard, one row per cloned source: totals, fresh-in-24h line, live ON/OFF, per-topic pages. LIVE means a real capture path exists. The ⏹ button beside a live row stops its live capture AND its running backfills — saved history stays.'),
+      cmd(8, `${codeHtml('/status')} ${codeHtml('[all]')}`, 'What is indexing right now plus running and recent backfill jobs (' + codeHtml('all') + ' lists every user\'s jobs, GOD). There is no stop command — stopping happens from the ⏹ button on /stats.'),
+      cmd(9, `${codeHtml('/delete')}`, 'One delete command with a picker: one saved link, one whole cloned chat (imports + live capture, with confirm), or one backfill session (imports only, with confirm). Direct forms still work: ' + codeHtml('/delete <url>') + ' removes a link, ' + codeHtml('/delete <chat_id> [thread_id]') + ' removes a whole clone.'),
       spacer,
       richParagraph('<b>Userbot accounts (GOD)</b>'),
-      cmd(12, `${codeHtml('/userbot_add')} ${codeHtml('<label> <api_id> <api_hash> <session>')}`, 'Connect an account (label defaults to main). Re-authenticate with the same label; adding another account never changes the selection. Sessions stay encrypted on the server — DM only.'),
-      cmd(13, `${codeHtml('/userbot_accounts')} · ${codeHtml('/userbot_select')} · ${codeHtml('/userbot_status')}`, 'List and switch accounts, and open the health dashboard: identities, live connection, saved follows, backfill and per-topic progress, recent errors. Switching accounts moves your live follows to the new account wherever it can see the chat.'),
-      cmd(14, `${codeHtml('/userbot_unfollow')} ${codeHtml('<chat_id> <community_id>')}`, 'Stop live capture for one chat in one community (keeps its history). The ⏹ button on /stats does the same thing with one tap.'),
-      cmd(16, `${codeHtml('/userbot_del')} ${codeHtml('<label>')} · ${codeHtml('/userbot_disconnect')}`, 'Remove one account, or disconnect all of them. Their follows and running clones stop too — switch accounts (14) instead if you just want to move live cloning elsewhere.'),
+      cmd(10, `${codeHtml('/userbot_add')} ${codeHtml('<label> <api_id> <api_hash> <session>')}`, 'Connect an account (label defaults to main). Re-authenticate with the same label; adding another account never changes the selection. Sessions stay encrypted on the server — DM only.'),
+      cmd(11, `${codeHtml('/userbot_accounts')} · ${codeHtml('/userbot_select')} · ${codeHtml('/userbot_status')}`, 'List and switch accounts, and open the health dashboard: identities, live connection, saved follows, backfill and per-topic progress, recent errors. Switching accounts moves your live follows to the new account wherever it can see the chat.'),
+      cmd(12, `${codeHtml('/userbot_unfollow')} ${codeHtml('<chat_id> <community_id>')}`, 'Stop live capture for one chat in one community (keeps its history). The ⏹ button on /stats does the same thing with one tap.'),
+      cmd(13, `${codeHtml('/userbot_del')} ${codeHtml('<label>')} · ${codeHtml('/userbot_disconnect')}`, 'Remove one account, or disconnect all of them. Their follows and running clones stop too — switch accounts (12) instead if you just want to move live cloning elsewhere.'),
       spacer,
-      richParagraph(`<b>Recipes:</b> group: ${codeHtml('/community_verify')} → ${codeHtml('/clone')} in the group → ${codeHtml('/stats')}; channel: ${codeHtml('/clone <-100…> <community_id>')} → ${codeHtml('/stats')}; history + live: ${codeHtml('/userbot_add')} → ${codeHtml('/userbot_select')} → ${codeHtml('/uclone <chat_id> [topic_id] [community_id]')} → ${codeHtml('/stats')}`),
+      richParagraph(`<b>Recipes:</b> group: ${codeHtml('/community_verify')} → ${codeHtml('/clone <chat_id> <community_id>')} → ${codeHtml('/stats')}; channel: ${codeHtml('/clone <-100…> <community_id>')} → ${codeHtml('/stats')}; history + live: ${codeHtml('/userbot_add')} → ${codeHtml('/userbot_select')} → ${codeHtml('/uclone <chat_id> <community_id>')} → ${codeHtml('/stats')}`),
       richParagraph('<i>Cloning never edits the source chat. The selected userbot account must see the source chat; every run asks Personal vs community first.</i>')
     ].join('\n');
   }
@@ -7739,26 +7737,25 @@ function helpTextForSection(section, isGod = false) {
       spacer,
       richParagraph('<b>Brains & targets</b>'),
       cmd(1, `${codeHtml('/personal')} · ${codeHtml('/community')} · ${codeHtml('/mode')}`, 'Where YOUR dumps land: private brain or the linked community. Same switch as in 👥 Community — repeated here because only GOD has a personal brain.'),
-      cmd(2, `${codeHtml('/clone')} ${codeHtml('<channel_id> <community_id>')}`, 'Clone a channel: full history first, then live indexing. Full create/change/remove split lives in 📡 Channels.'),
-      cmd(3, `${codeHtml('/dumpsmart')} · ${codeHtml('/dumpall on|off')}`, 'One dump-mode setting: smart keeps the primary link only (default), on saves every URL.'),
+      cmd(2, `${codeHtml('/dumpsmart')} · ${codeHtml('/dumpall on|off')}`, 'One dump-mode setting: smart keeps the primary link only (default), on saves every URL. Channel cloning lives in 📡 Channels.'),
       spacer,
       richParagraph('<b>Tagging & structure</b>'),
-      cmd(4, `${codeHtml('/forcetags')} ${codeHtml('[community_id]')}`, 'AI-tag untagged links, 150 per run — run again to continue. Add a community id to stay inside one brain.'),
-      cmd(5, codeHtml('/tag_untagged'), 'Same idea, whole database, background pass with no per-run limit. Either command leaves already-tagged links alone.'),
-      cmd(6, codeHtml('/structure'), 'One-pass DB cleanup: strips tracking URLs, merges near-duplicate links, cleans titles and notes, trims multi-link notes to each link’s own section. Runs in the background with live progress.'),
+      cmd(3, `${codeHtml('/forcetags')} ${codeHtml('[community_id]')}`, 'AI-tag untagged links, 150 per run — run again to continue. Add a community id to stay inside one brain.'),
+      cmd(4, codeHtml('/tag_untagged'), 'Same idea, whole database, background pass with no per-run limit. Either command leaves already-tagged links alone.'),
+      cmd(5, codeHtml('/structure'), 'One-pass DB cleanup: strips tracking URLs, merges near-duplicate links, cleans titles and notes, trims multi-link notes to each link’s own section. Runs in the background with live progress.'),
       spacer,
       richParagraph('<b>Backup & import</b>'),
-      cmd(7, codeHtml('/backup'), 'Full database backup (SQL, gzipped) sent to this chat.'),
-      cmd(8, `${codeHtml('/import')} — ${boldHtml('reply to a backup file')}`, 'Merges the backup into your CURRENT brains: community links → the linked community, the backup’s original community, or ' + codeHtml('/import <community_id>') + ', personal links → your personal brain. Duplicates skipped; runs in the background with progress. Use ' + codeHtml('/backup') + ' (7) to make the file.'),
+      cmd(6, codeHtml('/backup'), 'Full database backup (SQL, gzipped) sent to this chat.'),
+      cmd(7, `${codeHtml('/import')} — ${boldHtml('reply to a backup file')}`, 'Merges the backup into your CURRENT brains: community links → the linked community, the backup’s original community, or ' + codeHtml('/import <community_id>') + ', personal links → your personal brain. Duplicates skipped; runs in the background with progress. Use ' + codeHtml('/backup') + ' (6) to make the file.'),
       spacer,
       richParagraph('<b>Channels, cloning & userbot</b>'),
       richParagraph(`<i>Channel/group/topic cloning and userbot commands live in the ${boldHtml('📡 Channels')} panel — most are GOD/owner gated and non-GOD just get "GOD rank only".</i>`),
       spacer,
       richParagraph('<b>Instance</b>'),
-      cmd(9, `${codeHtml('/setlogchannel')} ${codeHtml('<chat_id>')} ${codeHtml('(/setlog)')}`, 'Mirror operational events to a log channel.'),
-      cmd(10, `${codeHtml('/log')} ${codeHtml('[n|clear|dokploy [app] [n]|buildlogs [app] [n]|--json [n]]')}`, 'Real runtime logs: app log tail (default 30), Dokploy container logs, last deployment build output, or machine-readable JSON. AI agents: GET /api/logs?follow=1 (NDJSON).'),
-      cmd(11, `${codeHtml('/dok')} ${codeHtml('[apps|status|logs|buildlogs|deploy|redeploy|restart|stop|start]')}`, 'Dokploy control (self-host). deploy/redeploy confirm the accepted request only — follow /dok buildlogs and /dok status.'),
-      cmd(12, `${codeHtml('/db')} · ${codeHtml('/restart')} · ${codeHtml('/clear_personal_db')}`, 'Storage info · restart the service · <b>wipes your personal brain</b> (asks for YES first).'),
+      cmd(8, `${codeHtml('/setlogchannel')} ${codeHtml('<chat_id>')} ${codeHtml('(/setlog)')}`, 'Mirror operational events to a log channel.'),
+      cmd(9, `${codeHtml('/log')} ${codeHtml('[n|clear|dokploy [app] [n]|buildlogs [app] [n]|--json [n]]')}`, 'Real runtime logs: app log tail (default 30), Dokploy container logs, last deployment build output, or machine-readable JSON. AI agents: GET /api/logs?follow=1 (NDJSON).'),
+      cmd(10, `${codeHtml('/dok')} ${codeHtml('[apps|status|logs|buildlogs|deploy|redeploy|restart|stop|start]')}`, 'Dokploy control (self-host). deploy/redeploy confirm the accepted request only — follow /dok buildlogs and /dok status.'),
+      cmd(11, `${codeHtml('/db')} · ${codeHtml('/restart')} · ${codeHtml('/clear_personal_db')}`, 'Storage info · restart the service · <b>wipes your personal brain</b> (asks for YES first).'),
       spacer,
       richParagraph('<i>Website Settings → AI keys, bot binding, storage.</i>')
     ].join('\n');
@@ -8503,7 +8500,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       await sendTelegramRichMessage(token, chatId, [
         richHeading(3, '🧬 Clone a chat'),
         '',
-        richParagraph(`• ${codeHtml('/clone')} — in a topic clones that topic, in General the whole group<br>• ${codeHtml('/clone <chat_id> <community_id>')} — whole chat ([Channel] for channels)<br>• ${codeHtml('/clone <chat_id> <topic_id> <community_id>')} — that topic of that chat<br>• ${codeHtml('/uclone <chat_id> [topic_id] [community_id]')} — guided wizard with per-topic stats<br>• ${codeHtml('/stats')} — counters, live state, ⏹ stop button · ${codeHtml('/status')} — what is indexing + jobs<br>• ${codeHtml('/delete')} — picker: one link, one cloned chat, or one backfill session`)
+        richParagraph(`• ${codeHtml('/clone <chat_id> <community_id>')} — whole chat ([Channel] for channels)<br>• ${codeHtml('/clone <chat_id> <topic_id> <community_id>')} — that topic of that chat<br>• ${codeHtml('/clone <channel_id> <community_id>')} — a channel<br>• ${codeHtml('/uclone <chat_id> <community_id>')} — whole-chat wizard · ${codeHtml('/uclone <chat_id> [topic_id] [community_id]')} — guided wizard with per-topic stats<br>• ${codeHtml('/stats')} — counters, live state, ⏹ stop button · ${codeHtml('/status')} — what is indexing + jobs<br>• ${codeHtml('/delete')} — picker: one link, one cloned chat, or one backfill session`)
       ].join('\n'), threadId);
     }
     return new Response('OK', { status: 200, headers: corsHeaders });
@@ -12086,10 +12083,10 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
 // ---- /clone shared flow: ask Personal vs community, then backfill + follow ----
 function cloneUsageHtml() {
   return [
-    `In a topic: ${codeHtml('/clone')} or ${codeHtml('/clone <community_id>')} clones that topic.`,
     `Whole chat: ${codeHtml('/clone <chat_id> <community_id>')}.`,
-    `One topic: ${codeHtml('/clone <chat_id> <topic_id> <community_id>')} (or ${codeHtml('/clone <topic_id> <community_id>')} inside its group).`,
-    `Guided tour with per-topic stats: ${codeHtml('/uclone <chat_id> [topic_id] [community_id]')}.`,
+    `One topic: ${codeHtml('/clone <chat_id> <topic_id> <community_id>')}.`,
+    `A channel: ${codeHtml('/clone <channel_id> <community_id>')}.`,
+    `Guided tour with per-topic stats: ${codeHtml('/uclone <chat_id> [topic_id] [community_id]')} (whole chat: ${codeHtml('/uclone <chat_id> <community_id>')}).`,
   ].join('\n');
 }
 
