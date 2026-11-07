@@ -26,6 +26,7 @@ import {
   helpTextForSection,
   hideSourceFromStats,
   restartLiveMode,
+  dedupeEligibleCommunities,
   isGroundedAiAnswer,
   normalizeModelId,
   parseAiDescribeResponse,
@@ -85,6 +86,22 @@ assert.match(helpTextForSection('god', true), /forcetags[\s\S]*?tag_untagged/);
   const idleDash = formatStatsRichReport({ sources: [{ ...fakeReport.sources[0], live: false }] });
   assert.match(idleDash.buttons, /stats:start:0/, 'idle row shows the ▶️ restart button');
   assert.doesNotMatch(idleDash.buttons, /stats:stop/, 'idle row has no stop button');
+}
+// dedupeEligibleCommunities: same-named rows show once — most links wins, tie oldest.
+{
+  const rows = [
+    { id: 'c_new', name: 'PIRATEZPARTY', links: 0, created_at: 200 },
+    { id: 'c_old', name: 'PIRATEZPARTY', links: 16703, created_at: 100 },
+    { id: 'c_other', name: 'Other', links: 5, created_at: 150 },
+  ];
+  const out = dedupeEligibleCommunities(rows);
+  assert.equal(out.map((c) => c.id).join(','), 'c_old,c_other');
+  const tied = dedupeEligibleCommunities([
+    { id: 'n2', name: 'X', links: 0, created_at: 200 },
+    { id: 'n1', name: 'x ', links: 0, created_at: 100 },
+  ]);
+  assert.equal(tied.map((c) => c.id).join(','), 'n1');
+  assert.equal(dedupeEligibleCommunities([]).length, 0);
 }
 // restartLiveMode: userbot required, bot optional (userbot mode fallback).
 assert.deepEqual(restartLiveMode({ userbotSeen: false, botStatus: 'member' }), { ok: false, reason: 'userbot' });

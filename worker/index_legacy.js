@@ -9201,6 +9201,26 @@ export function restartLiveMode({ userbotSeen, botStatus }) {
   return { ok: true, userbotMode: true };
 }
 
+/**
+ * Dedupe the clone destination picker by community name: a re-run
+ * /community_verify leaves two same-named rows that otherwise show twice.
+ * Keeps the entry with the most saved links (tie: oldest first). Pure,
+ * exported for tests.
+ */
+export function dedupeEligibleCommunities(rows) {
+  const byName = new Map();
+  for (const c of rows || []) {
+    const key = String(c?.name || c?.id || '').trim().toLowerCase();
+    if (!key) continue;
+    const cur = byName.get(key);
+    if (!cur) { byName.set(key, c); continue; }
+    const cl = Number(c?.links || 0), kl = Number(cur?.links || 0);
+    if (cl !== kl) { if (cl > kl) byName.set(key, c); continue; }
+    if (Number(c?.created_at || 0) < Number(cur?.created_at || 0)) byName.set(key, c);
+  }
+  return [...byName.values()];
+}
+
 /** Ownership check shared by the /stats beside toggle and drill-down buttons. */
 async function statsSourceAllowed(env, { isGodCb, user, src }) {
   let allowed = !!isGodCb;
@@ -12336,10 +12356,15 @@ function cloneUsageHtml() {
 async function cloneEligibleCommunities(env, athenaUser, isGod) {
   const out = [];
   try {
-    const rows = await env.DB.prepare(`SELECT id, name FROM communities WHERE id != 'default' ORDER BY created_at DESC`).all();
+    const rows = await env.DB.prepare(`SELECT id, name, created_at FROM communities WHERE id != 'default' ORDER BY created_at DESC`).all();
+    let linkCounts = {};
+    try {
+      const lr = await env.DB.prepare(`SELECT community_id, COUNT(*) AS n FROM links GROUP BY community_id`).all().catch(() => ({ results: [] }));
+      for (const r of lr?.results || lr || []) linkCounts[String(r.community_id || '')] = Number(r.n || 0);
+    } catch (_) {}
     for (const c of (rows?.results || rows || [])) {
       if (!c?.id) continue;
-      if (isGod || await ensureOwnerOrAdmin(c.id, athenaUser?.id || '', env)) out.push(c);
+      if (isGod || await ensureOwnerOrAdmin(c.id, athenaUser?.id || '', env)) out.push({ ...c, links: linkCounts[String(c.id)] || 0 });
     }
   } catch (_) {}
   return out;
@@ -12356,7 +12381,7 @@ async function startCloneTargetAsk(env, ctx) {
       return;
     }
   }
-  const eligible = await cloneEligibleCommunities(env, athenaUser, isGod);
+  const eligible = dedupeEligibleCommunities(await cloneEligibleCommunities(env, athenaUser, isGod));
   if (!eligible.length) {
     await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No community available — ask a community owner to make you owner/admin first.`, forumThreadId);
     return;
@@ -12423,7 +12448,7 @@ async function startCloneTargetAsk(env, ctx) {
        'SELECT thread_id, community_id, target FROM telegram_topic_bindings WHERE chat_id = ? ORDER BY thread_id'
      ).bind(chatId).all();
      if (!results?.length) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No topics linked in this group yet. Run ${codeHtml('/clone')} inside a topic.`, forumThreadId);
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No topics linked in this group yet. Clone one with ${codeHtml('/clone <chat_id> <topic_id> <community_id>')}.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      const lines = results.map((r) => `• ${codeHtml('#' + r.thread_id)} → ${escHtml(r.community_id)} · ${codeHtml(r.target || 'community')}`);
@@ -12439,7 +12464,7 @@ async function startCloneTargetAsk(env, ctx) {
         await sendTelegramFormatted(token, chatId, [
           `${boldHtml('🗂 Session history export')}`,
           '',
-          `${italicHtml('This is optional. Bot mode handles new posts with')} ${codeHtml('/clone')} ${italicHtml('inside a linked group; userbot history uses')} ${codeHtml('/uclone')} ${italicHtml('after')} ${codeHtml('/userbot_add')}${italicHtml('.')}`,
+          `${italicHtml('This is optional. Bot mode handles new posts in a linked group after')} ${codeHtml('/clone <chat_id> <community_id>')} ${italicHtml('; userbot history uses')} ${codeHtml('/uclone')} ${italicHtml('after')} ${codeHtml('/userbot_add')}${italicHtml('.')}`,
           `Install ${codeHtml('npm install telegram')} on the self-hosted server first.`,
           `${boldHtml('Never paste a session string in a group.')} It grants the user account access and is encrypted only when ${codeHtml('STORAGE_KEY')} is configured.`,
           `Progress: ${codeHtml('/status')} · stop anytime from the ⏹ button on its /stats row`
@@ -12513,6 +12538,9 @@ async function startCloneTargetAsk(env, ctx) {
       const chatArg = args.find((a) => /^-?\d{8,}$/.test(a)) || '';
       const topicArg = args.find((a) => /^\d{1,7}$/.test(a) && a !== chatArg) || '';
       const flagArg = args.find((a) => /^(bot|userbot|personal|community|both)$/i.test(a)) || '';
+      // No chat id, no answer: bare /clone (DM, General or topic) and
+      // community-only forms stay silent. Only explicit-ID forms respond.
+      if (!chatArg) return new Response('OK', { status: 200, headers: corsHeaders });
       if (flagArg) {
         await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Engine/target flags are gone — every /clone asks Personal vs community from buttons, then backfills history and follows live.\n${cloneUsageHtml()}`, forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
