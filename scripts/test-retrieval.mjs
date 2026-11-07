@@ -705,6 +705,12 @@ assert.deepEqual(normalizeTagList(['Music', 'music', '#Pop']), ['music', 'pop'])
   const r = smartFallbackTags('https://example.com/x', { title: '', notes: '', content: '' }, ['backfill', 'dump']);
   assert.equal(r.removed.length, 2, 'content-free rows lose all junk');
 }
+{
+  // Title words must not coin junk tags ("Junk 5" is not about junk).
+  const r = smartFallbackTags('https://junk5.example.org/f', { title: 'Junk 5', notes: 'random file dump post', content: '' }, ['backfill', 'telegram', 'dump']);
+  assert.ok(!r.tags.includes('junk') && !r.tags.includes('dump'), 'title words never become junk tags');
+  assert.ok(r.removed.includes('backfill') && r.removed.includes('telegram'), 'provenance junk removed');
+}
 // Names are never tags: domains and usernames banned, ecosystems allowed.
 {
   const bans = domainNameBans('https://spotiflac.zarz.moe/extension');

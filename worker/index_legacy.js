@@ -6891,7 +6891,12 @@ const RETAG_JUNK_TAGS = new Set([
   'bookmark', 'bookmarks', 'archive', 'archived', 'auto', 'import', 'imported',
   'shared', 'share', 'forward', 'forwarded', 'media', 'attachment', 'attachments',
   'document', 'documents', 'upload', 'uploads', 'rss', 'bot-api', 'untagged-link',
-  'telegram'
+  'telegram',
+  // Words title-scraping coins as tags that never describe a topic.
+  'junk', 'misc', 'stuff', 'thing', 'things', 'item', 'items', 'various',
+  'untitled', 'placeholder', 'temp', 'temporary', 'new', 'default', 'home',
+  'main', 'page', 'index', 'welcome', 'hello', 'title', 'text', 'description',
+  'header', 'footer', 'sidebar', 'content'
 ]);
 
 function parseStoredTags(raw) {
@@ -6941,9 +6946,12 @@ function smartFallbackTags(rawUrl, meta, currentTags) {
   const word = (w) => new RegExp(`(^|[^a-z0-9])${w}([^a-z0-9]|$)`).test(bag);
   const kept = [];
   const removed = [];
+  // Junk provenance tags drop unconditionally — except telegram, which is a
+  // real topic when the content is actually about Telegram.
+  const junkRescued = (t) => t === 'telegram' && (word('telegram') || bag.includes('telegram'));
   for (const t of normalizeTagList(currentTags)) {
-    if (RETAG_JUNK_TAGS.has(t) && !word(t.replace(/-/g, ' ')) && !bag.includes(t)) removed.push(t);
-    else if (!kept.includes(t)) kept.push(t);
+    if (RETAG_JUNK_TAGS.has(t) && !junkRescued(t)) { if (!removed.includes(t)) removed.push(t); continue; }
+    if (!kept.includes(t)) kept.push(t);
   }
   const tags = [...kept];
   const added = [];
@@ -7008,9 +7016,16 @@ function smartFallbackTags(rawUrl, meta, currentTags) {
     for (const w of words) { if (!stop.has(w)) add(w); if (tags.length >= 8) break; }
   }
   // Never emit the link's own names, even if rules above added them.
+  // Same for freshly coined junk: a title word like "Junk" or "Personal"
+  // must not become a tag unless the content is actually about it.
   {
     const bans = domainNameBans(rawUrl);
-    const dropBanned = (arr) => { for (let i = arr.length - 1; i >= 0; i--) if (bans.has(arr[i])) arr.splice(i, 1); };
+    const dropBanned = (arr) => {
+      for (let i = arr.length - 1; i >= 0; i--) {
+        if (bans.has(arr[i])) { arr.splice(i, 1); continue; }
+        if (RETAG_JUNK_TAGS.has(arr[i]) && arr[i] !== 'telegram') arr.splice(i, 1);
+      }
+    };
     dropBanned(tags); dropBanned(added);
   }
   const finalTags = tags.slice(0, 8);
@@ -12988,16 +13003,26 @@ async function startCloneTargetAsk(env, ctx) {
      const think = await sendTelegramFormatted(token, chatId, `${boldHtml('🏷')} Retag review (${wantAll ? 'all · ' : ''}${scopeArg}${scopeCommunity ? ` · ${codeHtml(escHtml(scopeCommunity))}` : ''})… ${aiMode ? 'AI on' : 'no AI key → rule fallback'}`, forumThreadId);
      const thinkId = think?.message_id;
      const junkLike = [...RETAG_JUNK_TAGS].slice(0, 14).map((j) => `tags LIKE '%${j}%'`).join(' OR ');
+     // All-mode pages each scope by stable id order with its own offset:
+     // in-place tag edits never move a row, so every row is visited exactly
+     // once and the sweep always terminates. Single-batch mode keeps the
+     // junk-first order with no offset.
+     const sweepOffsets = new Map();
      const pickTargets = async () => {
        const targets = [];
        const pick = async (table, col) => {
          await ensureSearchColumns(env);
          const extra = (table === 'links' && scopeCommunity) ? ` AND community_id = '${scopeCommunity.replace(/'/g, '')}'` : '';
+         const key = `${table}:${col}`;
+         const off = wantAll ? (sweepOffsets.get(key) || 0) : 0;
+         const order = wantAll ? 'id ASC' : `CASE WHEN COALESCE(tags,'') IN ('', '[]', 'null', '["untagged"]') THEN 0 WHEN ${junkLike} THEN 1 ELSE 2 END, created_at DESC`;
+         const page = wantAll ? `LIMIT ${BATCH} OFFSET ${off}` : `LIMIT ${BATCH}`;
          const { results } = await env.DB.prepare(
            `SELECT id, url, title, notes, tags, search_blob FROM ${table}
             WHERE 1=1${extra}
-            ORDER BY CASE WHEN COALESCE(tags,'') IN ('', '[]', 'null', '["untagged"]') THEN 0 WHEN ${junkLike} THEN 1 ELSE 2 END, created_at DESC LIMIT ${BATCH}`
+            ORDER BY ${order} ${page}`
          ).all();
+         if (wantAll && (results || []).length) sweepOffsets.set(key, off + results.length);
          for (const r of results || []) targets.push({ table, col, row: r });
        };
        if (scopeArg !== 'personal') {
@@ -13074,7 +13099,7 @@ async function startCloneTargetAsk(env, ctx) {
          if (added.length || removed.length || metaRescued) {
            await env.DB.prepare(
              `UPDATE ${t.table} SET tags = ?, title = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
-           ).bind(JSON.stringify(newTags.length ? newTags : current), title, notes, r.id).run();
+           ).bind(JSON.stringify(newTags || []), title, notes, r.id).run();
            markMeiliScopeDirty(env, t.table === 'links' ? 'community' : 'personal', t.col);
            st.changed++;
            for (const a of added) st.addedCounts[a] = (st.addedCounts[a] || 0) + 1;
@@ -13086,7 +13111,7 @@ async function startCloneTargetAsk(env, ctx) {
          }
        } catch (_) {}
        st.done++;
-       if (st.done % 10 === 0) await editProgress(targets.length);
+       if (st.done % 10 === 0) await editProgress(wantAll ? null : targets.length);
      }
      };
      const buildReport = (moreRemain) => {
