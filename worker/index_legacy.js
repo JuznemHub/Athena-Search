@@ -7715,7 +7715,7 @@ function helpTextForSection(section, isGod = false) {
       cmd(6, `${codeHtml('/uclone')} ${codeHtml('<chat_id> <community_id>')}`, 'Guided wizard for a whole chat: same measuring and stats, straight to the destination picker.'),
       spacer,
       richParagraph('<b>Watch & stop</b>'),
-      cmd(7, `${codeHtml('/stats')}`, 'Newest-first dashboard, one row per cloned source: totals, fresh-in-24h line, live ON/OFF, per-topic pages. Forum groups show Group[topic]. LIVE means a real capture path exists. The beside button toggles live: ⏹ on a live row stops its live capture AND its running backfills — saved history stays; ▶️ on an idle row runs a full clone first, then live follows (fails loud when the bot or the userbot account is not in the chat). Tapping a source opens its drill-down page with a 🗑 Delete from stats button: hides the row and stops live, saved links stay.'),
+      cmd(7, `${codeHtml('/stats')}`, 'Newest-first dashboard, one row per cloned source: totals, fresh-in-24h line, live ON/OFF, per-topic pages. Forum groups show Group[topic]. LIVE means a real capture path exists. The beside button toggles live: ⏹ on a live row stops its live capture AND its running backfills — saved history stays; ▶️ on an idle row runs a full clone first, then live follows (needs the userbot account in the chat — fails loud otherwise; without the bot it runs in userbot mode and says so). Tapping a source opens its drill-down page with a 🗑 Delete from stats button: hides the row and stops live, saved links stay.'),
       cmd(8, `${codeHtml('/status')} ${codeHtml('[all]')}`, 'What is indexing right now plus running and recent backfill jobs (' + codeHtml('all') + ' lists every user\'s jobs, GOD). There is no stop command — stopping happens from the ⏹ button on /stats.'),
       cmd(9, `${codeHtml('/delete')}`, 'One delete command with a picker: one saved link, one whole cloned chat (imports + live capture, with confirm), or one backfill session (imports only, with confirm). Direct forms still work: ' + codeHtml('/delete <url>') + ' removes a link, ' + codeHtml('/delete <chat_id> [thread_id]') + ' removes a whole clone.'),
       spacer,
@@ -8313,7 +8313,9 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
     }
     if (action === 'start') {
       // ▶️ beside a non-live source: full clone first, then live follows.
-      // Needs the bot AND the userbot account in the chat, else it fails loud.
+      // The userbot account must see the chat (it runs the backfill and the
+      // follow); the bot is optional — without it the restart runs in
+      // userbot mode and says so.
       try {
         const user = await resolveAthenaUserFromTg(env, tgUserId);
         const scope = { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user ? String(user.id) : '') };
@@ -8368,10 +8370,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
             botStatus = String(m?.result?.status || '');
           }
         } catch (_) {}
-        if (!['creator', 'administrator', 'member', 'restricted'].includes(botStatus)) {
-          await fail(`bot is not in ${src.chat_id}. Add it as admin/member, then tap ▶️ again.`);
-          return new Response('OK', { status: 200, headers: corsHeaders });
-        }
+        const { userbotMode } = restartLiveMode({ userbotSeen: seen, botStatus });
         const target = src.target || 'community';
         const communityIdArg = target === 'personal' ? '' : (src.community || src.owner || '');
         const communityName = communityIdArg
@@ -8392,7 +8391,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
         }
         const fresh = await buildStatsReport(env, token, scope);
         const view = formatStatsRichReport(fresh);
-        const note = `${boldHtml('▶️')} Live clone restarted for ${escHtml(display)}: full clone running first, then live follows. Progress in ${codeHtml('/stats')}.`;
+        const note = `${boldHtml('▶️')} Live clone restarted for ${escHtml(display)}: full clone running first, then live follows${userbotMode ? ' (userbot mode — bot is not in the chat, so bot-mode live stays off)' : ''}. Progress in ${codeHtml('/stats')}.`;
         await editTelegramRichMessage(token, chatId, msgId, note + '\n\n' + view.html, threadId, view.buttons);
       } catch (e) {
         console.error('stats start failed', e?.message || e);
@@ -9191,6 +9190,17 @@ const UCLONE_MANAGERS = new WeakMap();
 // link row(s) and every userbot follow (base chat and per-topic keys).
 // Saved history is untouched — this only stops future posts. Used by the
 // ⏹ button on /stats rows (unlinking moved there when /channel_unlink went away).
+/**
+ * Restart-mode decision for the ▶️ toggle. Pure. The userbot account runs
+ * the backfill and the follow, so it must see the chat; the bot only adds
+ * bot-mode live, so its absence drops to userbot mode instead of failing.
+ */
+export function restartLiveMode({ userbotSeen, botStatus }) {
+  if (!userbotSeen) return { ok: false, reason: 'userbot' };
+  if (['creator', 'administrator', 'member', 'restricted'].includes(String(botStatus || ''))) return { ok: true, userbotMode: false };
+  return { ok: true, userbotMode: true };
+}
+
 /** Ownership check shared by the /stats beside toggle and drill-down buttons. */
 async function statsSourceAllowed(env, { isGodCb, user, src }) {
   let allowed = !!isGodCb;

@@ -25,6 +25,7 @@ import {
   formatStatsRichReport,
   helpTextForSection,
   hideSourceFromStats,
+  restartLiveMode,
   isGroundedAiAnswer,
   normalizeModelId,
   parseAiDescribeResponse,
@@ -85,6 +86,12 @@ assert.match(helpTextForSection('god', true), /forcetags[\s\S]*?tag_untagged/);
   assert.match(idleDash.buttons, /stats:start:0/, 'idle row shows the ▶️ restart button');
   assert.doesNotMatch(idleDash.buttons, /stats:stop/, 'idle row has no stop button');
 }
+// restartLiveMode: userbot required, bot optional (userbot mode fallback).
+assert.deepEqual(restartLiveMode({ userbotSeen: false, botStatus: 'member' }), { ok: false, reason: 'userbot' });
+assert.deepEqual(restartLiveMode({ userbotSeen: true, botStatus: 'member' }), { ok: true, userbotMode: false });
+assert.deepEqual(restartLiveMode({ userbotSeen: true, botStatus: 'administrator' }), { ok: true, userbotMode: false });
+assert.deepEqual(restartLiveMode({ userbotSeen: true, botStatus: 'left' }), { ok: true, userbotMode: true });
+assert.deepEqual(restartLiveMode({ userbotSeen: true, botStatus: '' }), { ok: true, userbotMode: true });
 // hideSourceFromStats: display-only delete removes run records, keeps imports.
 {
   const sql = new DatabaseSync(':memory:');
