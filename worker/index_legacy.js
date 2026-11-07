@@ -2827,7 +2827,7 @@ const TELEGRAM_GOD_COMMAND_MENU = [
   { command: 'userbotconnect', description: 'Connect userbot session (GOD)' },
   { command: 'userbot_disconnect', description: 'Disconnect userbot' },
   { command: 'userbot_del', description: 'Delete userbot session' },
-  { command: 'forcetags', description: 'AI retag review: fix tags (GOD)' },
+  { command: 'forcetags', description: 'Retag review of one brain (GOD)' },
   { command: 'structure', description: 'Tidy the DB (notes + titles)' },
   { command: 'import', description: 'Restore links from a backup (GOD)' },
   { command: 'backup', description: 'Back up the database (GOD)' },
@@ -7962,7 +7962,7 @@ function helpTextForSection(section, isGod = false) {
       cmd(2, `${codeHtml('/dumpsmart')} · ${codeHtml('/dumpall on|off')}`, 'One dump-mode setting: smart keeps the primary link only (default), on saves every URL. Channel cloning lives in 📡 Channels.'),
       spacer,
       richParagraph('<b>Tagging & structure</b>'),
-      cmd(3, `${codeHtml('/forcetags')} ${codeHtml('[all] [community_id]')}`, 'AI retag review, 150 links per run. Add all to sweep the whole brain in the background — no retyping. Drops junk tags, fixes wrong ones, scrapes thin links, then reports every change. Add a community id to stay inside one brain.'),
+      cmd(3, `${codeHtml('/forcetags <community_id>')} ${codeHtml('[all]')}`, 'Run a retag review of one brain. The community id is required, then pick the community brain or your personal brain. One batch of 150 links per run; add all to sweep that whole brain in the background — no retyping. Drops junk tags, fixes wrong ones, scrapes thin links, then reports every change.'),
       cmd(5, codeHtml('/structure'), 'One-pass DB cleanup: strips tracking URLs, merges near-duplicate links, cleans titles and notes, trims multi-link notes to each link’s own section. Runs in the background with live progress.'),
       spacer,
       richParagraph('<b>Backup & import</b>'),
@@ -8235,6 +8235,198 @@ async function editTelegramRichMessage(token, chatId, messageId, richHtml, threa
   return data;
 }
 
+/**
+ * Retag review engine for one brain. /forcetags and its scope buttons both
+ * call this, so the two paths cannot drift. Community and personal brains are
+ * separate scopes and the caller always names exactly one.
+ */
+async function runForcetagsReview(env, { token, chatId, forumThreadId = null, tgUserId = null, scope = 'community', communityId = '', wantAll = false }) {
+  const personal = scope === 'personal';
+  const scopeLabel = personal ? 'personal' : 'community';
+  await ensureAiConfigTable(env);
+  const cfgFt = await getInstanceAiConfig(env);
+  const aiMode = !!cfgFt?.api_key;
+  const BATCH = 150;
+  let scopeKey = String(communityId || '');
+  if (personal) {
+    // Personal review covers the requester's own brain, never every user's.
+    scopeKey = tgUserId && isGodTgId(tgUserId, env) ? `telegram_${tgUserId}` : '';
+    if (!scopeKey) {
+      const godRow = await env.DB.prepare("SELECT id FROM users WHERE id LIKE 'telegram_%' ORDER BY created_at ASC LIMIT 1").first().catch(() => null);
+      scopeKey = godRow?.id || '';
+    }
+    if (!scopeKey) {
+      await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No personal brain on this instance.`, forumThreadId).catch(() => {});
+      return;
+    }
+  }
+  const scopeSuffix = personal ? '' : ` · ${codeHtml(escHtml(scopeKey))}`;
+  const think = await sendTelegramFormatted(token, chatId, `${boldHtml('🏷')} Retag review (${wantAll ? 'all · ' : ''}${scopeLabel}${scopeSuffix})… ${aiMode ? 'AI on' : 'no AI key → rule fallback'}`, forumThreadId);
+  const thinkId = think?.message_id;
+  const junkLike = [...RETAG_JUNK_TAGS].map((j) => `tags LIKE '%${j}%'`).join(' OR ');
+  // All-mode pages one scope by stable id order with its own offset: in-place
+  // tag edits never move a row, so every row is visited once and the sweep
+  // terminates. Single-batch mode keeps the junk-first order with no offset.
+  const sweepOffsets = new Map();
+  const table = personal ? 'personal_links' : 'links';
+  const pickTargets = async () => {
+    await ensureSearchColumns(env);
+    const off = wantAll ? (sweepOffsets.get(table) || 0) : 0;
+    const order = wantAll ? 'id ASC' : `CASE WHEN COALESCE(tags,'') IN ('', '[]', 'null', '["untagged"]') THEN 0 WHEN ${junkLike} THEN 1 ELSE 2 END, created_at DESC`;
+    const page = wantAll ? `LIMIT ${BATCH} OFFSET ${off}` : `LIMIT ${BATCH}`;
+    const where = personal ? ' AND user_id = ?' : ` AND community_id = '${scopeKey.replace(/'/g, '')}'`;
+    const stmt = env.DB.prepare(
+      `SELECT id, url, title, notes, tags, search_blob FROM ${table}
+       WHERE 1=1${where}
+       ORDER BY ${order} ${page}`
+    );
+    const { results } = await (personal ? stmt.bind(scopeKey) : stmt).all();
+    if (wantAll && (results || []).length) sweepOffsets.set(table, off + results.length);
+    return (results || []).map((row) => ({ table, col: scopeKey, row }));
+  };
+  const st = { done: 0, changed: 0, failed: 0, aiHits: 0, ruleHits: 0, addedCounts: {}, removedCounts: {}, rejectCounts: {}, changeLines: [], failLines: [] };
+  const editProgress = async (total) => {
+    if (!thinkId) return;
+    const bar = total
+      ? (() => { const pct = Math.min(100, Math.round((st.done / total) * 100)); const f = Math.round((pct / 100) * 18); return `▮`.repeat(f) + '▯'.repeat(18 - f) + `\n${codeHtml(pct + '% · ' + st.done + '/' + total)}`; })()
+      : codeHtml(`${st.done} reviewed`);
+    await telegramApi(token, 'editMessageText', {
+      chat_id: chatId, message_id: thinkId, parse_mode: 'HTML',
+      text: `${boldHtml('🏷 Force tags')}${wantAll ? ' (sweeping all)' : ''}\n${bar}\nchanged ${st.changed} · AI ${st.aiHits} · rules ${st.ruleHits}`
+    }).catch(() => {});
+  };
+  const processTargets = async (targets) => {
+    for (const t of targets) {
+      try {
+        const r = t.row;
+        const current = parseStoredTags(r.tags);
+        let title = r.title || ''; let notes = r.notes || '';
+        let meta = { title, notes, content: r.search_blob || '' };
+        // Thin link: scrape the page so the review (AI or rules) reads facts.
+        // Title alone is not enough — names without a description are what
+        // produced name-plated tags, so scrape whenever notes+content are empty.
+        if (!meta.notes && !meta.content && /^https?:\/\//i.test(r.url || '')) {
+          try {
+            const sc = await scrapeLinkMetadata(r.url, env);
+            if (sc) {
+              if (!title && sc.title) title = String(sc.title).slice(0, 200);
+              if (!notes && sc.description) notes = String(sc.description).slice(0, 600);
+              meta = { title, notes, content: String(sc.content || '').slice(0, 4000) };
+            }
+          } catch (_) {}
+        }
+        const nameBans = [...domainNameBans(r.url)];
+        // Deterministic facts first: what the page plainly is drives the
+        // tags, so the same link always lands on the same words.
+        const rule = classifyTags(r.url, meta);
+        const vocab = await recentTagsForScope(env, personal ? 'personal' : 'community', t.col);
+        // Provenance stamps survive only when the content is about them.
+        const curated = current.filter((x) => !RETAG_JUNK_TAGS.has(x) || (x === 'telegram' && rule.facts.telegram));
+        st.rejectCounts.junk = (st.rejectCounts.junk || 0) + (current.length - curated.length);
+        let candidate = [...curated, ...rule.tags];
+        let usedAi = false;
+        // The model only fills gaps. When the rules already named a type and
+        // a topic there is nothing left to ask, which keeps the sweep cheap
+        // and repeatable.
+        const ruleTopics = rule.tags.filter((x) => !PLATFORM_SET.has(x)).length;
+        if (aiMode && ruleTopics < 2) {
+          try {
+            const ai = await aiDescribeAndTag(env, r.url, meta, vocab, cfgFt, curated, nameBans);
+            if (ai?.tags?.length) {
+              candidate = [...candidate, ...ai.tags];
+              usedAi = true; st.aiHits++;
+              if (ai.title && !title) title = String(ai.title).slice(0, 200);
+              if (ai.description && !notes) notes = String(ai.description).slice(0, 600);
+            }
+          } catch (_) {}
+        }
+        if (!usedAi) st.ruleHits++;
+        // Nothing reaches storage unless it is canonical or already in use in
+        // this scope. This is what stops model-invented tags.
+        const verdict = validateTags(candidate, { vocabulary: vocab, banned: nameBans, max: 8 });
+        for (const rej of verdict.rejected) st.rejectCounts[rej.reason] = (st.rejectCounts[rej.reason] || 0) + 1;
+        const newTags = verdict.tags;
+        const added = newTags.filter((x) => !current.includes(x));
+        const removed = current.filter((x) => !newTags.includes(x));
+        const metaRescued = title !== (r.title || '') || notes !== (r.notes || '');
+        if (added.length || removed.length || metaRescued) {
+          await env.DB.prepare(
+            `UPDATE ${t.table} SET tags = ?, title = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
+          ).bind(JSON.stringify(newTags || []), title, notes, r.id).run();
+          markMeiliScopeDirty(env, personal ? 'personal' : 'community', t.col);
+          st.changed++;
+          for (const a of added) st.addedCounts[a] = (st.addedCounts[a] || 0) + 1;
+          for (const x of removed) st.removedCounts[x] = (st.removedCounts[x] || 0) + 1;
+          if (st.changeLines.length < 40) {
+            const bits = [...added.map((a) => `+${a}`), ...removed.map((x) => `−${x}`)].join(' ');
+            st.changeLines.push(`<li><b>${escHtml((title || r.url || 'link').slice(0, 70))}</b> ${escHtml(bits)}${metaRescued && !added.length && !removed.length ? ' (title/notes rescued)' : ''}</li>`);
+          }
+        }
+      } catch (e) {
+        // A rejected write (missing column, bad JSON, DB hiccup) used to count
+        // as reviewed with no trace — the report then claimed work that never
+        // landed. Count it and say so.
+        st.failed++;
+        if (st.failLines.length < 5) st.failLines.push(`${escHtml(String(t.row?.url || t.row?.id || 'row').slice(0, 60))}: ${escHtml(String(e?.message || e).slice(0, 120))}`);
+      }
+      st.done++;
+      if (st.done % 10 === 0) await editProgress(wantAll ? null : targets.length);
+    }
+  };
+  const buildReport = (moreRemain) => {
+    const top = (m) => Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([tag, c]) => `${escHtml(tag)}×${c}`).join(', ');
+    const totalAdded = Object.values(st.addedCounts).reduce((a, b) => a + b, 0);
+    const totalRemoved = Object.values(st.removedCounts).reduce((a, b) => a + b, 0);
+    const rejected = Object.entries(st.rejectCounts).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
+    return [
+      richHeading(3, '🏷 Force tags — report'),
+      `<p>Mode: ${aiMode ? 'AI review' : 'rule fallback (no AI key)'} · Scope: ${scopeLabel}${scopeSuffix}</p>`,
+      `<p>Reviewed ${st.done} · Changed ${st.changed} · Unchanged ${st.done - st.changed} (AI ${st.aiHits} · rules ${st.ruleHits})</p>`,
+      `<p>Tags added: ${totalAdded}${top(st.addedCounts) ? ` (${top(st.addedCounts)})` : ''} · Removed: ${totalRemoved}${top(st.removedCounts) ? ` (${top(st.removedCounts)})` : ''}</p>`,
+      rejected.length ? `<p>Rejected ${rejected.reduce((a, [, n]) => a + n, 0)}: ${rejected.map(([reason, n]) => `${escHtml(reason)} ${n}`).join(' · ')}</p>` : '',
+      st.changeLines.length ? `<ul>${st.changeLines.join('')}</ul>` : '<p>No tag changes needed — everything already fits.</p>',
+      st.failed ? `<p>⚠️ ${st.failed} row(s) could not be updated${st.failLines.length ? `: ${st.failLines.join('; ')}` : ''}.</p>` : '',
+      moreRemain ? '<p><i>More remain — run /forcetags again to continue.</i></p>' : (st.changed ? '' : '<p>All caught up.</p>'),
+    ].join('\n');
+  };
+  if (!wantAll) {
+    const targets = await pickTargets();
+    if (!targets.length) {
+      if (thinkId) await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: thinkId, text: `${boldHtml('✅')} Nothing to review — that brain has no links.`, parse_mode: 'HTML' }).catch(() => {});
+      return;
+    }
+    // Review in the background. A full batch scrapes thin links and calls the
+    // model per row, which outlives Telegram's webhook timeout — the retry
+    // then re-ran the same batch and the ACK never arrived. Reply now, report
+    // when the batch is done.
+    runInBackground(env, (async () => {
+      try {
+        await processTargets(targets);
+        await editProgress(targets.length);
+        await sendTelegramRichMessage(token, chatId, buildReport(targets.length >= BATCH), forumThreadId);
+      } catch (e) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} Retag failed: ${escHtml(String(e?.message || e).slice(0, 200))}`, forumThreadId).catch(() => {});
+      }
+    })());
+  } else {
+    // Whole-brain sweep in the background: webhook ACKs now, progress edits +
+    // final report land as the batches complete.
+    runInBackground(env, (async () => {
+      try {
+        for (;;) {
+          const batch = await pickTargets();
+          if (!batch.length) break;
+          await processTargets(batch);
+          await editProgress(null);
+        }
+        await sendTelegramRichMessage(token, chatId, buildReport(false), forumThreadId);
+      } catch (e) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} Sweep failed: ${escHtml(String(e?.message || e).slice(0, 200))}`, forumThreadId).catch(() => {});
+      }
+    })());
+  }
+}
+
 async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
   const data = cq.data || '';
   const tgUserId = cq.from?.id ? String(cq.from.id) : null;
@@ -8254,6 +8446,29 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       await ucloneManager(env).callback({ data, tgUserId, user, chatId, messageId: msgId, callbackId: cq.id, token, isGod: isGodTgId(tgUserId, env) });
     } catch (error) {
       await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: cloneFailure(error).message, show_alert: true });
+    }
+    return new Response('OK', { status: 200, headers: corsHeaders });
+  }
+
+  // ---- /forcetags brain picker ----
+  if (data.startsWith('ft:')) {
+    if (!tgUserId || !isGodTgId(tgUserId, env)) {
+      await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'GOD rank only', show_alert: true }).catch(() => {});
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    const [, rawScope, ftCommunityId = '', rawMode = '1'] = data.split(':');
+    if (!/^c_/.test(ftCommunityId)) {
+      await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'This prompt expired — run /forcetags again.', show_alert: true }).catch(() => {});
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
+    const ftScope = rawScope === 'p' ? 'personal' : 'community';
+    const ftLabel = ftScope === 'personal' ? '👤 personal brain' : '📚 community brain';
+    await editTelegramMessage(token, chatId, msgId, `${boldHtml('🏷 Retag review')} — ${ftLabel} ${codeHtml(escHtml(ftCommunityId))}`, null, threadId).catch(() => {});
+    try {
+      await runForcetagsReview(env, { token, chatId, forumThreadId: threadId, tgUserId, scope: ftScope, communityId: ftCommunityId, wantAll: rawMode === 'a' });
+    } catch (e) {
+      await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} Retag failed: ${escHtml(String(e?.message || e).slice(0, 200))}`, threadId).catch(() => {});
     }
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
@@ -12976,214 +13191,37 @@ async function startCloneTargetAsk(env, ctx) {
    // reports every change. Tags that already fit are left untouched.
    if (cmd === '/forcetags') {
      if (!isGod) { await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId); return new Response('OK', { status: 200, headers: corsHeaders }); }
-     await ensureAiConfigTable(env);
-     const cfgFt = await getInstanceAiConfig(env);
-     const aiMode = !!cfgFt?.api_key;
-     const BATCH = 150;
-     // Scope: /forcetags [all] [community|personal|both|<community_id>] (default both, one batch).
-     // "all" sweeps the whole scope in batches in the background — no retyping.
-     let scopeArg = '';
-     let scopeCommunity = '';
-     let wantAll = false;
-     for (const a of parts.slice(1)) {
-       const t = a.trim();
-       if (t.toLowerCase() === 'all') wantAll = true;
-       else if (['community', 'personal', 'both'].includes(t.toLowerCase())) scopeArg = t.toLowerCase();
-       else if (/^c_/.test(t)) scopeCommunity = t;
+     const ftArgs = parts.slice(1).map((a) => a.trim()).filter(Boolean);
+     const ftAll = ftArgs.some((a) => a.toLowerCase() === 'all');
+     const ftCommunity = ftArgs.find((a) => /^c_/.test(a)) || '';
+     if (!ftCommunity) {
+       await sendTelegramFormatted(token, chatId, [
+         `${boldHtml('🏷 Retag review')}`,
+         `Needs a community id: ${codeHtml('/forcetags <community_id>')} reviews one batch of 150.`,
+         `${codeHtml('/forcetags <community_id> all')} sweeps that brain in the background.`,
+         `${italicHtml('You then pick community or personal brain.')}`,
+       ].join('\n'), forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
      }
-     scopeArg = scopeArg || 'both';
-     const think = await sendTelegramFormatted(token, chatId, `${boldHtml('🏷')} Retag review (${wantAll ? 'all · ' : ''}${scopeArg}${scopeCommunity ? ` · ${codeHtml(escHtml(scopeCommunity))}` : ''})… ${aiMode ? 'AI on' : 'no AI key → rule fallback'}`, forumThreadId);
-     const thinkId = think?.message_id;
-     // Every junk tag drives junk-first ordering. slice(0, 14) silently left
-     // the rest unprioritised, so most junk rows were reviewed last.
-     const junkLike = [...RETAG_JUNK_TAGS].map((j) => `tags LIKE '%${j}%'`).join(' OR ');
-     // All-mode pages each scope by stable id order with its own offset:
-     // in-place tag edits never move a row, so every row is visited exactly
-     // once and the sweep always terminates. Single-batch mode keeps the
-     // junk-first order with no offset.
-     const sweepOffsets = new Map();
-     const pickTargets = async () => {
-       const targets = [];
-       const seen = new Set();
-       const pick = async (table, col) => {
-         if (!wantAll && targets.length >= BATCH) return;
-         await ensureSearchColumns(env);
-         // A community is a scope of its own. Filtering only when the id was
-         // typed re-read the same first page once per community, so links past
-         // that page were never reviewed and one batch did N× the work.
-         const extra = (table === 'links' && col) ? ` AND community_id = '${String(col).replace(/'/g, '')}'` : '';
-         const key = `${table}:${col}`;
-         const off = wantAll ? (sweepOffsets.get(key) || 0) : 0;
-         const order = wantAll ? 'id ASC' : `CASE WHEN COALESCE(tags,'') IN ('', '[]', 'null', '["untagged"]') THEN 0 WHEN ${junkLike} THEN 1 ELSE 2 END, created_at DESC`;
-         const page = wantAll ? `LIMIT ${BATCH} OFFSET ${off}` : `LIMIT ${BATCH}`;
-         const { results } = await env.DB.prepare(
-           `SELECT id, url, title, notes, tags, search_blob FROM ${table}
-            WHERE 1=1${extra}
-            ORDER BY ${order} ${page}`
-         ).all();
-         if (wantAll && (results || []).length) sweepOffsets.set(key, off + results.length);
-         for (const r of results || []) {
-           const id = `${table}:${col}:${r.id}`;
-           if (seen.has(id)) continue;
-           seen.add(id);
-           targets.push({ table, col, row: r });
-         }
-       };
-       if (scopeArg !== 'personal') {
-         if (scopeCommunity) await pick('links', scopeCommunity);
-         else {
-           const { results: cids } = await env.DB.prepare('SELECT DISTINCT community_id AS id FROM links').all();
-           for (const row of cids || []) if (row.id) await pick('links', row.id);
-         }
-       }
-       if (scopeArg !== 'community') {
-         const godRow = await env.DB.prepare("SELECT id FROM users WHERE id LIKE 'telegram_%' ORDER BY created_at ASC LIMIT 1").first().catch(() => null);
-         const godId = isGodTgId(tgUserId, env) ? `telegram_${tgUserId}` : (godRow?.id || '');
-         if (godId) await pick('personal_links', godId);
-       }
-       return targets;
-     };
-     const st = { done: 0, changed: 0, failed: 0, aiHits: 0, ruleHits: 0, addedCounts: {}, removedCounts: {}, rejectCounts: {}, changeLines: [], failLines: [] };
-     const editProgress = async (total) => {
-       if (!thinkId) return;
-       const bar = total
-         ? (() => { const pct = Math.min(100, Math.round((st.done / total) * 100)); const f = Math.round((pct / 100) * 18); return `▮`.repeat(f) + '▯'.repeat(18 - f) + `\n${codeHtml(pct + '% · ' + st.done + '/' + total)}`; })()
-         : codeHtml(`${st.done} reviewed`);
-       await telegramApi(token, 'editMessageText', {
-         chat_id: chatId, message_id: thinkId, parse_mode: 'HTML',
-         text: `${boldHtml('🏷 Force tags')}${wantAll ? ' (sweeping all)' : ''}\n${bar}\nchanged ${st.changed} · AI ${st.aiHits} · rules ${st.ruleHits}`
-       }).catch(() => {});
-     };
-     const processTargets = async (targets) => {
-     for (const t of targets) {
-       try {
-         const r = t.row;
-         const current = parseStoredTags(r.tags);
-         let title = r.title || ''; let notes = r.notes || '';
-         let meta = { title, notes, content: r.search_blob || '' };
-         // Thin link: scrape the page so the review (AI or rules) reads facts.
-         // Title alone is not enough — names without a description are what
-         // produced name-plated tags, so scrape whenever notes+content are empty.
-         if (!meta.notes && !meta.content && /^https?:\/\//i.test(r.url || '')) {
-           try {
-             const sc = await scrapeLinkMetadata(r.url, env);
-             if (sc) {
-               if (!title && sc.title) title = String(sc.title).slice(0, 200);
-               if (!notes && sc.description) notes = String(sc.description).slice(0, 600);
-               meta = { title, notes, content: String(sc.content || '').slice(0, 4000) };
-             }
-           } catch (_) {}
-         }
-         const nameBans = [...domainNameBans(r.url)];
-         // Deterministic facts first: what the page plainly is drives the
-         // tags, so the same link always lands on the same words.
-         const rule = classifyTags(r.url, meta);
-         const vocab = await recentTagsForScope(env, t.table === 'links' ? 'community' : 'personal', t.col);
-         // Provenance stamps survive only when the content is about them.
-         const curated = current.filter((x) => !RETAG_JUNK_TAGS.has(x) || (x === 'telegram' && rule.facts.telegram));
-         st.rejectCounts.junk = (st.rejectCounts.junk || 0) + (current.length - curated.length);
-         let candidate = [...curated, ...rule.tags];
-         let usedAi = false;
-         // The model only fills gaps. When the rules already named a type and
-         // a topic there is nothing left to ask, which keeps the sweep cheap
-         // and repeatable.
-         const ruleTopics = rule.tags.filter((x) => !PLATFORM_SET.has(x)).length;
-         if (aiMode && ruleTopics < 2) {
-           try {
-             const ai = await aiDescribeAndTag(env, r.url, meta, vocab, cfgFt, curated, nameBans);
-             if (ai?.tags?.length) {
-               candidate = [...candidate, ...ai.tags];
-               usedAi = true; st.aiHits++;
-               if (ai.title && !title) title = String(ai.title).slice(0, 200);
-               if (ai.description && !notes) notes = String(ai.description).slice(0, 600);
-             }
-           } catch (_) {}
-         }
-         if (!usedAi) st.ruleHits++;
-         // Nothing reaches storage unless it is canonical or already in use in
-         // this scope. This is what stops model-invented tags.
-         const verdict = validateTags(candidate, { vocabulary: vocab, banned: nameBans, max: 8 });
-         for (const rej of verdict.rejected) st.rejectCounts[rej.reason] = (st.rejectCounts[rej.reason] || 0) + 1;
-         const newTags = verdict.tags;
-         const added = newTags.filter((x) => !current.includes(x));
-         const removed = current.filter((x) => !newTags.includes(x));
-         const metaRescued = title !== (r.title || '') || notes !== (r.notes || '');
-         if (added.length || removed.length || metaRescued) {
-           await env.DB.prepare(
-             `UPDATE ${t.table} SET tags = ?, title = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
-           ).bind(JSON.stringify(newTags || []), title, notes, r.id).run();
-           markMeiliScopeDirty(env, t.table === 'links' ? 'community' : 'personal', t.col);
-           st.changed++;
-           for (const a of added) st.addedCounts[a] = (st.addedCounts[a] || 0) + 1;
-           for (const x of removed) st.removedCounts[x] = (st.removedCounts[x] || 0) + 1;
-           if (st.changeLines.length < 40) {
-             const bits = [...added.map((a) => `+${a}`), ...removed.map((x) => `−${x}`)].join(' ');
-             st.changeLines.push(`<li><b>${escHtml((title || r.url || 'link').slice(0, 70))}</b> ${escHtml(bits)}${metaRescued && !added.length && !removed.length ? ' (title/notes rescued)' : ''}</li>`);
-           }
-         }
-       } catch (e) {
-         // A rejected write (missing column, bad JSON, DB hiccup) used to count
-         // as reviewed with no trace — the report then claimed work that never
-         // landed. Count it and say so.
-         st.failed++;
-         if (st.failLines.length < 5) st.failLines.push(`${escHtml(String(t.row?.url || t.row?.id || 'row').slice(0, 60))}: ${escHtml(String(e?.message || e).slice(0, 120))}`);
-       }
-       st.done++;
-       if (st.done % 10 === 0) await editProgress(wantAll ? null : targets.length);
+     const ftRow = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(ftCommunity).first().catch(() => null);
+     if (!ftRow) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No community ${codeHtml(escHtml(ftCommunity))}.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
      }
-     };
-     const buildReport = (moreRemain) => {
-     const top = (m) => Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([tag, c]) => `${escHtml(tag)}×${c}`).join(', ');
-     const totalAdded = Object.values(st.addedCounts).reduce((a, b) => a + b, 0);
-     const totalRemoved = Object.values(st.removedCounts).reduce((a, b) => a + b, 0);
-     const rejected = Object.entries(st.rejectCounts).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
-     return [
-       richHeading(3, '🏷 Force tags — report'),
-       `<p>Mode: ${aiMode ? 'AI review' : 'rule fallback (no AI key)'} · Scope: ${escHtml(scopeArg)}${scopeCommunity ? ` · ${codeHtml(escHtml(scopeCommunity))}` : ''}</p>`,
-       `<p>Reviewed ${st.done} · Changed ${st.changed} · Unchanged ${st.done - st.changed} (AI ${st.aiHits} · rules ${st.ruleHits})</p>`,
-       `<p>Tags added: ${totalAdded}${top(st.addedCounts) ? ` (${top(st.addedCounts)})` : ''} · Removed: ${totalRemoved}${top(st.removedCounts) ? ` (${top(st.removedCounts)})` : ''}</p>`,
-       rejected.length ? `<p>Rejected ${rejected.reduce((a, [, n]) => a + n, 0)}: ${rejected.map(([reason, n]) => `${escHtml(reason)} ${n}`).join(' · ')}</p>` : '',
-       st.changeLines.length ? `<ul>${st.changeLines.join('')}</ul>` : '<p>No tag changes needed — everything already fits.</p>',
-       st.failed ? `<p>⚠️ ${st.failed} row(s) could not be updated${st.failLines.length ? `: ${st.failLines.join('; ')}` : ''}.</p>` : '',
-       moreRemain ? '<p><i>More remain — run /forcetags again to continue.</i></p>' : (st.changed ? '' : '<p>All caught up.</p>'),
-     ].join('\n');
-     };
-     if (!wantAll) {
-       const targets = await pickTargets();
-       if (!targets.length) {
-         if (thinkId) await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: thinkId, text: `${boldHtml('✅')} Nothing to review — no links in scope.`, parse_mode: 'HTML' }).catch(() => {});
-         return new Response('OK', { status: 200, headers: corsHeaders });
-       }
-       // Review in the background. A full batch scrapes thin links and calls
-       // the model per row, which outlives Telegram's webhook timeout — the
-       // retry then re-ran the same batch and the ACK never arrived. Reply now,
-       // report when the batch is done.
-       runInBackground(env, (async () => {
-         try {
-           await processTargets(targets);
-           await editProgress(targets.length);
-           await sendTelegramRichMessage(token, chatId, buildReport(targets.length >= BATCH), forumThreadId);
-         } catch (e) {
-           await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} Retag failed: ${escHtml(String(e?.message || e).slice(0, 200))}`, forumThreadId).catch(() => {});
-         }
-       })());
-     } else {
-       // Whole-scope sweep in the background: webhook ACKs now, progress
-       // edits + final report land as the batches complete.
-       runInBackground(env, (async () => {
-         try {
-           for (;;) {
-             const batch = await pickTargets();
-             if (!batch.length) break;
-             await processTargets(batch);
-             await editProgress(null);
-           }
-           await sendTelegramRichMessage(token, chatId, buildReport(false), forumThreadId);
-         } catch (e) {
-           await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} Sweep failed: ${escHtml(String(e?.message || e).slice(0, 200))}`, forumThreadId).catch(() => {});
-         }
-       })());
-     }
+     // The id names the community, but the review runs on either that
+     // community brain or the personal one — ask before touching anything.
+     await sendTelegramMessageWithKeyboard(token, chatId, [
+       `${boldHtml('🏷 Retag review')}`,
+       `Community: <b>${escHtml(ftRow.name || ftCommunity)}</b> ${codeHtml(escHtml(ftCommunity))}`,
+       `Volume: ${ftAll ? 'whole brain, background sweep' : 'one batch of 150'}`,
+       '',
+       'Which brain should I review?',
+     ].join('\n'), {
+       inline_keyboard: [[
+         { text: '📚 Community brain', callback_data: `ft:c:${ftCommunity}:${ftAll ? 'a' : '1'}` },
+         { text: '👤 Personal brain', callback_data: `ft:p:${ftCommunity}:${ftAll ? 'a' : '1'}` },
+       ]],
+     }, forumThreadId, 'HTML');
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
