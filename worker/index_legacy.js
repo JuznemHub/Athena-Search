@@ -11751,6 +11751,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   // if first token is a URL, not a command
   if (cmd.startsWith('http')) cmd = '';
   const rest = cmd.startsWith('/') ? text.slice(parts[0].length).trim() : text;
+  if (cmd.startsWith('/')) { try { console.log(`[webhook] cmd ${cmd} chat=${chatId} from=${tgUserId || '?'} mid=${msg.message_id}`); } catch (_) {} }
 
   let binding = await findTelegramBinding(env, chatId, tgUserId);
   let token = (await tokenForBindingAsync(binding, env)) || env.TELEGRAM_BOT_TOKEN;
@@ -12548,12 +12549,12 @@ async function startCloneTargetAsk(env, ctx) {
        ? await env.DB.prepare('SELECT * FROM index_jobs ORDER BY updated_at DESC LIMIT 10').all()
        : await env.DB.prepare('SELECT * FROM index_jobs WHERE user_id = ? ORDER BY updated_at DESC LIMIT 10').bind(athenaUser?.id || tgUserId || '').all();
      const jobLines = (jobs || []).map((j) => `<li>${j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'error' ? '❌' : '⏸'} ${j.chat_name ? `${boldHtml(escHtml(j.chat_name))} ` : ''}${codeHtml(j.chat_id)}${j.thread_id ? ` topic ${codeHtml('#' + j.thread_id)}` : ''} — ${escHtml(j.status)} · ${j.processed || 0} scanned · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.dupes_skipped ? ` · ${j.dupes_skipped} dupes` : ''}${j.saved_files ? ` · ${j.saved_files} files` : ''}${j.error ? ` — ${escHtml(String(j.error).slice(0, 80))}` : ''}</li>`);
-     await sendTelegramFormatted(token, chatId, [
+     await sendTelegramRichMessage(token, chatId, [
        `${boldHtml('🗂 Status')}`,
        '',
        `${boldHtml('Real time (automatic)')}`,
        isGroup ? '• This group: every posted link and file is saved as it arrives.' : '• Linked groups: every posted link and file is saved as it arrives.',
-       chanLines.length ? `• Linked channels (new posts auto-copied):\n${chanLines.join('\n')}` : '• Channels: none linked yet — /clone <community_id> <channel_id>',
+       chanLines.length ? `• Linked channels (new posts auto-copied):\n${chanLines.join('\n')}` : `• Channels: none linked yet — ${codeHtml('/clone <channel_id> <community_id>')}`,
        '',
        `${boldHtml(`Backfill jobs${allUsers ? ' — all users' : ''}`)}`,
        jobLines.length ? `<ul>${jobLines.join('')}</ul>` : `• No backfill jobs yet. ${codeHtml('/uclone <chat_id>')} starts the guided history scan; ${codeHtml('/clone')} in a linked group is Bot API live mode.`,
