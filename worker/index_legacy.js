@@ -9221,57 +9221,54 @@ async function stopSourceLiveJobs(env, src, { isGodCb, user }) {
 }
 
 /**
- * Remove one /stats source from the display only. Prefers the exact run ids
- * the report attached to the source (precise even for target-less error
- * shells that group under a normalized destination); without ids it falls
- * back to the chat + destination + owner key. Saved links, files and vault
- * media stay — live capture is stopped separately via stopSourceLiveJobs.
- * Pure record surgery, exported for tests.
+ * Remove one /stats source from the display only: the exact run ids the
+ * report attached, plus every same-key sibling the newest-wins dedupe hides
+ * (older same-chat retries, target-less error shells). Key rule mirrors the
+ * report grouping: same chat, same normalized destination, same owner.
+ * Saved links, files and vault media stay — live capture is stopped
+ * separately via stopSourceLiveJobs. Pure record surgery, exported for tests.
  */
 export async function hideSourceFromStats(env, src) {
   const out = { parents: 0, jobs: 0, sessions: 0, items: 0 };
   const num = (r) => Number(r?.meta?.changes ?? r?.changes ?? 0);
-  let parentIds = [...new Set(((src?.ids?.parents || []).map(String)).filter(Boolean))];
-  let jobIds = [...new Set(((src?.ids?.jobs || []).map(String)).filter(Boolean))];
-  if (!parentIds.length && !jobIds.length) {
-    const cid = normalizeTgChatId(String(src?.chat_id || ''));
-    if (!cid) return out;
-    const bare = cid.replace(/^-100/, '');
-    const target = String(src?.target || 'community');
-    const owner = String(src?.owner || '');
-    try {
-      const prow = await env.DB.prepare(
-        `SELECT id FROM pending_clones WHERE (chat_id = ? OR chat_id = ?) AND COALESCE(target, '') = ? AND (COALESCE(community_id, '') = ? OR COALESCE(requester_user_id, '') = ?)`
-      ).bind(cid, bare, target, owner, owner).all().catch(() => ({ results: [] }));
-      parentIds = (prow?.results || prow || []).map((p) => String(p.id)).filter(Boolean);
-    } catch (_) {}
-    try {
-      const jrow = await env.DB.prepare(
-        `SELECT id FROM index_jobs WHERE (chat_id = ? OR chat_id LIKE ? OR chat_id = ? OR chat_id LIKE ?) AND COALESCE(target, '') = ? AND (COALESCE(community_id, '') = ? OR COALESCE(user_id, '') = ?)`
-      ).bind(cid, `${cid}:%`, bare, `${bare}:%`, target, owner, owner).all().catch(() => ({ results: [] }));
-      jobIds = (jrow?.results || jrow || []).map((j) => String(j.id)).filter(Boolean);
-    } catch (_) {}
-    try {
-      if (parentIds.length) {
-        const kids = await env.DB.prepare(
-          `SELECT id FROM index_jobs WHERE parent_id IN (${parentIds.map(() => '?').join(',')})`
-        ).bind(...parentIds).all().catch(() => ({ results: [] }));
-        for (const k of kids?.results || kids || []) {
-          const id = String(k.id);
-          if (!jobIds.includes(id)) jobIds.push(id);
-        }
-      }
-    } catch (_) {}
-  }
+  const srcChat = normalizeTgChatId(String(src?.chat_id || ''));
+  if (!srcChat) return out;
+  const srcBare = srcChat.replace(/^-100/, '');
+  const srcTarget = String(src?.target || 'community');
+  const srcOwner = String(src?.owner || '');
+  const normTarget = (t) => { const s = String(t || ''); return s === '' ? 'community' : s; };
+  const ownerOf = (normT, community, user) => normT === 'personal' ? String(user || '') : String(community || '');
+  const parentIds = new Set([...((src?.ids?.parents || []).map(String)).filter(Boolean)]);
+  const jobIds = new Set([...((src?.ids?.jobs || []).map(String)).filter(Boolean)]);
   try {
-    for (const id of jobIds) {
+    const prow = await env.DB.prepare(
+      `SELECT id, target, community_id, requester_user_id FROM pending_clones WHERE chat_id = ? OR chat_id = ?`
+    ).bind(srcChat, srcBare).all().catch(() => ({ results: [] }));
+    for (const p of prow?.results || prow || []) {
+      const t = normTarget(p.target);
+      if (t === srcTarget && ownerOf(t, p.community_id, p.requester_user_id) === srcOwner && p.id != null) parentIds.add(String(p.id));
+    }
+  } catch (_) {}
+  try {
+    const jrow = await env.DB.prepare(
+      `SELECT id, target, community_id, user_id FROM index_jobs WHERE chat_id = ? OR chat_id = ? OR chat_id LIKE ? OR chat_id LIKE ?`
+    ).bind(srcChat, srcBare, `${srcChat}:%`, `${srcBare}:%`).all().catch(() => ({ results: [] }));
+    for (const j of jrow?.results || jrow || []) {
+      const t = normTarget(j.target);
+      if (t === srcTarget && ownerOf(t, j.community_id, j.user_id) === srcOwner && j.id != null) jobIds.add(String(j.id));
+    }
+  } catch (_) {}
+  const parentIdList = [...parentIds];
+  const jobIdList = [...jobIds];
+  try {
+    for (const id of jobIdList) {
       out.sessions += num(await env.DB.prepare('DELETE FROM telegram_index_sessions WHERE id = ?').bind(id).run().catch(() => null));
       out.items += num(await env.DB.prepare('DELETE FROM clone_job_items WHERE job_id = ?').bind(id).run().catch(() => null));
       out.jobs += num(await env.DB.prepare('DELETE FROM index_jobs WHERE id = ?').bind(id).run().catch(() => null));
     }
   } catch (_) {}
   try {
-    for (const id of parentIds) {
+    for (const id of parentIdList) {
       out.parents += num(await env.DB.prepare('DELETE FROM pending_clones WHERE id = ?').bind(id).run().catch(() => null));
     }
   } catch (_) {}
