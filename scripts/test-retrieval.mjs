@@ -27,6 +27,7 @@ import {
   hideSourceFromStats,
   restartLiveMode,
   dedupeEligibleCommunities,
+  stopLiveCapture,
   isGroundedAiAnswer,
   normalizeModelId,
   parseAiDescribeResponse,
@@ -86,6 +87,34 @@ assert.match(helpTextForSection('god', true), /forcetags[\s\S]*?tag_untagged/);
   const idleDash = formatStatsRichReport({ sources: [{ ...fakeReport.sources[0], live: false }] });
   assert.match(idleDash.buttons, /stats:start:0/, 'idle row shows the ▶️ restart button');
   assert.doesNotMatch(idleDash.buttons, /stats:stop/, 'idle row has no stop button');
+}
+// stopLiveCapture: stops follows + bot-mode live but keeps the binding row
+// (group link, topic lock, token) — deleting it unlinked the group and
+// forced duplicate communities on re-verify.
+{
+  const sql = new DatabaseSync(':memory:');
+  sql.exec(`CREATE TABLE community_bots (id TEXT PRIMARY KEY, platform TEXT, group_id TEXT, community_id TEXT, channel_target TEXT, copy_text INTEGER, topic_id TEXT, scope TEXT);
+  CREATE TABLE userbot_follows (chat_id TEXT NOT NULL, label TEXT NOT NULL DEFAULT 'main', community_id TEXT NOT NULL DEFAULT '', target TEXT NOT NULL DEFAULT 'community', created_by TEXT, created_at BIGINT NOT NULL, PRIMARY KEY (chat_id, community_id));`);
+  const DB = { prepare(query) {
+    const bind = (values = []) => ({ bind(...args) { return bind(args.map(v => v ?? null)); },
+      async first() { return sql.prepare(query).get(...values) || null; },
+      async all() { return { results: sql.prepare(query).all(...values) }; },
+      async run() { const r = sql.prepare(query).run(...values); return { meta: { changes: Number(r.changes) } }; }
+    }); return bind();
+  } };
+  const env = { DB };
+  sql.prepare(`INSERT INTO community_bots VALUES ('b1','telegram','-1001','c1','community',1,'7','community')`).run();
+  sql.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_at) VALUES ('-1001','alpha','c1','community',1)`).run();
+  sql.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_at) VALUES ('-1002','alpha','c1','community',1)`).run();
+  const out = await stopLiveCapture(env, '-1001', 'c1');
+  assert.deepEqual(out, { chatId: '-1001', followsRemoved: 1, linksRemoved: 1 });
+  const kept = sql.prepare(`SELECT * FROM community_bots WHERE id = 'b1'`).get();
+  assert.ok(kept, 'binding row survives the stop');
+  assert.equal(kept.channel_target, null);
+  assert.equal(kept.copy_text, 0);
+  assert.equal(kept.topic_id, '7', 'topic lock survives the stop');
+  assert.equal(kept.community_id, 'c1', 'group link survives the stop');
+  assert.equal(sql.prepare(`SELECT COUNT(*) AS n FROM userbot_follows`).get().n, 1);
 }
 // dedupeEligibleCommunities: same-named rows show once — most links wins, tie oldest.
 {

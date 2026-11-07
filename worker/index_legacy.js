@@ -9242,7 +9242,7 @@ async function stopSourceLiveJobs(env, src, { isGodCb, user }) {
   const stopped = await stopLiveCapture(env, src.chat_id, src.community || '');
   const bits = [];
   if (stopped.followsRemoved) bits.push(`${stopped.followsRemoved} follow${stopped.followsRemoved === 1 ? '' : 's'}`);
-  if (stopped.linksRemoved) bits.push(`${stopped.linksRemoved} bot link${stopped.linksRemoved === 1 ? '' : 's'}`);
+  if (stopped.linksRemoved) bits.push(`${stopped.linksRemoved} bot live${stopped.linksRemoved === 1 ? '' : 's'}`);
   // Running backfills have no stop command — the ⏹ button stops them too
   // (own jobs, or any job on this chat for GOD). Saved history stays.
   let jobsStopped = 0;
@@ -9346,8 +9346,12 @@ export async function stopLiveCapture(env, chatIdArg, communityId = '') {
       : await env.DB.prepare(
         `SELECT id FROM community_bots WHERE platform = 'telegram' AND group_id IN (?, ?) AND community_id IS NOT NULL`
       ).bind(cid, bare).all().catch(() => ({ results: [] }));
+    // Neutralize bot-mode live capture WITHOUT deleting the binding row:
+    // the row is the group↔community link (/community_verify), the topic
+    // lock, and the bot token. Deleting it unlinked the group and forced a
+    // duplicate community on re-verify. Re-clone re-enables capture.
     for (const row of rows?.results || rows || []) {
-      await env.DB.prepare('DELETE FROM community_bots WHERE id = ?').bind(row.id).run().catch(() => null);
+      await env.DB.prepare(`UPDATE community_bots SET channel_target = NULL, copy_text = 0 WHERE id = ?`).bind(row.id).run().catch(() => null);
       linksRemoved++;
     }
   } catch (_) {}
