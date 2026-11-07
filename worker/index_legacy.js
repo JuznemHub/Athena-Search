@@ -1,3 +1,53 @@
+import { createUcloneManager, cloneFailure, withCloneAccount, ensureUcloneTables } from './uclone-manager.js';
+import { classifyCloneMessage, countCloneMessage, emptyCloneCounters, sourceClonePost, documentCounter } from './clone-content.js';
+import { renderCloneProgress } from './clone-ui.js';
+import { dokployConfigured, dokployApps, dokployStatus, dokployLogSnapshot, dokployDeploy, dokploySimple } from './dokploy.js';
+import { handleLogApi } from './log-api.js';
+import { runtimeLogs, redactLog, writeRuntimeLog } from './runtime-logs.js';
+import { classifyTags, validateTags, JUNK_TAGS, PLATFORM_SET, CANONICAL_TAGS } from './tag-taxonomy.js';
+
+function cloneDisplayName(chatTitle, chatType, flowThread, topicTitle) {
+  const base = String(chatTitle || '');
+  if (!flowThread) return chatType === 'channel' ? `[${base}]` : base;
+  return `${base}[${topicTitle || '#' + flowThread}]`;
+}
+
+async function resolveCloneChat(env, token, chatId) {
+  // Best-effort title + type for stats naming. Bot API first (knows the type);
+  // fall back to any connected userbot account (sees chats the bot is not in).
+  try {
+    const chk = await telegramApi(token, 'getChat', { chat_id: chatId });
+    if (chk?.ok && chk.result) {
+      const t = String(chk.result.type || '');
+      const title = chk.result.title || (chk.result.username ? '@' + chk.result.username : chatId);
+      return { title, type: t };
+    }
+  } catch (_) {}
+  try {
+    const acc = [...USERBOT_ACCOUNTS.values()].find((a) => a?.client);
+    const ent = acc ? await acc.client.getEntity(chatId).catch(() => null) : null;
+    if (ent) {
+      const title = ent.title || (ent.username ? '@' + ent.username : chatId);
+      const type = ent.className === 'Channel' ? (ent.broadcast ? 'channel' : 'supergroup') : (ent.className === 'Chat' ? 'group' : '');
+      return { title, type };
+    }
+  } catch (_) {}
+  return { title: chatId, type: '' };
+}
+
+async function resolveForumTopicTitle(env, label, chatId, threadId) {
+  try {
+    const client = USERBOT_ACCOUNTS.get(label)?.client;
+    if (!client || !threadId) return '';
+    const { Api } = await import('telegram');
+    const res = await client.invoke(new Api.channels.GetForumTopicsByID({ channel: chatId, topics: [Number(threadId)] }));
+    const list = res?.topics || [];
+    const found = list.find((t) => String(t?.id) === String(threadId)) || list[0];
+    return String(found?.title || '');
+  } catch (_) { return ''; }
+}
+
+
 /**
  * Cloudflare Worker: Athena (auth + API + static)
  * Telegram + Discord OAuth, session-gated APIs, community bot bindings
@@ -187,7 +237,9 @@ export default {
         try {
           const _u = update.message || update.channel_post || update.edited_message || update.callback_query || update.my_chat_member || {};
           const _t = String(_u.text || '');
-          logInfo('webhook', `id=${update.update_id} type=${update.message ? 'msg' : update.channel_post ? 'chn' : update.edited_message ? 'edt' : update.callback_query ? 'cb' : update.my_chat_member ? 'mcm' : '?'} chat=${_u.chat?.id ?? '?'} mid=${_u.message_id ?? '?'} from=${_u.from?.id ?? '?'}`, _t.slice(0, 50));
+          const _command = _t.trim().split(/\s+/, 1)[0].toLowerCase().replace(/@\w+$/, '');
+          const _secretCommand = /^(?:\/userbot_?add|\/userbot_?connect)$/.test(_command);
+          logInfo('webhook', `id=${update.update_id} type=${update.message ? 'msg' : update.channel_post ? 'chn' : update.edited_message ? 'edt' : update.callback_query ? 'cb' : update.my_chat_member ? 'mcm' : '?'} chat=${_u.chat?.id ?? '?'} mid=${_u.message_id ?? '?'} from=${_u.from?.id ?? '?'}`, _secretCommand ? `${_command} [credentials redacted]` : _t.slice(0, 50));
         } catch (_) {}
         return await handleTelegramWebhook(update, env, corsHeaders);
       }
@@ -210,6 +262,14 @@ export default {
             { status: 401, headers: corsHeaders }
           );
         }
+      }
+
+      if (pathname === '/api/logs' && request.method === 'GET') {
+        if (!(await isInstanceOwnerUserAsync(user, env))) return deny(corsHeaders, 'Runtime logs are GOD only', 'GOD_ONLY');
+        return handleLogApi(request, env, corsHeaders, async () => {
+          const current = await requireUser(request, env);
+          return Boolean(current && await isInstanceOwnerUserAsync(current, env));
+        });
       }
 
       if (pathname === '/api/auth/me' && request.method === 'GET') {
@@ -490,12 +550,6 @@ export default {
         if (request.method === 'POST') {
           return await handleSaveStorageConfig(request, env, corsHeaders);
         }
-      }
-      if (pathname === '/api/storage/sync' && request.method === 'POST') {
-        if (!(await isInstanceOwnerUserAsync(user, env))) {
-          return deny(corsHeaders, 'Storage sync is GOD rank only', 'GOD_ONLY');
-        }
-        return await handleStorageSync(user, env, corsHeaders);
       }
 
       // Community admins (platform IDs)
@@ -1142,10 +1196,6 @@ async function clearCommunityLinksOnly(env, communityId) {
   }
   try { await env.DB.prepare('DELETE FROM links WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
   markMeiliScopeDirty(env, 'community', communityId);
-  try { await env.DB.prepare('DELETE FROM telegram_pending WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
-  // Only the ACTIVE store is cleared. In GitHub mode that means the Markdown
-  // too; the parked Cloudflare copy is deliberately left alone, and vice versa.
-  await clearActiveStoreFolder(env, 'community', communityId);
   runInBackground(env, logOperationalEvent(
     env,
     '🧹 Community database cleared',
@@ -1514,7 +1564,6 @@ async function handleWipePersonalAccount(request, user, env, corsHeaders) {
   } catch (_) {}
   try {
     await ensureDocumentsTable(env);
-    await clearActiveDocumentFolder(env, 'personal', uid);
     await env.DB.prepare("DELETE FROM uploaded_documents WHERE scope = 'personal' AND user_id = ?").bind(uid).run();
   } catch (_) {}
   markMeiliScopeDirty(env, 'personal', uid);
@@ -2700,6 +2749,7 @@ function telegramApiBaseFor(env) {
   } catch (_) { return TG_CLOUD_BASE; }
 }
 
+
 async function telegramApi(token, method, payload = null) {
   const url = `${TG_API_BASE}/bot${token}/${method}`;
   const opts = payload
@@ -2736,15 +2786,9 @@ async function verifyTelegramBotToken(token, expectedUsername) {
 }
 
 // Command menu registered with setMyCommands — what users see in Telegram's
-// "/" autocomplete. Staff-only commands stay out of everyone's menu on
-// purpose; /help lists them per rank.
-// Hidden but still handled (kept for compat, not in autocomplete):
-// group_copy, channel_target, channel_link/channel_unlink, topic_link,
-// topic_unlink, topic_list, topic_target, userbot_add, userbot_del,
-// userbot_follow, userbot_unfollow, userbot_disconnect, forcetags,
-// transfers/clone_sessions, clone_del, index, index_start, index_status,
-// index_stop, dumpsmart/dumpall, personal/community/mode, /perosnal alias
-// and all staff/admin/clear/sync/backup/community_verify handlers.
+// "/" autocomplete. Everyone gets TELEGRAM_COMMAND_MENU; the owner ids also
+// get TELEGRAM_GOD_COMMAND_MENU as a chat-scoped replacement, so staff commands
+// are not advertised to plain members.
 const TELEGRAM_COMMAND_MENU = [
   { command: 'start', description: 'Welcome / status' },
   { command: 'help', description: 'Help menu' },
@@ -2758,9 +2802,9 @@ const TELEGRAM_COMMAND_MENU = [
   { command: 'community_list', description: 'Your communities' },
   { command: 'edit', description: 'Edit title/notes of a link' },
   { command: 'delete', description: 'Delete a saved link' },
-  { command: 'clone', description: 'Clone this chat (live + history)' },
-  { command: 'stats', description: 'Clone stats for this chat' },
-  { command: 'userbot_status', description: 'Userbot connection + follows' },
+  { command: 'clone', description: 'Clone chat/topic history + live (community-scoped)' },
+  { command: 'stats', description: 'Persisted clone stats and live state' },
+  { command: 'userbot_status', description: 'Userbot account and follow health (DM)' },
 ];
 
 // GOD-only commands, advertised as a per-chat scope for TG_OWNER_IDS so the
@@ -2775,25 +2819,15 @@ const TELEGRAM_GOD_COMMAND_MENU = [
   { command: 'kick', description: 'Remove a member (rejoin allowed)' },
   { command: 'admin', description: 'Promote a member (reply)' },
   { command: 'demote', description: 'Demote a member (reply)' },
-  { command: 'uclone', description: 'Clone with explicit userbot' },
-  { command: 'clone_stop', description: 'Stop a running clone' },
-  { command: 'group_copy', description: 'Copy group messages' },
-  { command: 'channel_link', description: 'Link a channel to a community' },
-  { command: 'channel_unlink', description: 'Unlink a channel' },
-  { command: 'channel_target', description: 'Channel dump target' },
-  { command: 'topic_link', description: 'Bind a forum topic to a target' },
+  { command: 'status', description: 'What is indexing + backfill jobs' },
+  { command: 'uclone', description: 'Userbot history wizard: topic + community' },
+  { command: 'userbot_accounts', description: 'Select or verify saved accounts (DM)' },
+  { command: 'clone', description: 'Clone chat/topic history + live (community-scoped)' },
   { command: 'topic_list', description: 'List topic bindings' },
-  { command: 'topic_target', description: 'Topic dump target' },
-  { command: 'index_start', description: 'Backfill a chat into the brain' },
-  { command: 'index_status', description: 'Indexing/backfill status' },
-  { command: 'index_stop', description: 'Stop a running backfill' },
   { command: 'userbotconnect', description: 'Connect userbot session (GOD)' },
   { command: 'userbot_disconnect', description: 'Disconnect userbot' },
   { command: 'userbot_del', description: 'Delete userbot session' },
-  { command: 'transfers', description: 'Recent clone/backfill sessions (GOD)' },
-  { command: 'clone_del', description: "Delete a clone's data" },
-  { command: 'forcetags', description: 'AI-tag untagged links (GOD)' },
-  { command: 'tag_untagged', description: 'Tag every untagged link (GOD)' },
+  { command: 'forcetags', description: 'Retag review of one brain (GOD)' },
   { command: 'structure', description: 'Tidy the DB (notes + titles)' },
   { command: 'import', description: 'Restore links from a backup (GOD)' },
   { command: 'backup', description: 'Back up the database (GOD)' },
@@ -3171,7 +3205,6 @@ async function handleGetCommunityLinks(url, user, env, corsHeaders) {
   if (!(await ensureMember(communityId, user.id, env))) {
     return Response.json({ success: false, error: 'Not a member — join with /community_join ' + communityId, code: 'NOT_MEMBER' }, { status: 403, headers: corsHeaders });
   }
-  await ensureFresh(env, 'community', communityId);
   await ensureLinkMetaColumns(env);
   const { results } = await env.DB.prepare(
     'SELECT * FROM links WHERE community_id = ? ORDER BY created_at DESC LIMIT 500'
@@ -3241,18 +3274,6 @@ async function handlePostCommunityLink(request, user, env, corsHeaders) {
   const id = 'link_' + Date.now().toString(36);
   const displayName = user.display_name || user.username || user.id;
   const now = Date.now();
-
-  // Commit to GitHub first when it is the source of truth. appendLink retries on
-  // conflict, which matters here: several members can dump into the same
-  // community from Telegram at the same moment.
-  const gh = await storeAddLink(env, 'community', communityId, {
-    id, url: rawUrl, url_hash: urlHash, title: meta.title, notes: meta.notes,
-    tags: body.tags || [], created_at: now, added_by_name: displayName,
-    added_by_user_id: user.id, image_url: meta.image_url, site_name: meta.site_name,
-  });
-  if (gh.handled && !gh.ok) {
-    return Response.json({ success: false, error: `GitHub write failed: ${gh.error}` }, { status: 502, headers: corsHeaders });
-  }
 
   try {
     await env.DB.prepare(
@@ -3327,10 +3348,6 @@ async function handleDeleteCommunityLink(request, user, env, corsHeaders) {
   await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(link.id).run();
   await env.DB.prepare('DELETE FROM link_votes WHERE link_id = ?').bind(link.id).run();
   markMeiliScopeDirty(env, 'community', link.community_id);
-  const gh = await storeMutateLink(env, 'community', link.community_id, link.id, null);
-  if (gh.handled && !gh.ok) {
-    return Response.json({ success: false, error: `GitHub write failed: ${gh.error}` }, { status: 502, headers: corsHeaders });
-  }
   return Response.json({ success: true, deleted: link.id }, { headers: corsHeaders });
 }
 
@@ -3548,10 +3565,60 @@ async function hydrateMeiliRows(env, scope, key, hits) {
     }
   } catch (_) {}
 
-  return rows.map((hit) => {
+  const hydrated = rows.map((hit) => {
     const kind = hit.type === 'document' || hit.isDocument ? 'document' : 'link';
-    return byKey.get(`${kind}:${hit.id}`) || hit;
-  });
+    return byKey.get(`${kind}:${hit.id}`);
+  }).filter(Boolean);
+  return hydrateSourcePosts(env, scope, key, hydrated);
+}
+
+/** Attach every source occurrence, independently of canonical link enrichment. */
+async function hydrateSourcePosts(env, scope, key, rows) {
+  if (!rows.length) return rows;
+  await ensureCloneSources(env);
+  const destination = `${scope === 'personal' ? 'personal' : 'community'}:${key}`;
+  const hydrated = [];
+  for (let offset = 0; offset < rows.length; offset += 100) {
+    const batch = rows.slice(offset, offset + 100);
+    const ids = [...new Set(batch.map(row => row.id).filter(Boolean))];
+    const contentKeys = [...new Set(batch.filter(row => row.url).map(row => 'url:' + generateUrlHash(row.url)))];
+    const clauses = [];
+    const params = [destination];
+    if (ids.length) {
+      clauses.push(`s.content_id IN (${ids.map(() => '?').join(',')})`);
+      params.push(...ids);
+    }
+    if (contentKeys.length) {
+      clauses.push(`s.content_key IN (${contentKeys.map(() => '?').join(',')})`);
+      params.push(...contentKeys);
+    }
+    const sources = clauses.length ? (await env.DB.prepare(`SELECT p.*, s.content_id, s.content_key, s.sender_id
+      FROM clone_sources s JOIN clone_posts p
+        ON p.destination=s.destination AND p.chat_id=s.chat_id
+        AND p.topic_id=s.topic_id AND p.message_id=s.message_id
+      WHERE s.destination=? AND s.status IN ('saved','duplicate') AND (${clauses.join(' OR ')})
+      ORDER BY p.message_date DESC, p.chat_id, p.topic_id, p.message_id`).bind(...params).all()).results || [] : [];
+    const byId = new Map();
+    const byContentKey = new Map();
+    for (const source of sources) {
+      const { content_id, content_key, ...post } = source;
+      try { post.message = JSON.parse(post.message_json || 'null'); } catch (_) { post.message = null; }
+      for (const [map, identity] of [[byId, content_id], [byContentKey, content_key]]) {
+        if (!identity) continue;
+        if (!map.has(identity)) map.set(identity, []);
+        map.get(identity).push(post);
+      }
+    }
+    for (const row of batch) {
+      const posts = new Map();
+      const contentKey = row.url ? 'url:' + generateUrlHash(row.url) : null;
+      for (const post of [...(byId.get(row.id) || []), ...(byContentKey.get(contentKey) || [])]) {
+        posts.set(JSON.stringify([post.destination, post.chat_id, post.topic_id, post.message_id]), post);
+      }
+      hydrated.push({ ...row, source_posts: [...posts.values()] });
+    }
+  }
+  return hydrated;
 }
 
 async function syncMeiliScope(env, scope, key) {
@@ -3655,8 +3722,10 @@ async function meiliSearchScope(env, scope, key, query, { limit = 50, offset = 0
   // background rebuild, an empty response can be stale; let PostgreSQL serve
   // the authoritative fallback instead of presenting a false empty result.
   if (!data.hits.length) return null;
+  const rows = await hydrateMeiliRows(env, scope, key, data.hits.map(meiliRowFromHit));
+  if (!rows.length) return null;
   return {
-    rows: data.hits.map(meiliRowFromHit),
+    rows,
     total: Number(data.estimatedTotalHits ?? data.total ?? data.hits.length)
   };
 }
@@ -3680,7 +3749,7 @@ async function retrieveAiRows(env, scope, key, query, { limit = AI_RETRIEVAL_LIM
   let engine = 'postgres';
 
   if (accelerated?.rows?.length) {
-    const hits = await hydrateMeiliRows(env, scope, key, accelerated.rows);
+    const hits = accelerated.rows;
     const ranked = rankLinks(dedupeLinkRows(hits), query, max, 8);
     rows = ranked.length ? ranked : dedupeLinkRows(hits).slice(0, max);
     engine = 'meilisearch+postgres';
@@ -3719,12 +3788,10 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
       if (!(await isInstanceOwnerUserAsync(user, env))) {
         return deny(corsHeaders, 'Personal mode is for GOD rank (instance host) only', 'PERSONAL_LOCKED');
       }
-      await ensureFresh(env, 'personal', user.id);
     } else {
       const communityId = url.searchParams.get('community_id');
       const gate = await requireActiveMember(env, communityId, user, corsHeaders);
       if (gate) return gate;
-      await ensureFresh(env, 'community', communityId);
     }
     const scopeKey = scope === 'personal' ? user.id : url.searchParams.get('community_id');
     const retrieval = await retrieveAiRows(env, scope, scopeKey, q, { limit: AI_RETRIEVAL_LIMIT });
@@ -3750,7 +3817,6 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
     if (!(await isInstanceOwnerUserAsync(user, env))) {
       return deny(corsHeaders, 'Personal mode is for GOD rank (instance host) only', 'PERSONAL_LOCKED');
     }
-    await ensureFresh(env, 'personal', user.id);
     await ensureLinkMetaColumns(env);
     const accelerated = await meiliSearchScope(env, 'personal', user.id, q, { limit: effectiveLimit });
     const rows = accelerated?.rows || await searchAllLinks(env, 'personal', user.id, q, effectiveLimit);
@@ -3769,7 +3835,6 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
   }
   const gate = await requireActiveMember(env, communityId, user, corsHeaders);
   if (gate) return gate;
-  await ensureFresh(env, 'community', communityId);
   await ensureLinkMetaColumns(env);
   const accelerated = await meiliSearchScope(env, 'community', communityId, q, { limit: effectiveLimit });
   const rows = accelerated?.rows || await searchAllLinks(env, 'community', communityId, q, effectiveLimit);
@@ -3796,7 +3861,8 @@ function rankLinks(rows, query, limit = null, minScore = 8) {
     const boundedContent = content.length > 50_000
       ? `${content.slice(0, 25_000)} ${content.slice(-25_000)}`
       : content;
-    const bag = [r.title, r.url, r.filename, r.notes, boundedContent, r.search_blob, r.tags].join(' ').toLowerCase();
+    const sources = (r.source_posts || []).map(post => `${post.message_text || ''} ${post.urls_json || ''}`).join(' ');
+    const bag = [r.title, r.url, r.filename, r.notes, boundedContent, r.search_blob, r.tags, sources].join(' ').toLowerCase();
     const ba = bag.replace(/[^a-z0-9]/g, '');
     let score = 0;
     if (title === q) score += 100;
@@ -3893,6 +3959,11 @@ async function ensureDocumentsTable(env) {
   await env.DB.prepare('ALTER TABLE uploaded_documents ADD COLUMN IF NOT EXISTS source_message_id TEXT').run().catch(() => {});
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_documents_personal ON uploaded_documents(scope, user_id, created_at)').run();
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_documents_community ON uploaded_documents(scope, community_id, created_at)').run();
+  // Clone/backfill dedupe looks documents up by their source message; without
+  // these the lookup scans every document for the scope, so a large clone
+  // degrades to O(n^2).
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_documents_personal_source ON uploaded_documents(scope, user_id, source_chat_id, source_message_id)').run();
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_documents_community_source ON uploaded_documents(scope, community_id, source_chat_id, source_message_id)').run();
 }
 
 export async function ensureChunksTable(env) {
@@ -3936,10 +4007,6 @@ export async function ensureChunksTable(env) {
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_scope ON document_chunks(scope, scope_key, para_idx)').run().catch(() => {});
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON document_chunks USING ivfflat (embedding vector_l2_ops)').run().catch(() => {});
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON document_chunks USING gin(tsv)').run().catch(() => {});
-}
-
-function documentFolder(scope, key) {
-  return scope === 'personal' ? `documents/personal/${key}` : `documents/communities/${key}`;
 }
 
 function validateDocumentText(scope, filename, content) {
@@ -4028,31 +4095,13 @@ async function handlePostDocument(request, user, env, corsHeaders) {
 
   const id = `doc_${crypto.randomUUID()}`;
   const key = doc.scope === 'personal' ? user.id : communityId;
-  const safeId = id.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const pathFilename = doc.filename.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const githubPath = `${documentFolder(doc.scope, key)}/${safeId}--${pathFilename}`;
-  const store = await githubStoreFor(env);
-  if (store) {
-    const written = await store.writeFile(githubPath, doc.content, { message: `athena: upload ${doc.filename}` });
-    if (!written.ok) {
-      return Response.json({ success: false, error: `GitHub write failed: ${written.body?.message || `HTTP ${written.status}`}` }, { status: 502, headers: corsHeaders });
-    }
-  }
 
-  try {
-    await env.DB.prepare(
-      `INSERT INTO uploaded_documents
-       (id, scope, user_id, community_id, filename, content, uploaded_by, github_path, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(id, doc.scope, doc.scope === 'personal' ? user.id : null, communityId, doc.filename,
-      doc.content, user.id, store ? githubPath : null, Date.now()).run();
-  } catch (err) {
-    if (store) {
-      const written = await store.readFile(githubPath).catch(() => null);
-      if (written) await store.deleteFile(githubPath, written.sha, `athena: rollback ${doc.filename}`).catch(() => null);
-    }
-    throw err;
-  }
+  await env.DB.prepare(
+    `INSERT INTO uploaded_documents
+     (id, scope, user_id, community_id, filename, content, uploaded_by, github_path, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(id, doc.scope, doc.scope === 'personal' ? user.id : null, communityId, doc.filename,
+    doc.content, user.id, null, Date.now()).run();
   markMeiliScopeDirty(env, doc.scope, key);
   const row = await env.DB.prepare('SELECT * FROM uploaded_documents WHERE id = ?').bind(id).first();
   return Response.json({ success: true, document: row }, { status: 201, headers: corsHeaders });
@@ -4071,16 +4120,6 @@ async function handleDeleteDocument(request, user, env, corsHeaders) {
   }
   if (row.scope === 'community' && row.uploaded_by !== user.id && !(await ensureOwnerOrAdmin(row.community_id, user.id, env))) {
     return Response.json({ success: false, error: 'Only community staff or the uploader can delete documents' }, { status: 403, headers: corsHeaders });
-  }
-  if (row.github_path) {
-    const store = await githubStoreFor(env);
-    if (store) {
-      const got = await store.readFile(row.github_path).catch(() => null);
-      if (got) {
-        const deleted = await store.deleteFile(row.github_path, got.sha, `athena: delete ${row.filename}`);
-        if (!deleted.ok) return Response.json({ success: false, error: `GitHub delete failed: ${deleted.body?.message || `HTTP ${deleted.status}`}` }, { status: 502, headers: corsHeaders });
-      }
-    }
   }
   await env.DB.prepare('DELETE FROM uploaded_documents WHERE id = ?').bind(row.id).run();
   markMeiliScopeDirty(env, row.scope, row.scope === 'personal' ? row.user_id : row.community_id);
@@ -4480,61 +4519,8 @@ async function handleClearAiConfig(user, env, corsHeaders) {
 }
 
 // ============================================================
-// Pluggable link storage — PostgreSQL only (D1/GitHub removed).
-// Legacy GitHub cache tables (storage_sync, storage_file_cache, parked_*) kept for compat.
+// Secret encryption for credentials stored in database rows.
 // ============================================================
-/* eslint-disable no-unused-vars */
-async function ensureStorageTables(env) {
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS instance_storage_config (
-      id TEXT PRIMARY KEY,
-      provider TEXT NOT NULL DEFAULT 'd1',
-      repo TEXT, branch TEXT, token TEXT,
-      updated_at INTEGER NOT NULL
-    )`
-  ).run();
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS storage_sync (
-      scope_key TEXT PRIMARY KEY,
-      sig TEXT,
-      checked_at INTEGER NOT NULL
-    )`
-  ).run();
-  // Parsed contents per Markdown file, keyed by its git sha, so a refresh only
-  // re-reads the files that actually changed.
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS storage_file_cache (
-      scope_key TEXT NOT NULL,
-      file_name TEXT NOT NULL,
-      sha TEXT NOT NULL,
-      payload TEXT NOT NULL,
-      updated_at INTEGER NOT NULL,
-      PRIMARY KEY (scope_key, file_name)
-    )`
-  ).run();
-}
-
-/** Per-file parse cache kept for compat — orphaned after postgres-only (GitHub removed). */
-function fileCacheFor(env, scopeKey) {
-  return {
-    async get(name, sha) {
-      try {
-        const row = await env.DB.prepare(
-          'SELECT payload FROM storage_file_cache WHERE scope_key = ? AND file_name = ? AND sha = ?'
-        ).bind(scopeKey, name, sha).first();
-        return row ? JSON.parse(row.payload) : null;
-      } catch (_) { return null; }
-    },
-    async put(name, sha, links) {
-      try {
-        await env.DB.prepare(
-          `INSERT OR REPLACE INTO storage_file_cache (scope_key, file_name, sha, payload, updated_at)
-           VALUES (?, ?, ?, ?, ?)`
-        ).bind(scopeKey, name, sha, JSON.stringify(links), Date.now()).run();
-      } catch (_) {}
-    },
-  };
-}
 
 /**
  * The storage token is a real credential sitting in a database row, so anyone
@@ -4591,46 +4577,6 @@ async function decryptSecret(env, stored) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Two independent stores
-//
-// The live tables (links / personal_links) always hold whichever store is
-// ACTIVE. The other store's rows are parked in mirror tables, untouched, so a
-// delete or edit in one mode can never reach the other. Switching provider
-// swaps the two sets. Every existing query keeps reading the live tables, so
-// mode-scoping is automatic rather than bolted onto 60+ call sites.
-// ---------------------------------------------------------------------------
-
-const LINK_COLS = 'id, community_id, url, url_hash, title, notes, tags, added_by, added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at, image_url, site_name';
-const PERSONAL_COLS = 'id, user_id, url, url_hash, title, notes, tags, created_at, image_url, site_name';
-
-async function ensureParkingTables(env) {
-  await ensureLinkMetaColumns(env);
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS parked_links (
-      store TEXT NOT NULL, ${LINK_COLS.split(', ').map(c => `${c} TEXT`).join(', ')}
-    )`
-  ).run();
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS parked_personal_links (
-      store TEXT NOT NULL, ${PERSONAL_COLS.split(', ').map(c => `${c} TEXT`).join(', ')}
-    )`
-  ).run();
-  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_parked_links_store ON parked_links(store)').run();
-  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_parked_personal_store ON parked_personal_links(store)').run();
-}
-
-/** Parking/switching removed — PostgreSQL is the only store. Kept as no-ops for call sites. */
-async function parkActiveStore(_env, _storeName) { return; }
-async function restoreStore(_env, _storeName) { return; }
-async function clearActiveStoreFolder(_env, _scope, _key) { return { handled: false }; }
-async function clearActiveDocumentFolder(_env, _scope, _key) { return { handled: false }; }
-async function parkedLinksFor(_env, _storeName, _scope, _key) { return []; }
-async function getStorageConfig(env) {
-  // Single-backend mode: always PostgreSQL. Existing rows (provider='d1'/'github') are ignored.
-  return { provider: 'postgres', repo: '', branch: '', token: null };
-}
-
 /**
  * Self-hosted instances run on their own database, which is faster than GitHub
  * and has no API rate limit, and they already back up to Telegram/Drive. A live
@@ -4674,100 +4620,6 @@ function frontendOrigin(env, url) {
   if (configured) return configured;
   return url.origin;
 }
-
-/** GitHub removed — always null. */
-async function githubStoreFor(_env) { return null; }
-function scopeKeyFor(scope, key) {
-  return scope === 'personal' ? `personal:${key}` : `community:${key}`;
-}
-/** No-op: PostgreSQL is live, no cache to reconcile. */
-async function ensureFresh(_env, _scope, _key, { force = false } = {}) {
-  return { provider: 'postgres' };
-}
-
-/** Rebuild the D1 rows for one scope from the authoritative Markdown. */
-async function replaceCachedLinks(env, scope, key, links) {
-  await ensureLinkMetaColumns(env);
-  if (scope === 'personal') {
-    await env.DB.prepare('DELETE FROM personal_links WHERE user_id = ?').bind(key).run();
-    for (const l of links) {
-      try {
-        await env.DB.prepare(
-          `INSERT OR REPLACE INTO personal_links
-             (id, user_id, url, url_hash, title, notes, tags, created_at, image_url, site_name)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        ).bind(
-          l.id, key, l.url, l.url_hash || generateUrlHash(l.url), l.title || '', l.notes || '',
-          JSON.stringify(l.tags || []), l.created_at || Date.now(), l.image_url || null, l.site_name || null
-        ).run();
-      } catch (_) {}
-    }
-    markMeiliScopeDirty(env, 'personal', key);
-    return;
-  }
-  await env.DB.prepare('DELETE FROM links WHERE community_id = ?').bind(key).run();
-  for (const l of links) {
-    try {
-      await env.DB.prepare(
-        `INSERT OR REPLACE INTO links
-           (id, community_id, url, url_hash, title, notes, tags, added_by, added_by_user_id,
-            added_by_name, upvotes, downvotes, created_at, image_url, site_name)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`
-      ).bind(
-        l.id, key, l.url, l.url_hash || generateUrlHash(l.url), l.title || '', l.notes || '',
-        JSON.stringify(l.tags || []), l.added_by_name || 'athena', l.added_by_user_id || null,
-        l.added_by_name || null, l.created_at || Date.now(), l.image_url || null, l.site_name || null
-      ).run();
-    } catch (_) {}
-  }
-  markMeiliScopeDirty(env, 'community', key);
-}
-
-function storageHeadingFor(scope, key) {
-  return scope === 'personal' ? 'Athena — personal brain' : `Athena — community ${key}`;
-}
-
-/** GitHub removed — always fall through to PostgreSQL direct INSERT. */
-async function storeAddLink(_env, _scope, _key, _link) { return { handled: false }; }
-async function storeAddLinks(_env, _scope, _key, _links) { return { handled: false }; }
-async function storeMutateLink(_env, _scope, _key, _linkId, _replacement) { return { handled: false }; }
-
-/**
- * Called right after we commit to GitHub ourselves.
- *
- * It is tempting to invalidate the cache here, but that is actively harmful:
- * GitHub's directory listing lags a commit by up to ~1s, so the very next read
- * can come back WITHOUT the link we just wrote, and replaceCachedLinks would
- * then delete the D1 row — the link visibly vanishes until the next sync.
- *
- * We just wrote both sides, so D1 is correct by construction. Mark it trusted
- * for one TTL. The empty sig guarantees the next check after the TTL still
- * compares unequal and does a real re-pull, so external edits are not missed.
- */
-async function markCacheTrusted(env, scope, key) {
-  try {
-    await ensureStorageTables(env);
-    await env.DB.prepare(
-      'INSERT OR REPLACE INTO storage_sync (scope_key, sig, checked_at) VALUES (?, ?, ?)'
-    ).bind(scopeKeyFor(scope, key), '', Date.now()).run();
-  } catch (_) {}
-}
-
-/** Current rows for a scope (legacy Markdown helper, kept). */
-async function cachedLinksFor(env, scope, key) {
-  const rows = scope === 'personal'
-    ? (await env.DB.prepare(
-        'SELECT * FROM personal_links WHERE user_id = ? ORDER BY created_at DESC'
-      ).bind(key).all()).results
-    : (await env.DB.prepare(
-        'SELECT * FROM links WHERE community_id = ? ORDER BY created_at DESC'
-      ).bind(key).all()).results;
-  return (rows || []).map(r => ({
-    ...r,
-    tags: (() => { try { return JSON.parse(r.tags || '[]'); } catch (_) { return []; } })(),
-  }));
-}
-/* eslint-enable no-unused-vars */
 
 // ---------------------------------------------------------------------------
 // Instance defaults
@@ -4931,17 +4783,6 @@ async function handleSaveStorageConfig(request, env, corsHeaders) {
     return Response.json({ success: false, error: 'Only PostgreSQL is supported (D1/GitHub removed). Set DATABASE_URL.' }, { status: 400, headers: corsHeaders });
   }
   return Response.json({ success: true, provider: 'postgres', engine: selfHostedEngine(env) }, { headers: corsHeaders });
-}
-
-// GitHub/D1 sync removed — PostgreSQL only. Stubs kept for call sites.
-// eslint-disable-next-line no-unused-vars
-async function mergeScope(_env, _store, _scope, _key) { return { ok: true, total: 0 }; }
-// eslint-disable-next-line no-unused-vars
-async function replaceParkedLinks(_env, _storeName, _scope, _key, _links) { return; }
-// eslint-disable-next-line no-unused-vars
-async function mergeAllScopes(_env, _store, _godUserId) { return { ok: true, total: 0, detail: [] }; }
-async function handleStorageSync(_user, _env, corsHeaders) {
-  return Response.json({ success: false, error: 'Sync removed — PostgreSQL is the only store (D1/GitHub deprecated). Use backups.', code: 'POSTGRES_ONLY' }, { status: 400, headers: corsHeaders });
 }
 
 function cleanApiBase(baseUrl) {
@@ -5642,7 +5483,6 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
 }
 
 async function handleGetPersonalLinks(userId, env, corsHeaders) {
-  await ensureFresh(env, 'personal', userId);
   await ensureLinkMetaColumns(env);
   const { results } = await env.DB.prepare(
     'SELECT * FROM personal_links WHERE user_id = ? ORDER BY created_at DESC LIMIT 1000'
@@ -5650,6 +5490,15 @@ async function handleGetPersonalLinks(userId, env, corsHeaders) {
   const links = dedupeLinkRows(results || []);
   const enrichmentPending = queueMissingLinkEnrichment(env, 'personal', userId, links);
   return Response.json({ success: true, links, enrichment_pending: enrichmentPending }, { headers: corsHeaders });
+}
+
+/**
+ * Rows affected by a write. D1 and the Postgres adapter both report the count
+ * as `meta.changes`; a top-level `changes` only exists on older shims, so
+ * reading it alone silently reported 0 for every delete.
+ */
+function rowsChanged(result) {
+  return Number(result?.meta?.changes ?? result?.changes ?? 0) || 0;
 }
 
 function isUniqueConstraintError(error) {
@@ -5792,21 +5641,6 @@ async function handlePostPersonalLinksBatch(request, userId, env, corsHeaders) {
     }
     inserted.splice(0, inserted.length, ...stored);
     if (stored.length) {
-      const gh = await storeAddLinks(env, 'personal', userId, stored);
-      if (gh.handled && !gh.ok) {
-        for (const l of stored) await env.DB.prepare('DELETE FROM personal_links WHERE id = ? AND user_id = ?').bind(l.id, userId).run().catch(() => {});
-        const failure = {
-          success: false,
-          total: items.length,
-          added: 0,
-          dupes: dupes.length,
-          failed: [...failed.map((f) => f.url), ...stored.map((l) => l.url)],
-          error: `GitHub write failed: ${gh.error}`,
-          code: 'STORAGE_WRITE_FAILED',
-        };
-        await finishBatchUpload(env, replayState.id, failure);
-        return Response.json(failure, { status: 502, headers: corsHeaders });
-      }
       // Dump was fast by design; enrich the fresh links in the background so
       // they carry descriptions/site names/images like Telegram saves do.
       runInBackground(env, enrichLinksInBackground(env, 'personal', userId, stored));
@@ -5903,21 +5737,6 @@ async function handlePostCommunityLinksBatch(request, user, env, corsHeaders) {
     }
     inserted.splice(0, inserted.length, ...stored);
     if (stored.length) {
-      const gh = await storeAddLinks(env, 'community', communityId, stored);
-      if (gh.handled && !gh.ok) {
-        for (const l of stored) await env.DB.prepare('DELETE FROM links WHERE id = ? AND community_id = ?').bind(l.id, communityId).run().catch(() => {});
-        const failure = {
-          success: false,
-          total: items.length,
-          added: 0,
-          dupes: dupes.length,
-          failed: [...failed.map((f) => f.url), ...stored.map((l) => l.url)],
-          error: `GitHub write failed: ${gh.error}`,
-          code: 'STORAGE_WRITE_FAILED',
-        };
-        await finishBatchUpload(env, replayState.id, failure);
-        return Response.json(failure, { status: 502, headers: corsHeaders });
-      }
       runInBackground(env, enrichLinksInBackground(env, 'community', communityId, stored));
       markMeiliScopeDirty(env, 'community', communityId);
     }
@@ -5964,17 +5783,6 @@ async function handlePostPersonalLink(request, userId, env, corsHeaders) {
   const id = 'pl_' + Date.now().toString(36);
   const now = Date.now();
 
-  // GitHub is the source of truth when enabled: commit first, and surface a
-  // failure instead of silently keeping a link that only exists in the cache.
-  const gh = await storeAddLink(env, 'personal', userId, {
-    id, url: rawUrl, url_hash: urlHash, title: meta.title, notes: meta.notes,
-    tags: body.tags || [], created_at: now,
-    image_url: meta.image_url, site_name: meta.site_name,
-  });
-  if (gh.handled && !gh.ok) {
-    return Response.json({ success: false, error: `GitHub write failed: ${gh.error}` }, { status: 502, headers: corsHeaders });
-  }
-
   try {
     await env.DB.prepare(
       `INSERT INTO personal_links (id, user_id, url, url_hash, title, notes, tags, created_at, image_url, site_name)
@@ -6013,11 +5821,6 @@ async function handleDeletePersonalLink(request, userId, env, corsHeaders) {
     'DELETE FROM personal_links WHERE id = ? AND user_id = ?'
   ).bind(body.id, userId).run();
   markMeiliScopeDirty(env, 'personal', userId);
-  // Entries live inside shared Markdown files, so removal means rewriting the folder.
-  const gh = await storeMutateLink(env, 'personal', userId, body.id, null);
-  if (gh.handled && !gh.ok) {
-    return Response.json({ success: false, error: `GitHub write failed: ${gh.error}` }, { status: 502, headers: corsHeaders });
-  }
   return Response.json({ success: true }, { headers: corsHeaders });
 }
 
@@ -6068,15 +5871,6 @@ async function handlePatchPersonalLink(request, userId, env, corsHeaders) {
       `UPDATE personal_links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?
        WHERE id = ? AND user_id = ?`
     ).bind(url, urlHash, title, notes, tags, id, userId).run();
-  }
-
-  const ghPatch = await storeMutateLink(env, 'personal', userId, id, {
-    url, url_hash: urlHash, title, notes,
-    tags: (() => { try { return JSON.parse(tags || '[]'); } catch (_) { return []; } })(),
-    image_url: imageUrl || null, site_name: siteName || null,
-  });
-  if (ghPatch.handled && !ghPatch.ok) {
-    return Response.json({ success: false, error: `GitHub write failed: ${ghPatch.error}` }, { status: 502, headers: corsHeaders });
   }
 
   markMeiliScopeDirty(env, 'personal', userId);
@@ -6146,15 +5940,6 @@ async function handlePatchCommunityLink(request, user, env, corsHeaders) {
     ).bind(url, urlHash, title, notes, tags, id).run();
   }
 
-  const ghPatch = await storeMutateLink(env, 'community', existing.community_id, id, {
-    url, url_hash: urlHash, title, notes,
-    tags: (() => { try { return JSON.parse(tags || '[]'); } catch (_) { return []; } })(),
-    image_url: imageUrl || null, site_name: siteName || null,
-  });
-  if (ghPatch.handled && !ghPatch.ok) {
-    return Response.json({ success: false, error: `GitHub write failed: ${ghPatch.error}` }, { status: 502, headers: corsHeaders });
-  }
-
   markMeiliScopeDirty(env, 'community', existing.community_id);
 
   return Response.json({
@@ -6169,25 +5954,8 @@ async function handlePatchCommunityLink(request, user, env, corsHeaders) {
 }
 
 // ============================================================
-// Telegram Webhook — personal/community dump, search, delete, approve
+// Telegram Webhook — personal/community dump, search, delete
 // ============================================================
-
-async function ensurePendingTable(env) {
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS telegram_pending (
-      id TEXT PRIMARY KEY,
-      community_id TEXT NOT NULL,
-      url TEXT NOT NULL,
-      url_hash TEXT NOT NULL,
-      title TEXT,
-      notes TEXT,
-      proposed_by TEXT,
-      proposed_by_tg TEXT,
-      status TEXT NOT NULL DEFAULT 'pending',
-      created_at INTEGER NOT NULL
-    )`
-  ).run();
-}
 
 // Keep each HTML page comfortably below Telegram's 4096-character message
 // limit so the navigation keyboard stays attached to the complete result page.
@@ -6251,9 +6019,36 @@ function telegramSearchRowHtml(row, botUsername = '') {
   if (Array.isArray(tags) && tags.length) {
     bits.push(boldHtml('Tags:') + ' ' + tags.slice(0, 8).map(t => tagLinkHtmlSync(String(t).toLowerCase(), botUsername)).filter(Boolean).join(' '));
   }
-  const notes = String(row.notes || row.content || '').replace(/\s+/g, ' ').trim();
-  if (notes) bits.push(linkifyHashtagsHtml(escHtml(notes.slice(0, 360))) + (notes.length > 360 ? '…' : ''));
+  if (row.source_posts?.length) {
+    for (const post of row.source_posts) {
+      const origin = `Chat ${post.chat_id} · Topic ${post.topic_id || 'General'}${post.topic_name ? ` (${post.topic_name})` : ''} · Message ${post.message_id}`;
+      bits.push(post.source_url ? linkHtml(post.source_url, origin) : escHtml(origin));
+      bits.push(telegramSourcePostHtml(post));
+    }
+  } else {
+    const notes = String(row.notes || row.content || '');
+    if (notes) bits.push(linkifyHashtagsHtml(escHtml(notes), botUsername));
+  }
   return bits.join('\n');
+}
+
+function telegramSourcePostHtml(post) {
+  const text = String(post.message_text ?? '');
+  const message = post.message || {};
+  const entities = message.entities || message.caption_entities || [];
+  const links = entities.filter(entity => entity.url && /^https?:\/\//i.test(entity.url))
+    .sort((a, b) => Number(a.offset) - Number(b.offset));
+  let offset = 0;
+  const parts = [];
+  for (const entity of links) {
+    const start = Number(entity.offset);
+    const end = start + Number(entity.length);
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < offset || end <= start || end > text.length) continue;
+    parts.push(escHtml(text.slice(offset, start)), linkHtml(entity.url, text.slice(start, end)));
+    offset = end;
+  }
+  parts.push(escHtml(text.slice(offset)));
+  return parts.join('');
 }
 
 // Telegram's own hashtag entity stops at '-' ('#Open-source' links only '#Open'),
@@ -6292,7 +6087,6 @@ function linkifyHashtagsHtml(escapedText, botUsername = '') {
 }
 
 async function getTelegramSearchPage(env, session) {
-  await ensureFresh(env, session.scope, session.scope_key);
   const accelerated = await meiliSearchScope(env, session.scope, session.scope_key, session.query, {
     limit: TG_SEARCH_PAGE_SIZE,
     offset: Math.max(0, Number(session.page || 0)) * TG_SEARCH_PAGE_SIZE
@@ -6344,8 +6138,26 @@ async function startTelegramSearch(env, token, chatId, tgUserId, scope, scopeKey
      VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`
   ).bind(session.id, session.tg_user_id, session.chat_id, session.scope, session.scope_key,
     session.query, now, now + TG_SEARCH_SESSION_TTL_MS).run();
-  const view = await getTelegramSearchPage(env, session);
-  return sendTelegramRichMessage(token, chatId, view.html, threadId, searchRichButtonRow(session.id, view.page, view.total));
+  // Ack immediately so the chat never looks dead while SQL scans run, then
+  // edit the same message with the results (errors edit it too — no silence).
+  const t0 = Date.now();
+  let ackId = null;
+  try {
+    const ack = await sendTelegramRichMessage(token, chatId,
+      richParagraph(`🔍 Searching ${scope === 'personal' ? 'personal' : 'community'} brain…`), threadId);
+    ackId = ack?.message_id || null;
+  } catch (_) {}
+  try {
+    const view = await getTelegramSearchPage(env, session);
+    const buttons = searchRichButtonRow(session.id, view.page, view.total);
+    if (ackId) await editTelegramRichMessage(token, chatId, ackId, view.html, threadId, buttons);
+    else await sendTelegramRichMessage(token, chatId, view.html, threadId, buttons);
+  } catch (e) {
+    const msg = richParagraph(`${boldHtml('❌')} Search failed: ${escHtml(String(e?.message || e).slice(0, 200))}`);
+    if (ackId) await editTelegramRichMessage(token, chatId, ackId, msg, threadId).catch(() => {});
+    else await sendTelegramRichMessage(token, chatId, msg, threadId).catch(() => {});
+  }
+  try { console.log(`[search] ${scope} done in ${Date.now() - t0}ms q=${JSON.stringify(session.query.slice(0, 60))}`); } catch (_) {}
 }
 
 function isPrivChat(msg, chatId) {
@@ -6541,7 +6353,6 @@ async function deleteCommunityFully(env, communityId) {
   markMeiliScopeDirty(env, 'community', communityId);
   try {
     await ensureDocumentsTable(env);
-    await clearActiveDocumentFolder(env, 'community', communityId);
     await env.DB.prepare("DELETE FROM uploaded_documents WHERE scope = 'community' AND community_id = ?").bind(communityId).run();
   } catch (_) {}
   markMeiliScopeDirty(env, 'community', communityId);
@@ -6549,7 +6360,6 @@ async function deleteCommunityFully(env, communityId) {
   try { await env.DB.prepare('DELETE FROM community_admins WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
   try { await env.DB.prepare('DELETE FROM community_members WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
   try { await env.DB.prepare('DELETE FROM notifications WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
-  try { await env.DB.prepare('DELETE FROM telegram_pending WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
   try { await env.DB.prepare('DELETE FROM telegram_bots WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
   try { await ensureBanTable(env); await env.DB.prepare('DELETE FROM community_bans WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
   try { await ensurePendingDeletesTable(env); await env.DB.prepare('DELETE FROM pending_community_deletes WHERE community_id = ?').bind(communityId).run(); } catch (_) {}
@@ -6567,13 +6377,6 @@ async function deleteCommunityFully(env, communityId) {
     await env.DB.prepare(
       `UPDATE community_bots SET community_id = NULL, scope = 'personal' WHERE community_id = ?`
     ).bind(communityId).run();
-  } catch (_) {}
-
-  // Same rule as /clear_db: remove the Markdown only when GitHub is active.
-  await clearActiveStoreFolder(env, 'community', communityId);
-  try {
-    await ensureParkingTables(env);
-    await env.DB.prepare('DELETE FROM parked_links WHERE community_id = ?').bind(communityId).run();
   } catch (_) {}
 
   await env.DB.prepare('DELETE FROM communities WHERE id = ?').bind(communityId).run();
@@ -6626,19 +6429,6 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
   const id = 'tg_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   await ensureLinkMetaColumns(env);
 
-  // Busiest write path in the app — many members dumping into one group. The
-  // append helper retries on commit conflicts so links are not silently dropped.
-  const ghDump = await storeAddLink(env, 'community', communityId, {
-    id, url: rawUrl, url_hash: urlHash, title: meta.title, notes: meta.notes || '',
-    tags: ['telegram', 'community'], created_at: Date.now(),
-    added_by_name: senderName, added_by_user_id: athenaUser?.id || null,
-    image_url: meta.image_url, site_name: meta.site_name,
-  });
-  if (ghDump.handled && !ghDump.ok) {
-    await sendTelegramMessage(token, chatId, `Could not save to GitHub: ${ghDump.error}`, threadId);
-    return;
-  }
-
   try {
     await env.DB.prepare(
       `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
@@ -6676,8 +6466,7 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
       try {
         await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
           .bind(meta.title, JSON.stringify(merged), meta.notes || '', id).run();
-        const g1 = await storeMutateLink(env, 'community', communityId, id, { title: meta.title, notes: meta.notes || '', tags: merged });
-        if (g1?.handled && !g1.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${g1.error||'unknown'}`, threadId); reply = await formatSavedLinkReply(env, 'community', meta.title, rawUrl, { title: meta.title, description: meta.notes || '', tags: userTags }); } else { reply = await formatSavedLinkReply(env, 'community', meta.title, rawUrl, { title: meta.title, description: meta.notes || '', tags: userTags }); }
+        reply = await formatSavedLinkReply(env, 'community', meta.title, rawUrl, { title: meta.title, description: meta.notes || '', tags: userTags });
       } catch (_) { reply = await formatSavedLinkReply(env, 'community', meta.title, rawUrl, { title: meta.title, description: meta.notes || '', tags: userTags }); }
     } else {
       const vocab = await recentTagsForScope(env, 'community', communityId);
@@ -6691,15 +6480,13 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
         try {
           await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
             .bind(savedTitle, JSON.stringify(merged), ai.description || meta.notes || '', id).run();
-          const g2 = await storeMutateLink(env, 'community', communityId, id, { title: savedTitle, notes: ai.description || meta.notes || '', tags: merged });
-          if (g2?.handled && !g2.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${g2.error||'unknown'}`, threadId); }
         } catch (_) {}
         reply = await formatSavedLinkReply(env, 'community', savedTitle, rawUrl, ai);
       } else {
         const fb=fallbackTagsFromMeta(rawUrl, meta);
         if(fb.length){
           const mergedFb=[...new Set([...['telegram','community'], ...fb])];
-          try{ await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`).bind(meta.title, JSON.stringify(mergedFb), meta.notes||'', id).run(); await storeMutateLink(env,'community',communityId,id,{title:meta.title, notes:meta.notes||'', tags:mergedFb}); }catch(_){}
+          try{ await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`).bind(meta.title, JSON.stringify(mergedFb), meta.notes||'', id).run(); }catch(_){}
           reply = await formatSavedLinkReply(env, 'community', meta.title, rawUrl, {title: meta.title, description: meta.notes||'', tags: fb}, meta.notes);
         } else {
           reply = await formatSavedLinkReply(env, 'community', meta.title, rawUrl, null, meta.notes);
@@ -6831,6 +6618,87 @@ function telegramUserNotes(msg) {
   // strip bare urls so leftover is the written detail
   t = t.replace(/https?:\/\/[^\s<>"')\]]+/gi, ' ').replace(/\s+/g, ' ').trim();
   return t;
+}
+
+/**
+ * Faithful copy of a Telegram post as Markdown, minus the image bytes.
+ * Walks text/caption + entities in offset order so hyperlinks, bold, italic,
+ * code and pre blocks stay in place. Photos, stickers and file blobs are
+ * ignored — only their caption text is kept. Inline-keyboard button URLs are
+ * appended as [label](url) so dump channels that hide links behind buttons
+ * still save them. Offsets are UTF-16 code units, matching JS substr.
+ */
+function telegramEntityMarkdown(source, entities) {
+  const text = String(source || '');
+  const ents = Array.isArray(entities) ? entities.filter((e) => e && typeof e.offset === 'number') : [];
+  if (!ents.length) return text;
+  const sorted = [...ents].sort((a, b) => a.offset - b.offset || b.length - a.length);
+  let out = '';
+  let pos = 0;
+  const push = (s) => { out += s; };
+  for (const ent of sorted) {
+    const start = Math.max(0, ent.offset);
+    const end = Math.max(start, start + (ent.length || 0));
+    if (start < pos) continue; // overlapping entity — outer one already won
+    push(text.slice(pos, start));
+    const inner = text.slice(start, end);
+    switch (ent.type) {
+      case 'bold': push(`**${inner}**`); break;
+      case 'italic': push(`_${inner}_`); break;
+      case 'code': push(`\`${inner}\``); break;
+      case 'pre': push(inner.includes('\n') ? '```\n' + inner + '\n```' : `\`${inner}\``); break;
+      case 'strikethrough': push(`~~${inner}~~`); break;
+      case 'underline': push(inner); break;
+      case 'spoiler': push(inner); break;
+      case 'blockquote': push(`> ${inner}`); break;
+      case 'text_link': {
+        const url = String(ent.url || '').trim();
+        push(url ? `[${inner}](${url})` : inner);
+        break;
+      }
+      case 'url': {
+        let raw = inner;
+        const url = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+        // Keep visible text as-is; append the resolved URL only when the
+        // visible text is not already that URL.
+        push(raw.trim() === url.trim() ? raw : `[${raw}](${url})`);
+        break;
+      }
+      case 'text_mention': push(inner); break;
+      case 'custom_emoji': push(inner); break;
+      default: push(inner); break;
+    }
+    pos = end;
+  }
+  push(text.slice(pos));
+  return out;
+}
+
+function telegramRichMarkdown(msg) {
+  if (!msg) return '';
+  const parts = [];
+  if (msg.text) parts.push(telegramEntityMarkdown(msg.text, msg.entities));
+  if (msg.caption && msg.caption !== msg.text) parts.push(telegramEntityMarkdown(msg.caption, msg.caption_entities));
+  try {
+    const btns = [];
+    for (const row of msg.reply_markup?.inline_keyboard || []) {
+      for (const btn of row || []) {
+        if (btn?.url) {
+          const label = String(btn.text || btn.url).trim();
+          btns.push(`[${label}](${String(btn.url).trim()})`);
+        }
+      }
+    }
+    if (btns.length) parts.push(btns.join(' · '));
+  } catch (_) {}
+  return parts.filter(Boolean).join('\n').trim();
+}
+
+function telegramRichNotesForSave(msg, maxLen = 8000) {
+  const rich = telegramRichMarkdown(msg);
+  let s = String(rich || '').replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (s.length > maxLen) s = s.slice(0, maxLen - 1) + '…';
+  return s;
 }
 
 /**
@@ -7008,10 +6876,159 @@ function normalizeTagList(tags) {
   const out = [];
   for (const t of Array.isArray(tags) ? tags : []) {
     const tag = String(t).replace(/^#/,'').trim().toLowerCase().replace(/\s+/g,'-').slice(0,40);
-    if (!tag || out.includes(tag)) continue;
+    // Single letters are import residue ("a", "b", "c"), never topics.
+    if (!tag || tag.length < 2 || out.includes(tag)) continue;
     out.push(tag);
   }
   return out;
+}
+
+/** Provenance/ingest stamps, not topics. Dropped on review unless the
+ *  content itself is about that word (e.g. telegram stays for Telegram
+ *  clients/bots, backfill never stays). The list lives with the vocabulary so
+ *  the review, the rules and the SQL junk ordering cannot drift apart. */
+const RETAG_JUNK_TAGS = JUNK_TAGS;
+
+function parseStoredTags(raw) {
+  if (Array.isArray(raw)) return normalizeTagList(raw);
+  if (typeof raw === 'string') {
+    const t = raw.trim();
+    if (!t || t === 'null') return [];
+    try {
+      const arr = JSON.parse(t);
+      if (Array.isArray(arr)) return normalizeTagList(arr);
+    } catch (_) {}
+    if (t.startsWith('#')) return normalizeTagList(t.split(/\s+/));
+  }
+  return [];
+}
+
+/** Hosts whose name IS the topic (ecosystems, forges, package registries).
+ *  Any other domain is a name, never a tag. */
+const ECOSYSTEM_HOSTS = new Set([
+  'github', 'gitlab', 'codeberg', 'bitbucket', 'sourceforge', 'telegram',
+  'arxiv', 'huggingface', 'npmjs', 'pypi', 'fdroid', 'kaggle', 'docker',
+]);
+
+/** Tokens that name WHERE/WHO, never WHAT — derived per link from its own
+ *  domain (labels + first path segment). AI and rules must not emit these. */
+function domainNameBans(rawUrl) {
+  const bans = new Set();
+  try {
+    const u = new URL(String(rawUrl || '').startsWith('http') ? rawUrl : `https://${rawUrl}`);
+    const labels = u.hostname.replace(/^www\./, '').toLowerCase().split('.');
+    const suffix = new Set(['com', 'net', 'org', 'io', 'dev', 'app', 'so', 'me', 'co', 'in', 'ai', 'xyz', 'top', 'fun', 'site', 'online']);
+    for (const l of labels) {
+      const clean = l.replace(/[^a-z0-9]/g, '');
+      if (clean.length >= 3 && !suffix.has(clean) && !ECOSYSTEM_HOSTS.has(clean)) bans.add(clean);
+    }
+    const seg = (u.pathname.split('/').filter(Boolean)[0] || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (seg.length >= 4 && !ECOSYSTEM_HOSTS.has(seg)) bans.add(seg);
+  } catch (_) {}
+  return bans;
+}
+
+/** No-AI retag: drop junk tags the content never mentions, keep the rest,
+ *  add platform + topic tags from keyword rules. Returns { tags, kept,
+ *  added, removed }. */
+function smartFallbackTags(rawUrl, meta, currentTags) {
+  const bag = `${meta?.title || ''} ${meta?.notes || ''} ${meta?.content || ''} ${rawUrl || ''}`.toLowerCase();
+  const word = (w) => new RegExp(`(^|[^a-z0-9])${w}([^a-z0-9]|$)`).test(bag);
+  const kept = [];
+  const removed = [];
+  // Junk provenance tags drop unconditionally — except telegram, which is a
+  // real topic when the content is actually about Telegram.
+  // t.me and telegram.me links are Telegram content without the word in them.
+  const aboutTelegram = word('telegram') || bag.includes('telegram') || bag.includes('telegram.me') || /(^|[^a-z0-9])t\.me\//.test(bag);
+  const junkRescued = (t) => t === 'telegram' && aboutTelegram;
+  for (const t of normalizeTagList(currentTags)) {
+    if (RETAG_JUNK_TAGS.has(t) && !junkRescued(t)) { if (!removed.includes(t)) removed.push(t); continue; }
+    if (!kept.includes(t)) kept.push(t);
+  }
+  const tags = [...kept];
+  const added = [];
+  const add = (t) => { if (t && !tags.includes(t)) { tags.push(t); added.push(t); } };
+  // Platform — only for software (app/client/apk/download), never for articles.
+  const isSoftware = word('app') || word('apk') || word('appstore') || bag.includes('play store') || word('software') || word('client') || word('download') || word('mobile') || /\.apk(\b|\/)/.test(bag) || /\.ipa(\b|\/)/.test(bag);
+  if (isSoftware) {
+    const android = word('android') || bag.includes('play store') || bag.includes('.apk');
+    const ios = word('ios') || word('iphone') || word('ipad') || bag.includes('app store') || bag.includes('.ipa');
+    const desktop = word('windows') || word('macos') || word('linux') || word('ubuntu');
+    if ((android && ios) || ((android || ios) && desktop) || /multiplatform|cross-platform|all platforms/.test(bag)) add('multiplatform');
+    else if (android) add('android');
+    else if (ios) add('ios');
+  }
+  const TOPIC_RULES = [
+    ['music', ['music', 'song', 'songs', 'mp3', 'spotify', 'album', 'playlist']],
+    ['video', ['video', 'videos', 'youtube', 'mp4', 'streaming']],
+    ['movie', ['movie', 'movies', 'film', 'films', 'cinema', 'bollywood', 'web-series', 'tv-show']],
+    ['game', ['game', 'games', 'gaming', 'mod', 'mods', 'emulator', 'rom']],
+    ['anime', ['anime', 'manga', 'manhwa']],
+    ['book', ['book', 'books', 'ebook', 'novel', 'pdf']],
+    ['ai', ['artificial intelligence', 'llm', 'chatgpt', 'machine learning', 'stable diffusion', 'midjourney']],
+    ['bot', ['telegram bot', 'bot api', 'discord bot', 'chatbot']],
+    ['telegram', ['telegram']],
+    ['privacy', ['privacy', 'adblock', 'ublock', 'tracker', 'fingerprint']],
+    ['vpn', ['vpn', 'proxy', 'proxies']],
+    ['security', ['security', 'malware', 'exploit', 'vulnerability']],
+    ['crypto', ['crypto', 'bitcoin', 'blockchain', 'web3']],
+    ['coding', ['github', 'programming', 'developer', 'api', 'sdk', 'library', 'framework', 'python', 'javascript']],
+    ['tool', ['tool', 'tools', 'utility', 'converter', 'downloader', 'generator']],
+    ['app', ['app']],
+    ['website', ['website', 'homepage', 'landing']],
+    ['news', ['news', 'breaking']],
+    ['tutorial', ['tutorial', 'guide', 'how-to', 'howto', 'course']],
+    ['wallpaper', ['wallpaper', 'wallpapers']],
+    ['sticker', ['sticker', 'stickers']],
+    ['font', ['font', 'fonts', 'typeface']],
+    ['photo', ['photo', 'photos', 'photography', 'camera']],
+    ['design', ['design', 'ui', 'ux', 'figma']],
+  ];
+  if (word('ai')) add('ai');
+  for (const [tag, keys] of TOPIC_RULES) {
+    if (keys.some((k) => bag.includes(k))) add(tag);
+  }
+  // Host identity counts only for ecosystems (github, arxiv…) — any other
+  // domain is a name, never a tag.
+  try {
+    const u = new URL(String(rawUrl || '').startsWith('http') ? rawUrl : `https://${rawUrl}`);
+    const host = u.hostname.replace(/^www\./, '').toLowerCase();
+    const labels = host.split('.');
+    for (const l of labels) {
+      const clean = l.replace(/[^a-z0-9]/g, '');
+      if (ECOSYSTEM_HOSTS.has(clean)) { add(clean); break; }
+    }
+  } catch (_) {}
+  // Title words for the long tail (same stopword discipline as before).
+  // Domain-derived names are stripped after this, so titles like
+  // "SpotiFlac Extension" contribute "extension", never "spotiflac".
+  if (tags.length < 5) {
+    const words = String(meta?.title || '').toLowerCase().match(/[a-z]{4,15}/g) || [];
+    const stop = new Set(['the', 'and', 'with', 'from', 'this', 'that', 'client', 'project', 'independent', 'for', 'are', 'was', 'were', 'have', 'has', 'with', 'your', 'free', 'best', 'download', 'official', 'ultimate', 'guide', 'using', 'user', 'users']);
+    for (const w of words) { if (!stop.has(w)) add(w); if (tags.length >= 8) break; }
+  }
+  // Never emit the link's own names, even if rules above added them.
+  // Same for freshly coined junk: a title word like "Junk" or "Personal"
+  // must not become a tag unless the content is actually about it.
+  {
+    const bans = domainNameBans(rawUrl);
+    const dropBanned = (arr) => {
+      for (let i = arr.length - 1; i >= 0; i--) {
+        if (bans.has(arr[i])) { arr.splice(i, 1); continue; }
+        if (RETAG_JUNK_TAGS.has(arr[i]) && arr[i] !== 'telegram') arr.splice(i, 1);
+      }
+    };
+    dropBanned(tags); dropBanned(added);
+  }
+  const finalTags = tags.slice(0, 8);
+  const finalSet = new Set(finalTags);
+  const normCurrent = normalizeTagList(currentTags);
+  return {
+    tags: finalTags,
+    kept: normCurrent.filter((t) => finalSet.has(t)),
+    added: added.filter((t) => finalSet.has(t)).slice(0, 8),
+    removed: normCurrent.filter((t) => !finalSet.has(t)),
+  };
 }
 
 /**
@@ -7431,6 +7448,11 @@ async function ensureSearchColumns(env) {
     'ALTER TABLE personal_links ADD COLUMN search_blob TEXT',
     'ALTER TABLE links ADD COLUMN search_blob TEXT',
     'ALTER TABLE uploaded_documents ADD COLUMN search_blob TEXT',
+    'CREATE INDEX IF NOT EXISTS idx_links_community ON links(community_id)',
+    'CREATE INDEX IF NOT EXISTS idx_links_url_hash ON links(url_hash)',
+    'CREATE INDEX IF NOT EXISTS idx_personal_links_url_hash ON personal_links(url_hash)',
+    'CREATE INDEX IF NOT EXISTS idx_clone_sources_content_key ON clone_sources(destination, content_key)',
+    'CREATE INDEX IF NOT EXISTS idx_clone_posts_join ON clone_posts(destination, chat_id, topic_id, message_id)',
   ]) {
     try { await env.DB.prepare(sql).run(); } catch (_) {}
   }
@@ -7444,38 +7466,43 @@ function buildSearchBlob(row) {
   return bag.replace(/[^a-z0-9]/g, '');
 }
 
-/** Fill in search_blob for rows that do not have one yet. Incremental. */
+/** Fill in search_blob for rows that do not have one yet. Incremental.
+ * Single UPDATE statement (no per-row round trips) so searches never stall
+ * behind hundreds of sequential writes on the read path. */
 async function backfillSearchBlobs(env, table, whereCol, whereVal, batch = 400) {
   await ensureSearchColumns(env);
   try {
-    const { results } = await env.DB.prepare(
-      `SELECT id, title, url, notes, tags FROM ${table}
-       WHERE ${whereCol} = ? AND (search_blob IS NULL OR search_blob = '')
-       LIMIT ${batch}`
-    ).bind(whereVal).all();
-    for (const r of (results || [])) {
-      await env.DB.prepare(`UPDATE ${table} SET search_blob = ? WHERE id = ?`)
-        .bind(buildSearchBlob(r), r.id).run();
-    }
-    return (results || []).length;
+    const lim = Math.max(1, Math.min(Number(batch) || 400, 2000));
+    const res = await env.DB.prepare(
+      `UPDATE ${table} SET search_blob = regexp_replace(lower(
+         COALESCE(title,'') || ' ' || COALESCE(url,'') || ' ' || COALESCE(notes,'') || ' ' || COALESCE(tags,'')
+       ), '[^a-z0-9]', '', 'g')
+       WHERE id IN (
+         SELECT id FROM ${table}
+         WHERE ${whereCol} = ? AND (search_blob IS NULL OR search_blob = '')
+         LIMIT ${lim}
+       )`
+    ).bind(whereVal).run();
+    return Number(res?.meta?.changes ?? res?.changes ?? 0);
   } catch (_) { return 0; }
 }
 
-async function backfillDocumentSearchBlobs(env, scope, whereCol, whereVal, batch = 20) {
+async function backfillDocumentSearchBlobs(env, scope, whereCol, whereVal, batch = 200) {
   await ensureDocumentsTable(env);
   await ensureSearchColumns(env);
   try {
-    const { results } = await env.DB.prepare(
-      `SELECT id, filename, content
-       FROM uploaded_documents
-       WHERE scope = ? AND ${whereCol} = ? AND (search_blob IS NULL OR search_blob = '')
-       LIMIT ${batch}`
-    ).bind(scope, whereVal).all();
-    for (const r of (results || [])) {
-      await env.DB.prepare('UPDATE uploaded_documents SET search_blob = ? WHERE id = ?')
-        .bind(buildSearchBlob(r), r.id).run();
-    }
-    return (results || []).length;
+    const lim = Math.max(1, Math.min(Number(batch) || 200, 2000));
+    const res = await env.DB.prepare(
+      `UPDATE uploaded_documents SET search_blob = regexp_replace(lower(
+         COALESCE(filename,'') || ' ' || COALESCE(content,'')
+       ), '[^a-z0-9]', '', 'g')
+       WHERE id IN (
+         SELECT id FROM uploaded_documents
+         WHERE scope = ? AND ${whereCol} = ? AND (search_blob IS NULL OR search_blob = '')
+         LIMIT ${lim}
+       )`
+    ).bind(scope, whereVal).run();
+    return Number(res?.meta?.changes ?? res?.changes ?? 0);
   } catch (_) { return 0; }
 }
 
@@ -7545,28 +7572,88 @@ async function searchAllLinks(env, scope, key, query, limit = null) {
   const col = scope === 'personal' ? 'user_id' : 'community_id';
   await backfillSearchBlobs(env, table, col, key);
   await backfillDocumentSearchBlobs(env, scope, col, key);
+  await ensureCloneSources(env);
 
   const terms = expandServerSearchTerms(q);
+  // Bare-URL queries carry a trailing slash that stored URLs often lack
+  // ("https://enhancv.com/" vs "https://enhancv.com") — match both forms.
+  const bare = q.replace(/\/+$/, '');
+  if (bare && bare !== q && bare.length >= 2 && !terms.includes(bare)) terms.push(bare);
   if (!terms.length) return [];
-  const clauses = terms.map(() => `(
-    lower(COALESCE(title,'')) LIKE ? OR
-    lower(COALESCE(url,'')) LIKE ? OR
-    lower(COALESCE(notes,'')) LIKE ? OR
-    lower(COALESCE(tags,'')) LIKE ? OR
-    COALESCE(search_blob,'') LIKE ?
-  )`).join(' OR ');
-  const params = [key];
-  for (const term of terms) {
-    const like = `%${term}%`;
-    params.push(like, like, like, like, `%${term.replace(/[^a-z0-9]/g, '')}%`);
-  }
+  // Bound unbounded callers: one common word must not drag the whole store
+  // through hydrate+rank. 2000 rows is far beyond any page/AI budget.
+  const cap = limit == null ? 2000 : Math.max(1, Math.min(Number(limit) || 2000, 2000));
+  // The old single query evaluated a per-row EXISTS over clone_posts, which
+  // took minutes on active scopes. Three cheap phases instead: exact URL
+  // match, direct column matches, and (only when hits are thin) a separate
+  // set-based source-post pass. Same recall shape, no per-row subquery.
+  const needMore = (have) => have < Math.min(cap, 200);
   try {
-    const { results } = await env.DB.prepare(
-      `SELECT * FROM ${table}
-       WHERE ${col} = ?
-         AND (${clauses})
-       ORDER BY created_at DESC${resultLimitClause(limit)}`
-    ).bind(...params).all();
+    const seen = new Map();
+    const addRows = (rows) => { for (const r of rows || []) if (r?.id && !seen.has(r.id)) seen.set(r.id, r); };
+    // Phase 0: exact URL lookup — one indexed query, instant for
+    // "did we save this link" questions.
+    try {
+      const urls = extractUrls(q);
+      const hashes = [...new Set(urls.map((u) => { try { return generateUrlHash(u); } catch (_) { return null; } }).filter(Boolean))].slice(0, 10);
+      if (hashes.length) {
+        const { results: exact } = await env.DB.prepare(
+          `SELECT * FROM ${table} WHERE ${col} = ? AND url_hash IN (${hashes.map(() => '?').join(',')}) ORDER BY created_at DESC`
+        ).bind(key, ...hashes).all();
+        addRows(exact);
+      }
+    } catch (_) {}
+    // Phase 1: direct column matches — indexed scope scan, no EXISTS.
+    if (needMore(seen.size)) {
+      const clauses = terms.map(() => `(
+        lower(COALESCE(title,'')) LIKE ? OR
+        lower(COALESCE(url,'')) LIKE ? OR
+        lower(COALESCE(notes,'')) LIKE ? OR
+        lower(COALESCE(tags,'')) LIKE ? OR
+        COALESCE(search_blob,'') LIKE ?
+      )`).join(' OR ');
+      const params = [key];
+      for (const term of terms) {
+        const like = `%${term}%`;
+        params.push(like, like, like, like, `%${term.replace(/[^a-z0-9]/g, '')}%`);
+      }
+      const { results } = await env.DB.prepare(
+        `SELECT * FROM ${table}
+         WHERE ${col} = ? AND (${clauses})
+         ORDER BY created_at DESC LIMIT ${cap}`
+      ).bind(...params).all();
+      addRows(results);
+    }
+    // Phase 2: source-post text — posts first, then links by id/key.
+    if (needMore(seen.size)) {
+      const sourceClauses = terms.map(() => `(lower(COALESCE(p.message_text,'')) LIKE ? OR lower(COALESCE(p.urls_json,'')) LIKE ?)`);
+      const srcParams = [];
+      for (const term of terms) srcParams.push(`%${term}%`, `%${term}%`);
+      const dest = `${scope === 'personal' ? 'personal' : 'community'}:${key}`;
+      const { results: srcs } = await env.DB.prepare(
+        `SELECT DISTINCT s.content_id, s.content_key FROM clone_sources s JOIN clone_posts p
+           ON p.destination=s.destination AND p.chat_id=s.chat_id
+           AND p.topic_id=s.topic_id AND p.message_id=s.message_id
+         WHERE s.destination=? AND s.status IN ('saved','duplicate')
+           AND (${sourceClauses.join(' OR ')})
+         LIMIT ${Math.min(cap, 500)}`
+      ).bind(dest, ...srcParams).all();
+      const ids = [...new Set((srcs || []).map((s) => s.content_id).filter(Boolean))].slice(0, 500);
+      const urlHashes = [...new Set((srcs || []).map((s) => s.content_key).filter(Boolean))]
+        .filter((k) => String(k).startsWith('url:')).map((k) => String(k).slice(4)).slice(0, 500);
+      const orBits = [];
+      const linkParams = [key];
+      if (ids.length) { orBits.push(`id IN (${ids.map(() => '?').join(',')})`); linkParams.push(...ids); }
+      if (urlHashes.length) { orBits.push(`url_hash IN (${urlHashes.map(() => '?').join(',')})`); linkParams.push(...urlHashes); }
+      if (orBits.length) {
+        const { results: viaSource } = await env.DB.prepare(
+          `SELECT * FROM ${table} WHERE ${col} = ? AND (${orBits.join(' OR ')}) ORDER BY created_at DESC LIMIT ${cap}`
+        ).bind(...linkParams).all();
+        addRows(viaSource);
+      }
+    }
+    const merged = [...seen.values()]
+      .sort((a, b) => (b.created_at || 0) - (a.created_at || 0)).slice(0, cap);
     await ensureDocumentsTable(env);
     const docCol = scope === 'personal' ? 'user_id' : 'community_id';
     const docClauses = terms.map(() => `(
@@ -7583,9 +7670,9 @@ async function searchAllLinks(env, scope, key, query, limit = null) {
       `SELECT * FROM uploaded_documents
        WHERE scope = ? AND ${docCol} = ?
          AND (${docClauses})
-        ORDER BY created_at DESC${resultLimitClause(limit)}`
+        ORDER BY created_at DESC LIMIT ${cap}`
     ).bind(...docParams).all();
-    return [...(results || []), ...(documents || []).map(documentAsLink)];
+    return hydrateSourcePosts(env, scope, key, [...merged, ...(documents || []).map(documentAsLink)]);
   } catch (_) { return []; }
 }
 
@@ -7609,7 +7696,7 @@ async function candidateLinks(env, scope, key, query, recentLimit = null) {
   for (const r of matches) byId.set(r.id, r);
   for (const r of (recent || [])) if (!byId.has(r.id)) byId.set(r.id, r);
   for (const r of (recentDocuments || []).map(documentAsLink)) if (!byId.has(r.id)) byId.set(r.id, r);
-  return [...byId.values()];
+  return hydrateSourcePosts(env, scope, key, [...byId.values()]);
 }
 
 function fuzzyMatchLinks(rows, query) {
@@ -7617,7 +7704,8 @@ function fuzzyMatchLinks(rows, query) {
   const qa = q.replace(/[^a-z0-9]/g, '');
   if (!q) return rows;
   return rows.filter(r => {
-    const bag = [r.title, r.url, r.filename, r.notes, r.content, r.tags].join(' ').toLowerCase();
+    const sources = (r.source_posts || []).map(post => `${post.message_text || ''} ${post.urls_json || ''}`).join(' ');
+    const bag = [r.title, r.url, r.filename, r.notes, r.content, r.tags, sources].join(' ').toLowerCase();
     const ba = bag.replace(/[^a-z0-9]/g, '');
     return bag.includes(q) || (qa.length >= 2 && ba.includes(qa));
   });
@@ -7642,8 +7730,6 @@ async function finalizePersonalSave(env, token, chatId, forumThreadId, athenaUse
       try {
         await env.DB.prepare('UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ' + AI_METADATA_VERSION + ', search_blob = NULL WHERE id = ?')
           .bind(r.title, JSON.stringify(merged), r.notes || '', r.id).run();
-        const gp = await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: r.title, notes: r.notes || '', tags: merged });
-        if (gp?.handled && !gp.ok) { await sendTelegramMessage(token, chatId, 'Saved to DB but GitHub sync failed: ' + (gp.error || 'unknown'), forumThreadId); }
       } catch (_) {}
       reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: userTagsPersonal }, r.notes);
     } else {
@@ -7656,14 +7742,13 @@ async function finalizePersonalSave(env, token, chatId, forumThreadId, athenaUse
         try {
           await env.DB.prepare('UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ' + AI_METADATA_VERSION + ', search_blob = NULL WHERE id = ?')
             .bind(savedTitle, JSON.stringify(merged), ai.description || r.notes || '', r.id).run();
-          await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: savedTitle, notes: ai.description || r.notes || '', tags: merged });
         } catch (_) {}
         reply = await formatSavedLinkReply(env, 'personal', savedTitle, rawUrl, ai, r.notes);
       } else {
         const fb = fallbackTagsFromMeta(rawUrl, { title: r.title, notes: r.notes, content: r.content });
         if (fb.length && r.id) {
           const mergedFb = [...new Set([...['telegram','personal'], ...fb])];
-          try { await env.DB.prepare('UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ' + AI_METADATA_VERSION + ', search_blob = NULL WHERE id = ?').bind(r.title, JSON.stringify(mergedFb), r.notes || '', r.id).run(); await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: r.title, notes: r.notes || '', tags: mergedFb }); } catch (_) {}
+          try { await env.DB.prepare('UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ' + AI_METADATA_VERSION + ', search_blob = NULL WHERE id = ?').bind(r.title, JSON.stringify(mergedFb), r.notes || '', r.id).run(); } catch (_) {}
           reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: fb }, r.notes);
         } else {
           reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, null, r.notes);
@@ -7695,14 +7780,6 @@ async function savePersonalUrl(env, userId, rawUrl, senderName, userNotes = '', 
     // keep scraped title if richer (e.g. GitHub full name)
   }
   const id = 'tgpl_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
-  const ghPersonal = await storeAddLink(env, 'personal', userId, {
-    id, url: rawUrl, url_hash: urlHash, title: meta.title, notes: meta.notes,
-    tags: ['telegram', 'dump'], created_at: Date.now(),
-    added_by_name: senderName, image_url: meta.image_url, site_name: meta.site_name,
-  });
-  if (ghPersonal.handled && !ghPersonal.ok) {
-    return { duplicate: false, error: `GitHub write failed: ${ghPersonal.error}` };
-  }
   try {
     await env.DB.prepare(
       `INSERT INTO personal_links (id, user_id, url, url_hash, title, notes, tags, created_at, image_url, site_name)
@@ -7765,11 +7842,17 @@ function chunkTelegramText(text, maxLen = TG_MSG_MAX) {
   return chunks;
 }
 
+/** Character budget for one help page, well inside the classic-HTML cap after
+ *  the navigation buttons are appended. */
+const HELP_PAGE_CHARS = 1500;
+
+/**
+ * Whole help panel as ready-to-send rich HTML. Command lines use the pattern
+ * "<b>N. /cmd <args></b> — what it is" plus an explanation line, separated by
+ * spacer paragraphs, per Telegram rich-message blocks (heading / paragraph /
+ * blockquote / list / pre — all verified live).
+ */
 function helpTextForSection(section, isGod = false) {
-  // Returns ready-to-send rich HTML. Command lines use the pattern
-  // "<b>N. /cmd <args></b> — what it is" + an indented explanation line,
-  // separated by spacer paragraphs, per Telegram rich-message blocks
-  // (heading / paragraph / blockquote / list / pre — all verified live).
   const cmd = (n, usage, what, extra = '') =>
     `<p><b>${n}. ${usage}</b>${what ? `<br>${what}` : ''}${extra ? `<br>${extra}` : ''}</p>`;
   const spacer = '<p></p>';
@@ -7794,28 +7877,30 @@ function helpTextForSection(section, isGod = false) {
   if (section === 'personal') {
     return [
       richHeading(3, '👤 Personal brain'),
-      richParagraph('<i>GOD rank only — your private second brain, separate from every community.</i>'),
+      richParagraph('<i>GOD rank only — your private second brain. Links you dump while the target is Personal land here, never in a community.</i>'),
       spacer,
-      cmd(1, `${codeHtml('/personal')} · ${codeHtml('/community')}`, 'Switch where dumps go. Personal saves links only you can search; community shares them with members.'),
-      cmd(2, `${codeHtml('/search')} ${codeHtml('<query>')}`, 'Search titles, notes and documents in the active brain. Results come as pages with prev/next buttons.'),
-      cmd(3, `${codeHtml('/ai')} ${codeHtml('<question>')}`, 'Ask your saved content. Answers cite your links and fall back to "no saved link" when nothing matches.'),
-      cmd(4, codeHtml('/export'), 'Export guide: Bot API export by default, session history backfill optional.'),
-      cmd(5, `${codeHtml('/delete')} ${codeHtml('<url>')}`, 'Delete one saved link. Works as a reply too. Personal mode deletes from your brain.'),
-      cmd(6, `${codeHtml('/edit')} ${codeHtml('<url>')} | title: … | notes: …`, "Rewrite a link's title and notes by hand."),
-      cmd(7, `${codeHtml('/dumpall')} ${codeHtml('on|off')} · ${codeHtml('/dumpsmart')}`, 'Multi-link posts: save every URL separately (all) or the primary one only (smart, default).'),
+      richParagraph('<b>Find things</b>'),
+      cmd(1, `${codeHtml('/search')} ${codeHtml('<query>')}`, 'Search titles, notes and documents. Results come as pages with prev/next buttons.'),
+      cmd(2, `${codeHtml('/ai')} ${codeHtml('<question>')}`, 'Ask your saved content. Answers cite your links and say so when nothing matches.'),
       spacer,
-      richParagraph(`<i>Setup: website Settings → Bot — GOD pastes the bot token + ${codeHtml('/id')} from this chat.</i>`)
+      richParagraph('<b>Change things</b>'),
+      cmd(3, codeHtml('/export'), 'Export guide: Bot API export by default, session history backfill optional.'),
+      cmd(4, `${codeHtml('/delete')} ${codeHtml('<url>')}`, 'Delete one saved link. Works as a reply too.'),
+      cmd(5, `${codeHtml('/edit')} ${codeHtml('<url>')} | title: … | notes: …`, "Rewrite a link's title and notes by hand."),
+      cmd(6, `${codeHtml('/dumpsmart')} · ${codeHtml('/dumpall on')} · ${codeHtml('/dumpall off')}`, 'One dump-mode setting for multi-link posts: smart keeps the primary link only (default), on saves every URL separately, off goes back to smart.'),
+      spacer,
+      richParagraph(`<i>Where dumps land is per chat: ${codeHtml('/mode')} shows it, ${codeHtml('/personal')} keeps them private, ${codeHtml('/community')} sends them to the linked community. Setup: website Settings → Bot — GOD pastes the bot token + ${codeHtml('/id')} from this chat.</i>`)
     ].join('\n');
   }
 
   if (section === 'community') {
     return [
       richHeading(3, '👥 Community'),
-      richParagraph('<i>One group = one shared brain. Members dump, everyone searches.</i>'),
+      richParagraph('<i>One group = one shared brain. Members dump links, everyone searches them.</i>'),
       spacer,
-      richParagraph('<b>Setup (owner)</b>'),
-      cmd(1, codeHtml('/community_verify'), 'Run inside the group. Creates the community, registers the bot, and makes you the owner.'),
-      cmd(2, codeHtml('/mode'), 'Show or switch the dump target for this chat.'),
+      richParagraph('<b>Setup (owner, once per group)</b>'),
+      cmd(1, codeHtml('/community_verify'), 'Run inside the group. Creates the community, registers the bot, and makes you the owner — or links your existing community when you already own one (never duplicates). Nothing else creates a community.'),
+      cmd(2, codeHtml('/mode'), 'Show where dumps in this chat land right now, or switch it between Personal and community.'),
       spacer,
       richParagraph('<b>Joining (members)</b>'),
       '<blockquote>1. Join the community Telegram group<br>2. Login on the website with the same Telegram<br>3. Send ' + codeHtml('/community_join <id>') + ' in the bot DM</blockquote>',
@@ -7823,55 +7908,47 @@ function helpTextForSection(section, isGod = false) {
       richParagraph('<b>Using</b>'),
       cmd(3, `${codeHtml('/search')} ${codeHtml('<query>')} · ${codeHtml('/ai')} ${codeHtml('<question>')}`, 'Search and ask over the shared brain — same as personal, but community scope.'),
       cmd(4, `${codeHtml('/community_list')} ${codeHtml('[id|name]')}`, 'List your communities, or show one community\'s details.'),
+      cmd(5, `${codeHtml('/community')} · ${codeHtml('/personal')}`, 'Switch YOUR dump target: your links land in the linked community or stay private. Creates and joins nothing — see 1 and Joining above.'),
       spacer,
       richParagraph('<b>Moderation (staff)</b>'),
-      cmd(5, `${codeHtml('/delete')} ${codeHtml('<url>')}`, 'Remove a link from the community brain (reply to a result works too).'),
-      cmd(6, `${codeHtml('/edit')} ${codeHtml('<url>')} | notes: …`, 'Fix a title or notes.'),
-      cmd(7, `${codeHtml('/topic')} ${codeHtml('<id>|off|here')}`, 'Lock the bot to one forum topic; dumps from other topics are ignored.'),
-      cmd(8, `${codeHtml('/kick')} ${codeHtml('<@user|id>')} · ${codeHtml('/clear')}`, 'Remove a member\'s access — they can rejoin later.'),
-      cmd(9, `${codeHtml('/admin')} · ${codeHtml('/demote')}`, 'Promote or demote — reply to the member\'s message. Owner/GOD only.'),
+      cmd(6, `${codeHtml('/delete')} ${codeHtml('<url>')}`, 'Remove a link from the community brain (reply to a result works too).'),
+      cmd(7, `${codeHtml('/edit')} ${codeHtml('<url>')} | notes: …`, 'Fix a title or notes.'),
+      cmd(8, `${codeHtml('/topic')} ${codeHtml('<id>|off|here')}`, 'A reply lock, not a clone. The bot only answers inside the locked topic until ' + codeHtml('/topic off') + '. To copy a topic into a brain use ' + codeHtml('/topic link') + ' below.'),
+      cmd(9, `${codeHtml('/kick')} ${codeHtml('<@user|id>')}`, 'Remove a member\'s access — they can rejoin later.'),
+      cmd(10, `${codeHtml('/admin')} · ${codeHtml('/demote')}`, 'Promote or demote — reply to the member\'s message. Owner/GOD only.'),
       spacer,
-      richParagraph(`<b>Owner:</b> ${codeHtml('/clear_db <id>')} wipes the community brain · ${codeHtml('/community_delete <id>')} deletes it (reply ${codeHtml('YES_DELETE_…')} to confirm). <i>Cloning lives in 📡 Channels.</i>`)
+      richParagraph(`<b>Topics live in 📡 Channels:</b> ${codeHtml('/clone')} inside a topic clones it with history + live follow, ${codeHtml('/topic_list')} lists bindings, ${codeHtml('/topic_unlink')} removes one. <b>Owner danger zone:</b> ${codeHtml('/clear_db <id>')} wipes the community brain · ${codeHtml('/community_delete <id>')} deletes the community (reply ${codeHtml('YES_DELETE_…')} to confirm).`)
     ].join('\n');
   }
 
   if (section === 'channels') {
     return [
       richHeading(3, '📡 Cloning channels, groups & topics'),
-      richParagraph('<i>Copy any Telegram chat into a brain — history backfill + live follow-up.</i>'),
+      richParagraph('<i>Two commands do everything. <b>/clone</b> backfills history first, then follows live; <b>/uclone</b> is the guided wizard with per-topic statistics. Community id always goes LAST, and every run asks Personal vs community before starting (your id comes pre-selected first). Stats show Group[Topic] / [Channel] with the usual ⏹ button.</i>'),
       spacer,
-      richParagraph('<b>Channels</b>'),
-      cmd(1, 'Add Athena as admin', 'Channel → Manage → Administrators — give it post access.'),
-      cmd(2, `${codeHtml('/channel_link')} ${codeHtml('<community_id> <channel_id>')}`, 'Links the channel: every new post is indexed live. IDs start with -100 — forward a post to @userinfobot to find one.'),
-      cmd(3, `${codeHtml('/channel_unlink')} ${codeHtml('<channel_id>')}`, 'Stop indexing a channel.'),
-      cmd(4, `${codeHtml('/channel_target')} ${codeHtml('<channel_id> community|personal|both')}`, 'Re-route where a linked channel saves (personal/both: GOD only).'),
-      cmd(5, `${codeHtml('/group_copy')} ${codeHtml('on|off')}`, 'Whole-group copy mode — index everything posted, not just links.'),
+      richParagraph('<b>/clone — history + live, community-scoped</b>'),
+      cmd(1, `${codeHtml('/clone')} ${codeHtml('<chat_id> <community_id>')}`, 'Whole chat (channels show as [Channel]): history first, then live. Runs as your selected account (' + codeHtml('/userbot_select') + '), first enabled if none.'),
+      cmd(2, `${codeHtml('/clone')} ${codeHtml('<chat_id> <topic_id> <community_id>')}`, 'That topic of that chat.'),
+      cmd(3, `${codeHtml('/clone')} ${codeHtml('<channel_id> <community_id>')}`, 'Clone a channel: full history first, then live indexing.'),
       spacer,
-      richParagraph('<b>Groups & forum topics</b>'),
-      cmd(6, `${codeHtml('/clone')} ${codeHtml('<group_id> community')}`, 'Whole group; forums clone topic-by-topic automatically. One topic only: add the topic id — or run /clone inside the topic.'),
-      cmd(7, `${codeHtml('/topic_link')} ${codeHtml('[community|personal|both]')}`, 'Bind the current forum topic to a brain.'),
-      cmd(8, `${codeHtml('/topic_list')} · ${codeHtml('/topic_unlink')}`, 'List topic bindings or unbind the current one.'),
-      cmd(9, `${codeHtml('/topic_target')} ${codeHtml('community|personal|both')}`, 'Switch the current topic\'s target brain.'),
+      richParagraph('<b>Forum topics</b>'),
+      cmd(4, `${codeHtml('/topic_list')} · ${codeHtml('/topic_unlink')}`, 'List bindings or remove one. Binding happens automatically when a clone runs.'),
+      cmd(5, `${codeHtml('/uclone')} ${codeHtml('<chat_id> [topic_id] [community_id]')}`, 'Guided wizard: measures history, shows per-topic statistics, then asks the destination (given community pinned first). Also written ' + codeHtml('/ubclone') + '.'),
+      cmd(6, `${codeHtml('/uclone')} ${codeHtml('<chat_id> <community_id>')}`, 'Guided wizard for a whole chat: same measuring and stats, straight to the destination picker.'),
       spacer,
-      richParagraph('<b>Clone control</b>'),
-      cmd(10, `${codeHtml('/clone_stop')} ${codeHtml('[chat_id]')}`, 'Stop a running history backfill.'),
-      cmd(11, `${codeHtml('/stats')}`, 'Live counters for every cloned chat, with refresh.'),
-      cmd(12, `${codeHtml('/transfers')}`, 'List all clone/backfill sessions with their ids.'),
-      cmd(13, `${codeHtml('/clone_del')} ${codeHtml('<transfer_id>')}`, "Delete everything one clone imported."),
-      cmd(14, `${codeHtml('/delete')} ${codeHtml('<chat_id> [topic_id]')}`, 'Delete a cloned chat or topic (alias: ' + codeHtml('/del') + ').'),
+      richParagraph('<b>Watch & stop</b>'),
+      cmd(7, `${codeHtml('/stats')}`, 'Newest-first dashboard, one row per cloned source: totals, fresh-in-24h line, live ON/OFF, per-topic pages. Forum groups show Group[topic]. LIVE means a real capture path exists. The beside button toggles live: ⏹ on a live row stops its live capture AND its running backfills — saved history stays; ▶️ on an idle row runs a full clone first, then live follows (needs the userbot account in the chat — fails loud otherwise; without the bot it runs in userbot mode and says so). Tapping a source opens its drill-down page with a 🗑 Delete from stats button: hides the row and stops live, saved links stay.'),
+      cmd(8, `${codeHtml('/status')} ${codeHtml('[all]')}`, 'What is indexing right now plus running and recent backfill jobs (' + codeHtml('all') + ' lists every user\'s jobs, GOD). There is no stop command — stopping happens from the ⏹ button on /stats.'),
+      cmd(9, `${codeHtml('/delete')}`, 'One delete command with a picker: one saved link, one whole cloned chat (imports + live capture, with confirm), or one backfill session (imports only, with confirm). Direct forms still work: ' + codeHtml('/delete <url>') + ' removes a link, ' + codeHtml('/delete <chat_id> [thread_id]') + ' removes a whole clone.'),
       spacer,
-      richParagraph('<b>Userbot</b> — powers history backfill; live indexing needs admin only'),
-      cmd(15, `${codeHtml('/uclone')} ${codeHtml('<chat_id> [topic_id] community|personal|both')}`, 'Explicit userbot clone — the GOD-only way to fill your personal brain. Without the userbot, /clone still follows live posts.'),
-      cmd(16, `${codeHtml('/userbotconnect')} ${codeHtml('<api_id> <api_hash> <session> <community_id>')}`, 'GOD, DM only. Stores the session that reads history. It is a secret — never paste it in a group; revoke it in Telegram Settings → Devices when done.'),
-      cmd(17, `${codeHtml('/userbot_status')}`, 'Is the userbot connected, and which chats does it follow.'),
-      cmd(17, `${codeHtml('/userbot_follow')} · ${codeHtml('/userbot_unfollow')}`, 'Add or remove live-follow chats for the userbot.'),
-      cmd(18, `${codeHtml('/userbot_disconnect')} · ${codeHtml('/userbot_del')}`, 'Disconnect, or fully delete the stored session.'),
+      richParagraph('<b>Userbot accounts (GOD)</b>'),
+      cmd(10, `${codeHtml('/userbot_add')} ${codeHtml('<label> <api_id> <api_hash> <session>')}`, 'Connect an account (label defaults to main). Re-authenticate with the same label; adding another account never changes the selection. Sessions stay encrypted on the server — DM only.'),
+      cmd(11, `${codeHtml('/userbot_accounts')} · ${codeHtml('/userbot_select')} · ${codeHtml('/userbot_status')}`, 'List and switch accounts, and open the health dashboard: identities, live connection, saved follows, backfill and per-topic progress, recent errors. Switching accounts moves your live follows to the new account wherever it can see the chat.'),
+      cmd(12, `${codeHtml('/userbot_unfollow')} ${codeHtml('<chat_id> <community_id>')}`, 'Stop live capture for one chat in one community (keeps its history). The ⏹ button on /stats does the same thing with one tap.'),
+      cmd(13, `${codeHtml('/userbot_del')} ${codeHtml('<label>')} · ${codeHtml('/userbot_disconnect')}`, 'Remove one account, or disconnect all of them. Their follows and running clones stop too — switch accounts (12) instead if you just want to move live cloning elsewhere.'),
       spacer,
-      richParagraph('<b>Legacy backfill</b>'),
-      cmd(19, `${codeHtml('/index_start')} · ${codeHtml('/index_status')} · ${codeHtml('/index_stop')}`, 'Older session-based backfill — /clone is the normal path now.'),
-      spacer,
-      richParagraph(`<b>Recipe:</b> ${codeHtml('/channel_link')} → ${codeHtml('/userbotconnect')} → ${codeHtml('/clone')} → ${codeHtml('/stats')} → ${codeHtml('/clone_stop')}`),
-      richParagraph('<i>Cloning never edits the source chat. If the userbot cannot see a chat, add it there first and retry.</i>')
+      richParagraph(`<b>Recipes:</b> group: ${codeHtml('/community_verify')} → ${codeHtml('/clone <chat_id> <community_id>')} → ${codeHtml('/stats')}; channel: ${codeHtml('/clone <-100…> <community_id>')} → ${codeHtml('/stats')}; history + live: ${codeHtml('/userbot_add')} → ${codeHtml('/userbot_select')} → ${codeHtml('/uclone <chat_id> <community_id>')} → ${codeHtml('/stats')}`),
+      richParagraph('<i>Cloning never edits the source chat. The selected userbot account must see the source chat; every run asks Personal vs community first.</i>')
     ].join('\n');
   }
 
@@ -7881,26 +7958,25 @@ function helpTextForSection(section, isGod = false) {
       richParagraph('<i>Instance-host only. These change the whole deployment.</i>'),
       spacer,
       richParagraph('<b>Brains & targets</b>'),
-      cmd(1, `${codeHtml('/personal')} · ${codeHtml('/community')} · ${codeHtml('/mode')}`, 'Where your dumps land: private brain or the linked community.'),
-      cmd(2, `${codeHtml('/channel_target')} ${codeHtml('<channel_id> community|personal|both')}`, 'Re-route a linked channel\'s indexing target.'),
-      cmd(3, `${codeHtml('/dumpall')} ${codeHtml('on|off')} · ${codeHtml('/dumpsmart')}`, 'Every URL in a post, or the primary one only.'),
+      cmd(1, `${codeHtml('/personal')} · ${codeHtml('/community')} · ${codeHtml('/mode')}`, 'Where YOUR dumps land: private brain or the linked community. Same switch as in 👥 Community — repeated here because only GOD has a personal brain.'),
+      cmd(2, `${codeHtml('/dumpsmart')} · ${codeHtml('/dumpall on|off')}`, 'One dump-mode setting: smart keeps the primary link only (default), on saves every URL. Channel cloning lives in 📡 Channels.'),
       spacer,
       richParagraph('<b>Tagging & structure</b>'),
-      cmd(4, `${codeHtml('/forcetags')} ${codeHtml('[community_id]')}`, 'AI re-tags every link (existing tags can be overwritten).'),
-      cmd(5, codeHtml('/tag_untagged'), 'Tags only rows with no real tags — cheap first pass.'),
-      cmd(6, codeHtml('/structure'), 'One-pass DB cleanup: strips tracking URLs, merges near-duplicate links, cleans titles and notes. Runs in the background with live progress.'),
+      cmd(3, `${codeHtml('/forcetags <community_id>')} ${codeHtml('[all]')}`, 'Run a retag review of one brain. The community id is required, then pick the community brain or your personal brain. One batch of 150 links per run; add all to sweep that whole brain in the background — no retyping. Drops junk tags, fixes wrong ones, scrapes thin links, then reports every change.'),
+      cmd(5, codeHtml('/structure'), 'One-pass DB cleanup: strips tracking URLs, merges near-duplicate links, cleans titles and notes, trims multi-link notes to each link’s own section. Runs in the background with live progress.'),
       spacer,
       richParagraph('<b>Backup & import</b>'),
-      cmd(7, codeHtml('/backup'), 'Full database backup (SQL, gzipped) sent to this chat.'),
-      cmd(8, `${codeHtml('/import')} — ${boldHtml('reply to a backup file')}`, 'Merges the backup into your CURRENT brains: community links → the linked community (or ' + codeHtml('/import <community_id>') + '), personal links → your personal brain. Duplicates skipped; runs in the background with progress.'),
+      cmd(6, codeHtml('/backup'), 'Full database backup (SQL, gzipped) sent to this chat.'),
+      cmd(7, `${codeHtml('/import')} — ${boldHtml('reply to a backup file')}`, 'Merges the backup into your CURRENT brains: community links → the linked community, the backup’s original community, or ' + codeHtml('/import <community_id>') + ', personal links → your personal brain. Duplicates skipped; runs in the background with progress. Use ' + codeHtml('/backup') + ' (6) to make the file.'),
       spacer,
       richParagraph('<b>Channels, cloning & userbot</b>'),
       richParagraph(`<i>Channel/group/topic cloning and userbot commands live in the ${boldHtml('📡 Channels')} panel — most are GOD/owner gated and non-GOD just get "GOD rank only".</i>`),
       spacer,
       richParagraph('<b>Instance</b>'),
-      cmd(7, `${codeHtml('/setlogchannel')} ${codeHtml('<chat_id>')} ${codeHtml('(/setlog)')}`, 'Mirror operational events to a log channel.'),
-      cmd(8, `${codeHtml('/logs')} ${codeHtml('[n|clear]')}`, 'Tail the in-app structured log (last n lines, default 30) — no SSH needed.'),
-      cmd(9, `${codeHtml('/db')} · ${codeHtml('/clear_personal_db')} · ${codeHtml('/restart')}`, 'Storage info · wipe your personal brain (confirm with YES) · restart the self-host service.'),
+      cmd(8, `${codeHtml('/setlogchannel')} ${codeHtml('<chat_id>')} ${codeHtml('(/setlog)')}`, 'Mirror operational events to a log channel.'),
+      cmd(9, `${codeHtml('/log')} ${codeHtml('[n|clear|dokploy [app] [n]|buildlogs [app] [n]|--json [n]]')}`, 'Real runtime logs: app log tail (default 30), Dokploy container logs, last deployment build output, or machine-readable JSON. AI agents: GET /api/logs?follow=1 (NDJSON).'),
+      cmd(10, `${codeHtml('/dok')} ${codeHtml('[apps|status|logs|buildlogs|deploy|redeploy|restart|stop|start]')}`, 'Dokploy control (self-host). deploy/redeploy confirm the accepted request only — follow /dok buildlogs and /dok status.'),
+      cmd(11, `${codeHtml('/db')} · ${codeHtml('/restart')} · ${codeHtml('/clear_personal_db')}`, 'Storage info · restart the service · <b>wipes your personal brain</b> (asks for YES first).'),
       spacer,
       richParagraph('<i>Website Settings → AI keys, bot binding, storage.</i>')
     ].join('\n');
@@ -7913,7 +7989,7 @@ function helpTextForSection(section, isGod = false) {
     `• ${boldHtml('👥 Community')} — setup, joining, moderation`,
     `• ${boldHtml('📡 Channels')} — cloning channels, groups, topics`
   ];
-  if (isGod) sections.push(`• ${boldHtml('🛡 GOD tools')} — structure, import, backup, tagging, logs`);
+  if (isGod) sections.push(`• ${boldHtml('🛡 GOD tools')} — tagging, dupe cleanup, backup, logs, instance`);
   return [
     richHeading(3, '🧭 Athena help'),
     richParagraph('<i>Your second brain: dump links, search them, ask AI.</i>'),
@@ -7926,6 +8002,45 @@ function helpTextForSection(section, isGod = false) {
     spacer,
     richParagraph('<i>Settings, AI keys and bot setup live on the website. Tap any #tag chip to search it.</i>')
   ].join('\n');
+}
+
+/**
+ * Split a help panel into pages of whole blocks. A section label always travels
+ * with the commands it introduces, so no page ends on a bare heading.
+ */
+function helpPagesFor(section, isGod = false) {
+  const lines = String(helpTextForSection(section, isGod) || '').split('\n').filter((line) => line.trim() !== '');
+  const isLabel = (line) => /^<p><b>[^<]+<\/b><\/p>$/.test(line) || /^<h[1-6]>/.test(line);
+  const sizeOf = (line) => richHtmlToClassic(line).length + 1;
+  const pages = [[]];
+  let length = 0;
+  for (const line of lines) {
+    if (pages.at(-1).length && length + sizeOf(line) > HELP_PAGE_CHARS) {
+      const carried = [];
+      while (pages.at(-1).length && isLabel(pages.at(-1).at(-1))) carried.unshift(pages.at(-1).pop());
+      pages.push(carried);
+      length = carried.reduce((sum, label) => sum + sizeOf(label), 0);
+    }
+    pages.at(-1).push(line);
+    length += sizeOf(line);
+  }
+  return pages.map((page) => page.join('\n')).filter(Boolean);
+}
+
+function helpSectionTitle(section, isGod = false) {
+  const heading = /<h[1-6]>([\s\S]*?)<\/h[1-6]>/.exec(String(helpTextForSection(section, isGod) || ''))?.[1];
+  return heading || '🧭 Athena help';
+}
+
+/** One page of a help panel. The panel's own heading already names it on page
+ *  one, so only later pages carry the compact "section · page n of m" line. */
+function helpPageHtml(section, page = 0, isGod = false) {
+  const pages = helpPagesFor(section, isGod);
+  if (pages.length <= 1) return { html: pages[0] || helpTextForSection(section, isGod), pages: 1, page: 0 };
+  const current = Math.max(0, Math.min(pages.length - 1, Number(page) || 0));
+  if (current === 0) return { html: pages[0], pages: pages.length, page: 0 };
+  const header = richParagraph(`${boldHtml(helpSectionTitle(section, isGod))} <i>· page ${current + 1} of ${pages.length}</i>`);
+  return { html: `${header}\n${pages[current]}`, pages: pages.length, page: current };
 }
 
 function parseTelegramEditPayload(rest, replyMessage = null) {
@@ -8004,9 +8119,6 @@ function richHeading(level, html) {
 
 function richParagraph(html) { return '<p>' + html + '</p>'; }
 
-function richDetails(summaryHtml, bodyHtml, open = false) {
-  return '<details' + (open ? ' open' : '') + '><summary>' + summaryHtml + '</summary>' + '\n' + bodyHtml + '</details>';
-}
 
 // Split long rich HTML only at finished block boundaries so no <table>/<details>
 // tag is left open across chunks.
@@ -8034,7 +8146,8 @@ function chunkRichHtml(text, maxLen = TG_RICH_MSG_MAX) {
 // Convert rich HTML back to classic-HTML sendable text (old-API fallback).
 function richHtmlToClassic(richHtml) {
   return String(richHtml || '')
-    .replace(/<tg-button-row[^>]*>|<\/tg-button-row>|<tg-button[^>]*>|<\/tg-button>/gi, ' ')
+    .replace(/<tg-button\b[^>]*>[\s\S]*?<\/tg-button>/gi, '')
+    .replace(/<\/?tg-button-row[^>]*>/gi, '')
     .replace(/<h[1-6]>|<\/h[1-6]>|<figure>|<\/figure>|<figcaption>|<\/figcaption>/gi, '\n')
     .replace(/<table[^>]*>|<\/table>|<tr[^>]*>|<\/tr>/gi, '\n')
     .replace(/<th[^>]*>|<\/th>|<td[^>]*>|<\/td>/gi, ' ')
@@ -8046,15 +8159,33 @@ function richHtmlToClassic(richHtml) {
     .replace(/<pre[^>]*>|<\/pre>/gi, '\n')
     .replace(/<a name="[^"]*"><\/a>/gi, '')
     .replace(/<input[^>]*>/gi, '')
-    .replace(/<tg-[a-z-]+[^>]*>|<\/tg-[a-z-]+>/gi, '')
-    .replace(/<a href="(?:https?:|mailto:|tel:)[^"]*">/gi, '')
-    .replace(/<\/a>/gi, '')
-    .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+    .replace(/<tg-[a-z-]+[^>]*>|<\/tg-[a-z-]+>/gi, '');
+}
+
+function richFallbackKeyboard(html) {
+  const decode = (value) => String(value).replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+  const rows = [...String(html || '').matchAll(/<tg-button-row\b[^>]*>([\s\S]*?)<\/tg-button-row>/gi)].map(row => {
+    return [...row[1].matchAll(/<tg-button\b([^>]*)>([\s\S]*?)<\/tg-button>/gi)].flatMap(match => {
+      const attrs = Object.fromEntries([...match[1].matchAll(/([\w-]+)="([^"]*)"/g)].map(a => [a[1], decode(a[2])]));
+      const text = decode(match[2].replace(/<[^>]*>/g, ''));
+      if (attrs.type === 'callback_data' && attrs.data) return [{ text, callback_data: attrs.data }];
+      if (attrs.type === 'url' && attrs.url) return [{ text, url: attrs.url }];
+      return [];
+    });
+  }).filter(row => row.length);
+  return { inline_keyboard: rows };
 }
 
 async function sendRichFallback(token, chatId, richHtml, buttonsHtml, threadId) {
-  const plain = richHtmlToClassic((richHtml || '') + (buttonsHtml ? '\n' + buttonsHtml : ''));
-  return sendTelegramMessage(token, chatId, plain, threadId, 'HTML');
+  const body = (richHtml || '') + (buttonsHtml ? '\n' + buttonsHtml : '');
+  const keyboard = richFallbackKeyboard(body);
+  let last;
+  for (const text of chunkTelegramHtml(richHtmlToClassic(body))) {
+    const response = await telegramApi(token, 'sendMessage', { chat_id: chatId, text, parse_mode: 'HTML', reply_markup: keyboard, ...(threadId != null ? { message_thread_id: Number(threadId) } : {}) });
+    if (!response.ok) { console.error('Rich classic fallback failed:', response.description); return response; }
+    last = { ok: true, message_id: response.result?.message_id };
+  }
+  return last || { ok: true };
 }
 
 async function sendTelegramRichMessage(token, chatId, richHtml, threadId = null, buttonsHtml = null) {
@@ -8070,6 +8201,8 @@ async function sendTelegramRichMessage(token, chatId, richHtml, threadId = null,
       if (threadId != null && threadId !== '' && !Number.isNaN(Number(threadId))) payload.message_thread_id = Number(threadId);
       const data = await telegramApi(token, 'sendRichMessage', payload);
       if (!data.ok) {
+        if (data.parameters?.retry_after || Number(data.error_code) >= 500) return data;
+        console.error('sendRichMessage failed, falling back to classic:', data.description || JSON.stringify(data).slice(0, 300));
         if (i === 0) return sendRichFallback(token, chatId, richHtml, buttonsHtml, threadId);
         return { ok: false, error: data.description || 'sendRichMessage failed', raw: data };
       }
@@ -8078,7 +8211,7 @@ async function sendTelegramRichMessage(token, chatId, richHtml, threadId = null,
     return last;
   } catch (err) {
     console.error('sendRichMessage threw:', err?.message || err);
-    return sendRichFallback(token, chatId, richHtml, buttonsHtml, threadId);
+    return { ok: false, error: 'Rich message transport failed' };
   }
 }
 
@@ -8092,10 +8225,206 @@ async function editTelegramRichMessage(token, chatId, messageId, richHtml, threa
   };
   if (threadId != null && threadId !== '' && !Number.isNaN(Number(threadId))) payload.message_thread_id = Number(threadId);
   const data = await telegramApi(token, 'editMessageText', payload);
-  if (!data.ok) {
-    return editTelegramMessage(token, chatId, messageId, richHtmlToClassic(body), null, threadId, 'HTML');
+  if (!data.ok && !/message is not modified/i.test(data.description || '')) {
+    console.error('Rich edit rejected:', data.description || 'Unknown Telegram error');
+    if (data.parameters?.retry_after || Number(data.error_code) >= 500) return data;
+    const fallback = await editTelegramMessage(token, chatId, messageId, richHtmlToClassic(body), richFallbackKeyboard(body), threadId, 'HTML');
+    if (!fallback.ok && !/message is not modified/i.test(fallback.description || '')) console.error('Rich classic edit failed:', fallback.description || 'Unknown Telegram error');
+    return fallback;
   }
   return data;
+}
+
+/**
+ * Retag review engine for one brain. /forcetags and its scope buttons both
+ * call this, so the two paths cannot drift. Community and personal brains are
+ * separate scopes and the caller always names exactly one.
+ */
+async function runForcetagsReview(env, { token, chatId, forumThreadId = null, tgUserId = null, scope = 'community', communityId = '', wantAll = false }) {
+  const personal = scope === 'personal';
+  const scopeLabel = personal ? 'personal' : 'community';
+  await ensureAiConfigTable(env);
+  const cfgFt = await getInstanceAiConfig(env);
+  const aiMode = !!cfgFt?.api_key;
+  const BATCH = 150;
+  let scopeKey = String(communityId || '');
+  if (personal) {
+    // Personal review covers the requester's own brain, never every user's.
+    scopeKey = tgUserId && isGodTgId(tgUserId, env) ? `telegram_${tgUserId}` : '';
+    if (!scopeKey) {
+      const godRow = await env.DB.prepare("SELECT id FROM users WHERE id LIKE 'telegram_%' ORDER BY created_at ASC LIMIT 1").first().catch(() => null);
+      scopeKey = godRow?.id || '';
+    }
+    if (!scopeKey) {
+      await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No personal brain on this instance.`, forumThreadId).catch(() => {});
+      return;
+    }
+  }
+  const scopeSuffix = personal ? '' : ` · ${codeHtml(escHtml(scopeKey))}`;
+  const think = await sendTelegramFormatted(token, chatId, `${boldHtml('🏷')} Retag review (${wantAll ? 'all · ' : ''}${scopeLabel}${scopeSuffix})… ${aiMode ? 'AI on' : 'no AI key → rule fallback'}`, forumThreadId);
+  const thinkId = think?.message_id;
+  const junkLike = [...RETAG_JUNK_TAGS].map((j) => `tags LIKE '%${j}%'`).join(' OR ');
+  // All-mode pages one scope by stable id order with its own offset: in-place
+  // tag edits never move a row, so every row is visited once and the sweep
+  // terminates. Single-batch mode keeps the junk-first order with no offset.
+  const sweepOffsets = new Map();
+  const table = personal ? 'personal_links' : 'links';
+  const pickTargets = async () => {
+    await ensureSearchColumns(env);
+    const off = wantAll ? (sweepOffsets.get(table) || 0) : 0;
+    const order = wantAll ? 'id ASC' : `CASE WHEN COALESCE(tags,'') IN ('', '[]', 'null', '["untagged"]') THEN 0 WHEN ${junkLike} THEN 1 ELSE 2 END, created_at DESC`;
+    const page = wantAll ? `LIMIT ${BATCH} OFFSET ${off}` : `LIMIT ${BATCH}`;
+    const where = personal ? ' AND user_id = ?' : ` AND community_id = '${scopeKey.replace(/'/g, '')}'`;
+    const stmt = env.DB.prepare(
+      `SELECT id, url, title, notes, tags, search_blob FROM ${table}
+       WHERE 1=1${where}
+       ORDER BY ${order} ${page}`
+    );
+    const { results } = await (personal ? stmt.bind(scopeKey) : stmt).all();
+    if (wantAll && (results || []).length) sweepOffsets.set(table, off + results.length);
+    return (results || []).map((row) => ({ table, col: scopeKey, row }));
+  };
+  const st = { done: 0, changed: 0, failed: 0, aiHits: 0, ruleHits: 0, addedCounts: {}, removedCounts: {}, rejectCounts: {}, changeLines: [], failLines: [] };
+  const editProgress = async (total) => {
+    if (!thinkId) return;
+    const bar = total
+      ? (() => { const pct = Math.min(100, Math.round((st.done / total) * 100)); const f = Math.round((pct / 100) * 18); return `▮`.repeat(f) + '▯'.repeat(18 - f) + `\n${codeHtml(pct + '% · ' + st.done + '/' + total)}`; })()
+      : codeHtml(`${st.done} reviewed`);
+    await telegramApi(token, 'editMessageText', {
+      chat_id: chatId, message_id: thinkId, parse_mode: 'HTML',
+      text: `${boldHtml('🏷 Force tags')}${wantAll ? ' (sweeping all)' : ''}\n${bar}\nchanged ${st.changed} · AI ${st.aiHits} · rules ${st.ruleHits}`
+    }).catch(() => {});
+  };
+  const processTargets = async (targets) => {
+    for (const t of targets) {
+      try {
+        const r = t.row;
+        const current = parseStoredTags(r.tags);
+        let title = r.title || ''; let notes = r.notes || '';
+        let meta = { title, notes, content: r.search_blob || '' };
+        // Thin link: scrape the page so the review (AI or rules) reads facts.
+        // Title alone is not enough — names without a description are what
+        // produced name-plated tags, so scrape whenever notes+content are empty.
+        if (!meta.notes && !meta.content && /^https?:\/\//i.test(r.url || '')) {
+          try {
+            const sc = await scrapeLinkMetadata(r.url, env);
+            if (sc) {
+              if (!title && sc.title) title = String(sc.title).slice(0, 200);
+              if (!notes && sc.description) notes = String(sc.description).slice(0, 600);
+              meta = { title, notes, content: String(sc.content || '').slice(0, 4000) };
+            }
+          } catch (_) {}
+        }
+        const nameBans = [...domainNameBans(r.url)];
+        // Deterministic facts first: what the page plainly is drives the
+        // tags, so the same link always lands on the same words.
+        const rule = classifyTags(r.url, meta);
+        const vocab = await recentTagsForScope(env, personal ? 'personal' : 'community', t.col);
+        // Provenance stamps survive only when the content is about them.
+        const curated = current.filter((x) => !RETAG_JUNK_TAGS.has(x) || (x === 'telegram' && rule.facts.telegram));
+        st.rejectCounts.junk = (st.rejectCounts.junk || 0) + (current.length - curated.length);
+        let candidate = [...curated, ...rule.tags];
+        let usedAi = false;
+        // The model only fills gaps. When the rules already named a type and
+        // a topic there is nothing left to ask, which keeps the sweep cheap
+        // and repeatable.
+        const ruleTopics = rule.tags.filter((x) => !PLATFORM_SET.has(x)).length;
+        if (aiMode && ruleTopics < 2) {
+          try {
+            const ai = await aiDescribeAndTag(env, r.url, meta, vocab, cfgFt, curated, nameBans);
+            if (ai?.tags?.length) {
+              candidate = [...candidate, ...ai.tags];
+              usedAi = true; st.aiHits++;
+              if (ai.title && !title) title = String(ai.title).slice(0, 200);
+              if (ai.description && !notes) notes = String(ai.description).slice(0, 600);
+            }
+          } catch (_) {}
+        }
+        if (!usedAi) st.ruleHits++;
+        // Nothing reaches storage unless it is canonical or already in use in
+        // this scope. This is what stops model-invented tags.
+        const verdict = validateTags(candidate, { vocabulary: vocab, banned: nameBans, max: 8 });
+        for (const rej of verdict.rejected) st.rejectCounts[rej.reason] = (st.rejectCounts[rej.reason] || 0) + 1;
+        const newTags = verdict.tags;
+        const added = newTags.filter((x) => !current.includes(x));
+        const removed = current.filter((x) => !newTags.includes(x));
+        const metaRescued = title !== (r.title || '') || notes !== (r.notes || '');
+        if (added.length || removed.length || metaRescued) {
+          await env.DB.prepare(
+            `UPDATE ${t.table} SET tags = ?, title = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
+          ).bind(JSON.stringify(newTags || []), title, notes, r.id).run();
+          markMeiliScopeDirty(env, personal ? 'personal' : 'community', t.col);
+          st.changed++;
+          for (const a of added) st.addedCounts[a] = (st.addedCounts[a] || 0) + 1;
+          for (const x of removed) st.removedCounts[x] = (st.removedCounts[x] || 0) + 1;
+          if (st.changeLines.length < 40) {
+            const bits = [...added.map((a) => `+${a}`), ...removed.map((x) => `−${x}`)].join(' ');
+            st.changeLines.push(`<li><b>${escHtml((title || r.url || 'link').slice(0, 70))}</b> ${escHtml(bits)}${metaRescued && !added.length && !removed.length ? ' (title/notes rescued)' : ''}</li>`);
+          }
+        }
+      } catch (e) {
+        // A rejected write (missing column, bad JSON, DB hiccup) used to count
+        // as reviewed with no trace — the report then claimed work that never
+        // landed. Count it and say so.
+        st.failed++;
+        if (st.failLines.length < 5) st.failLines.push(`${escHtml(String(t.row?.url || t.row?.id || 'row').slice(0, 60))}: ${escHtml(String(e?.message || e).slice(0, 120))}`);
+      }
+      st.done++;
+      if (st.done % 10 === 0) await editProgress(wantAll ? null : targets.length);
+    }
+  };
+  const buildReport = (moreRemain) => {
+    const top = (m) => Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([tag, c]) => `${escHtml(tag)}×${c}`).join(', ');
+    const totalAdded = Object.values(st.addedCounts).reduce((a, b) => a + b, 0);
+    const totalRemoved = Object.values(st.removedCounts).reduce((a, b) => a + b, 0);
+    const rejected = Object.entries(st.rejectCounts).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
+    return [
+      richHeading(3, '🏷 Force tags — report'),
+      `<p>Mode: ${aiMode ? 'AI review' : 'rule fallback (no AI key)'} · Scope: ${scopeLabel}${scopeSuffix}</p>`,
+      `<p>Reviewed ${st.done} · Changed ${st.changed} · Unchanged ${st.done - st.changed} (AI ${st.aiHits} · rules ${st.ruleHits})</p>`,
+      `<p>Tags added: ${totalAdded}${top(st.addedCounts) ? ` (${top(st.addedCounts)})` : ''} · Removed: ${totalRemoved}${top(st.removedCounts) ? ` (${top(st.removedCounts)})` : ''}</p>`,
+      rejected.length ? `<p>Rejected ${rejected.reduce((a, [, n]) => a + n, 0)}: ${rejected.map(([reason, n]) => `${escHtml(reason)} ${n}`).join(' · ')}</p>` : '',
+      st.changeLines.length ? `<ul>${st.changeLines.join('')}</ul>` : '<p>No tag changes needed — everything already fits.</p>',
+      st.failed ? `<p>⚠️ ${st.failed} row(s) could not be updated${st.failLines.length ? `: ${st.failLines.join('; ')}` : ''}.</p>` : '',
+      moreRemain ? '<p><i>More remain — run /forcetags again to continue.</i></p>' : (st.changed ? '' : '<p>All caught up.</p>'),
+    ].join('\n');
+  };
+  if (!wantAll) {
+    const targets = await pickTargets();
+    if (!targets.length) {
+      if (thinkId) await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: thinkId, text: `${boldHtml('✅')} Nothing to review — that brain has no links.`, parse_mode: 'HTML' }).catch(() => {});
+      return;
+    }
+    // Review in the background. A full batch scrapes thin links and calls the
+    // model per row, which outlives Telegram's webhook timeout — the retry
+    // then re-ran the same batch and the ACK never arrived. Reply now, report
+    // when the batch is done.
+    runInBackground(env, (async () => {
+      try {
+        await processTargets(targets);
+        await editProgress(targets.length);
+        await sendTelegramRichMessage(token, chatId, buildReport(targets.length >= BATCH), forumThreadId);
+      } catch (e) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} Retag failed: ${escHtml(String(e?.message || e).slice(0, 200))}`, forumThreadId).catch(() => {});
+      }
+    })());
+  } else {
+    // Whole-brain sweep in the background: webhook ACKs now, progress edits +
+    // final report land as the batches complete.
+    runInBackground(env, (async () => {
+      try {
+        for (;;) {
+          const batch = await pickTargets();
+          if (!batch.length) break;
+          await processTargets(batch);
+          await editProgress(null);
+        }
+        await sendTelegramRichMessage(token, chatId, buildReport(false), forumThreadId);
+      } catch (e) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} Sweep failed: ${escHtml(String(e?.message || e).slice(0, 200))}`, forumThreadId).catch(() => {});
+      }
+    })());
+  }
 }
 
 async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
@@ -8110,6 +8439,38 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
     const u = await resolveAthenaUserFromTg(env, tgUserId);
     const personal = u ? await findPersonalBotForOwner(env, u.id) : null;
     if (personal?.bot_token) token = await decryptBotToken(env, personal.bot_token);
+  }
+  if (data.startsWith('uc:')) {
+    const user = await resolveAthenaUserFromTg(env, tgUserId);
+    try {
+      await ucloneManager(env).callback({ data, tgUserId, user, chatId, messageId: msgId, callbackId: cq.id, token, isGod: isGodTgId(tgUserId, env) });
+    } catch (error) {
+      await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: cloneFailure(error).message, show_alert: true });
+    }
+    return new Response('OK', { status: 200, headers: corsHeaders });
+  }
+
+  // ---- /forcetags brain picker ----
+  if (data.startsWith('ft:')) {
+    if (!tgUserId || !isGodTgId(tgUserId, env)) {
+      await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'GOD rank only', show_alert: true }).catch(() => {});
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    const [, rawScope, ftCommunityId = '', rawMode = '1'] = data.split(':');
+    if (!/^c_/.test(ftCommunityId)) {
+      await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'This prompt expired — run /forcetags again.', show_alert: true }).catch(() => {});
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
+    const ftScope = rawScope === 'p' ? 'personal' : 'community';
+    const ftLabel = ftScope === 'personal' ? '👤 personal brain' : '📚 community brain';
+    await editTelegramMessage(token, chatId, msgId, `${boldHtml('🏷 Retag review')} — ${ftLabel} ${codeHtml(escHtml(ftCommunityId))}`, null, threadId).catch(() => {});
+    try {
+      await runForcetagsReview(env, { token, chatId, forumThreadId: threadId, tgUserId, scope: ftScope, communityId: ftCommunityId, wantAll: rawMode === 'a' });
+    } catch (e) {
+      await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} Retag failed: ${escHtml(String(e?.message || e).slice(0, 200))}`, threadId).catch(() => {});
+    }
+    return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
   // ---- Telegram search pagination ----
@@ -8157,6 +8518,46 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
+  // ---- Clone progress-card buttons (Stop / Refresh) ----
+  if (data.startsWith('clone_ctrl:')) {
+    await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
+    const [, ctrlAction, rawChat] = data.split(':');
+    const targetChat = normalizeTgChatId(String(rawChat || ''));
+    if (ctrlAction === 'stop') {
+      const { results } = await env.DB.prepare(
+        `SELECT id FROM index_jobs WHERE chat_id = ? AND status IN ('queued','running')`
+      ).bind(targetChat).all().catch(() => ({ results: [] }));
+      for (const j of results || []) {
+        await env.DB.prepare(`UPDATE index_jobs SET status = 'stopping', updated_at = ? WHERE id = ?`).bind(Date.now(), j.id).run().catch(() => {});
+      }
+    }
+    // The card is a rich Body API message (formatForumCloneCardRich + in-body
+    // buttons), so a classic editMessageText silently does nothing — that is why
+    // Stop/Refresh looked dead. Edit it as a rich message first, then fall back
+    // to classic if the bot cannot send rich bodies.
+    if (ctrlAction === 'stop' || ctrlAction === 'refresh') {
+      const jobs = await forumCardJobs(env, targetChat);
+      const topicIds = await forumCardTopicIds(env, targetChat);
+      if (ctrlAction === 'stop') {
+        // Every queued/running topic was set 'stopping' above (all at once).
+        // Close the live card: render the final state WITHOUT the Stop/Refresh
+        // buttons and a 'stopped' banner so it is plain the clone is halted.
+        const stopBanner = boldHtml('⏹ Stopped — cloning halted for all topics.') + '\n';
+        const rich = stopBanner + formatForumCloneCardRich({ chatId: targetChat, chatName: '', topicIds, jobs });
+        const classic = stopBanner + formatForumCloneCard({ chatId: targetChat, chatName: '', topics: topicIds.length, topicIds, jobs });
+        const edited = await editTelegramRichMessage(token, chatId, msgId, rich, threadId, null);
+        if (!edited?.ok) await editTelegramMessage(token, chatId, msgId, classic, null, threadId).catch(() => {});
+      } else {
+        const buttons = cloneCardButtonsRich(targetChat);
+        const rich = formatForumCloneCardRich({ chatId: targetChat, chatName: '', topicIds, jobs }) + (buttons ? '\n' + buttons : '');
+        const classic = formatForumCloneCard({ chatId: targetChat, chatName: '', topics: topicIds.length, topicIds, jobs });
+        const edited = await editTelegramRichMessage(token, chatId, msgId, rich, threadId, null);
+        if (!edited?.ok) await editTelegramMessage(token, chatId, msgId, classic, cloneCardKeyboard(targetChat), threadId).catch(() => {});
+      }
+    }
+    return new Response('OK', { status: 200, headers: corsHeaders });
+  }
+
   // ---- Clone confirm buttons ----
   if (data.startsWith('clone:')) {
     const parts = data.split(':');
@@ -8173,19 +8574,85 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       await editTelegramMessage(token, chatId, msgId, `${boldHtml('❌ Cancelled.')}`, null, threadId);
       return new Response('OK',{status:200, headers:corsHeaders});
     }
+    if(action==='target'){
+      const choice = parts.slice(3).join(':');
+      const cbIsGod = tgUserId ? isInstanceOwnerTgId(tgUserId, env) : false;
+      const athenaUser2 = await resolveAthenaUserFromTg(env, tgUserId);
+      if (!athenaUser2) {
+        await deletePendingClone(env, pendingId);
+        await editTelegramMessage(token, chatId, msgId, `${boldHtml('⚠️')} Login at ${await getWebsiteDisplayUrl(env)} first.`, null, threadId);
+        return new Response('OK',{status:200, headers:corsHeaders});
+      }
+      const st = JSON.parse(pend.stats_json||'{}');
+      if (st.manager !== 'botclone' || st.stage !== 'choice') {
+        await editTelegramMessage(token, chatId, msgId, `${boldHtml('⚠️')} This prompt expired — run ${codeHtml('/clone')} again.`, null, threadId);
+        return new Response('OK',{status:200, headers:corsHeaders});
+      }
+      const isPersonal = choice === 'personal';
+      const communityId = isPersonal ? '' : choice;
+      if (isPersonal && !cbIsGod) {
+        await telegramApi(token,'answerCallbackQuery',{callback_query_id: cq.id, text:'Personal brain is GOD only', show_alert:true}).catch(()=>{});
+        return new Response('OK',{status:200, headers:corsHeaders});
+      }
+      let communityName = '';
+      if (!isPersonal) {
+        const c = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityId).first().catch(()=>null);
+        if (!c || (!cbIsGod && !(await ensureOwnerOrAdmin(communityId, athenaUser2.id, env)))) {
+          await editTelegramMessage(token, chatId, msgId, `${boldHtml('🔒')} Community not found or not yours.`, null, threadId);
+          return new Response('OK',{status:200, headers:corsHeaders});
+        }
+        communityName = c.name || communityId;
+      }
+      const label = await resolveJobLabel(env, athenaUser2.id)
+        || (await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled = 1 ORDER BY label LIMIT 1').first().catch(() => null))?.label;
+      if (!label) {
+        await editTelegramMessage(token, chatId, msgId, `${boldHtml('🤖')} No userbot account connected yet. GOD: ${codeHtml('/userbot_add <label> <api_id> <api_hash> <session>')}`, null, threadId);
+        return new Response('OK',{status:200, headers:corsHeaders});
+      }
+      let topicTitle = '';
+      if (pend.thread_id) topicTitle = await resolveForumTopicTitle(env, label, pend.chat_id, pend.thread_id);
+      const resolved2 = await resolveCloneChat(env, token, pend.chat_id);
+      const chatTitle2 = resolved2.title, chatType2 = resolved2.type;
+      const display = cloneDisplayName(chatTitle2, chatType2, pend.thread_id || '', topicTitle);
+      const target = isPersonal ? 'personal' : 'community';
+      st.destinationName = isPersonal ? 'Personal' : (communityName || communityId);
+      st.sourceName = display; st.stage = 'queued';
+      if (pend.thread_id) st.topics = [{ id: String(pend.thread_id), name: topicTitle || undefined }];
+      await env.DB.prepare(`UPDATE pending_clones SET stats_json = ?, target = ?, community_id = ? WHERE id = ?`).bind(JSON.stringify(st), target, communityId || null, pendingId).run();
+      const res = await startBackfillJob(env, { token, chatId, forumThreadId: threadId, athenaUser: athenaUser2, communityIdArg: communityId, chatIdArg: pend.chat_id, threadArg: pend.thread_id || '', communityName, userbotLabel: label, target, topicName: topicTitle, silentProgress: true });
+      if (!res?.ok) {
+        await editTelegramMessage(token, chatId, msgId, `${boldHtml('❌')} Clone failed: ${escHtml(String(res?.reason || 'unknown'))}`, null, threadId);
+        return new Response('OK',{status:200, headers:corsHeaders});
+      }
+      await editTelegramMessage(token, chatId, msgId, `${boldHtml('✅ Cloning')} ${escHtml(display)} → ${escHtml(st.destinationName)}. History first, then live — progress in ${codeHtml('/stats')}.`, null, threadId);
+      return new Response('OK',{status:200, headers:corsHeaders});
+    }
     if(action==='yes'){
       const stats = JSON.parse(pend.stats_json||'{}');
+      const athenaUser2 = await resolveAthenaUserFromTg(env, tgUserId);
+      if (stats.manager === 'botclone' && stats.stage !== 'choice') {
+        if (!athenaUser2) {
+          await editTelegramMessage(token, chatId, msgId, `${boldHtml('⚠️')} Login at ${await getWebsiteDisplayUrl(env)} first.`, null, threadId);
+          return new Response('OK',{status:200, headers:corsHeaders});
+        }
+        try {
+          await activateBotClone(env, { pendingId, stats, chatId: pend.chat_id, token, messageId: msgId, threadId, user: athenaUser2 });
+        } catch (error) {
+          await deletePendingClone(env, pendingId);
+          await editTelegramMessage(token, chatId, msgId, `${boldHtml('❌ Bot clone failed:')} ${escHtml(String(error?.message || error).slice(0, 160))}`, null, threadId);
+        }
+        return new Response('OK',{status:200, headers:corsHeaders});
+      }
       const communityIdArg = pend.community_id || '';
       const chatIdN2 = pend.chat_id;
       const targetArg2 = pend.target || '';
       await deletePendingClone(env, pendingId);
-      const athenaUser2 = await resolveAthenaUserFromTg(env, tgUserId);
       if(!athenaUser2){
         await editTelegramMessage(token, chatId, msgId, `${boldHtml('⚠️')} Login at ${await getWebsiteDisplayUrl(env)} first.`, null, threadId);
         return new Response('OK',{status:200, headers:corsHeaders});
       }
       await editTelegramMessage(token, chatId, msgId, `${boldHtml('✅ Confirmed — cloning started.')} ${codeHtml(chatIdN2)}`, null, threadId).catch(()=>{});
-      await doCloneAfterConfirm(env, { token, chatId, forumThreadId: threadId, athenaUser: athenaUser2, communityIdArg, chatIdN: chatIdN2, targetArg: targetArg2, stats });
+      await doCloneAfterConfirm(env, { token, chatId, forumThreadId: threadId, athenaUser: athenaUser2, communityIdArg, chatIdN: chatIdN2, targetArg: targetArg2, stats, threadArg: pend.thread_id||'' });
       return new Response('OK',{status:200, headers:corsHeaders});
     }
   }
@@ -8193,40 +8660,370 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
   // ---- Help menu buttons ----
   if (data.startsWith('help:')) {
     await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id });
-    const section = data.slice(5); // menu | global | personal | community | channels | god
-    const back = section !== 'menu';
+    const [, section = 'menu', rawPage = '0'] = data.split(':');
+    if (section === 'noop') return new Response('OK', { status: 200, headers: corsHeaders });
     const cbIsGod = tgUserId ? isInstanceOwnerTgId(tgUserId, env) : false;
-    if (section === 'menu' || section === 'global' || section === 'personal' || section === 'community' || section === 'channels' || (section === 'god' && cbIsGod)) {
-      await editTelegramRichMessage(token, chatId, msgId, richHelpHtml(section, cbIsGod), threadId, helpRichButtonRows(back, cbIsGod));
-    }
+    const known = ['menu', 'global', 'personal', 'community', 'channels'].includes(section) || (section === 'god' && cbIsGod);
+    if (!known) return new Response('OK', { status: 200, headers: corsHeaders });
+    const view = helpPageHtml(section, rawPage, cbIsGod);
+    await editTelegramRichMessage(token, chatId, msgId, view.html, threadId, helpRichButtonRows(section, view.page, view.pages, cbIsGod));
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
-
-  // ---- /stats Refresh / Close buttons ----
+  // ---- /stats buttons: refresh / run navigation / close ----
+  // Authorization: refresh and run routes rebuild the report with the
+  // requester's scope and re-verify run ownership before rendering. GODs may
+  // view every run; plain users only their own requester-owned runs.
   if (data.startsWith('stats:')) {
     if (!tgUserId) {
       await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Unknown sender', show_alert: true }).catch(() => {});
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    const action = data.slice(6);
-    await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
+    const parts = data.split(':');
+    const action = parts[1];
+    const isGodCb = isGodTgId(tgUserId, env);
+    const answered = () => telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
     if (action === 'close') {
+      await answered();
       await editTelegramMessage(token, chatId, msgId, boldHtml('👋 Stats closed.'), null, threadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    if (action === 'refresh') {
+    if (action === 'noop') {
+      await answered();
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    if (action === 'refresh' || action === 'dashboard' || action === 'src' || action === 'run') {
       try {
-        const report = await buildStatsReport(env, token);
-        if (!report.chats || !report.chats.length) {
-          await editTelegramMessage(token, chatId, msgId, 'Nothing cloned yet — run /clone inside the chat or /uclone <chat_id> in DM.', null, threadId);
-        } else {
-          await editTelegramRichMessage(token, chatId, msgId, formatStatsRichReport(report), threadId, statsRichButtons());
+        const user = await resolveAthenaUserFromTg(env, tgUserId);
+        const report = await buildStatsReport(env, token, { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user ? String(user.id) : '') });
+        let sel;
+        if (action === 'src') {
+          const idx = Math.max(0, Number(parts[2]) || 0);
+          const tp = Math.max(0, Number(parts[3]) || 0);
+          sel = { src: idx, topicPage: tp };
         }
+        const src = sel ? (report.sources || [])[sel.src] : true;
+        const mine = (s) => s && s.auth && (isGodCb || (s.auth.tgIds || []).includes(String(tgUserId)) || (user && (s.auth.userIds || []).includes(String(user.id))));
+        if (sel && (!src || !mine(src))) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Expired or not yours', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        await answered();
+        const view = formatStatsRichReport(report, sel);
+        await editTelegramRichMessage(token, chatId, msgId, view.html, threadId, view.buttons);
       } catch (e) {
         console.error('stats refresh failed', e?.message || e);
         await editTelegramMessage(token, chatId, msgId, boldHtml('❌') + ' Stats failed: ' + codeHtml(escHtml(String(e?.message || e).slice(0, 160))), null, threadId).catch(() => {});
       }
       return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    if (action === 'stop') {
+      // ⏹ beside a live source: stop live capture (follows + bot link) and
+      // running backfills, keep history.
+      try {
+        const user = await resolveAthenaUserFromTg(env, tgUserId);
+        const report = await buildStatsReport(env, token, { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user ? String(user.id) : '') });
+        const src = (report.sources || [])[Math.max(0, Number(parts[2]) || 0)];
+        const mine = (s) => s && s.auth && (isGodCb || (s.auth.tgIds || []).includes(String(tgUserId)) || (user && (s.auth.userIds || []).includes(String(user.id))));
+        if (!src || !mine(src)) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Expired or not yours', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        if (!(await statsSourceAllowed(env, { isGodCb, user, src }))) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Community owner/GOD only', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        await answered();
+        const { bits } = await stopSourceLiveJobs(env, src, { isGodCb, user });
+        const fresh = await buildStatsReport(env, token, { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user ? String(user.id) : '') });
+        const view = formatStatsRichReport(fresh);
+        const display = statsSourceDisplayName(src, 60);
+        const note = bits.length
+          ? `${boldHtml('⏹')} Stopped for ${escHtml(display)}: ${bits.join(' + ')} stopped. Saved history stays.`
+          : `${boldHtml('⏹')} ${escHtml(display)} had nothing running left to stop.`;
+        await editTelegramRichMessage(token, chatId, msgId, note + '\n\n' + view.html, threadId, view.buttons);
+      } catch (e) {
+        console.error('stats stop failed', e?.message || e);
+        await editTelegramMessage(token, chatId, msgId, boldHtml('❌') + ' Stop failed: ' + codeHtml(escHtml(String(e?.message || e).slice(0, 160))), null, threadId).catch(() => {});
+      }
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    if (action === 'start') {
+      // ▶️ beside a non-live source: full clone first, then live follows.
+      // The userbot account must see the chat (it runs the backfill and the
+      // follow); the bot is optional — without it the restart runs in
+      // userbot mode and says so.
+      try {
+        const user = await resolveAthenaUserFromTg(env, tgUserId);
+        const scope = { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user ? String(user.id) : '') };
+        const report = await buildStatsReport(env, token, scope);
+        const src = (report.sources || [])[Math.max(0, Number(parts[2]) || 0)];
+        const mine = (s) => s && s.auth && (isGodCb || (s.auth.tgIds || []).includes(String(tgUserId)) || (user && (s.auth.userIds || []).includes(String(user.id))));
+        if (!src || !mine(src)) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Expired or not yours', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        if (!(await statsSourceAllowed(env, { isGodCb, user, src }))) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Community owner/GOD only', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        if (src.live) {
+          await answered();
+          const fresh = await buildStatsReport(env, token, scope);
+          const view = formatStatsRichReport(fresh);
+          await editTelegramRichMessage(token, chatId, msgId, `${boldHtml('▶️')} ${escHtml(statsSourceDisplayName(src, 60))} is already live.` + '\n\n' + view.html, threadId, view.buttons);
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        if (!user) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Login on the website first', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        await answered();
+        const display = statsSourceDisplayName(src, 60);
+        const fail = async (why) => {
+          // Keep the dashboard alive under the error so the user can retry
+          // without sending /stats again.
+          try {
+            const fresh = await buildStatsReport(env, token, scope);
+            const view = formatStatsRichReport(fresh);
+            await editTelegramRichMessage(token, chatId, msgId, `${boldHtml('❌ Live clone failed:')} ${escHtml(why)}` + '\n\n' + view.html, threadId, view.buttons);
+          } catch (_) {
+            await editTelegramMessage(token, chatId, msgId, `${boldHtml('❌ Live clone failed:')} ${escHtml(why)}`, null, threadId).catch(() => {});
+          }
+        };
+        const label = await resolveJobLabel(env, user.id).catch(() => '');
+        if (!label) { await fail('no enabled userbot account. Connect one with /userbot_add in a DM, then retry.'); return new Response('OK', { status: 200, headers: corsHeaders }); }
+        try { await startUserbotAccount(env, label); } catch (_) {}
+        const client = USERBOT_ACCOUNTS.get(label)?.client;
+        let seen = false;
+        try { seen = client ? await primeEntity(client, src.chat_id, 30000) : false; } catch (_) { seen = false; }
+        if (!seen) { await fail(`userbot account ${label} is not in ${src.chat_id}. Add it to the chat, then tap ▶️ again.`); return new Response('OK', { status: 200, headers: corsHeaders }); }
+        let botStatus = '';
+        try {
+          const me = await telegramApi(token, 'getMe');
+          const botId = Number(me?.result?.id || 0);
+          if (botId) {
+            const m = await telegramApi(token, 'getChatMember', { chat_id: src.chat_id, user_id: botId });
+            botStatus = String(m?.result?.status || '');
+          }
+        } catch (_) {}
+        const { userbotMode } = restartLiveMode({ userbotSeen: seen, botStatus });
+        const target = src.target || 'community';
+        const communityIdArg = target === 'personal' ? '' : (src.community || src.owner || '');
+        const communityName = communityIdArg
+          ? ((await env.DB.prepare('SELECT name FROM communities WHERE id = ?').bind(communityIdArg).first().catch(() => null))?.name || communityIdArg)
+          : 'Personal brain';
+        const threads = [...new Set((src.topics || []).map((t) => String(t.threadId ?? '')).filter((t) => t !== ''))];
+        if (threads.length > 1) {
+          runInBackground(env, startForumCloneSequential(env, { token, chatId: src.chat_id, chatName: src.name || src.chat_id, progressChatId: chatId, forumThreadId: threadId, topicIds: threads, communityIdArg, targetArg: target, athenaUser: user, label, communityName }).catch((e) => console.error('stats restart sequential failed', e?.message || e)));
+        } else {
+          let res = null;
+          try {
+            res = await startBackfillJob(env, { token, chatId, forumThreadId: threadId, athenaUser: user, communityIdArg, chatIdArg: src.chat_id, threadArg: threads.length === 1 ? threads[0] : '', communityName, userbotLabel: label, silentProgress: true, target });
+          } catch (e) { res = { ok: false, reason: String(e?.message || e).slice(0, 160) }; }
+          if (!res?.ok && res?.reason !== 'already running') {
+            await fail(`${src.chat_id}: ${res?.reason || 'could not start the full clone'}.`);
+            return new Response('OK', { status: 200, headers: corsHeaders });
+          }
+        }
+        const fresh = await buildStatsReport(env, token, scope);
+        const view = formatStatsRichReport(fresh);
+        const note = `${boldHtml('▶️')} Live clone restarted for ${escHtml(display)}: full clone running first, then live follows${userbotMode ? ' (userbot mode — bot is not in the chat, so bot-mode live stays off)' : ''}. Progress in ${codeHtml('/stats')}.`;
+        await editTelegramRichMessage(token, chatId, msgId, note + '\n\n' + view.html, threadId, view.buttons);
+      } catch (e) {
+        console.error('stats start failed', e?.message || e);
+        try {
+          const user2 = await resolveAthenaUserFromTg(env, tgUserId);
+          const scope2 = { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user2 ? String(user2.id) : '') };
+          const view = formatStatsRichReport(await buildStatsReport(env, token, scope2));
+          await editTelegramRichMessage(token, chatId, msgId, boldHtml('❌') + ' Live clone failed: ' + codeHtml(escHtml(String(e?.message || e).slice(0, 160))) + '\n\n' + view.html, threadId, view.buttons);
+        } catch (_) {
+          await editTelegramMessage(token, chatId, msgId, boldHtml('❌') + ' Live clone failed: ' + codeHtml(escHtml(String(e?.message || e).slice(0, 160))), null, threadId).catch(() => {});
+        }
+      }
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    if (action === 'del' || action === 'delyes') {
+      // 🗑 drill-down delete: hide the source from stats (saved links stay)
+      // and stop its live capture too. Two-step like the /delete picker.
+      try {
+        const user = await resolveAthenaUserFromTg(env, tgUserId);
+        const scope = { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user ? String(user.id) : '') };
+        const idx = Math.max(0, Number(parts[2]) || 0);
+        const tp = Math.max(0, Number(parts[3]) || 0);
+        const report = await buildStatsReport(env, token, scope);
+        const src = (report.sources || [])[idx];
+        const mine = (s) => s && s.auth && (isGodCb || (s.auth.tgIds || []).includes(String(tgUserId)) || (user && (s.auth.userIds || []).includes(String(user.id))));
+        if (!src || !mine(src)) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Expired or not yours', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        if (!(await statsSourceAllowed(env, { isGodCb, user, src }))) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Community owner/GOD only', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        const display = statsSourceDisplayName(src, 60);
+        if (action === 'del') {
+          await answered();
+          await editTelegramRichMessage(token, chatId, msgId, [
+            `${boldHtml('⚠️ Remove')} ${escHtml(display)} ${boldHtml('from stats?')}`,
+            `Stops its live capture too. Saved links and files stay — re-clone to bring it back.`,
+          ].join('\n'), threadId, [
+            [{ label: '✅ Yes, remove', data: 'stats:delyes:' + idx }],
+            [{ label: '« Back', data: 'stats:src:' + idx + ':' + tp }],
+          ].map((r) => richButtonRow(r)).join('\n'));
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        await answered();
+        const { bits } = await stopSourceLiveJobs(env, src, { isGodCb, user });
+        const hidden = await hideSourceFromStats(env, src);
+        const fresh = await buildStatsReport(env, token, scope);
+        const view = formatStatsRichReport(fresh);
+        const removed = [];
+        if (bits.length) removed.push(bits.join(' + ') + ' stopped');
+        if (hidden.parents + hidden.jobs) removed.push(`${hidden.parents + hidden.jobs} run${hidden.parents + hidden.jobs === 1 ? '' : 's'} hidden`);
+        const note = removed.length
+          ? `${boldHtml('🗑')} Removed ${escHtml(display)} from stats: ${removed.join(' · ')}. Saved history stays.`
+          : `${boldHtml('🗑')} ${escHtml(display)} is already gone from stats.`;
+        await editTelegramRichMessage(token, chatId, msgId, note + '\n\n' + view.html, threadId, view.buttons);
+      } catch (e) {
+        console.error('stats delete failed', e?.message || e);
+        await editTelegramMessage(token, chatId, msgId, boldHtml('❌') + ' Delete failed: ' + codeHtml(escHtml(String(e?.message || e).slice(0, 160))), null, threadId).catch(() => {});
+      }
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    return new Response('OK', { status: 200, headers: corsHeaders });
+  }
+
+  // ---- /delete picker callbacks (bare /delete opens the options) ----
+  if (data.startsWith('del:')) {
+    if (!tgUserId) {
+      await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Unknown sender', show_alert: true }).catch(() => {});
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    const dparts = data.split(':');
+    const daction = dparts[1];
+    const isGodCb = isGodTgId(tgUserId, env);
+    const answered = () => telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
+    const delBack = [{ label: '« Delete options', data: 'del:back' }];
+    const showOptions = async () => {
+      const optsHtml = [`${boldHtml('🗑 What do you want to delete?')}`, '', `Deleting is permanent. Pick a kind — each one asks you to confirm.`].join('\n');
+      const optsButtons = [
+        [{ label: '🗑 One link', data: 'del:link' }],
+        [{ label: '📡 Cloned chat…', data: 'del:chats' }],
+        [{ label: '🧬 Backfill session…', data: 'del:jobs' }],
+      ].map((r) => richButtonRow(r)).join('\n');
+      await editTelegramRichMessage(token, chatId, msgId, optsHtml, threadId, optsButtons);
+    };
+    try {
+      const user = await resolveAthenaUserFromTg(env, tgUserId);
+      const scope = { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user ? String(user.id) : '') };
+      if (daction === 'back') {
+        await answered();
+        await showOptions();
+      } else if (daction === 'link') {
+        await answered();
+        await editTelegramRichMessage(token, chatId, msgId, [
+          `${boldHtml('🗑 Delete one link')}`,
+          '',
+          `Reply to any result with ${codeHtml('/delete')}, or send ${codeHtml('/delete <url>')}.`,
+          `${italicHtml('The message it came from is never touched.')}`,
+        ].join('\n'), threadId, [delBack].map((r) => richButtonRow(r)).join('\n'));
+      } else if (daction === 'chats') {
+        await answered();
+        const report = await buildStatsReport(env, token, scope);
+        const mine = (s) => s && s.auth && (isGodCb || (s.auth.tgIds || []).includes(String(tgUserId)) || (user && (s.auth.userIds || []).includes(String(user.id))));
+        const mineSources = (report.sources || []).filter(mine);
+        if (!mineSources.length) {
+          await editTelegramRichMessage(token, chatId, msgId, `${boldHtml('📡')} No cloned chats found for you.`, threadId, [delBack].map((r) => richButtonRow(r)).join('\n'));
+        } else {
+          const rows = mineSources.slice(0, 20).map((s) => {
+            const key = [s.chat_id, s.target, s.owner].join('|');
+            const short = String(s.name || s.chat_id || '?').slice(0, 28);
+            return [{ label: `🗑 ${short}`, data: 'del:chat:' + key }];
+          });
+          rows.push(delBack);
+          await editTelegramRichMessage(token, chatId, msgId, `${boldHtml('📡')} Pick a cloned chat to delete (imports + live capture):`, threadId, rows.map((r) => richButtonRow(r)).join('\n'));
+        }
+      } else if (daction === 'chat') {
+        await answered();
+        const [cId = '', cTarget = '', cOwner = ''] = String(dparts[2] || '').split('|');
+        const report = await buildStatsReport(env, token, scope);
+        const src = (report.sources || []).find((s) => s.chat_id === cId && String(s.target || 'community') === String(cTarget || 'community') && String(s.owner || '') === String(cOwner || ''));
+        if (!src) {
+          await editTelegramRichMessage(token, chatId, msgId, `${boldHtml('⚠️')} That source is gone already.`, threadId, [delBack].map((r) => richButtonRow(r)).join('\n'));
+        } else {
+          const key = [cId, cTarget, cOwner].join('|');
+          await editTelegramRichMessage(token, chatId, msgId, [
+            `${boldHtml('⚠️ Delete ALL of')} ${escHtml(src.name || cId)}${src.target !== 'community' ? ` (${escHtml(src.target)})` : ''}?`,
+            `This removes every imported link, file and topic of this chat and stops its live capture.`,
+            `${italicHtml('Per-topic deletes stay on the direct form: /delete <chat_id> <thread_id>.')}`,
+          ].join('\n'), threadId, [
+            [{ label: '✅ Yes, delete', data: 'del:chatyes:' + key }],
+            [{ label: '🧹 Yes, + wipe vault files', data: 'del:chatvault:' + key }],
+            delBack,
+          ].map((r) => richButtonRow(r)).join('\n'));
+        }
+      } else if (daction === 'chatyes' || daction === 'chatvault') {
+        const [cId = '', cTarget = '', cOwner = ''] = String(dparts[2] || '').split('|');
+        let allowed = isGodCb;
+        if (!allowed && cTarget === 'personal' && user) {
+          const report = await buildStatsReport(env, token, scope);
+          const src = (report.sources || []).find((s) => s.chat_id === cId && String(s.target || 'community') === String(cTarget || 'community') && String(s.owner || '') === String(cOwner || ''));
+          allowed = !!(src && (src.auth.userIds || []).includes(String(user.id)));
+        }
+        if (!allowed && cTarget !== 'personal' && user && cOwner) {
+          try { allowed = await ensureOwnerOrAdmin(cOwner, user.id, env); } catch (_) { allowed = false; }
+        }
+        if (!allowed) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Community owner/GOD only', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        await answered();
+        const res = await deleteChatClone(env, { chatArg: cId, threadArg: '', withFiles: daction === 'chatvault' });
+        await editTelegramRichMessage(token, chatId, msgId, res.text, threadId, [delBack].map((r) => richButtonRow(r)).join('\n'));
+      } else if (daction === 'jobs') {
+        await answered();
+        const { results } = isGodCb
+          ? await env.DB.prepare('SELECT * FROM index_jobs ORDER BY updated_at DESC LIMIT 8').all().catch(() => ({ results: [] }))
+          : await env.DB.prepare('SELECT * FROM index_jobs WHERE user_id = ? ORDER BY updated_at DESC LIMIT 8').bind(user ? String(user.id) : '—none—').all().catch(() => ({ results: [] }));
+        if (!results || !results.length) {
+          await editTelegramRichMessage(token, chatId, msgId, `${boldHtml('🧬')} No backfill sessions found.`, threadId, [delBack].map((r) => richButtonRow(r)).join('\n'));
+        } else {
+          const rows = results.map((j) => [{ label: `🗑 ${String(j.chat_id || j.id).slice(0, 24)} · ${j.status}`, data: 'del:job:' + j.id }]);
+          rows.push(delBack);
+          await editTelegramRichMessage(token, chatId, msgId, `${boldHtml('🧬')} Pick a backfill session to delete (its imports only — live capture stays):`, threadId, rows.map((r) => richButtonRow(r)).join('\n'));
+        }
+      } else if (daction === 'job') {
+        await answered();
+        const jobId = dparts[2];
+        const job = await env.DB.prepare('SELECT * FROM index_jobs WHERE id = ?').bind(jobId).first().catch(() => null);
+        if (!job) {
+          await editTelegramRichMessage(token, chatId, msgId, `${boldHtml('⚠️')} That session is gone already.`, threadId, [delBack].map((r) => richButtonRow(r)).join('\n'));
+        } else {
+          await editTelegramRichMessage(token, chatId, msgId, [
+            `${boldHtml('⚠️ Delete session')} ${codeHtml(jobId)} (${escHtml(job.chat_id || '?')}${job.thread_id ? ', topic ' + codeHtml('#' + job.thread_id) : ''})?`,
+            `Removes what it imported (${Number(job.saved_links || 0)} links). Live capture keeps running.`,
+          ].join('\n'), threadId, [
+            [{ label: '✅ Yes, delete', data: 'del:jobyes:' + jobId }],
+            [{ label: '🧹 Yes, + wipe vault files', data: 'del:jobvault:' + jobId }],
+            delBack,
+          ].map((r) => richButtonRow(r)).join('\n'));
+        }
+      } else if (daction === 'jobyes' || daction === 'jobvault') {
+        if (!isGodCb) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'GOD only', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        await answered();
+        const res = await deleteSessionImports(env, { jobId: dparts[2], withFiles: daction === 'jobvault' });
+        await editTelegramRichMessage(token, chatId, msgId, res.text, threadId, [delBack].map((r) => richButtonRow(r)).join('\n'));
+      } else {
+        await answered();
+        await showOptions();
+      }
+    } catch (e) {
+      console.error('delete picker failed', e?.message || e);
+      await editTelegramMessage(token, chatId, msgId, boldHtml('❌') + ' Delete failed: ' + codeHtml(escHtml(String(e?.message || e).slice(0, 160))), null, threadId).catch(() => {});
     }
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
@@ -8235,16 +9032,13 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
   if (data.startsWith('menu:')) {
     await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
     const action = data.slice(5);
-    if (action === 'help') {
-      await sendTelegramRichMessage(token, chatId, richHelpHtml('menu', tgUserId ? isInstanceOwnerTgId(tgUserId, env) : false), threadId, helpRichButtonRows(false, tgUserId ? isInstanceOwnerTgId(tgUserId, env) : false));
-    } else if (action === 'stats') {
+    if (action === 'stats') {
       try {
-        const report = await buildStatsReport(env, token);
-        if (!report.chats || !report.chats.length) {
-          await sendTelegramFormatted(token, chatId, 'Nothing cloned yet — run /clone inside the chat or /uclone <chat_id> in DM.', threadId);
-        } else {
-          await sendTelegramRichMessage(token, chatId, formatStatsRichReport(report), threadId, statsRichButtons());
-        }
+        const user = await resolveAthenaUserFromTg(env, tgUserId);
+        const isGodCb = isGodTgId(tgUserId, env);
+        const report = await buildStatsReport(env, token, { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user ? String(user.id) : '—none—') });
+        const view = formatStatsRichReport(report);
+        await sendTelegramRichMessage(token, chatId, view.html, threadId, view.buttons);
       } catch (e) {
         console.error('menu stats failed', e?.message || e);
         await sendTelegramFormatted(token, chatId, boldHtml('❌') + ' Stats failed: ' + codeHtml(escHtml(String(e?.message || e).slice(0, 160))), threadId).catch(() => {});
@@ -8259,7 +9053,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       await sendTelegramRichMessage(token, chatId, [
         richHeading(3, '🧬 Clone a chat'),
         '',
-        richParagraph('• /uclone <chat_id> community — channel/group → community (DM)<br>• /uclone <chat_id> <topic_id> community — one forum topic<br>• /uclone <chat_id> personal — GOD-only, to your brain<br>• /uclone_del <chat_id> — remove the follow<br><br>Channel posts index live automatically after clone.')
+        richParagraph(`• ${codeHtml('/clone <chat_id> <community_id>')} — whole chat ([Channel] for channels)<br>• ${codeHtml('/clone <chat_id> <topic_id> <community_id>')} — that topic of that chat<br>• ${codeHtml('/clone <channel_id> <community_id>')} — a channel<br>• ${codeHtml('/uclone <chat_id> <community_id>')} — whole-chat wizard · ${codeHtml('/uclone <chat_id> [topic_id] [community_id]')} — guided wizard with per-topic stats<br>• ${codeHtml('/stats')} — counters, live state, ⏹/▶️ live toggle per row (drill-down has 🗑 remove-from-stats) · ${codeHtml('/status')} — what is indexing + jobs<br>• ${codeHtml('/delete')} — picker: one link, one cloned chat, or one backfill session`)
       ].join('\n'), threadId);
     }
     return new Response('OK', { status: 200, headers: corsHeaders });
@@ -8325,86 +9119,9 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
-  await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id });
-
-  if (!data.startsWith('ca:') && !data.startsWith('cr:')) {
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-  const approve = data.startsWith('ca:');
-  const pendingId = data.slice(3);
-  await ensurePendingTable(env);
-  const pend = await env.DB.prepare('SELECT * FROM telegram_pending WHERE id = ?').bind(pendingId).first();
-  if (!pend || pend.status !== 'pending') {
-    if (chatId) await sendTelegramMessage(token, chatId, 'Already handled or not found.');
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-
-  const athenaUser = await resolveAthenaUserFromTg(env, tgUserId);
-  const staff = await isTgUserCommunityStaff(env, pend.community_id, tgUserId, athenaUser);
-  if (!staff) {
-    await telegramApi(token, 'answerCallbackQuery', {
-      callback_query_id: cq.id,
-      text: 'Only owner/admins can approve or reject',
-      show_alert: true
-    });
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-
-  if (approve) {
-    const again = await findExistingLink(env, 'links', 'community_id', pend.community_id, pend.url);
-    if (!again) {
-      const id = 'tg_' + Date.now().toString(36);
-      try {
-        const meta = await enrichLinkFields(env, pend.url, { title: pend.title, notes: pend.notes });
-        await ensureLinkMetaColumns(env);
-        try {
-          await env.DB.prepare(
-            `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
-              added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at, image_url, site_name)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'telegram', ?, 0, 0, ?, ?, ?)`
-          ).bind(
-            id, pend.community_id, pend.url, pend.url_hash, meta.title, meta.notes,
-            JSON.stringify(['telegram', 'approved']),
-            pend.proposed_by_tg || 'telegram', pend.proposed_by, pend.proposed_by_tg || 'telegram',
-            Date.now(), meta.image_url || null, meta.site_name || null
-          ).run();
-        } catch (_) {
-          await env.DB.prepare(
-            `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
-              added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'telegram', ?, 0, 0, ?)`
-          ).bind(
-            id, pend.community_id, pend.url, pend.url_hash, meta.title, meta.notes,
-            JSON.stringify(['telegram', 'approved']),
-            pend.proposed_by_tg || 'telegram', pend.proposed_by, pend.proposed_by_tg || 'telegram', Date.now()
-          ).run();
-        }
-      } catch (_) {
-        const cleanTitle = titleFromUrl(pend.url);
-        await env.DB.prepare(
-          'INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-        ).bind(id, pend.community_id, pend.url, pend.url_hash, cleanTitle, '', JSON.stringify(['telegram']), pend.proposed_by_tg || 'tg', Date.now()).run();
-      }
-    }
-    await env.DB.prepare(`UPDATE telegram_pending SET status = 'approved' WHERE id = ?`).bind(pendingId).run();
-    markMeiliScopeDirty(env, 'community', pend.community_id);
-    if (chatId && msgId) {
-      await telegramApi(token, 'editMessageText', {
-        chat_id: chatId,
-        message_id: msgId,
-        text: `Approved by ${cq.from?.first_name || 'admin'}\n${pend.url}`
-      });
-    }
-  } else {
-    await env.DB.prepare(`UPDATE telegram_pending SET status = 'rejected' WHERE id = ?`).bind(pendingId).run();
-    if (chatId && msgId) {
-      await telegramApi(token, 'editMessageText', {
-        chat_id: chatId,
-        message_id: msgId,
-        text: `Rejected by ${cq.from?.first_name || 'admin'}\n${pend.url}`
-      });
-    }
-  }
+  // No callback prefix is left unhandled; acknowledge so the client stops its
+  // spinner instead of leaving the button in a loading state.
+  await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
   return new Response('OK', { status: 200, headers: corsHeaders });
 }
 
@@ -8429,6 +9146,7 @@ async function indexChannelPost(msg, binding, token, env) {
     msg, token,
     communityId: binding.community_id,
     personalOwner,
+    ownerId: binding.created_by || binding.user_id,
     channelTitle: msg.sender_chat?.title || msg.chat?.title || 'channel',
   });
 }
@@ -8450,87 +9168,101 @@ function sinkTargetsFor(target, personalOwner) {
  * (pdf/docx/epub/md/…), and text-only announcements as markdown. Used by
  * channels, forum topics, and copy-mode groups. Dedupe is per-sink.
  */
+async function liveCaptureCounters(env, id) {
+  const { results } = await env.DB.prepare('SELECT counters_json FROM clone_job_items WHERE job_id=?').bind(id).all();
+  const total = (results || []).reduce((sum, row) => statsAddCounters(sum, statsParseCounters(row)), {});
+  // clone_job_items is the progress ledger, but a process can die after the
+  // canonical link insert and before its ledger row. Reconcile URLs from the
+  // durable association table so /stats reflects links actually added.
+  try {
+    const job = await env.DB.prepare('SELECT chat_id,target,community_id,user_id FROM index_jobs WHERE id=?').bind(id).first();
+    const owner = job?.target === 'personal' ? job.user_id : job?.community_id;
+    if (job?.chat_id && owner) {
+      const destination = `${job.target}:${owner}`;
+      const row = await env.DB.prepare("SELECT COUNT(*) AS links, COUNT(DISTINCT message_id) AS posts FROM clone_sources WHERE destination=? AND chat_id=? AND status='saved' AND content_key LIKE 'url:%'")
+        .bind(destination, job.chat_id).first();
+      total.savedLinks = Math.max(Number(total.savedLinks || 0), Number(row?.links || 0));
+      total.savedLinkPosts = Math.max(Number(total.savedLinkPosts || 0), Number(row?.posts || 0));
+    }
+  } catch (_) {}
+  return total;
+}
+
 async function capturePostIntoSinks(env, sinks, ctx) {
   const { msg, token, communityId, personalOwner, channelTitle } = ctx;
-  const text = String(msg.text || msg.caption || '').trim();
-  const urls = [...new Set(extractUrlsFromTelegramMessage(msg, { includeReply: false }))];
-  const doc = msg.document;
-  const srcChat = msg.chat && msg.chat.id != null ? String(msg.chat.id) : null;
-  const srcMsgId = msg.message_id != null ? String(msg.message_id) : null;
-  const liveTransfer = srcChat ? `live:${srcChat}` : null;
-
+  const chatId = normalizeTgChatId(String(ctx.sourceChatId ?? msg.chat?.id ?? msg.chatId ?? '').split(':')[0]);
+  const mid = msg.id ?? msg.message_id;
+  if (!chatId || mid == null) throw new Error('SOURCE_MESSAGE_ID_REQUIRED');
+  const classification = classifyCloneMessage(msg);
+  const item = cloneWriteCounters();
+  countCloneMessage(item, msg);
+  if (!item.messages) return item;
+  const topicId = String(classification.topicId || String(ctx.sourceChatId || '').split(':')[1] || '');
+  const job = { id: `live:${chatId}`, chat_id: chatId, user_id: personalOwner,
+    community_id: communityId, chat_name: channelTitle, topic_name: ctx.topicName || '' };
+  await ensureCloneSources(env);
+  await ensureLinkMetaColumns(env);
+  await ensureTransferColumns(env);
+  await ensureIndexTables(env);
+  let downloaded;
   for (const sink of sinks) {
+    if (!(sink === 'personal' ? personalOwner : communityId)) continue;
+    const ledgerId = 'live_' + generateUrlHash(JSON.stringify([chatId, topicId, ctx.accountLabel || 'bot', sink, communityId || '', ctx.ownerId || personalOwner || '']));
+    const now = Date.now();
+    await env.DB.prepare(`INSERT INTO index_jobs (id,community_id,chat_id,user_id,status,created_at,updated_at,userbot_label,target,thread_id,chat_name,topic_name,counters_json)
+      VALUES (?,?,?,?,'done',?,?,?,?,?,?,?,'{}') ON CONFLICT(id) DO NOTHING`)
+      .bind(ledgerId, communityId || '', chatId, ctx.ownerId || personalOwner || '', now, now, ctx.accountLabel || 'bot', sink, topicId, channelTitle || chatId, ctx.topicName || '').run();
+    await env.DB.prepare("UPDATE index_jobs SET status='running',updated_at=? WHERE id=?").bind(now, ledgerId).run();
     try {
-      if (sink === 'personal') {
-        if (!personalOwner) continue;
-        if (doc && doc.file_id) {
-          const filename = doc.file_name || 'document.txt';
-          const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
-          if ((DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) && Number(doc.file_size || 0) <= CONVERT_SOURCE_MAX_BYTES) {
-            const fileInfo = await telegramApi(token, 'getFile', { file_id: doc.file_id });
-            if (fileInfo?.ok && fileInfo.result?.file_path) {
-              const fileRes = await fetchWithTimeout(`${TG_API_BASE}/file/bot${token}/${fileInfo.result.file_path}`, { env, redirect: 'error', allowPrivate: true }, 60_000);
-              if (fileRes.ok) {
-                const r = await savePersonalIndexedDocument(env, personalOwner, filename, ext, new Uint8Array(await fileRes.arrayBuffer()), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id }, liveTransfer);
-                if (r && r.error) console.warn(`post doc skipped (${channelTitle}, personal): ${r.error}`);
-              }
-            }
-          }
+    const before = { ...item };
+    await persistClonePost(env, job, sink, msg, classification, topicId);
+    const component = (key, save) => persistCloneComponent(env, { job, sink, message: msg, classification, topicId, item, key, save, replay: false });
+    for (const url of classification.urls) await component('url:' + generateUrlHash(url), () => saveBackfillLink(env, job, sink, msg, url));
+    const media = classification.media;
+    if (media && media.kind !== 'video') await component('media', async () => {
+      if (!downloaded) {
+        if (ctx.downloadMedia) downloaded = await ctx.downloadMedia();
+        else {
+          const file = msg.document || msg.audio || msg.voice || msg.animation || msg.sticker || msg.photo?.at(-1);
+          if (!file?.file_id) throw new Error('INVALID_MEDIA');
+          const fileInfo = await telegramApi(token, 'getFile', { file_id: file.file_id });
+          if (!fileInfo?.ok || !fileInfo.result?.file_path) throw new Error('MEDIA_DOWNLOAD_FAILED');
+          const response = await fetchWithTimeout(`${TG_API_BASE}/file/bot${token}/${fileInfo.result.file_path}`, { env, redirect: 'error', allowPrivate: true }, 60_000);
+          if (!response.ok) throw new Error('MEDIA_DOWNLOAD_FAILED');
+          downloaded = new Uint8Array(await response.arrayBuffer());
         }
-        const savedP = await savePersonalIndexedLinks(env, personalOwner, urls, channelTitle, text, liveTransfer, srcChat, srcMsgId);
-        if (savedP) console.log(`${channelTitle} → personal: indexed ${savedP} link(s)`);
-        if (!savedP && !doc && text.length >= 80) {
-          const dateStr = msg.date ? new Date(msg.date * 1000).toISOString().slice(0, 10) : '';
-          const safeName = String(channelTitle).replace(/[^\w-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'chat';
-          const md = `# ${channelTitle}${dateStr ? ` — ${dateStr}` : ''}\n\n${text}`;
-          await savePersonalIndexedDocument(env, personalOwner, `${safeName}_${msg.message_id}.md`, 'md', new TextEncoder().encode(md), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id }, liveTransfer);
-        }
-        continue;
+        if (!downloaded?.length) throw new Error('EMPTY_DOWNLOAD');
       }
-
-      // community sink
-      await ensureDocumentsTable(env);
-      if (doc && doc.file_id) {
-        try {
-          const filename = doc.file_name || 'document.txt';
-          const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
-          if (DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) {
-            if (Number(doc.file_size || 0) > CONVERT_SOURCE_MAX_BYTES) {
-              console.warn(`post doc skipped (${channelTitle}): exceeds ${CONVERT_SOURCE_MAX_BYTES} bytes`);
-            } else {
-              const fileInfo = await telegramApi(token, 'getFile', { file_id: doc.file_id });
-              if (fileInfo?.ok && fileInfo.result?.file_path) {
-                const fileRes = await fetchWithTimeout(`${TG_API_BASE}/file/bot${token}/${fileInfo.result.file_path}`, { env, redirect: 'error', allowPrivate: true }, 60_000);
-                if (fileRes.ok) {
-                  const r = await saveIndexedDocument(env, communityId, filename, ext, new Uint8Array(await fileRes.arrayBuffer()), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id }, liveTransfer);
-                  if (r && r.error) console.warn(`post doc skipped (${channelTitle}): ${r.error}`);
-                }
-              }
-            }
-          }
-        } catch (e) {
-          console.error('post doc index failed', e?.message || e);
-        }
+      const filename = media.filename || `${media.kind}_${mid}${media.ext ? '.' + media.ext : ''}`;
+      const path = await vaultSave(`${sink}_${sink === 'personal' ? personalOwner : communityId}_${chatId}`, mid, filename, downloaded);
+      if (media.kind === 'document' && (DOCUMENT_EXTENSIONS.has(media.ext) || CONVERTIBLE_EXTENSIONS.has(media.ext))) {
+        const save = sink === 'personal' ? savePersonalIndexedDocument : saveIndexedDocument;
+        const result = await save(env, sink === 'personal' ? personalOwner : communityId, filename, media.ext, downloaded, `channel:${chatId}`, { chatId, messageId: mid }, job.id);
+        if (result?.error) throw new Error(result.error);
+        return { ...result, path };
       }
-
-      const saved = await saveIndexedLinks(env, communityId, urls, channelTitle, text, 'channel', liveTransfer, srcChat, srcMsgId);
-      if (saved) console.log(`${channelTitle}: indexed ${saved} link(s)`);
-
-      if (!saved && !doc && text.length >= 80) {
-        try {
-          const dateStr = msg.date ? new Date(msg.date * 1000).toISOString().slice(0, 10) : '';
-          const safeName = String(channelTitle).replace(/[^\w-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'chat';
-          const filename = `${safeName}_${msg.message_id}.md`;
-          const md = `# ${channelTitle}${dateStr ? ` — ${dateStr}` : ''}\n\n${text}`;
-          await saveIndexedDocument(env, communityId, filename, 'md', new TextEncoder().encode(md), `channel:${msg.chat.id}`, { chatId: msg.chat.id, messageId: msg.message_id }, liveTransfer);
-        } catch (e) {
-          console.error('post text index failed', e?.message || e);
-        }
-      }
-    } catch (e) {
-      console.error(`capture failed (${sink})`, e?.message || e);
+      if (!path) throw new Error('MEDIA_VAULT_NOT_CONFIGURED');
+      return { path };
+    });
+    const text = sourceClonePost(msg).text;
+    if (!media && !classification.urls.length && text.length) await component('text', () => {
+      const save = sink === 'personal' ? savePersonalIndexedDocument : saveIndexedDocument;
+      return save(env, sink === 'personal' ? personalOwner : communityId, `${mid}.md`, 'md', new TextEncoder().encode(text), `channel:${chatId}`, { chatId, messageId: mid }, job.id);
+    });
+    const recorded = cloneWriteCounters();
+    countCloneMessage(recorded, msg);
+    for (const key of Object.keys(item)) {
+      if (typeof item[key] === 'number' && key.startsWith('saved')) recorded[key] = item[key] - (before[key] || 0);
+    }
+    recorded.savedLinkPosts = recorded.savedLinks > 0 ? 1 : 0;
+    for (const key of ['copiedMessages', 'duplicates', 'failed', 'retries']) recorded[key] = item[key] - (before[key] || 0);
+    await env.DB.prepare('INSERT INTO clone_job_items (job_id,message_id,counters_json) VALUES (?,?,?) ON CONFLICT(job_id,message_id) DO NOTHING')
+      .bind(ledgerId, String(mid), JSON.stringify(recorded)).run();
+    } finally {
+      await env.DB.prepare("UPDATE index_jobs SET status='done',updated_at=? WHERE id=?").bind(Date.now(), ledgerId).run();
     }
   }
+  return item;
 }
 
 // ---- Forum-topic bindings: clone specific topics, rank-aware targets ----
@@ -8547,8 +9279,41 @@ async function ensureTopicBindingTable(env) {
      )`
   ).run();
   await env.DB.prepare(
-    'CREATE UNIQUE INDEX IF NOT EXISTS idx_topic_bind_chat_thread ON telegram_topic_bindings(chat_id, thread_id)'
+    'DROP INDEX IF EXISTS idx_topic_bind_chat_thread'
   ).run().catch(() => {});
+  await env.DB.prepare(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_topic_bind_chat_thread_community ON telegram_topic_bindings(chat_id, thread_id, community_id)'
+  ).run().catch(() => {});
+}
+
+// One chat can now feed many communities: rebuild single-community keys.
+async function tablePkCols(env, table) {
+  try {
+    const r = await env.DB.prepare(
+      `SELECT kcu.column_name AS c FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema WHERE tc.table_name = ? AND tc.constraint_type = 'PRIMARY KEY' ORDER BY kcu.ordinal_position`
+    ).bind(table).all();
+    return (((r && r.results) || r) || []).map((x) => String(x.c || ''));
+  } catch (_) { return []; }
+}
+async function migrateFollowKeys(env) {
+  let pk;
+  try {
+    pk = await tablePkCols(env, 'userbot_follows');
+  } catch (_) {
+    return;
+  }
+  if (!pk || !pk.length) return; // fresh table (already new shape) or unreadable — nothing to rebuild
+  if (pk.includes('chat_id') && pk.includes('community_id')) return;
+  try {
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS userbot_follows_new (chat_id TEXT NOT NULL, label TEXT NOT NULL DEFAULT 'main', community_id TEXT NOT NULL DEFAULT '', target TEXT NOT NULL DEFAULT 'community', created_by TEXT, created_at BIGINT NOT NULL, last_seen_at BIGINT, PRIMARY KEY (chat_id, community_id))`
+    ).run();
+    await env.DB.prepare(
+      `INSERT INTO userbot_follows_new (chat_id, label, community_id, target, created_by, created_at, last_seen_at) SELECT chat_id, label, community_id, target, created_by, created_at, last_seen_at FROM userbot_follows`
+    ).run();
+    await env.DB.prepare(`DROP TABLE userbot_follows`).run();
+    await env.DB.prepare(`ALTER TABLE userbot_follows_new RENAME TO userbot_follows`).run();
+  } catch (e) { console.error('follow key migration', e?.message || e); }
 }
 
 /** Shared by channel indexing and history backfill. Returns {error?} or {saved} or null on skip. */
@@ -8560,7 +9325,7 @@ async function saveIndexedDocument(env, communityId, filename, ext, bytes, uploa
     const duplicate = await env.DB.prepare(
       `SELECT id FROM uploaded_documents
        WHERE scope = 'community' AND community_id = ? AND source_chat_id = ? AND source_message_id = ? LIMIT 1`
-    ).bind(communityId, String(sourceMessage.chatId), String(sourceMessage.messageId)).first().catch(() => null);
+    ).bind(communityId, String(sourceMessage.chatId), String(sourceMessage.messageId)).first();
     if (duplicate) return { duplicate: true, id: duplicate.id };
   }
   let valid;
@@ -8574,7 +9339,7 @@ async function saveIndexedDocument(env, communityId, filename, ext, bytes, uploa
   }
   if (valid?.error) return valid;
   if (!valid || !valid.content) return null;
-  const id = 'doc_ix_' + Date.now().toString(36) + '_' + randomToken().slice(0, 4);
+  const id = 'doc_ix_' + Date.now().toString(36) + '_' + randomToken().slice(0, 12);
   try {
     await env.DB.prepare(
       `INSERT INTO uploaded_documents
@@ -8592,73 +9357,175 @@ async function saveIndexedDocument(env, communityId, filename, ext, bytes, uploa
   }
   if (transferId) {
     await ensureTransferColumns(env);
-    await env.DB.prepare('UPDATE uploaded_documents SET transfer_id = ? WHERE id = ?').bind(transferId, id).run().catch(() => {});
+    await env.DB.prepare('UPDATE uploaded_documents SET transfer_id = ? WHERE id = ?').bind(transferId, id).run();
   }
   markMeiliScopeDirty(env, 'community', communityId);
   return { saved: id };
 }
 
 /** Personal-brain variants of the channel indexers — target = personal|both. */
-async function savePersonalIndexedLinks(env, ownerUserId, urls, attributionName, postText, transferId = null, sourceChatId = null, sourceMessageId = null, batchPlan = null) {
-  const baseTags = ['telegram', 'channel'];
-  let saved = 0;
-  for (const rawUrl of urls) {
-    try {
-      const _forced = batchPlan && batchPlan.urlMap ? batchPlan.urlMap.get(rawUrl) : null;
-      if (await findExistingLink(env, 'personal_links', 'user_id', ownerUserId, rawUrl)) continue;
-      const meta = await enrichLinkFields(env, rawUrl, { title: _forced && _forced.title ? _forced.title : '', notes: postText || '' });
-      if (_forced && _forced.title) meta.title = _forced.title;
-      const urlHash = generateUrlHash(rawUrl);
-      const id = 'ixp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
-      await ensureLinkMetaColumns(env);
-      const insertSql = sourceChatId
-        ? `INSERT INTO personal_links (id, user_id, url, url_hash, title, notes, tags, created_at, image_url, site_name, source_chat_id, source_message_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        : `INSERT INTO personal_links (id, user_id, url, url_hash, title, notes, tags, created_at, image_url, site_name)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-      const insertArgs = sourceChatId
-        ? [id, ownerUserId, rawUrl, urlHash, meta.title, meta.notes || '', JSON.stringify(baseTags), Date.now(), meta.image_url || null, meta.site_name || null, String(sourceChatId), sourceMessageId == null ? null : String(sourceMessageId)]
-        : [id, ownerUserId, rawUrl, urlHash, meta.title, meta.notes || '', JSON.stringify(baseTags), Date.now(), meta.image_url || null, meta.site_name || null];
-      await env.DB.prepare(insertSql).bind(...insertArgs).run();
-      saved++;
-      if (transferId) {
-        await ensureTransferColumns(env);
-        await env.DB.prepare('UPDATE personal_links SET transfer_id = ? WHERE id = ?').bind(transferId, id).run().catch(() => {});
-      }
-      // tags: post #hashtags win, else AI describe, else context fallback (same as community path)
-      const userTags = normalizeTagList(extractHashtags(postText || ''));
-      let finalTags = null;
-      let finalTitle = meta.title;
-      let finalNotes = meta.notes || '';
-      if (_forced && _forced.tags && _forced.tags.length) {
-        finalTags = [...new Set([...baseTags, ..._forced.tags])];
-      } else if (userTags.length) {
-        finalTags = [...new Set([...baseTags, ...userTags])];
-      } else {
-        const vocab = await recentTagsForScope(env, 'personal', ownerUserId);
-        let ai = null;
-        try { ai = await aiDescribeAndTag(env, rawUrl, meta, vocab); } catch (_) {}
-        if (ai) {
-          finalTitle = ai.title || meta.title;
-          finalNotes = ai.description || meta.notes || '';
-          finalTags = ai.tags?.length ? [...new Set([...baseTags, ...ai.tags])] : baseTags;
-        } else {
-          const fb = fallbackTagsFromMeta(rawUrl, { title: meta.title, notes: meta.notes || postText, content: '' });
-          finalTags = [...new Set([...baseTags, ...(fb || [])])];
+function notesForUrl(postText, rawUrl, urlCount) {
+  const text = String(postText || '');
+  if (!text || Number(urlCount) <= 1) return text;
+  const needle = String(rawUrl || '').toLowerCase();
+  const idx = text.toLowerCase().indexOf(needle);
+  if (!needle || idx < 0) return '';
+  const URL_RE = /https?:\/\/[^\s<>()[\]{}"']+/gi;
+  // Own line, widened over adjacent lines that carry no URL of their own.
+  const lines = text.split('\n');
+  let pos = 0, hit = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (idx >= pos && idx <= pos + lines[i].length) { hit = i; break; }
+    pos += lines[i].length + 1;
+    hit = i;
+  }
+  const LINE_URL = /https?:\/\/[^\s<>()[\]{}"']+/i;
+  let lo = hit, hi = hit;
+  while (lo - 1 >= 0 && !LINE_URL.test(lines[lo - 1])) lo--;
+  while (hi + 1 < lines.length && !LINE_URL.test(lines[hi + 1])) hi++;
+  let seg = lines.slice(lo, hi + 1).join('\n');
+  // Cut text belonging to neighbouring URLs on the same lines.
+  const base = lo === 0 && hi === lines.length - 1 ? 0 : lines.slice(0, lo).join('\n').length + (lo ? 1 : 0);
+  const rel = idx - base;
+  const others = [...seg.matchAll(URL_RE)].filter(m => !(m.index <= rel && rel < m.index + m[0].length));
+  for (const m of others) {
+    seg = m.index < rel ? seg.slice(m.index + m[0].length) : seg.slice(0, m.index);
+  }
+  seg = seg.trim().slice(0, 800);
+  // A segment that is only the URL (or nothing) carries no information —
+  // callers fall back to scraped metadata instead of stamping shared text.
+  if (!seg.replace(URL_RE, '').replace(/[-*•·|>_\s#]+/g, ' ').trim()) return '';
+  return seg;
+}
+
+/** Repair for rows already contaminated: notes mentioning other URLs than
+ *  the row's own shrink to the relevant snippet; otherwise kept as-is. */
+function shrinkNotesToUrl(notes, url) {
+  const text = String(notes || '');
+  const own = String(url || '');
+  if (!text || !own) return text;
+  const URL_RE = /https?:\/\/[^\s<>()[\]{}"']+/gi;
+  const rest = text.replace(own, '').replace(own.toLowerCase(), '');
+  if (!URL_RE.test(rest)) return text;
+  const snippet = notesForUrl(text, own, 2);
+  return snippet && snippet.length < text.length ? snippet : text;
+}
+
+/** Fingerprint of URL-stripped list notes: cleanNotesText removes every URL,
+ *  so a harvested listicle degrades into name lines left dangling with a
+ *  trailing dash ("ChatABC -"). Legit prose almost never does that. */
+function isStrippedListNotes(notes) {
+  const lines = String(notes || '').split('\n').map(l => l.trim()).filter(Boolean);
+  if (lines.length < 4) return false;
+  const dangling = lines.filter(l => /[-–•*]\s*$/.test(l));
+  return dangling.length >= 3 && dangling.length / lines.length >= 0.4;
+}
+
+/** Tokens identifying the row itself: domain parts + strong title words. */
+function selfAnchorTokens(url, title) {
+  const out = new Set();
+  try {
+    const u = String(url || '');
+    const host = new URL(u.startsWith('http') ? u : `https://${u}`).hostname.toLowerCase();
+    for (const p of host.replace(/^www\./, '').split('.')) if (p.length >= 4) out.add(p);
+  } catch (_) {}
+  const t = String(title || '');
+  if (t && !isWeakTitle(t, url)) {
+    for (const w of t.toLowerCase().split(/[^a-z0-9]+/)) if (w.length >= 5) out.add(w);
+  }
+  return [...out];
+}
+
+/** Repair URL-stripped lists: keep the line naming this link (±1), else clear
+ *  (a list that never names the row is pure foreign text). */
+function repairStrippedListNotes(notes, url, title) {
+  const text = String(notes || '');
+  if (!isStrippedListNotes(text)) return text;
+  const anchors = selfAnchorTokens(url, title);
+  const lines = text.split('\n');
+  let hit = -1;
+  if (anchors.length) {
+    hit = lines.map(l => l.toLowerCase()).findIndex(l => anchors.some(a => l.includes(a)));
+  }
+  if (hit < 0) return '';
+  const keep = [];
+  for (let i = Math.max(0, hit - 1); i <= Math.min(lines.length - 1, hit + 1); i++) {
+    if (lines[i].trim()) keep.push(lines[i].trim());
+  }
+  const snippet = keep.join('\n').slice(0, 500);
+  return snippet.length < text.length ? snippet : text;
+}
+
+/** Combined /structure repair: URL evidence first, stripped-list fingerprint
+ *  second, foreign-name evidence third, otherwise untouched. */
+function repairContaminatedNotes(notes, url, title, nameRe = null) {
+  const shrunk = shrinkNotesToUrl(notes, url);
+  if (shrunk !== notes) return shrunk;
+  const stripped = repairStrippedListNotes(notes, url, title);
+  if (stripped !== notes) return stripped;
+  return repairForeignNameNotes(notes, url, title, nameRe);
+}
+
+/** Name parts of every saved URL (one regex for cheap per-row matching).
+ *  Used to spot notes that describe other saved links, not this row. */
+async function loadLinkNamePattern(env) {
+  const STOP = new Set('app apps web online tools tool best top free plus go get try use site page home main blog news shop store docs help info official search video photo image music movie media bot tv fun hub box lab kit cloud data api www com net org io dev me us my'.split(' '));
+  const names = new Set();
+  try {
+    for (const t of ['links', 'personal_links']) {
+      const r = await env.DB.prepare(`SELECT DISTINCT url FROM ${t}`).all().catch(() => null);
+      for (const row of (r && r.results) || []) {
+        const raw = String(row.url || '').toLowerCase();
+        let host = '';
+        try { host = new URL(raw.startsWith('http') ? raw : `https://${raw}`).hostname; }
+        catch (_) {
+          const noScheme = raw.includes('://') ? raw.slice(raw.indexOf('://') + 3) : raw;
+          host = noScheme.split('/')[0].split('?')[0].split('#')[0].split(':')[0];
+        }
+        const parts = host.replace(/^www\./, '').split('.');
+        if (parts.length > 1) parts.pop(); // drop TLD
+        for (const p of parts) {
+          const clean = p.replace(/[^a-z0-9]/g, '');
+          if (clean.length >= 5 && !STOP.has(clean)) names.add(clean);
         }
       }
-      if (finalTags) {
-        await ensureSearchColumns(env);
-        await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
-          .bind(finalTitle, JSON.stringify(finalTags), finalNotes, id).run().catch(() => {});
-      }
-      markMeiliScopeDirty(env, 'personal', ownerUserId);
-    } catch (e) {
-      if (!isUniqueConstraintError(e)) console.error(`personal indexed link failed (${rawUrl})`, e?.message || e);
     }
-  }
-  return saved;
+  } catch (_) {}
+  if (!names.size) return null;
+  const esc = [...names].map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).sort((a, b) => b.length - a.length);
+  try { return new RegExp(`\\b(${esc.join('|')})\\b`, 'gi'); } catch (_) { return null; }
 }
+
+function namesInText(text, nameRe) {
+  const out = new Set();
+  if (!nameRe) return out;
+  nameRe.lastIndex = 0;
+  let m;
+  while ((m = nameRe.exec(text)) !== null) out.add(m[0].toLowerCase());
+  return out;
+}
+
+/** Listicles without URLs or dangling dashes ("1. Gigapixel AI - …"): when
+ *  long notes name 3+ OTHER saved links, keep lines naming this row and
+ *  drop foreign-only lines; clear when nothing names this row. */
+function repairForeignNameNotes(notes, url, title, nameRe) {
+  const text = String(notes || '');
+  if (text.length < 300 || !nameRe) return text;
+  const own = new Set(selfAnchorTokens(url, title).map(s => s.toLowerCase()));
+  const found = namesInText(text, nameRe);
+  for (const o of own) found.delete(o);
+  if (found.size < 3) return text;
+  const lines = text.split('\n');
+  const fixed = lines.filter(l => {
+    const hits = namesInText(l, nameRe);
+    if (!hits.size) return true; // neutral line (header etc.)
+    return [...hits].some(h => own.has(h)); // own wins; foreign-only dropped
+  });
+  const snippet = fixed.join('\n').trim().slice(0, 800);
+  if (!snippet || snippet.length >= text.length) return text;
+  return snippet;
+}
+
 
 async function savePersonalIndexedDocument(env, ownerUserId, filename, ext, bytes, uploadedBy, sourceMessage = null, transferId = null) {
   if (!DOCUMENT_EXTENSIONS.has(ext) && !CONVERTIBLE_EXTENSIONS.has(ext)) return null;
@@ -8668,7 +9535,7 @@ async function savePersonalIndexedDocument(env, ownerUserId, filename, ext, byte
     const duplicate = await env.DB.prepare(
       `SELECT id FROM uploaded_documents
        WHERE scope = 'personal' AND user_id = ? AND source_chat_id = ? AND source_message_id = ? LIMIT 1`
-    ).bind(ownerUserId, String(sourceMessage.chatId), String(sourceMessage.messageId)).first().catch(() => null);
+    ).bind(ownerUserId, String(sourceMessage.chatId), String(sourceMessage.messageId)).first();
     if (duplicate) return { duplicate: true, id: duplicate.id };
   }
   let valid;
@@ -8682,7 +9549,7 @@ async function savePersonalIndexedDocument(env, ownerUserId, filename, ext, byte
   }
   if (valid?.error) return valid;
   if (!valid || !valid.content) return null;
-  const id = 'doc_ixp_' + Date.now().toString(36) + '_' + randomToken().slice(0, 4);
+  const id = 'doc_ixp_' + Date.now().toString(36) + '_' + randomToken().slice(0, 12);
   await env.DB.prepare(
     `INSERT INTO uploaded_documents
      (id, scope, user_id, filename, content, uploaded_by, created_at, source_chat_id, source_message_id)
@@ -8692,84 +9559,12 @@ async function savePersonalIndexedDocument(env, ownerUserId, filename, ext, byte
     sourceMessage?.messageId == null ? null : String(sourceMessage.messageId)).run();
   if (transferId) {
     await ensureTransferColumns(env);
-    await env.DB.prepare('UPDATE uploaded_documents SET transfer_id = ? WHERE id = ?').bind(transferId, id).run().catch(() => {});
+    await env.DB.prepare('UPDATE uploaded_documents SET transfer_id = ? WHERE id = ?').bind(transferId, id).run();
   }
   markMeiliScopeDirty(env, 'personal', ownerUserId);
   return { saved: id };
 }
 
-/** Shared insert path for indexed links (channel posts + history backfill). */
-async function saveIndexedLinks(env, communityId, urls, attributionName, postText, source /* 'channel'|'backfill' */, transferId = null, sourceChatId = null, sourceMessageId = null, batchPlan = null) {
-  const baseTags = ['telegram', source === 'backfill' ? 'backfill' : 'channel'];
-  let saved = 0;
-  for (const rawUrl of urls) {
-    try {
-      const _forced = batchPlan && batchPlan.urlMap ? batchPlan.urlMap.get(rawUrl) : null;
-      if (await findExistingLink(env, 'links', 'community_id', communityId, rawUrl)) continue;
-      const meta = await enrichLinkFields(env, rawUrl, { title: _forced && _forced.title ? _forced.title : '', notes: postText || '' });
-      if (_forced && _forced.title) meta.title = _forced.title;
-      const urlHash = generateUrlHash(rawUrl);
-      const id = 'ix_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
-      await ensureLinkMetaColumns(env);
-      try {
-        const insertSql = sourceChatId
-          ? `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
-              added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at, image_url, site_name, source_chat_id, source_message_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'telegram', ?, 0, 0, ?, ?, ?, ?, ?)`
-          : `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
-              added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at, image_url, site_name)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'telegram', ?, 0, 0, ?, ?, ?)`;
-        const insertArgs = sourceChatId
-          ? [id, communityId, rawUrl, urlHash, meta.title, meta.notes || '', JSON.stringify(baseTags), attributionName, attributionName, Date.now(), meta.image_url || null, meta.site_name || null, String(sourceChatId), sourceMessageId == null ? null : String(sourceMessageId)]
-          : [id, communityId, rawUrl, urlHash, meta.title, meta.notes || '', JSON.stringify(baseTags), attributionName, attributionName, Date.now(), meta.image_url || null, meta.site_name || null];
-        await env.DB.prepare(insertSql).bind(...insertArgs).run();
-      } catch (error) {
-        if (isUniqueConstraintError(error)) continue;
-        if (!isMissingLinkMetaColumnError(error)) throw error;
-        await env.DB.prepare(
-          'INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-        ).bind(id, communityId, rawUrl, urlHash, meta.title, meta.notes || '', JSON.stringify(baseTags), attributionName, Date.now()).run();
-      }
-      saved++;
-      if (transferId) {
-        await ensureTransferColumns(env);
-        await env.DB.prepare('UPDATE links SET transfer_id = ? WHERE id = ?').bind(transferId, id).run().catch(() => {});
-      }
-      // tagging: post #hashtags win, else AI describe (same as group dumps)
-      const userTags = normalizeTagList(extractHashtags(postText || ''));
-      let finalTags = null;
-      let finalTitle = meta.title;
-      let finalNotes = meta.notes || '';
-      if (_forced && _forced.tags && _forced.tags.length) {
-        finalTags = [...new Set([...baseTags, ..._forced.tags])];
-      } else if (userTags.length) {
-        finalTags = [...new Set([...baseTags, ...userTags])];
-      } else {
-        const vocab = await recentTagsForScope(env, 'community', communityId);
-        let ai = null;
-        try { ai = await aiDescribeAndTag(env, rawUrl, meta, vocab); } catch (_) {}
-        if (ai) {
-          finalTitle = ai.title || meta.title;
-          finalNotes = ai.description || meta.notes || '';
-          finalTags = ai.tags?.length ? [...new Set([...baseTags, ...ai.tags])] : baseTags;
-        } else {
-          // AI down → context tags from caption/URL so clones are never tagless
-          const fb = fallbackTagsFromMeta(rawUrl, { title: meta.title, notes: meta.notes || postText, content: '' });
-          finalTags = [...new Set([...baseTags, ...(fb || [])])];
-        }
-      }
-      if (finalTags) {
-        await ensureSearchColumns(env);
-        await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
-          .bind(finalTitle, JSON.stringify(finalTags), finalNotes, id).run().catch(() => {});
-      }
-    } catch (e) {
-      console.error(`indexed link save failed (${rawUrl})`, e?.message || e);
-    }
-  }
-  markMeiliScopeDirty(env, 'community', communityId);
-  return saved;
-}
 
 // ---- History backfill via a user session string (gramjs, self-host only) ----
 
@@ -8788,6 +9583,458 @@ async function ensureIndexTables(env) {
       saved_docs INTEGER NOT NULL DEFAULT 0, progress_chat_id TEXT,
       error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`
   ).run();
+  await ensureIndexJobColumns(env);
+}
+
+/** Idempotent index_jobs migrations — called from ensureIndexTables so every
+ *  reader (status commands included) is safe even before any backfill ran. */
+async function ensureIndexJobColumns(env) {
+  if (ensureIndexJobColumns._databases?.has(env.DB)) return;
+  const alters = [
+    'thread_id TEXT', 'progress_msg_id BIGINT', 'min_id BIGINT', 'max_id BIGINT',
+    'saved_files INTEGER DEFAULT 0', 'skipped_media INTEGER DEFAULT 0',
+    'urls_seen INTEGER DEFAULT 0', 'continuations INTEGER DEFAULT 0',
+    'chat_name TEXT', 'saved_pdfs INTEGER DEFAULT 0', 'dupes_skipped INTEGER DEFAULT 0',
+    'total_messages INTEGER DEFAULT 0',
+    'userbot_label TEXT', "target TEXT DEFAULT 'community'", 'parent_id TEXT',
+    'silent_progress INTEGER DEFAULT 0', 'progress_thread_id TEXT', 'topic_name TEXT',
+    'known_total INTEGER DEFAULT 0', 'counters_json TEXT', 'errors INTEGER DEFAULT 0', 'retries INTEGER DEFAULT 0',
+  ];
+  let failedAlter = false;
+  for (const def of alters) {
+    const col = def.split(' ')[0];
+    try { await env.DB.prepare(`ALTER TABLE index_jobs ADD COLUMN ${def}`).run(); }
+    catch (e) { if (!/duplicate column|exists/i.test(String(e?.message))) { failedAlter = true; console.error(`[backfill] ${col} alter:`, e?.message); } }
+  }
+  // Only mark done when every column is in place. A transient DDL failure that
+  // got cached here left a missing column forever — the index_jobs INSERT then
+  // threw on every backfill start and a forum clone reported "0 topics".
+  if (failedAlter) throw new Error('Clone job migration failed');
+  ensureIndexJobColumns._databases ||= new WeakSet();
+  ensureIndexJobColumns._databases.add(env.DB);
+}
+
+const UCLONE_MANAGERS = new WeakMap();
+
+/**
+ * Subscribing a chat for live capture under the account that clones it.
+ * Cloning a chat must imply live indexing afterwards — otherwise a backfill
+ * finishes and the chat goes dark with no follow row to explain why. Shared
+ * by the uclone wizard, /index_start, range clones and account migration.
+ */
+// Stopping live capture for one chat, from anywhere: removes the bot-mode
+// link row(s) and every userbot follow (base chat and per-topic keys).
+// Saved history is untouched — this only stops future posts. Used by the
+// ⏹ button on /stats rows (unlinking moved there when /channel_unlink went away).
+/**
+ * Restart-mode decision for the ▶️ toggle. Pure. The userbot account runs
+ * the backfill and the follow, so it must see the chat; the bot only adds
+ * bot-mode live, so its absence drops to userbot mode instead of failing.
+ */
+export function restartLiveMode({ userbotSeen, botStatus }) {
+  if (!userbotSeen) return { ok: false, reason: 'userbot' };
+  if (['creator', 'administrator', 'member', 'restricted'].includes(String(botStatus || ''))) return { ok: true, userbotMode: false };
+  return { ok: true, userbotMode: true };
+}
+
+/**
+ * Dedupe the clone destination picker by community name: a re-run
+ * /community_verify leaves two same-named rows that otherwise show twice.
+ * Keeps the entry with the most saved links (tie: oldest first). Pure,
+ * exported for tests.
+ */
+export function dedupeEligibleCommunities(rows) {
+  const byName = new Map();
+  for (const c of rows || []) {
+    const key = String(c?.name || c?.id || '').trim().toLowerCase();
+    if (!key) continue;
+    const cur = byName.get(key);
+    if (!cur) { byName.set(key, c); continue; }
+    const cl = Number(c?.links || 0), kl = Number(cur?.links || 0);
+    if (cl !== kl) { if (cl > kl) byName.set(key, c); continue; }
+    if (Number(c?.created_at || 0) < Number(cur?.created_at || 0)) byName.set(key, c);
+  }
+  return [...byName.values()];
+}
+
+/**
+ * Decide what /community_verify should do when the group is not linked yet.
+ * Pure: owned = [{id, name}] the requester owns, arg = optional word after
+ * the command. Never mints a duplicate when an owned community exists.
+ */
+export function pickVerifyTarget(owned, arg) {
+  const list = (owned || []).filter((c) => c && c.id);
+  const a = String(arg || '').trim();
+  if (a && a.toLowerCase() !== 'new') return { action: 'link', id: a };
+  if (a.toLowerCase() === 'new' || list.length === 0) return { action: 'create' };
+  if (list.length === 1) return { action: 'link', id: String(list[0].id) };
+  return { action: 'ask', list: list.map((c) => ({ id: String(c.id), name: String(c.name || c.id) })) };
+}
+
+/** Create (or repair) the group↔community binding row. Never mints communities. */
+export async function linkGroupToCommunity(env, { chatId, chatTitle, communityId, ownerId, personal }) {
+  const botUname = personal?.bot_username || 'bot';
+  const storeToken = (personal?.bot_token && await decryptBotToken(env, personal.bot_token)) || null;
+  const encStore = storeToken ? await encryptSecret(env, storeToken) : null;
+  const existing = await env.DB.prepare(
+    `SELECT * FROM community_bots WHERE platform = 'telegram' AND group_id = ?`
+  ).bind(String(chatId)).first().catch(() => null);
+  const now = Date.now();
+  if (existing) {
+    await env.DB.prepare(
+      `UPDATE community_bots SET community_id = ?, scope = 'community', group_name = ?, created_by = ?, user_id = ?, bot_token = COALESCE(?, bot_token), bot_username = COALESCE(?, bot_username) WHERE id = ?`
+    ).bind(communityId, chatTitle, ownerId, ownerId, encStore, botUname, existing.id).run();
+    return env.DB.prepare('SELECT * FROM community_bots WHERE id = ?').bind(existing.id).first();
+  }
+  const botId = 'bot_' + now.toString(36);
+  await env.DB.prepare(
+    `INSERT INTO community_bots (id, community_id, platform, bot_username, group_id, group_name, created_by, created_at, scope, user_id, bot_token)
+     VALUES (?, ?, 'telegram', ?, ?, ?, ?, ?, 'community', ?, ?)`
+  ).bind(botId, communityId, botUname, String(chatId), chatTitle, ownerId, now, ownerId, encStore).run();
+  return env.DB.prepare('SELECT * FROM community_bots WHERE id = ?').bind(botId).first();
+}
+
+/** Ownership check shared by the /stats beside toggle and drill-down buttons. */
+async function statsSourceAllowed(env, { isGodCb, user, src }) {
+  let allowed = !!isGodCb;
+  if (!allowed && src?.target === 'personal') {
+    allowed = !!(user && (src.auth?.userIds || []).includes(String(user.id)));
+  }
+  if (!allowed && src?.target !== 'personal' && user) {
+    try { allowed = await ensureOwnerOrAdmin(src.owner, user.id, env); } catch (_) { allowed = false; }
+  }
+  return allowed;
+}
+
+/**
+ * Stop live capture AND running backfills for one /stats source. Saved
+ * history stays — this only stops future posts. Shared by the ⏹ button and
+ * the drill-down delete (which additionally hides the source from stats).
+ */
+async function stopSourceLiveJobs(env, src, { isGodCb, user }) {
+  const stopped = await stopLiveCapture(env, src.chat_id, src.community || '');
+  const bits = [];
+  if (stopped.followsRemoved) bits.push(`${stopped.followsRemoved} follow${stopped.followsRemoved === 1 ? '' : 's'}`);
+  if (stopped.linksRemoved) bits.push(`${stopped.linksRemoved} bot live${stopped.linksRemoved === 1 ? '' : 's'}`);
+  // Running backfills have no stop command — the ⏹ button stops them too
+  // (own jobs, or any job on this chat for GOD). Saved history stays.
+  let jobsStopped = 0;
+  try {
+    const stopComm = String(src.community || '');
+    const jobRows = await env.DB.prepare(
+      `SELECT id FROM index_jobs WHERE status IN ('queued','running','stopping') AND (chat_id = ? OR chat_id = ?) AND (community_id = ? OR ? = '')`
+    ).bind(stopped.chatId, stopped.chatId.replace(/^-100/, ''), stopComm, stopComm).all().catch(() => ({ results: [] }));
+    for (const j of jobRows?.results || jobRows || []) {
+      if (!isGodCb) {
+        const owner = await env.DB.prepare('SELECT user_id FROM index_jobs WHERE id = ?').bind(j.id).first().catch(() => null);
+        if (!owner || String(owner.user_id) !== String(user?.id || '—none—')) continue;
+      }
+      await env.DB.prepare(`UPDATE index_jobs SET status = 'stopping', updated_at = ? WHERE id = ?`).bind(Date.now(), j.id).run().catch(() => {});
+      await env.DB.prepare('DELETE FROM telegram_index_sessions WHERE id = ?').bind(j.id).run().catch(() => {});
+      jobsStopped++;
+    }
+  } catch (_) {}
+  if (jobsStopped) bits.push(`${jobsStopped} backfill${jobsStopped === 1 ? '' : 's'}`);
+  return { stopped, bits, jobsStopped };
+}
+
+/**
+ * Remove one /stats source from the display only: the exact run ids the
+ * report attached, plus every same-key sibling the newest-wins dedupe hides
+ * (older same-chat retries, target-less error shells). Key rule mirrors the
+ * report grouping: same chat, same normalized destination, same owner.
+ * Saved links, files and vault media stay — live capture is stopped
+ * separately via stopSourceLiveJobs. Pure record surgery, exported for tests.
+ */
+export async function hideSourceFromStats(env, src) {
+  const out = { parents: 0, jobs: 0, sessions: 0, items: 0 };
+  const num = (r) => Number(r?.meta?.changes ?? r?.changes ?? 0);
+  const srcChat = normalizeTgChatId(String(src?.chat_id || ''));
+  if (!srcChat) return out;
+  const srcBare = srcChat.replace(/^-100/, '');
+  const srcTarget = String(src?.target || 'community');
+  const srcOwner = String(src?.owner || '');
+  const normTarget = (t) => { const s = String(t || ''); return s === '' ? 'community' : s; };
+  const ownerOf = (normT, community, user) => normT === 'personal' ? String(user || '') : String(community || '');
+  const parentIds = new Set([...((src?.ids?.parents || []).map(String)).filter(Boolean)]);
+  const jobIds = new Set([...((src?.ids?.jobs || []).map(String)).filter(Boolean)]);
+  try {
+    const prow = await env.DB.prepare(
+      `SELECT id, target, community_id, requester_user_id FROM pending_clones WHERE chat_id = ? OR chat_id = ?`
+    ).bind(srcChat, srcBare).all().catch(() => ({ results: [] }));
+    for (const p of prow?.results || prow || []) {
+      const t = normTarget(p.target);
+      if (t === srcTarget && ownerOf(t, p.community_id, p.requester_user_id) === srcOwner && p.id != null) parentIds.add(String(p.id));
+    }
+  } catch (_) {}
+  try {
+    const jrow = await env.DB.prepare(
+      `SELECT id, target, community_id, user_id FROM index_jobs WHERE chat_id = ? OR chat_id = ? OR chat_id LIKE ? OR chat_id LIKE ?`
+    ).bind(srcChat, srcBare, `${srcChat}:%`, `${srcBare}:%`).all().catch(() => ({ results: [] }));
+    for (const j of jrow?.results || jrow || []) {
+      const t = normTarget(j.target);
+      if (t === srcTarget && ownerOf(t, j.community_id, j.user_id) === srcOwner && j.id != null) jobIds.add(String(j.id));
+    }
+  } catch (_) {}
+  const parentIdList = [...parentIds];
+  const jobIdList = [...jobIds];
+  try {
+    for (const id of jobIdList) {
+      out.sessions += num(await env.DB.prepare('DELETE FROM telegram_index_sessions WHERE id = ?').bind(id).run().catch(() => null));
+      out.items += num(await env.DB.prepare('DELETE FROM clone_job_items WHERE job_id = ?').bind(id).run().catch(() => null));
+      out.jobs += num(await env.DB.prepare('DELETE FROM index_jobs WHERE id = ?').bind(id).run().catch(() => null));
+    }
+  } catch (_) {}
+  try {
+    for (const id of parentIdList) {
+      out.parents += num(await env.DB.prepare('DELETE FROM pending_clones WHERE id = ?').bind(id).run().catch(() => null));
+    }
+  } catch (_) {}
+  return out;
+}
+
+export async function stopLiveCapture(env, chatIdArg, communityId = '') {
+  const cid = normalizeTgChatId(String(chatIdArg || ''));
+  const bare = cid.replace(/^-100/, '');
+  const comm = String(communityId || '').trim();
+  let followsRemoved = 0;
+  let linksRemoved = 0;
+  try {
+    await ensureUserbotTables(env);
+    const r = comm
+      ? await env.DB.prepare(
+        `DELETE FROM userbot_follows WHERE (chat_id = ? OR chat_id = ? OR chat_id LIKE ? OR chat_id LIKE ?) AND community_id = ?`
+      ).bind(cid, bare, `${cid}:%`, `${bare}:%`, comm).run().catch(() => null)
+      : await env.DB.prepare(
+        `DELETE FROM userbot_follows WHERE chat_id = ? OR chat_id = ? OR chat_id LIKE ? OR chat_id LIKE ?`
+      ).bind(cid, bare, `${cid}:%`, `${bare}:%`).run().catch(() => null);
+    followsRemoved = Number(r?.meta?.changes ?? r?.changes ?? 0);
+  } catch (_) {}
+  try {
+    await ensureBotBindingColumns(env);
+    const rows = comm
+      ? await env.DB.prepare(
+        `SELECT id FROM community_bots WHERE platform = 'telegram' AND group_id IN (?, ?) AND community_id = ?`
+      ).bind(cid, bare, comm).all().catch(() => ({ results: [] }))
+      : await env.DB.prepare(
+        `SELECT id FROM community_bots WHERE platform = 'telegram' AND group_id IN (?, ?) AND community_id IS NOT NULL`
+      ).bind(cid, bare).all().catch(() => ({ results: [] }));
+    // Neutralize bot-mode live capture WITHOUT deleting the binding row:
+    // the row is the group↔community link (/community_verify), the topic
+    // lock, and the bot token. Deleting it unlinked the group and forced a
+    // duplicate community on re-verify. Re-clone re-enables capture.
+    for (const row of rows?.results || rows || []) {
+      await env.DB.prepare(`UPDATE community_bots SET channel_target = NULL, copy_text = 0 WHERE id = ?`).bind(row.id).run().catch(() => null);
+      linksRemoved++;
+    }
+  } catch (_) {}
+  return { chatId: cid, followsRemoved, linksRemoved };
+}
+
+// Delete everything one chat/topic clone imported AND stop its live capture
+// (follows, bindings, jobs, links, docs). Saved-data counterpart of stopLiveCapture
+// (live only). Used by /delete <chat> and the picker confirm button.
+async function deleteChatClone(env, { chatArg, threadArg, withFiles }) {
+  await ensureTransferColumns(env);
+  await ensureUserbotTables(env);
+  chatArg = normalizeTgChatId(chatArg);
+  const bare = String(chatArg).replace(/^-100/, '');
+  const chatKeys = [...new Set([chatArg, bare])];
+  const threadLive = threadArg ? chatKeys.map(k => `live:${k}:${threadArg}`) : [];
+  const liveTransfers = [...chatKeys.map(k => `live:${k}`), ...threadLive];
+
+  // 1. Remember the path(s) this chat was cloned into: follows (userbot) and
+  //    bindings (bot-linked channels/groups). Topic follows are keyed chat:thread.
+  const followKeys = threadArg
+    ? chatKeys.map(k => `${k}:${threadArg}`)
+    : chatKeys;
+  let communityIds = new Set();
+  let personalUserIds = new Set();
+  try {
+    const fph = followKeys.map(() => '?').join(',');
+    const { results: follows } = await env.DB.prepare(`SELECT community_id, target, created_by FROM userbot_follows WHERE chat_id IN (${fph})`).bind(...followKeys).all();
+    for (const f of follows || []) {
+      const t = String(f.target || 'community');
+      if (f.community_id) {
+        if (t === 'community' || t === 'both') communityIds.add(f.community_id);
+      }
+      if ((t === 'personal' || t === 'both') && f.created_by) personalUserIds.add(String(f.created_by));
+    }
+  } catch (_) {}
+  try {
+    const bph = chatKeys.map(() => '?').join(',');
+    const { results: binds } = await env.DB.prepare(`SELECT community_id, COALESCE(channel_target,'community') AS target, created_by FROM community_bots WHERE platform='telegram' AND group_id IN (${bph}) AND community_id IS NOT NULL`).all().catch(() => ({ results: [] }));
+    for (const b of binds || []) {
+      const t = String(b.target || 'community');
+      if ((t === 'community' || t === 'both') && b.community_id) communityIds.add(b.community_id);
+      if ((t === 'personal' || t === 'both') && b.created_by) personalUserIds.add(String(b.created_by));
+    }
+  } catch (_) {}
+  // Backfill jobs still record the community even if the follow row is gone.
+  try {
+    const jph = chatKeys.map(() => '?').join(',');
+    const { results: jobsMeta } = await env.DB.prepare(`SELECT DISTINCT community_id FROM index_jobs WHERE chat_id IN (${jph}) AND community_id IS NOT NULL`).all().catch(() => ({ results: [] }));
+    for (const j of jobsMeta || []) if (j.community_id) communityIds.add(j.community_id);
+  } catch (_) {}
+
+  // 2. Transfer ids: backfill jobs for this chat/topic + live sessions.
+  const jobQs = threadArg
+    ? `SELECT id FROM index_jobs WHERE chat_id IN (${chatKeys.map(()=>'?').join(',')}) AND thread_id = ?`
+    : `SELECT id FROM index_jobs WHERE chat_id IN (${chatKeys.map(()=>'?').join(',')})`;
+  const jobArgs = threadArg ? [...chatKeys, threadArg] : [...chatKeys];
+  let transferIds = [];
+  let jobIds = [];
+  try {
+    const { results } = await env.DB.prepare(jobQs).bind(...jobArgs).all().catch(() => ({ results: [] }));
+    jobIds = (results || []).map(r => r.id);
+    transferIds = [...jobIds, ...liveTransfers];
+  } catch (_) {}
+  if (!transferIds.length && !communityIds.size && !personalUserIds.size) {
+    return { found: false, text: `Nothing found for ${chatArg}${threadArg ? ':' + threadArg : ''}. Try /index_status all to see ids.. Try /status all to see ids.` };
+  }
+  const ph = transferIds.map(() => '?').join(',');
+  const d1 = transferIds.length ? await env.DB.prepare(`DELETE FROM links WHERE transfer_id IN (${ph})`).bind(...transferIds).run().catch(() => ({ changes: 0 })) : { changes: 0 };
+  const d2 = transferIds.length ? await env.DB.prepare(`DELETE FROM personal_links WHERE transfer_id IN (${ph})`).bind(...transferIds).run().catch(() => ({ changes: 0 })) : { changes: 0 };
+  const d3 = transferIds.length ? await env.DB.prepare(`DELETE FROM uploaded_documents WHERE transfer_id IN (${ph})`).bind(...transferIds).run().catch(() => ({ changes: 0 })) : { changes: 0 };
+
+  // 3. Scoped orphan cleanup (chat-scoped, never whole-DB): rows whose
+  //    transfer_id is NULL (early clones) but which carry source provenance.
+  const cIds = [...communityIds];
+  const pIds = [...personalUserIds];
+  let orphanLinks = 0, orphanPersonal = 0, orphanDocs = 0;
+  if (cIds.length) {
+    const cph = cIds.map(() => '?').join(',');
+    const kph = chatKeys.map(() => '?').join(',');
+    const r1 = await env.DB.prepare(`DELETE FROM links WHERE source_chat_id IN (${kph}) AND community_id IN (${cph})`).bind(...chatKeys, ...cIds).run().catch(() => ({ changes: 0 }));
+    orphanLinks = rowsChanged(r1);
+    const r3 = await env.DB.prepare(`DELETE FROM uploaded_documents WHERE source_chat_id IN (${kph}) AND scope = 'community' AND community_id IN (${cph})`).bind(...chatKeys, ...cIds).run().catch(() => ({ changes: 0 }));
+    orphanDocs += rowsChanged(r3);
+  }
+  if (pIds.length) {
+    const pph = pIds.map(() => '?').join(',');
+    const k2 = chatKeys.map(() => '?').join(',');
+    const r2 = await env.DB.prepare(`DELETE FROM personal_links WHERE source_chat_id IN (${k2}) AND user_id IN (${pph})`).bind(...chatKeys, ...pIds).run().catch(() => ({ changes: 0 }));
+    orphanPersonal = rowsChanged(r2);
+    const r3b = await env.DB.prepare(`DELETE FROM uploaded_documents WHERE source_chat_id IN (${k2}) AND scope = 'personal' AND user_id IN (${pph})`).bind(...chatKeys, ...pIds).run().catch(() => ({ changes: 0 }));
+    orphanDocs += rowsChanged(r3b);
+  }
+  // Docs for this chat regardless of path (chat-scoped, precise).
+  try {
+    const k3 = chatKeys.map(() => '?').join(',');
+    const rd = await env.DB.prepare(`DELETE FROM uploaded_documents WHERE source_chat_id IN (${k3})`).bind(...chatKeys).run().catch(() => ({ changes: 0 }));
+    orphanDocs += rowsChanged(rd);
+  } catch (_) {}
+  let vaultWiped = 0;
+  if (withFiles && MEDIA_VAULT_DIR) {
+    vaultWiped = await wipeCloneVaultPaths(env, { transferIds: jobIds, chatKeys: threadArg ? [] : chatKeys }).catch(() => 0);
+  }
+  if (jobIds.length) {
+    await env.DB.prepare(`DELETE FROM index_jobs WHERE id IN (${jobIds.map(() => '?').join(',')})`).bind(...jobIds).run().catch(() => {});
+    if (threadArg) {
+      await env.DB.prepare('DELETE FROM telegram_topic_bindings WHERE chat_id IN (' + chatKeys.map(() => '?').join(',') + ') AND thread_id = ?').bind(...chatKeys, threadArg).run().catch(() => {});
+      const fk = chatKeys.map(k => `${k}:${threadArg}`);
+      await env.DB.prepare('DELETE FROM userbot_follows WHERE chat_id IN (' + fk.map(() => '?').join(',') + ')').bind(...fk).run().catch(() => {});
+    } else {
+      await env.DB.prepare('DELETE FROM userbot_follows WHERE chat_id IN (' + chatKeys.map(() => '?').join(',') + ')').bind(...chatKeys).run().catch(() => {});
+      await env.DB.prepare('DELETE FROM telegram_topic_bindings WHERE chat_id IN (' + chatKeys.map(() => '?').join(',') + ')').bind(...chatKeys).run().catch(() => {});
+    }
+  }
+  const scopeTxt = [];
+  if (cIds.length) scopeTxt.push('community: ' + cIds.map(c => escHtml(c.replace(/^c_/, ''))).join(', '));
+  if (pIds.length) scopeTxt.push('personal: ' + pIds.length + ' user(s)');
+  const totalLinks = rowsChanged(d1) + orphanLinks;
+  const totalPersonal = rowsChanged(d2) + orphanPersonal;
+  const totalDocs = rowsChanged(d3) + orphanDocs;
+  return { found: true, text: `🗑 Deleted ${threadArg ? 'topic ' + threadArg + ' of ' : ''}${chatArg}
+• community links: ${totalLinks}
+• personal links: ${totalPersonal}
+• documents: ${totalDocs}${scopeTxt.length ? '\n• path: ' + scopeTxt.join(' · ') : ''}${withFiles ? (vaultWiped ? `\n• vault files wiped: ${vaultWiped}` : `\n• vault files: none to wipe${MEDIA_VAULT_DIR ? '' : ' (media vault not configured)'}`) : ''}` };
+}
+
+// Delete one backfill session’s imports (links + docs + job row). Live
+// follows stay untouched — stopping live is the ⏹ button’s job. Used by the
+// /delete picker ("one backfill session").
+async function deleteSessionImports(env, { jobId, withFiles }) {
+  const transferIds = [jobId];
+  const ph = transferIds.map(() => '?').join(',');
+  const args = [...transferIds];
+  const d1 = await env.DB.prepare(`DELETE FROM links WHERE transfer_id IN (${ph})`).bind(...args).run().catch(() => ({ changes: 0 }));
+  const d2 = await env.DB.prepare(`DELETE FROM personal_links WHERE transfer_id IN (${ph})`).bind(...args).run().catch(() => ({ changes: 0 }));
+  const d3 = await env.DB.prepare(`DELETE FROM uploaded_documents WHERE transfer_id IN (${ph})`).bind(...args).run().catch(() => ({ changes: 0 }));
+  let filesWiped = false;
+  if (withFiles && MEDIA_VAULT_DIR) {
+    filesWiped = (await wipeCloneVaultPaths(env, { transferIds, chatKeys: [] })) > 0;
+  }
+  await env.DB.prepare(`DELETE FROM index_jobs WHERE id = ?`).bind(jobId).run().catch(() => {});
+  return { found: true, text:
+    `${boldHtml('🗑 Deleted session')} ${codeHtml(jobId)}\n• links removed: ${rowsChanged(d1)}\n• personal links: ${rowsChanged(d2)}\n• documents: ${rowsChanged(d3)}${filesWiped ? '\n• vault media folder wiped' : ''}\n${italicHtml(withFiles ? '' : 'Vault media files were kept \u2014 repeat with "files" to wipe them.')}` };
+}
+
+export async function ensureChatFollow(env, { chatId, threadId = '', label, communityId = '', target = 'community', createdBy = '' }) {
+  const followChat = `${normalizeTgChatId(chatId)}${threadId ? ':' + threadId : ''}`;
+  await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at)
+    VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id, community_id) DO UPDATE SET label=excluded.label,
+    target=excluded.target, created_by=excluded.created_by`).bind(followChat, label, communityId || '', target, createdBy, Date.now()).run();
+  if (threadId) {
+    await ensureTopicBindingTable(env);
+    await env.DB.prepare(`INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at)
+      VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id, community_id) DO UPDATE SET
+      target=excluded.target, created_by=excluded.created_by`).bind('tb_' + Date.now().toString(36) + '_' + randomToken().slice(0, 5), normalizeTgChatId(chatId), threadId, communityId || '', target, createdBy, Date.now()).run();
+  }
+  return followChat;
+}
+
+function ucloneManager(env) {
+  if (UCLONE_MANAGERS.has(env)) return UCLONE_MANAGERS.get(env);
+  const manager = createUcloneManager(env, {
+    ensureTables: async () => { await ensureUserbotTables(env); await ensureIndexTables(env); },
+    startAccount: (label) => startUserbotAccount(env, label),
+    getClient: (label) => USERBOT_ACCOUNTS.get(label)?.client,
+    canSeeChat: async (label, chatId) => {
+      try {
+        const acc = USERBOT_ACCOUNTS.get(label);
+        if (!acc?.client) return false;
+        return await primeEntity(acc.client, normalizeTgChatId(chatId), 15_000);
+      } catch (_) { return false; }
+    },
+    stopAccount: (label) => stopUserbotAccount(env, label),
+    startJob: (options) => startBackfillJob(env, options),
+    ensureFollow: async (opts) => ensureChatFollow(env, opts),
+    runJob: (job, token) => runHistoryIndexJob(env, job, token),
+    authorizeCommunity: async (user, id) => {
+      const fullUser = await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(user.id).first();
+      const community = await env.DB.prepare('SELECT id FROM communities WHERE id=?').bind(id).first();
+      return !!community && !!fullUser && (await isGodUserAsync(fullUser, env) || await ensureOwnerOrAdmin(id, user.id, env));
+    },
+    listCommunities: async (user) => {
+      // Clone destinations are the communities this user created or staffs
+      // (owner/admin membership).  The default system community and unrelated
+      // communities are not valid destinations, even for GOD users.
+      const { results } = await env.DB.prepare(
+        `SELECT DISTINCT c.id, c.name FROM communities c
+         LEFT JOIN community_members m ON m.community_id = c.id AND m.user_id = ?
+         WHERE c.id != 'default' AND (c.creator_id = ? OR m.role IN ('owner','admin'))
+         ORDER BY c.name, c.id`
+      ).bind(user.id, user.id).all();
+      return results || [];
+    },
+    telegram: telegramApi,
+    classicText: richHtmlToClassic,
+    beforeRequest: ubWaitForRelease,
+    onFlood: async (label, seconds) => { ubReportFlood(label, seconds); await ubWaitForRelease(label); },
+    background: (task) => runInBackground(env, task),
+    log: (category) => console.error('[uclone]', category),
+  });
+  UCLONE_MANAGERS.set(env, manager);
+  return manager;
+}
+
+export async function resumeCloneJobs(env, token) {
+  await startUserbotDaemon(env);
+  await ensureIndexTables(env);
+  await ucloneManager(env).resume(token);
+  const { results } = await env.DB.prepare("SELECT * FROM index_jobs WHERE status IN ('queued','running','stopping') AND parent_id IS NULL ORDER BY created_at").all();
+  for (const job of results) runInBackground(env, runHistoryIndexJob(env, job, token));
 }
 
 async function ensurePendingCloneTable(env){
@@ -8801,157 +10048,364 @@ async function ensurePendingCloneTable(env){
 async function storePendingClone(env, row){ await ensurePendingCloneTable(env); await env.DB.prepare(`INSERT INTO pending_clones (id, chat_id, thread_id, community_id, target, requester_tg_id, requester_user_id, stats_json, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(row.id,row.chat_id,row.thread_id||null,row.community_id||null,row.target||null,row.requester_tg_id,row.requester_user_id,JSON.stringify(row.stats),row.created_at,row.expires_at).run(); }
 async function getPendingClone(env, id){ await ensurePendingCloneTable(env); return await env.DB.prepare(`SELECT * FROM pending_clones WHERE id=? AND expires_at>?`).bind(id,Date.now()).first(); }
 async function deletePendingClone(env,id){ await env.DB.prepare(`DELETE FROM pending_clones WHERE id=?`).bind(id).run().catch(()=>{}); }
-
-async function collectClonePreview(env, label, chatIdN){
-  let isForum = false;
-  let topics = [];
-  try { topics = await getForumTopicsViaUserbot(env, chatIdN).catch(()=>[]); if(topics?.length) isForum = true; } catch(_){}
-  if(!isForum){
-    try { const acc = USERBOT_ACCOUNTS.get(label); if(acc) { const f = await isForumEnabled(null, chatIdN, env).catch(()=>false); if(f) isForum = true; } } catch(_){}
+async function activateBotClone(env, { pendingId, stats, chatId, token, messageId, threadId, user }) {
+  if (!user?.id) throw new Error('LOGIN_REQUIRED');
+  await ensureBotBindingColumns(env);
+  const sourceChat = normalizeTgChatId(chatId);
+  const thread = stats.threadId ? String(stats.threadId) : '';
+  const target = CHANNEL_TARGETS.has(stats.target) ? stats.target : 'community';
+  const communityId = String(stats.communityId || '');
+  if (thread) {
+    await ensureTopicBindingTable(env);
+    await env.DB.prepare(`INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at)
+      VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id, community_id) DO UPDATE SET
+      target=excluded.target, created_by=excluded.created_by`).bind('tb_' + Date.now().toString(36) + '_' + randomToken().slice(0, 5), sourceChat, thread, communityId, target, user.id, Date.now()).run();
+  } else {
+    const binding = await env.DB.prepare("SELECT id FROM community_bots WHERE platform='telegram' AND group_id=? ORDER BY created_at DESC LIMIT 1").bind(sourceChat).first();
+    if (!binding?.id) throw new Error('BOT_BINDING_REQUIRED');
+    await env.DB.prepare('UPDATE community_bots SET copy_text=1, channel_target=?, user_id=? WHERE id=?').bind(target, user.id, binding.id).run();
   }
-  let totalMsgs = null;
-  let sampleLinks=0, sampleFiles=0, sampleUrls=0, sampleSize=0;
-  let estLinks=null, estFiles=null, estUrls=null;
+  const next = { ...stats, manager: 'botclone', stage: 'running', live: true, sourceName: stats.sourceName || sourceChat, destinationName: target === 'community' ? communityId : target === 'both' ? 'Personal + community' : 'Personal', isForum: !!thread, chosen: thread ? [{ id: thread, name: `Topic ${thread}`, counters: { messages: 0 } }] : [] };
+  await ensurePendingCloneTable(env);
+  await env.DB.prepare('UPDATE pending_clones SET stats_json=?, expires_at=? WHERE id=?').bind(JSON.stringify(next), Date.now() + 30 * 86400_000, pendingId).run();
+  await editTelegramRichMessage(token, chatId, messageId,
+    `${boldHtml('✅ Live clone enabled')} ${codeHtml(sourceChat)}${thread ? ` · topic ${codeHtml('#' + thread)}` : ''}\n` +
+    `${italicHtml('The Bot API cannot read old messages. New links, files and text posts are indexed as they arrive.')}`,
+    threadId);
+}
+
+const STATS_BAR_FILLED = '█';
+const STATS_BAR_EMPTY = '░';
+// Topic lines per /stats page: the classic-HTML fallback must stay inside one
+// Telegram message, and the page split below also caps by rendered length.
+const STATS_TOPICS_PAGE_MAX = 100;
+
+const statsNum = (v) => String(Math.max(0, Math.floor(Number(v) || 0)));
+
+function statsProgressBar(percent, width = 18) {
+  const pct = Math.max(0, Math.min(100, Number(percent) || 0));
+  const filled = Math.round((pct / 100) * width);
+  return STATS_BAR_FILLED.repeat(filled) + STATS_BAR_EMPTY.repeat(Math.max(0, width - filled)) + ' ' + pct + '%';
+}
+
+/** Authoritative counters_json values may nest (per-sink objects); sum every numeric leaf. */
+function statsNormalizeCounters(obj) {
+  const out = {};
+  const walk = (node, key) => {
+    if (node == null) return;
+    if (Array.isArray(node)) { for (const v of node) walk(v, key); return; }
+    if (typeof node === 'object') { for (const [k, v] of Object.entries(node)) walk(v, key || k); return; }
+    if (typeof node === 'boolean') node = node ? 1 : 0;
+    if (typeof node !== 'number' || !Number.isFinite(node)) return;
+    const k = key || '_';
+    out[k] = (out[k] || 0) + node;
+  };
+  walk(obj, '');
+  return out;
+}
+
+/** "Other" bucket: every saved artefact that is neither a link nor a file. */
+function statsOtherCount(c) {
+  return Number(c.savedOther || 0) + Number(c.savedHtml || 0) + Number(c.savedJson || 0) +
+    Number(c.savedMarkdown || 0) + Number(c.savedImages || 0) + Number(c.savedAudio || 0);
+}
+
+/** Counters that mirror stored destination rows rather than this run's work. */
+const STATS_STORED_FIELDS = ['savedLinks', 'savedLinkPosts', 'savedFiles', 'savedDocs', 'savedOther',
+  'savedPdfs', 'savedMarkdown', 'savedJson', 'savedHtml', 'savedImages', 'savedAudio'];
+
+/** Compact counters backed by successful rows in the destination database. */
+function statsCountersText(c) {
+  return richParagraph('🔗 Link Posts: ' + statsNum(c.savedLinkPosts) + '<br>🔗 URLs Indexed: ' + statsNum(c.savedLinks) +
+    '<br>📄 Files: ' + statsNum(c.savedFiles) + '<br>📦 Other: ' + statsNum(statsOtherCount(c)));
+}
+
+async function statsDatabaseCounters(env, target, owner, chatId) {
+  if (!target || !owner || !chatId) return null;
   try {
-    const client = USERBOT_ACCOUNTS.get(label)?.client;
-    if(client){
-      // Authoritative message count from Telegram — the newest message id is
-      // not the count: deleted messages leave gaps, imported history can start
-      // at an arbitrary id (the old code overstated Msgs by every deletion).
-      try {
-        const { Api } = await import('telegram/tl');
-        const hist = await client.invoke(new Api.messages.GetHistory({ peer: chatIdN, offsetId: 0, offsetDate: 0, addOffset: 0, limit: 1, maxId: 0, minId: 0, hash: 0n }));
-        if (hist && typeof hist.count === 'number') totalMsgs = hist.count;
-      } catch (_) {}
-      if (totalMsgs == null) {
-        const head = await client.getMessages(chatIdN, {limit:1});
-        totalMsgs = Number(head?.[0]?.id || 0) || null;
-      }
-      // Representative sample: probe across the whole history instead of the
-      // newest 80 messages (recent posts can look nothing like the archive —
-      // e.g. a group that posts media now but was link-dense historically).
-      const SAMPLE_TARGET = 240;
-      let sampled = [];
-      if (totalMsgs && totalMsgs <= SAMPLE_TARGET) {
-        sampled = (await client.getMessages(chatIdN, { limit: SAMPLE_TARGET })) || [];
-      } else if (totalMsgs) {
-        const chunks = Math.max(2, Math.min(6, Math.ceil(totalMsgs / 600)));
-        const per = Math.max(1, Math.ceil(SAMPLE_TARGET / chunks));
-        const seen = new Set();
-        for (let i = 0; i < chunks; i++) {
-          const off = Math.floor((totalMsgs * (i + 1)) / (chunks + 1));
-          try {
-            const msgs = (await client.getMessages(chatIdN, { limit: per, addOffset: off })) || [];
-            for (const m of msgs) if (!seen.has(m.id)) { seen.add(m.id); sampled.push(m); }
-          } catch (_) {}
-        }
-      }
-      for (const m of sampled || []) {
-        const urls = urlsFromGramjsMessage(m);
-        sampleUrls += urls.length; if(urls.length) sampleLinks++;
-        if(m.media?.className==='MessageMediaDocument' || m.media?.className==='MessageMediaPhoto') sampleFiles++;
-      }
-      sampleSize = (sampled || []).length;
-      if (sampleSize > 0 && totalMsgs) {
-        estLinks = Math.round(sampleLinks * totalMsgs / sampleSize);
-        estFiles = Math.round(sampleFiles * totalMsgs / sampleSize);
-        estUrls  = Math.round(sampleUrls  * totalMsgs / sampleSize);
-      }
-    }
-  } catch(_){}
-  return { isForum, topics: topics||[], topicCount: (topics||[]).length, totalMsgs, sampleLinks, sampleFiles, sampleUrls, sampleSize, estLinks, estFiles, estUrls };
+    const destination = `${target}:${owner}`;
+    const row = await env.DB.prepare(`SELECT
+      COUNT(CASE WHEN content_key LIKE 'url:%' THEN 1 END) AS links,
+      COUNT(DISTINCT CASE WHEN content_key LIKE 'url:%' THEN message_id END) AS posts,
+      COUNT(CASE WHEN content_key = 'media' THEN 1 END) AS files,
+      COUNT(CASE WHEN content_key = 'text' THEN 1 END) AS docs
+      FROM clone_sources
+      WHERE destination=? AND chat_id=? AND status IN ('saved','duplicate')`).bind(destination, chatId).first();
+    return {
+      savedLinks: Number(row?.links || 0), savedLinkPosts: Number(row?.posts || 0),
+      savedFiles: Number(row?.files || 0), savedDocs: Number(row?.docs || 0), savedOther: Number(row?.docs || 0),
+    };
+  } catch (_) { return null; }
 }
 
-/** Render "~N (est. from M sampled)" for one clone-preview stat. */
-function formatPreviewEst(est, sampleVal, sampleSize) {
-  const shown = est != null ? '~' + est.toLocaleString() : String(sampleVal || 0);
-  const note = sampleSize ? ' (est. from ' + sampleSize + ' msg sample)' : '';
-  return shown + note;
+function statsLiveLine(live) {
+  return richParagraph((live ? '🟢' : '🔴') + ' LIVE CLONING: ' + (live ? 'ON' : 'OFF'));
 }
 
-function formatStatsRichReport(report) {
-  const liveMark = (v) => v ? '🟢' : '⚪';
-  const liveNote = (v) => v ? ' (new posts clone automatically)' : '';
-  const out = [];
-  out.push(richHeading(3, '📊 ATHENA — CLONE STATUS'));
-  for (let i = 0; i < report.chats.length; i++) {
-    const c = report.chats[i];
-    const idx = i + 1;
-    const idPart = codeHtml(escHtml(c.id));
-    const typeLabel = c.type || (c.isForum ? 'forum' : 'group');
-    const targetLabel = c.target || 'community';
-    const communitySuffix = c.communityId ? ' → ' + escHtml(c.communityId) : '';
-    const summary = idx + '. ' + escHtml(c.name) + ' (' + idPart + ') · ' + typeLabel
-      + (c.isForum ? ' · ' + (c.topics ? c.topics.length + ' topics' : 'forum') : '')
-      + ' · ' + targetLabel + communitySuffix + ' · ' + liveMark(c.live) + liveNote(c.live);
-    const body = [];
-    const totL = c.total.links || 0;
-    const totF = c.total.files || c.total.docs || 0;
-    const totP = c.total.photos || 0;
-    const totM = c.total.msgs || 0;
-    body.push(richParagraph('• links ' + totL + ' · files ' + totF + ' · photos ' + totP + ' · msgs ' + totM));
-    const tdL = c.today.links || 0;
-    const tdD = c.today.docs || 0;
-    const tdP = c.today.photos || 0;
-    body.push(richParagraph('today ' + tdL + ' links · ' + tdD + ' docs · ' + tdP + ' photos'));
-    const jobsAll = c.jobs?.all || [];
-    if (jobsAll.length) {
-      let doneJobs = jobsAll.filter((j) => j.status === 'done').length;
-      let runningJobs = jobsAll.filter((j) => j.status === 'running' || j.status === 'queued').length;
-      let errJobs = jobsAll.filter((j) => j.status === 'error').length;
-      let sumMsgs = jobsAll.reduce((a, j) => a + Number(j.processed || 0), 0);
-      let sumUrls = jobsAll.reduce((a, j) => a + Number(j.urls_seen || 0), 0);
-      let sumLinks = jobsAll.reduce((a, j) => a + Number(j.saved_links || 0), 0);
-      let sumDocs = jobsAll.reduce((a, j) => a + Number(j.saved_docs || 0), 0);
-      let bfStatus = doneJobs && !runningJobs ? 'done' : runningJobs ? 'running' : errJobs ? 'error' : 'queued';
-      body.push(richParagraph('backfill: ' + bfStatus + ' ' + sumMsgs + ' msgs · ' + sumUrls + ' urls · ' + sumLinks + ' links · ' + sumDocs + ' docs'));
-      for (const j of jobsAll.slice(0, 2)) {
-        if (j.error) body.push(richParagraph('⚠️ ' + codeHtml(escHtml(j.id)) + ' error: ' + escHtml(String(j.error).slice(0, 80))));
-      }
-    } else {
-      body.push(richParagraph('backfill: not run'));
+
+function statsSourceHtml(run) {
+  const state = run.state || {};
+  const name = state.sourceName || run.chat_id;
+  const username = state.username ? String(state.username).replace(/^@/, '') : null;
+  return username
+    ? '<a href="https://t.me/' + escHtml(username) + '">' + escHtml(name) + '</a>'
+    : escHtml(name) + ' ' + codeHtml(escHtml(run.chat_id));
+}
+
+function statsTopicLine(t) {
+  const title = t.title ? ' ' + escHtml(t.title) : '';
+  return '<li>' + codeHtml('#' + t.threadId) + title + '<br>' + statsProgressBar(t.percent) + '<br>' +
+    '🔗 ' + (t.total?.links || 0) + ' | 📄 ' + (t.total?.files || 0) + ' | 📦 ' + (t.total?.other || 0) + ' · ' + t.stateMark + '</li>';
+}
+
+/** Split topic lines so one page still fits the classic-HTML fallback message. */
+function statsTopicPages(topics) {
+  const pages = [[]];
+  let length = 0;
+  for (const topic of topics) {
+    const size = richHtmlToClassic(statsTopicLine(topic)).length;
+    if (pages.at(-1).length && (length + size > 2400 || pages.at(-1).length >= STATS_TOPICS_PAGE_MAX)) {
+      pages.push([]);
+      length = 0;
     }
-    if (c.isForum && c.topics && c.topics.length) {
-      const withClones = c.topics.filter((t) => t.job).length;
-      body.push(richParagraph('topics: ' + withClones + '/' + c.topics.length + ' with clones'));
-      const items = [];
-      for (const t of c.topics.slice(0, 12)) {
-        const titlePart = t.title ? ' · ' + escHtml(t.title) : '';
-        const liveT = t.live?.lastAt ? ' · live ' + Math.max(1, Math.round((Date.now() - (t.live.lastAt || 0)) / 60000)) + 'm ago' : (t.live?.msgs ? ' · live' : '');
-        const j = t.job;
-        const jPart = j ? j.status + (j.processed ? ' ' + j.processed + ' msgs' : '') + (j.saved_links ? ' · ' + j.saved_links + ' links' : '') + (j.saved_docs ? ' · ' + j.saved_docs + ' docs' : '') : 'not started';
-        items.push('<li>' + codeHtml('#' + t.threadId) + titlePart + ' → links ' + t.total.links + ' · docs ' + t.total.docs + ' (today ' + t.today.links + '/' + t.today.docs + ') · ' + jPart + liveT + '</li>');
-      }
-      if (c.topics.length > 12) items.push('<li>… +' + (c.topics.length - 12) + ' more topics</li>');
-      body.push('<ul>' + items.join('') + '</ul>');
-    }
-    if (c.live) {
-      const stat = USERBOT_STATS.get(c.id) || USERBOT_STATS.get(c.id.replace(/^-100/, '')) || null;
-      if (stat) body.push(richParagraph('live: ' + (stat.msgs || 0) + ' msgs · ' + (stat.links || 0) + ' links · ' + (stat.docs || 0) + ' docs'));
-      if (c.topics) {
-        const hot = c.topics.filter((t) => t.live?.lastAt && Date.now() - t.live.lastAt < 3600000).slice(0, 3);
-        for (const h of hot) body.push(richParagraph('live ▸ #' + h.threadId + ' cloned ' + (h.live.links || 0) + ' links · ' + (h.live.docs || 0) + ' docs today'));
-      }
-    }
-    out.push(richDetails(summary, body.join('\n'), true));
+    pages.at(-1).push(topic);
+    length += size;
   }
-  return out.join('\n');
+  return pages;
 }
 
-function statsRichButtons() {
-  return richButtonRow([
+/** Two runs describe one source when chat, destination and owner all match. */
+/**
+ * Sum every run of one source. Stored counters mirror rows already in the
+ * destination database, so a re-clone of the same source would multiply them:
+ * those fields take the highest run value instead of a sum, while per-run work
+ * counters still add up.
+ */
+function statsSourceOverall(runs) {
+  const overall = {};
+  for (const run of runs) statsAddCounters(overall, statsNormalizeCounters(run.state?.overall || run.state?.counters || {}));
+  for (const field of STATS_STORED_FIELDS) {
+    overall[field] = Math.max(0, ...runs.map((run) => Number(run.state?.overall?.[field] || run.state?.counters?.[field] || 0)));
+  }
+  return overall;
+}
+
+/**
+ * Fresh saved links for one source over the rolling 24h, newest first —
+ * the drill-down list on the /stats dashboard. Topic attribution comes from
+ * clone_sources where the link was saved by a clone; personal links and
+ * older rows without a source row simply carry no thread.
+ */
+async function statsRecentLinks(env, target, owner, chatId, limit = 8) {
+  const out = [];
+  if (!target || !owner || !chatId) return out;
+  const cap = Math.max(1, Math.min(12, Number(limit) || 8));
+  const since = Date.now() - 86400000;
+  try {
+    const norm = normalizeTgChatId(chatId);
+    const variants = [String(norm), String(norm).replace(/^-100/, '')];
+    const ph = variants.map(() => '?').join(',');
+    const mapRows = (rows) => (rows || []).map((x) => ({
+      title: String(x.title || x.url || 'untitled').slice(0, 80),
+      url: String(x.url || ''),
+      created_at: Number(x.created_at || 0),
+      thread: String(x.thread || ''),
+    }));
+    if (target === 'personal') {
+      const r = await env.DB.prepare(
+        `SELECT title, url, created_at, '' AS thread FROM personal_links WHERE user_id=? AND created_at>? ORDER BY created_at DESC LIMIT ${cap}`
+      ).bind(String(owner), since).all().catch(() => null);
+      return mapRows(r?.results || r || []).slice(0, cap);
+    }
+    try {
+      const dest = `community:${owner}`;
+      const r = await env.DB.prepare(
+        `SELECT l.title AS title, l.url AS url, l.created_at AS created_at, MAX(cs.topic_id) AS thread FROM links l
+         LEFT JOIN clone_sources cs ON cs.destination=? AND cs.chat_id IN (${ph}) AND cs.message_id=l.source_message_id AND cs.content_key LIKE 'url:%'
+         WHERE l.community_id=? AND l.source_chat_id IN (${ph}) AND l.created_at>?
+         GROUP BY l.id, l.title, l.url, l.created_at ORDER BY l.created_at DESC LIMIT ${cap}`
+      ).bind(dest, ...variants, String(owner), ...variants, since).all().catch(() => null);
+      if (r) return mapRows(r.results || r || []).slice(0, cap);
+    } catch (_) {}
+    // Older databases without source_chat_id: community-wide fallback.
+    const r = await env.DB.prepare(
+      `SELECT title, url, created_at, '' AS thread FROM links WHERE community_id=? AND created_at>? ORDER BY created_at DESC LIMIT ${cap}`
+    ).bind(String(owner), since).all().catch(() => null);
+    return mapRows(r?.results || r || []).slice(0, cap);
+  } catch (_) { return out; }
+}
+
+function statsAgo(ts) {
+  const s = Math.max(0, Math.floor((Date.now() - Number(ts || 0)) / 1000));
+  if (s < 60) return 'just now';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
+
+/** Dashboard totals across sources: counted once per source, grows with live clones. */
+function statsSourcesTotalsText(sources) {
+  const overall = {};
+  for (const s of sources) statsAddCounters(overall, s.overall || {});
+  const live = sources.some((s) => s.live === true);
+  return richParagraph('📈 All sources — ' + sources.length + (sources.length === 1 ? ' source' : ' sources') +
+    ' · 🔗 ' + statsNum(overall.savedLinkPosts) + ' link posts · 🔗 ' + statsNum(overall.savedLinks) + ' urls' +
+    ' · 📄 ' + statsNum(overall.savedFiles) + ' files · 📦 ' + statsNum(statsOtherCount(overall)) + ' other' +
+    ' · ' + (live ? '🟢 live on' : '🔴 live off'));
+}
+
+/** Display name for a /stats source: forum groups show Group[topic, …], capped. */
+function statsSourceTopicsSuffix(s, max = 5) {
+  const topics = Array.isArray(s?.topics) ? s.topics : [];
+  if (!s?.isForum || !topics.length) return '';
+  const names = topics.map((t) => String(t?.title || (t?.threadId != null && t.threadId !== '' ? '#' + t.threadId : '')).trim()).filter(Boolean);
+  if (!names.length) return '';
+  const shown = names.slice(0, max);
+  return '[' + shown.join(', ') + (names.length > shown.length ? `, +${names.length - shown.length} more` : '') + ']';
+}
+function statsSourceDisplayName(s, maxLen = 60) {
+  return String(String(s?.name || s?.chat_id || '?') + statsSourceTopicsSuffix(s)).slice(0, maxLen);
+}
+function statsSourceRowLine(s, index) {
+  const o = s.overall || {};
+  const liveMark = s.live ? '🟢 LIVE' : '🔴 off';
+  const typeMark = s.type === 'channel' ? '📡' : s.isForum ? '👥' : '👤';
+  const name = escHtml(statsSourceDisplayName(s, 60));
+  return `<b>${index + 1}. ${typeMark} ${name}</b> · ${liveMark}<br>` +
+    escHtml(String(s.chat_id || '') + ' → ' + String(s.destinationName || (s.target === 'personal' ? 'Personal brain' : 'community'))) + '<br>' +
+    '🔗 ' + statsNum(o.savedLinkPosts) + ' posts · 🔗 ' + statsNum(o.savedLinks) + ' urls' +
+    ' · 📄 ' + statsNum(o.savedFiles) + ' files · 📦 ' + statsNum(statsOtherCount(o)) +
+    ' · 🆕 +' + Number(s.fresh?.links || 0) + '/+' + Number(s.fresh?.files || 0);
+}
+
+/** One dashboard page: one row per cloned source, each with live state. */
+function statsDashboardPage(sources) {
+  const lines = [richHeading(3, '📊 CLONE STATS'), statsSourcesTotalsText(sources)];
+  if (!sources.length) {
+    lines.push(richParagraph('No clones yet. Start one with ' + codeHtml('/uclone') + ' or ' + codeHtml('/clone') + '.'));
+    return lines.join('\n');
+  }
+  lines.push(richParagraph('Tap a source for its topics and the absolute latest links (last 24h).'));
+  lines.push('<ul>' + sources.map((s, i) => `<li>${statsSourceRowLine(s, i)}</li>`).join('') + '</ul>');
+  return lines.join('\n');
+}
+
+/** Drill-down page for one source: topics (+fresh counts) and latest links. */
+function statsSourcePage(s, topicPagesList, topicPage) {
+  const o = s.overall || {};
+  const freshByThread = {};
+  for (const r of s.recent || []) {
+    const t = String(r.thread || '');
+    freshByThread[t] = (freshByThread[t] || 0) + 1;
+  }
+  const lines = [];
+  lines.push(richHeading(3, '📊 ' + escHtml(statsSourceDisplayName(s, 60))));
+  lines.push(richParagraph('Source: ' + statsSourceHtml({ chat_id: s.chat_id, state: { sourceName: s.name, label: s.label } }) +
+    '<br>Type: ' + escHtml(s.type === 'channel' ? 'Channel' : s.isForum ? 'Group — Topics Enabled' : s.target === 'personal' ? 'Personal brain' : 'Group — No Topics') +
+    '<br>Destination: ' + escHtml(String(s.destinationName || (s.target === 'personal' ? 'Personal brain' : 'community')))));
+  lines.push(statsCountersText(o));
+  lines.push(statsLiveLine(s.live === true));
+  const freshLinks = Number(s.fresh?.links || 0);
+  const freshFiles = Number(s.fresh?.files || 0);
+  lines.push(richParagraph('🆕 Fresh in the last 24h: ' + escHtml(freshLinks + freshFiles > 0 ? `+${freshLinks} links · +${freshFiles} files` : 'nothing new')));
+  if (s.isForum && s.topics?.length) {
+    const shown = topicPagesList[topicPage] || [];
+    lines.push(richParagraph('📚 Topics — page ' + (topicPage + 1) + ' / ' + topicPagesList.length + ' · ' + s.topics.length + ' total'));
+    lines.push('<ul>' + shown.map((t) => {
+      const f = freshByThread[String(t.threadId || '')] || 0;
+      return statsTopicLine(t) + (f > 0 ? ' ' + escHtml(`· 🆕 +${f}`) : '');
+    }).join('') + '</ul>');
+  }
+  const recent = s.recent || [];
+  if (recent.length) {
+    lines.push(richParagraph('🆕 Latest links (24h) — newest first'));
+    lines.push('<ul>' + recent.map((r) => {
+      const title = escHtml(r.title || r.url || 'untitled');
+      const threadBit = r.thread ? ' ' + escHtml('#' + r.thread) : '';
+      const linkBit = r.url ? `<a href="${escHtml(r.url)}">${title}</a>` : title;
+      return `<li>${linkBit}${threadBit} <i>${escHtml(statsAgo(r.created_at))}</i></li>`;
+    }).join('') + '</ul>');
+  } else {
+    lines.push(richParagraph('🆕 Latest links (24h): nothing new.'));
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Render the /stats dashboard: one table row per cloned source (no run
+ * pages), each row with totals and live state; tapping a source opens its
+ * drill-down page with per-topic counters and the absolute latest links
+ * (last 24h). Every render rebuilds from the authoritative report, so the
+ * counters are never a stale snapshot.
+ */
+function formatStatsRichReport(report, sel = {}) {
+  const sources = report?.sources || [];
+  const rows = [];
+  let html;
+  let src = -1;
+  let topicPage;
+  let topicPagesList;
+  if (!sources.length) {
+    html = statsEmptyPage();
+  } else if (sel && sel.src != null && sources[Number(sel.src)]) {
+    const s = sources[Number(sel.src)];
+    src = Number(sel.src);
+    topicPagesList = s.isForum && s.topics?.length ? statsTopicPages(s.topics) : [[]];
+    topicPage = Math.max(0, Math.min(topicPagesList.length - 1, Number(sel.topicPage) || 0));
+    html = statsSourcePage(s, topicPagesList, topicPage);
+    if (topicPagesList.length > 1) {
+      rows.push([
+        { label: '◀ Previous', data: 'stats:src:' + src + ':' + Math.max(0, topicPage - 1) },
+        { label: '📚 Page ' + (topicPage + 1) + ' / ' + topicPagesList.length, data: 'stats:noop' },
+        { label: 'Next ▶', data: 'stats:src:' + src + ':' + Math.min(topicPagesList.length - 1, topicPage + 1) },
+      ]);
+    }
+    // Delete from the stats display: stops live capture too, saved links stay.
+    // Two-step (ask → yes) like the /delete picker.
+    rows.push([{ label: '🗑 Delete from stats', data: 'stats:del:' + src + ':' + (topicPage || 0) }]);
+    rows.push([{ label: '« All sources', data: 'stats:dashboard' }]);
+  } else {
+    html = statsDashboardPage(sources);
+    for (let i = 0; i < sources.length; i++) {
+      const s = sources[i];
+      const short = statsSourceDisplayName(s, 22);
+      rows.push([
+        { label: `${i + 1}. ${short} ▸`, data: 'stats:src:' + i },
+        // Beside toggle: ⏹ stops live, ▶️ restarts it (full clone first).
+        { label: s.live ? '⏹' : '▶️', data: (s.live ? 'stats:stop:' : 'stats:start:') + i },
+      ]);
+    }
+  }
+  rows.push([
     { label: '🔄 Refresh', data: 'stats:refresh' },
     { label: '💻 Clone', data: 'menu:clone' },
-    { label: '❌ Close', data: 'stats:close' }
+    { label: '❌ Close', data: 'stats:close' },
   ]);
+  return { html, pages: Math.max(1, sources.length), page: Math.max(0, src), totalRuns: sources.length, buttons: rows.map((r) => richButtonRow(r)).join('\n') };
 }
+
+function statsEmptyPage() {
+  return richHeading(3, '📊 CLONE STATS') + '\n' +
+    richParagraph('No clones yet. Start one with ' + codeHtml('/uclone') + ' or ' + codeHtml('/clone') + ' — then this page shows<br>total links / files / other for every channel, group and topic you clone.');
+}
+
+/**
+ * Render the /stats dashboard. Totals for every cloned source sit above a page
+ * per run; the nav buttons carry the run index and the topic page so each run
+ * stays reachable. Every render rebuilds from the authoritative report, so the
+ * counters are never a stale snapshot.
+ */
+/* Legacy page-per-run /stats renderer removed: the dashboard renders one row
+ * per cloned source with per-source drill-down pages instead. */
+
+
 
 function welcomeRichButtonRows(websiteUrl) {
   const rows = [richButtonRow([
     { label: '📊 Stats', data: 'menu:stats' },
     { label: '🔍 Search', data: 'menu:search' },
     { label: '🧬 Clone', data: 'menu:clone' },
-    { label: '🧭 Help', data: 'help:menu' }
+    { label: '🧭 Help', data: 'help:menu:0' }
   ])];
   if (websiteUrl) {
     rows.push(richButtonRow([{ type: 'url', url: websiteUrl, label: '🌐 Open ' + String(websiteUrl).replace(/^https?:\/\//, '') }]));
@@ -8959,19 +10413,25 @@ function welcomeRichButtonRows(websiteUrl) {
   return rows.join('\n');
 }
 
-function helpRichButtonRows(back = false, isGod = false) {
+/** Section switchers plus page navigation for the help panels. */
+function helpRichButtonRows(section = 'menu', page = 0, pages = 1, isGod = false) {
   const rows = [];
-  if (back) rows.push(richButtonRow([{ label: '« Help menu', data: 'help:menu' }]));
+  if (section !== 'menu') rows.push(richButtonRow([{ label: '« All sections', data: 'help:menu:0' }]));
   rows.push(richButtonRow([
-    { label: '🌐 Global', data: 'help:global' },
-    { label: '👤 Personal', data: 'help:personal' }
+    { label: '🌐 Global', data: 'help:global:0' },
+    { label: '👤 Personal', data: 'help:personal:0' }
   ]));
   rows.push(richButtonRow([
-    { label: '👥 Community', data: 'help:community' },
-    { label: '📡 Channels', data: 'help:channels' }
+    { label: '👥 Community', data: 'help:community:0' },
+    { label: '📡 Channels', data: 'help:channels:0' }
   ]));
-  if (isGod) {
-    rows.push(richButtonRow([{ label: '🛡 GOD tools', data: 'help:god' }]));
+  if (isGod) rows.push(richButtonRow([{ label: '🛡 GOD tools', data: 'help:god:0' }]));
+  if (pages > 1) {
+    rows.push(richButtonRow([
+      { label: '◀ Previous', data: `help:${section}:${Math.max(0, page - 1)}` },
+      { label: `📄 Page ${page + 1} / ${pages}`, data: 'help:noop' },
+      { label: 'Next ▶', data: `help:${section}:${Math.min(pages - 1, page + 1)}` }
+    ]));
   }
   return rows.join('\n');
 }
@@ -8985,122 +10445,144 @@ function richTextToRich(htmlText) {
     .join('\n');
 }
 
-function richHelpHtml(section, isGod = false) {
-  const raw = String(helpTextForSection(section, isGod) || '');
-  if (/^<h3/i.test(raw)) return raw; // panels are rich HTML now
-  const out = [];
-  const paras = raw.split(/\n{2,}/).map((x) => x.trim()).filter(Boolean);
-  for (let i = 0; i < paras.length; i++) {
-    const inner = paras[i].split(/\n/).join('<br>');
-    out.push(i === 0 ? richHeading(3, inner) : richParagraph(inner));
-  }
-  return out.join('\n');
+/** One page of a help panel as rich HTML; page parts come from the shared
+ *  splitter so the mobile fallback and the buttons agree on the count. */
+function richHelpHtml(section, isGod = false, page = 0) {
+  return helpPageHtml(section, page, isGod).html;
 }
-async function doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdN, targetArg, stats }){
+async function doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdN, targetArg, stats, threadArg = '' }){
   const _minId = stats?.minId || stats?.min_id || '';
   const _maxId = stats?.maxId || stats?.max_id || '';
   const labelRow = await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled=1 ORDER BY label LIMIT 1').first().catch(()=>null);
   const label = labelRow?.label || 'main';
   const communityName = communityIdArg ? (await env.DB.prepare('SELECT name FROM communities WHERE id=?').bind(communityIdArg).first().catch(()=>null))?.name || communityIdArg : communityIdArg;
+  const cloneChatName = await resolveChatTitle(env, token, chatIdN);
+  const cloneWhere = `${cloneChatName ? `${boldHtml(escHtml(cloneChatName))} ` : ''}${codeHtml(chatIdN)}`;
   if(_minId || _maxId){
-    await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET label=excluded.label, community_id=excluded.community_id, target=excluded.target, created_by=excluded.created_by`).bind(chatIdN, label, communityIdArg || null, targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
-    await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: '', communityName, userbotLabel: label, minId: _minId, maxId: _maxId });
-    await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning range')} ${codeHtml(_minId||'0')}→${codeHtml(_maxId||'∞')} ${codeHtml(chatIdN)} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}\n${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
+    await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id, community_id) DO UPDATE SET label=excluded.label, target=excluded.target, created_by=excluded.created_by`).bind(chatIdN, label, communityIdArg || '', targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
+    await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: '', communityName, userbotLabel: label, minId: _minId, maxId: _maxId, target: targetArg || 'community' });
+    await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning range')} ${codeHtml(_minId||'0')}→${codeHtml(_maxId||'∞')} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}\n${codeHtml('⏹ on its /stats row')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
     return;
   }
-  // topic-wise if forum
+  // topic-wise if forum — ONE topic at a time: start topic N, wait for it to
+  // finish, then the next. Running all topics concurrently tripped the shared
+  // userbot session's flood limit (GetReplies) and stalled every read for
+  // 8-21s — the "Cloning 0 topics after 19 flood-waits" crawl.
   if(stats?.isForum && stats.topics?.length){
-    let started = 0;
-    for(const t of stats.topics){
-      const thr = String(t.id);
-      try {
-        await env.DB.prepare(`INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id) DO UPDATE SET community_id=excluded.community_id, target=excluded.target`).bind('tb_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), chatIdN, thr, communityIdArg || 'personal', targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
-        await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET label=excluded.label, community_id=excluded.community_id, target=excluded.target, created_by=excluded.created_by`).bind(chatIdN+':'+thr, label, communityIdArg || null, targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
-        await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: thr, communityName, userbotLabel: label });
-        started++;
-        await new Promise(r=>setTimeout(r, 800));
-      } catch(e){ console.error('topic clone failed', e?.message); }
-    }
-    await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning '+started+' topics')} ${codeHtml(chatIdN)} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}
-${italicHtml('Each topic backfills + live indexing afterwards.')}
-${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
+    const topicIds = stats.topics.map((t) => String(t.id));
+    const banner = `${boldHtml('🧬 Cloning ' + topicIds.length + ' topics')} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}
+${italicHtml('One topic at a time — the next starts after the current finishes.')}
+${codeHtml('⏹ on its /stats row')} to stop · ${codeHtml('/del ' + chatIdN)} to delete `;
+    await sendTelegramFormatted(token, chatId, banner, forumThreadId).catch(()=>{});
+    runInBackground(env, startForumCloneSequential(env, { token, chatId: chatIdN, chatName: cloneChatName || chatIdN, progressChatId: chatId, forumThreadId, topicIds, communityIdArg, targetArg, athenaUser, label, communityName }));
+    return;
+  }
+  // One topic was requested but the userbot could not enumerate topics (the
+  // preview degraded to isForum:false/topics:[]). Do NOT fall through to a
+  // whole-chat clone — that imports every topic's history. Clone that thread.
+  if (threadArg) {
+    const thr = String(threadArg);
+    await env.DB.prepare(`INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id, community_id) DO UPDATE SET target=excluded.target`).bind('tb_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), chatIdN, thr, communityIdArg || 'personal', targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
+    await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id, community_id) DO UPDATE SET label=excluded.label, target=excluded.target, created_by=excluded.created_by`).bind(chatIdN+':'+thr, label, communityIdArg || '', targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
+    await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: thr, communityName, userbotLabel: label, silentProgress: true, target: targetArg || 'community' });
+    await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning topic')} ${codeHtml('#'+thr)} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}\n• Live: every new post in this topic lands automatically\n${codeHtml('⏹ on its /stats row')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
+    if (chatId) await startForumCloneCard(env, { token, chatId: chatIdN, chatName: cloneChatName || chatIdN, progressChatId: chatId, forumThreadId });
     return;
   }
   // non-forum: single
-  await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET label=excluded.label, community_id=excluded.community_id, target=excluded.target, created_by=excluded.created_by`).bind(chatIdN, label, communityIdArg || null, targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
-  await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: '', communityName, userbotLabel: label });
-  await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning this chat')} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}
+  await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id, community_id) DO UPDATE SET label=excluded.label, target=excluded.target, created_by=excluded.created_by`).bind(chatIdN, label, communityIdArg || '', targetArg || 'community', athenaUser.id, Date.now()).run().catch(()=>{});
+  await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatIdN, threadArg: '', communityName, userbotLabel: label, target: targetArg || 'community' });
+  await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Cloning this chat')} ${cloneWhere} → ${boldHtml(escHtml(communityName||communityIdArg||'personal'))}
 • Live: every new post lands automatically
 • History: backfill running below
-${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
+${codeHtml('⏹ on its /stats row')} to stop · ${codeHtml('/del '+chatIdN)} to delete`, forumThreadId).catch(()=>{});
 }
 
 const INDEX_BATCH = 100;
 const INDEX_BATCH_DELAY_MS = 1500; // ~40 req/min ceiling — well under Telegram's flood limits
-const INDEX_MAX_MESSAGES = 50000;
-const INDEX_AUTO_CONTINUATIONS = 20; // big channels finish across chunked runs
+// The page delay above does not pace media: a media-heavy topic issues one
+// upload.getFile per message, so the runner used to burst ~1.7 downloads/s
+// until Telegram throttled the account and every later download sat in a flood
+// wait. One gap per downloaded file keeps the sustained rate at the same
+// ~40 req/min ceiling the page delay targets.
+const MEDIA_DOWNLOAD_GAP_MS = 1500;
+
+/**
+ * Flood-wait retry policy for one operation (a download, a link save, a page
+ * read).
+ *
+ * Retrying on the server-announced boundary is not enough: a throttled
+ * `upload.getFile` keeps re-tripping the limiter, so the announced 1s never
+ * clears it and the runner sits on one message forever — the item is never
+ * saved, the cursor never moves and no error is ever reported. Each retry
+ * therefore pauses for at least the announced time, escalating through
+ * FLOOD_PAUSE_SECONDS so a sustained throttle gets a real quiet period; after
+ * the last step the flood is raised so the run stops with the flood reason
+ * instead of looping.
+ */
+const FLOOD_PAUSE_SECONDS = [10, 60, 300];
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 /**
+ * Session-scoped flood-wait gate.
+ *
+ * Every history/media read on a userbot session shares ONE release timestamp
+ * per account label. When any read trips a FloodWaitError it reports the
+ * server-announced seconds here, and every other read on the same label waits
+ * for that same timestamp before issuing its request. This turns many
+ * uncoordinated per-request sleeps — where N jobs each sleep then immediately
+ * re-trip the limit and re-sleep, the "Sleeping for Ns on flood wait" cascade
+ * — into a single backoff window for the whole session.
+ *
+ * gramJS would otherwise sleep short waits internally and per-request, so we
+ * set floodSleepThreshold to 0 on the client so it re-raises EVERY wait to us
+ * and the gate coordinates them. A wait here never fails a job: it just delays
+ * the next read until the session is clear. Capped at 5 min like the code
+ * before, so a stuck session cannot wedge the loop forever.
+ */
+const UB_FLOOD_WAIT = new Map(); // label -> { until: epoch ms }
+function ubFloodWaitMs(label) {
+  if (!label) return 0;
+  const w = UB_FLOOD_WAIT.get(String(label));
+  return w ? Math.max(0, w.until - Date.now()) : 0;
+}
+async function ubWaitForRelease(label) {
+  let ms = ubFloodWaitMs(label);
+  while (ms > 0) {
+    await sleep(ms + 25);
+    ms = ubFloodWaitMs(label);
+  }
+}
+function ubReportFlood(label, seconds) {
+  if (!label || !(seconds > 0)) return;
+  try { console.info(`[userbot:${label}] flood wait ${seconds}s`); } catch (_) {}
+  const until = Date.now() + seconds * 1000;
+  const k = String(label);
+  const w = UB_FLOOD_WAIT.get(k);
+  if (!w || w.until < until) UB_FLOOD_WAIT.set(k, { until });
+}
+
+/**
  * Media vault: store original files on the VPS (self-host only) when
- * ATHENA_MEDIA_DIR is set. Everything is kept — photos, videos, audio,
- * archives, apk — independent of what gets indexed into the brain.
+ * ATHENA_MEDIA_DIR is set. Original nonvideo media is retained independently
+ * of document conversion. The returned path is persisted with source provenance.
  */
 const MEDIA_VAULT_DIR = String(process.env?.ATHENA_MEDIA_DIR || '').trim();
 async function vaultSave(chatId, messageId, filename, bytes) {
-  if (!MEDIA_VAULT_DIR || !bytes?.length) return false;
-  try {
-    const fsSpec = 'node:fs/promises';
-    const { mkdir, writeFile } = await import(fsSpec);
-    const safeName = String(filename || `file_${messageId}`).replace(/[^\w.-]+/g, '_').slice(0, 120);
-    const dir = `${MEDIA_VAULT_DIR}/${String(chatId).replace(/[^\w-]+/g, '_')}`;
-    await mkdir(dir, { recursive: true });
-    await writeFile(`${dir}/${messageId}_${safeName}`, bytes);
-    return true;
-  } catch (e) {
-    console.error('[vault] save failed', e?.message || e);
-    return false;
-  }
+  if (!MEDIA_VAULT_DIR || !bytes?.length) return null;
+  const fsSpec = 'node:fs/promises';
+  const { mkdir, writeFile } = await import(fsSpec);
+  const safeName = String(filename || `file_${messageId}`).replace(/[^\w.-]+/g, '_').slice(0, 120);
+  const dir = `${MEDIA_VAULT_DIR}/${String(chatId).replace(/[^\w-]+/g, '_')}`;
+  await mkdir(dir, { recursive: true });
+  const path = `${dir}/${messageId}_${safeName}`;
+  await writeFile(path, bytes);
+  return path;
 }
 
-/** Classify gramjs media for skip/vault decisions. */
-function classifyGramjsMedia(docu) {
-  const attrs = docu?.attributes || [];
-  const fnameAttr = attrs.find((a) => a.className === 'MessageAttributeFilename');
-  const filename = fnameAttr?.fileName || '';
-  const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
-  const mime = String(docu?.mimeType || '');
-  const isVideo = attrs.some((a) => a.className === 'MessageAttributeVideo') || mime.startsWith('video/');
-  const isAudio = attrs.some((a) => a.className === 'MessageAttributeAudio') || mime.startsWith('audio/');
-  const isPhoto = mime === 'image/jpeg' && !filename; // Telegram photos are jpegs w/o name
-  const kind = isVideo ? 'video' : isAudio ? 'audio' : isPhoto ? 'photo' : 'document';
-  return { filename, ext, kind };
-}
 
 /** URLs from a gramjs message: link entities + plain-text regex. */
-function urlsFromGramjsMessage(message) {
-  const out = new Set();
-  const text = String(message.text || message.message || '');
-  try {
-    for (const e of message.entities || []) {
-      if (e?.className === 'MessageEntityTextUrl' && e.url) out.add(e.url);
-    }
-  } catch (_) {}
-  // Inline / URL buttons under the post
-  try {
-    const rm = message.replyMarkup;
-    const rows = rm?.rows || [];
-    for (const row of rows) {
-      for (const b of row?.buttons || []) {
-        if (b?.className === 'KeyboardButtonUrl' && b.url) out.add(String(b.url));
-      }
-    }
-  } catch (_) {}
-  for (const m of text.matchAll(/https?:\/\/[^\s<>"')\]]+/g)) out.add(m[0]);
-  return [...out];
-}
-
 /**
  * Backfill one chat's history into a community using the stored user session.
  * Pacing: INDEX_BATCH_DELAY_MS between getHistory pages plus per-media gaps;
@@ -9109,321 +10591,803 @@ function urlsFromGramjsMessage(message) {
  */
 /**
  * Create + launch a backfill job using the connected userbot session
- * (userbot_state). One place for both /backfill (in-chat) and /index_start.
+ * (userbot_state). Single entry point: /index_start.
  */
-async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg, threadArg = '', communityName = '', userbotLabel = '', minId = '', maxId = '' }) {
+const CHAT_NAME_CACHE = new Map();
+/** Display name for a chat (channel/group title or @username) via Bot API.
+ *  Cached; '' when unresolvable (private chat the bot never saw). */
+async function resolveChatTitle(env, token, chatId) {
+  const key = String(chatId || '');
+  if (!key) return '';
+  if (CHAT_NAME_CACHE.has(key)) return CHAT_NAME_CACHE.get(key);
+  try {
+    const r = await telegramApi(token, 'getChat', { chat_id: key });
+    const ch = r?.result;
+    const name = ch && (ch.title || ch.username) ? (ch.title || ('@' + ch.username)) : '';
+    if (name) CHAT_NAME_CACHE.set(key, name);
+    return name;
+  } catch (_) { return ''; }
+}
+
+function progressBar(done, total, width = 18) {
+  const d = Math.max(Number(done) || 0, 0);
+  const t = Math.max(Number(total) || 0, 0);
+  // No real denominator (a topic job, or a count we could not probe): render a
+  // bar that fills as messages are scanned but report no percent — a 0 or a
+  // whole-channel id as "total" made finished jobs look stuck at 0%.
+  if (!t) {
+    const filled = Math.min(width, Math.max(1, Math.round(d / 200)));
+    return { bar: '▮'.repeat(filled) + '▯'.repeat(width - filled), pct: null };
+  }
+  const pct = Math.min(100, Math.round((d / t) * 100));
+  const filled = Math.round((pct / 100) * width);
+  return { bar: '▮'.repeat(filled) + '▯'.repeat(width - filled), pct };
+}
+
+/** Full backfill progress card (header + bar + per-type counts). Pure. Classic
+ *  HTML: the rich bridge does not exist in this setup, so classic is what
+ *  renders — keep it first-class instead of relying on fallback. */
+function formatBackfillProgress(o) {
+  const { bar, pct } = progressBar(o.done, o.total);
+  const pctLabel = pct == null ? '' : ` ${pct}%`;
+  const parts = [`${bar}${pctLabel}`, `${o.done}${o.total && o.total >= o.done ? `/${o.total}` : ''} msgs`];
+  if (o.links) parts.push(`${o.links} links`);
+  if (o.dupes) parts.push(`${o.dupes} dupes`);
+  if (o.docs) parts.push(`${o.docs} docs`);
+  if (o.pdfs) parts.push(`${o.pdfs} pdfs`);
+  if (o.files) parts.push(`${o.files} files`);
+  if (o.urls) parts.push(`${o.urls} urls found`);
+  if (o.skipped) parts.push(`${o.skipped} media skipped`);
+  const where = o.threadId ? `#${o.threadId}` : (o.chatId || '');
+  const head = `${boldHtml('🗂 Backfill')}${o.name ? ` ${boldHtml(escHtml(o.name))}` : ''} ${codeHtml(where)}`;
+  return `${head}\n${codeHtml(parts.join(' · '))}\n${italicHtml('⏹ on its /stats row to stop · /del ' + (o.chatId || '') + ' to delete')}`;
+}
+
+/** Backfill completion card. Pure. Classic HTML (see above). */
+function formatBackfillDone(o) {
+  const icon = o.status === 'done' ? '✅' : '⏸';
+  const where = o.name ? `${boldHtml(escHtml(o.name))} ${codeHtml(o.chatId || '')}` : codeHtml(o.chatId || '');
+  const counts = [`${o.processed} scanned`, `${o.links} links`, `${o.docs} docs`];
+  if (o.dupes) counts.push(`${o.dupes} dupes already saved`);
+  if (o.pdfs) counts.push(`${o.pdfs} pdfs`);
+  if (o.files) counts.push(`${o.files} files`);
+  const live = o.live ? `\n${o.live.emoji} ${escHtml(o.live.label)}` : '';
+  return `${icon} Backfill ${o.status || 'done'}: ${where}\n${counts.join(' · ')} saved.${live}`;
+}
+
+/** Per-topic backfill progress line (used by the aggregated forum card and
+ *  /userbot_status topic rows). Pure, classic HTML. */
+function formatTopicProgressLine(j) {
+  if (!j) return italicHtml('not started');
+  const { bar, pct } = progressBar(j.processed, j.total_messages);
+  const icon = j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'queued' ? '⏳' : j.status === 'error' ? '❌' : '⏸';
+  const pctLabel = pct == null ? '' : ` ${pct}%`;
+  let rep = `${bar}${pctLabel} · ${j.processed || 0} msgs`;
+  if (j.total_messages && Number(j.total_messages) > Number(j.processed || 0)) rep = `${bar}${pctLabel} · ${j.processed || 0}/${j.total_messages} msgs`;
+  if (j.saved_links) rep += ` · ${j.saved_links} links`;
+  if (j.saved_docs) rep += ` · ${j.saved_docs} docs`;
+  if (j.saved_pdfs) rep += ` · ${j.saved_pdfs} pdfs`;
+  if (j.saved_files) rep += ` · ${j.saved_files} files`;
+  if (j.dupes_skipped) rep += ` · ${j.dupes_skipped} dupes`;
+  if (j.status === 'error') rep += ` — ${escHtml(String(j.error || 'failed').slice(0, 70))}`;
+  return `${icon} ${escHtml(j.status)} — ${rep}`;
+}
+
+/** Aggregated forum-clone progress card: ONE realtime message with a progress
+ *  bar per topic. Jobs push their counters to index_jobs via patch(); this
+ *  card (and /userbot_status) renders from that — no per-topic message spam.
+ *  Rendered through classic parse_mode HTML, so keep it to <b>/<code>/<i> and
+ *  plain newlines — a <p> wrapper makes Telegram reject the whole card
+ *  ("can't parse entities: Unsupported start tag p") and it never shows. */
+function formatForumCloneCard(o) {
+  const lines = [];
+  const head = `${boldHtml('📇 Forum clone')} ${codeHtml(o.chatId)}${o.chatName && o.chatName !== o.chatId ? ` ${boldHtml(escHtml(o.chatName))}` : ''} — ${o.topics || 0} topics`;
+  const byThread = new Map();
+  for (const j of o.jobs || []) byThread.set(String(j.thread_id), j);
+  const counts = { running: 0, queued: 0, done: 0, stopped: 0, error: 0 };
+  for (const tid of o.topicIds || []) {
+    const j = byThread.get(String(tid));
+    if (j) { counts[j.status] = (counts[j.status] || 0) + 1; lines.push(`• ${codeHtml('#' + tid)} ${formatTopicProgressLine(j)}`); }
+    else { counts.queued++; lines.push(`• ${codeHtml('#' + tid)} ⏳ ${italicHtml('not started')}`); }
+  }
+  const tail = [];
+  if (counts.running) tail.push(`${boldHtml('▶️ ' + counts.running + ' running')}`);
+  if (counts.queued) tail.push(`${counts.queued} queued/not-started`);
+  if (counts.done) tail.push(`${boldHtml('✅ ' + counts.done + ' done')}`);
+  if (counts.stopped) tail.push(`⏸ ${counts.stopped} stopped`);
+  if (counts.error) tail.push(`${boldHtml('❌ ' + counts.error + ' failed')}`);
+  return `${head}\n${lines.join('\n')}\n${tail.length ? italicHtml(tail.join(' · ')) : ''}`;
+}
+
+// Rich Body API renderer (Bot API 10.1+ sendRichMessage): headings + <p> topic
+// lines. The Stop/Refresh buttons are appended in-body via <tg-button-row>. Falls
+// back to the classic card if the bot does not support the rich Body API, so the
+// card renders everywhere and never loses its buttons.
+function formatForumCloneCardRich(o) {
+  const byThread = new Map();
+  for (const j of o.jobs || []) byThread.set(String(j.thread_id), j);
+  const counts = { running: 0, queued: 0, done: 0, stopped: 0, error: 0 };
+  const lines = [];
+  for (const tid of o.topicIds || []) {
+    const j = byThread.get(String(tid));
+    if (j) { counts[j.status] = (counts[j.status] || 0) + 1; lines.push(richParagraph(`• ${codeHtml('#' + tid)} ${formatTopicProgressLine(j)}`)); }
+    else { counts.queued++; lines.push(richParagraph(`• ${codeHtml('#' + tid)} ⏳ ${italicHtml('not started')}`)); }
+  }
+  const tail = [];
+  if (counts.running) tail.push(`${boldHtml('▶️ ' + counts.running + ' running')}`);
+  if (counts.queued) tail.push(`${counts.queued} queued`);
+  if (counts.done) tail.push(`${boldHtml('✅ ' + counts.done + ' done')}`);
+  if (counts.stopped) tail.push(`⏸ ${counts.stopped} stopped`);
+  if (counts.error) tail.push(`${boldHtml('❌ ' + counts.error + ' failed')}`);
+  const head = richHeading(3, `📇 Forum clone ${codeHtml(o.chatId)}${o.chatName && o.chatName !== o.chatId ? ' ' + boldHtml(escHtml(o.chatName)) : ''} — ${o.topicIds?.length || 0} topics`);
+  return [head, ...lines, ...(tail.length ? [richParagraph(italicHtml(tail.join(' · ')))] : [])].join('\n');
+}
+
+// In-body <tg-button-row> Stop/Refresh buttons for the rich card.
+function cloneCardButtonsRich(chatId) {
+  const target = normalizeTgChatId(String(chatId || ''));
+  return richButtonRow([
+    { label: '⏹ Stop', data: 'clone_ctrl:stop:' + target },
+    { label: '🔄 Refresh', data: 'clone_ctrl:refresh:' + target }
+  ]);
+}
+
+// chatId(key) -> { msgId } — one live card per forum clone; the watcher edits
+// that single message while any topic job is active, then freezes the final state.
+const FORUM_CLONE_CARDS = new Map();
+
+// Inline keyboard under the live forum card (Telegram 13 welcome-messages
+// buttons): Stop halts the chat's running jobs; Refresh re-renders the card.
+function cloneCardKeyboard(chatId) {
+  const target = normalizeTgChatId(String(chatId || ''));
+  return { inline_keyboard: [[
+    { text: '⏹ Stop', callback_data: 'clone_ctrl:stop:' + target },
+    { text: '🔄 Refresh', callback_data: 'clone_ctrl:refresh:' + target }
+  ]] };
+}
+
+async function editForumCard(state, token, chatId, richHtml, classicHtml, forumThreadId, replyMarkup) {
+  const thread = (forumThreadId != null && forumThreadId !== '' && !Number.isNaN(Number(forumThreadId))) ? Number(forumThreadId) : undefined;
+  if (state.msgId) {
+    // Rich body first (headings + in-body <tg-button-row>). Any failure drops to
+    // the classic body + standard inline buttons below, so the card never breaks
+    // and never loses its Stop/Refresh buttons.
+    try {
+      const r = await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: state.msgId, rich_message: { html: richHtml }, ...(thread != null ? { message_thread_id: thread } : {}) }).catch(() => ({ ok: false }));
+      if (r && r.ok) return;
+    } catch (_) {}
+    const res = await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: state.msgId, text: classicHtml, parse_mode: 'HTML', ...(replyMarkup ? { reply_markup: replyMarkup } : {}), ...(thread != null ? { message_thread_id: thread } : {}) }).catch(() => ({ ok: false, description: 'network' }));
+    const desc = String(res?.description || '').toLowerCase();
+    // Only re-send when the original card is genuinely gone. A "not modified",
+    // parse or transient failure must never spawn a fresh message — the contract
+    // is ONE card edited in place; anything else spams new cards every round.
+    if (!/(not found|message to edit not found|message_id is invalid|message was deleted|deleted)/.test(desc)) return;
+    state.msgId = null; // message deleted — send a fresh card
+  }
+  // Fresh send: rich first (in-body buttons), else classic + standard buttons.
+  let m = null;
+  try {
+    const r = await telegramApi(token, 'sendRichMessage', { chat_id: chatId, rich_message: { html: richHtml }, ...(thread != null ? { message_thread_id: thread } : {}) }).catch(() => ({ ok: false, result: null }));
+    if (r && r.ok && r.result?.message_id != null) m = { message_id: r.result.message_id };
+  } catch (_) {}
+  if (!m) {
+    const s = await sendTelegramMessageWithKeyboard(token, chatId, classicHtml, replyMarkup, forumThreadId, 'HTML').catch(() => null);
+    if (s && s.message_id != null) m = { message_id: s.message_id };
+  }
+  state.msgId = m?.message_id || null;
+}
+
+async function forumCardTopicIds(env, chatId) {
+  const tids = new Set();
+  const norm = normalizeTgChatId(chatId);
+  const binds = await env.DB.prepare('SELECT thread_id FROM telegram_topic_bindings WHERE chat_id = ?').bind(norm).all().catch(() => ({ results: [] }));
+  for (const b of binds.results || []) tids.add(String(b.thread_id));
+  const fws = await env.DB.prepare('SELECT chat_id FROM userbot_follows WHERE chat_id LIKE ?').bind(norm + ':%').all().catch(() => ({ results: [] }));
+  for (const f of fws.results || []) { const tid = String(f.chat_id).split(':')[1] || ''; if (tid) tids.add(tid); }
+  return [...tids].sort((a, b) => Number(a) - Number(b));
+}
+
+async function forumCardJobs(env, chatId) {
+  const r = await env.DB.prepare(`SELECT thread_id, status, processed, total_messages, saved_links, saved_docs, saved_pdfs, saved_files, dupes_skipped, error, updated_at
+    FROM index_jobs WHERE chat_id = ? ORDER BY updated_at DESC`).bind(normalizeTgChatId(chatId)).all().catch(() => ({ results: [] }));
+  // Re-cloning (or a resumed run) leaves earlier DONE/ERROR rows for the same
+  // thread. Only the newest job per thread is authoritative — otherwise the
+  // card snaps back to the old clone's numbers ("old progress was saved").
+  const seen = new Set();
+  const rows = (r.results || []).filter((j) => { if (!j.thread_id) return false; const k = String(j.thread_id); if (seen.has(k)) return false; seen.add(k); return true; });
+  // Live / catch-up saves never touch index_jobs — they go to the links,
+  // personal_links and uploaded_documents tables with a `live:chat:thread`
+  // transfer id. /stats sums those per topic, but this card read only the
+  // backfill counters, so a topic the live index reached first showed "0 links
+  // · N dupes" while the logs and /stats proved the links existed. Enrich each
+  // row with the live-saved links, docs and pdfs so the card matches reality.
+  const live = await forumLiveCounts(env, chatId).catch(() => new Map());
+  if (live.size) {
+    for (const j of rows) {
+      const lc = live.get(String(j.thread_id));
+      if (lc && (lc.links || lc.docs || lc.pdfs)) {
+        j.saved_links = Number(j.saved_links || 0) + lc.links;
+        j.saved_docs = Number(j.saved_docs || 0) + lc.docs;
+        j.saved_pdfs = Number(j.saved_pdfs || 0) + lc.pdfs;
+      }
+    }
+  }
+  return rows;
+}
+
+/** Per-topic counts of LIVE/catch-up-saved links, docs and pdfs for a forum
+ *  chat. Pure reads over `live:chat:thread` transfer ids — one grouped query
+ *  per table, then keyed by the thread suffix. Distinct from the backfill job
+ *  counters (a URL keeps whichever transfer id inserted it first, so no double
+ *  count). */
+async function forumLiveCounts(env, chatId) {
+  const chat = String(normalizeTgChatId(chatId));
+  const prefix = 'live:' + chat + ':'; // e.g. live:-1002290798043:4100
+  const out = new Map(); // thread -> { links, docs, pdfs }
+  const add = (thread, links, docs, pdfs) => {
+    const k = String(thread);
+    if (!k || k.startsWith('live:')) return; // never nest a bare-chat live id
+    const cur = out.get(k) || { links: 0, docs: 0, pdfs: 0 };
+    cur.links += links || 0; cur.docs += docs || 0; cur.pdfs += pdfs || 0; out.set(k, cur);
+  };
+  try {
+    const r = await env.DB.prepare('SELECT transfer_id, COUNT(*) c FROM links WHERE transfer_id LIKE ? GROUP BY transfer_id').bind(prefix + '%').all().catch(() => ({ results: [] }));
+    for (const row of r.results || []) add(String(row.transfer_id).slice(prefix.length), Number(row.c || 0), 0, 0);
+  } catch (_) {}
+  try {
+    const r = await env.DB.prepare('SELECT transfer_id, COUNT(*) c FROM personal_links WHERE transfer_id LIKE ? GROUP BY transfer_id').bind(prefix + '%').all().catch(() => ({ results: [] }));
+    for (const row of r.results || []) add(String(row.transfer_id).slice(prefix.length), Number(row.c || 0), 0, 0);
+  } catch (_) {}
+  try {
+    const r = await env.DB.prepare('SELECT transfer_id, COUNT(*) c FROM uploaded_documents WHERE transfer_id LIKE ? GROUP BY transfer_id').bind(prefix + '%').all().catch(() => ({ results: [] }));
+    for (const row of r.results || []) add(String(row.transfer_id).slice(prefix.length), 0, Number(row.c || 0), 0);
+  } catch (_) {}
+  // PDFs are uploaded_documents whose filename ends .pdf (the table stores the
+  // original name, not a separate ext column).
+  try {
+    const r = await env.DB.prepare("SELECT transfer_id, COUNT(*) c FROM uploaded_documents WHERE transfer_id LIKE ? AND LOWER(filename) LIKE '%.pdf' GROUP BY transfer_id").bind(prefix + '%').all().catch(() => ({ results: [] }));
+    for (const row of r.results || []) add(String(row.transfer_id).slice(prefix.length), 0, 0, Number(row.c || 0));
+  } catch (_) {}
+  return out;
+}
+
+/** One watcher per forum clone: renders the aggregated card, edits it every
+ *  ~9s, and freezes the final frame when no topic job is active. */
+async function startForumCloneCard(env, { token, chatId, chatName = '', progressChatId, forumThreadId = null }) {
+  // Key on the progress chat too: two users cloning the same forum each need
+  // their own live card, and a key on channel alone dropped the second one.
+  const key = normalizeTgChatId(chatId) + '|' + String(progressChatId || '') + '|' + String(forumThreadId || '');
+  if (!token || FORUM_CLONE_CARDS.has(key)) return;
+  const state = { msgId: null };
+  FORUM_CLONE_CARDS.set(key, state);
+  const topicIds = await forumCardTopicIds(env, chatId);
+  const keyboard = cloneCardKeyboard(chatId);
+  const richButtons = cloneCardButtonsRich(chatId);
+  const render = (jobs) => ({
+    classic: formatForumCloneCard({ chatId, chatName, topics: topicIds.length, topicIds, jobs }),
+    rich: formatForumCloneCardRich({ chatId, chatName, topicIds, jobs }) + (richButtons ? '\n' + richButtons : '')
+  });
+  const loop = (async () => {
+    try {
+      for (let round = 0; round < 320; round++) {
+        const jobs = await forumCardJobs(env, chatId);
+        const v = render(jobs);
+        await editForumCard(state, token, progressChatId, v.rich, v.classic, forumThreadId, keyboard);
+        const active = jobs.some((j) => j.status === 'queued' || j.status === 'running');
+        if (!active || round === 319) break;
+        await sleep(9000);
+      }
+      const jobs = await forumCardJobs(env, chatId);
+      const v = render(jobs);
+      await editForumCard(state, token, progressChatId, v.rich, v.classic, forumThreadId, keyboard);
+    } finally {
+      FORUM_CLONE_CARDS.delete(key);
+    }
+  })();
+  runInBackground(env, loop);
+}
+
+/** Sequential forum clone: start topic N, wait for it to finish, then start
+ *  topic N+1 — one history read at a time on the shared userbot session, so it
+ *  never trips Telegram's flood limit (the "Sleeping for 14s on flood wait"
+ *  stall from many concurrent topic jobs). Drives the ONE live card after each
+ *  start/progress/done and honors stop requests (⏹ button on /stats). */
+async function startForumCloneSequential(env, { token, chatId, chatName = '', progressChatId, forumThreadId = null, topicIds = [], communityIdArg = '', targetArg = 'community', athenaUser, label, communityName = '' }) {
+  const key = normalizeTgChatId(chatId) + '|' + String(progressChatId || '') + '|' + String(forumThreadId || '');
+  if (!token || FORUM_CLONE_CARDS.has(key)) return { started: 0, failed: 0 };
+  const state = { msgId: null };
+  FORUM_CLONE_CARDS.set(key, state);
+  const keyboard = cloneCardKeyboard(chatId);
+  const richButtons = cloneCardButtonsRich(chatId);
+  const render = (jobs) => ({
+    classic: formatForumCloneCard({ chatId, chatName, topics: topicIds.length, topicIds, jobs }),
+    rich: formatForumCloneCardRich({ chatId, chatName, topicIds, jobs }) + (richButtons ? '\n' + richButtons : '')
+  });
+  const anyStopping = async () => !!(await env.DB.prepare("SELECT id FROM index_jobs WHERE chat_id = ? AND status = 'stopping'").bind(normalizeTgChatId(chatId)).first().catch(() => null));
+  let started = 0, failed = 0, firstErr = '';
+  try {
+    for (let i = 0; i < (topicIds || []).length; i++) {
+      if (await anyStopping()) break; // stop requested — end the whole sequence
+      const thr = String(topicIds[i]);
+      try {
+        await env.DB.prepare(`INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_id, thread_id, community_id) DO UPDATE SET target=excluded.target`).bind('tb_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), normalizeTgChatId(chatId), thr, communityIdArg || 'personal', targetArg || 'community', athenaUser.id, Date.now()).run().catch(() => {});
+        await env.DB.prepare(`INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id, community_id) DO UPDATE SET label=excluded.label, target=excluded.target, created_by=excluded.created_by`).bind(normalizeTgChatId(chatId) + ':' + thr, label, communityIdArg || '', targetArg || 'community', athenaUser.id, Date.now()).run().catch(() => {});
+      } catch (_) {}
+      let jobId = '';
+      try {
+        const jobRes = await startBackfillJob(env, { token, chatId: progressChatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatId, threadArg: thr, communityName, userbotLabel: label, silentProgress: true, target: targetArg || 'community' });
+        // Already-running topics are still part of the clone: wait for the
+        // existing job to drain rather than counting it a failure and moving on.
+        if (jobRes && (jobRes.ok || jobRes.reason === 'already running')) jobId = jobRes.jobId || '';
+      } catch (e) { failed++; if (!firstErr) firstErr = String((e && (e.message || e)) || '').slice(0, 160); console.error('topic clone failed', e && (e.message || e)); continue; }
+      if (!jobId) { failed++; continue; }
+      started++;
+      for (;;) {
+        const jobs = await forumCardJobs(env, chatId);
+        const v = render(jobs);
+        await editForumCard(state, token, progressChatId, v.rich, v.classic, forumThreadId, keyboard);
+        const row = await env.DB.prepare('SELECT status FROM index_jobs WHERE id = ?').bind(jobId).first().catch(() => null);
+        const st = row && row.status;
+        if (st === 'stopped' || st === 'stopping' || st === 'error' || !st) return { started, failed: failed + (st === 'error' ? 1 : 0), firstErr: st === 'error' ? 'Topic failed; sequence stopped.' : firstErr };
+        if (st === 'done') break;
+        await sleep(6000);
+      }
+    }
+  } finally {
+    const jobs = await forumCardJobs(env, chatId);
+    const v = render(jobs);
+    await editForumCard(state, token, progressChatId, v.rich, v.classic, forumThreadId, keyboard);
+    FORUM_CLONE_CARDS.delete(key);
+  }
+  return { started, failed, firstErr };
+}
+
+/** Live-follow indicator. Pure. accountConnected = userbot session alive in
+ *  memory; lastSeenAtMs = persisted userbot_follows.last_seen_at. */
+function followLiveness(accountConnected, lastSeenAtMs, nowMs = Date.now()) {
+  if (accountConnected) return { emoji: '🟢', label: 'Live indexing ON — new posts clone automatically' };
+  const age = nowMs - Number(lastSeenAtMs || 0);
+  if (lastSeenAtMs && age < 24 * 3600 * 1000) return { emoji: '🟢', label: 'Live indexing ON — follow active, seen recently' };
+  return { emoji: '⚪', label: 'Live idle — follow saved, resumes when the userbot connects' };
+}
+
+async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg = '', chatIdArg, threadArg = '', communityName = '', userbotLabel = '', minId = '', maxId = null, silentProgress = false, target = 'community', parentId = null, jobId = null, knownTotal = null, progressMsgId = null, topicName = '' }) {
   await ensureUserbotTables(env);
   await ensureIndexTables(env);
-  // Normalize bare channel ids (Telegram web apps often show them without -100)
-  let cid = String(chatIdArg || '').trim();
-  if (/^\d{9,}$/.test(cid)) cid = `-100${cid}`;
-  // One active backfill per chat — a second /index_start would double-index
-  const active = await env.DB.prepare(
-    "SELECT id FROM index_jobs WHERE chat_id = ? AND status IN ('queued','running')"
-  ).bind(cid).first();
-  if (active) {
-    await sendTelegramFormatted(token, chatId,
-      `${boldHtml('⏳')} A backfill for ${codeHtml(cid)} is already running. Progress: ${codeHtml('/index_status')} · cancel: ${codeHtml('/index_stop')}`,
-      forumThreadId).catch(() => {});
-    return { ok: false, reason: 'already running', jobId: active.id };
-  }
-  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN thread_id TEXT').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] thread_id alter:', e?.message); }
-  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN progress_msg_id BIGINT').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] progress_msg_id alter:', e?.message); }
-  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN min_id BIGINT').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] min_id alter:', e?.message); }
-  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN max_id BIGINT').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] max_id alter:', e?.message); }
-  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN saved_files INTEGER DEFAULT 0').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] saved_files alter:', e?.message); }
-  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN skipped_media INTEGER DEFAULT 0').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] skipped_media alter:', e?.message); }
-  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN urls_seen INTEGER DEFAULT 0').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] urls_seen alter:', e?.message); }
-  try { await env.DB.prepare('ALTER TABLE index_jobs ADD COLUMN continuations INTEGER DEFAULT 0').run(); } catch (e) { if (!/exists/i.test(String(e?.message))) console.error('[backfill] continuations alter:', e?.message); }
-  const jobId = 'ij_' + Date.now().toString(36) + '_' + randomToken().slice(0, 6);
-  await env.DB.prepare(
-      `INSERT INTO index_jobs (id, community_id, chat_id, user_id, status, offset_id, progress_chat_id, created_at, updated_at, thread_id, min_id, max_id)
-       VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?)`
-    ).bind(jobId, communityIdArg, cid, athenaUser.id, chatId, Date.now(), Date.now(), threadArg || null, minId ? Number(minId) : null, maxId ? Number(maxId) : null).run();
-  runInBackground(env, runHistoryIndexJob(env, { id: jobId, community_id: communityIdArg, chat_id: cid, thread_id: threadArg || null, userbot_label: userbotLabel || null, min_id: minId ? Number(minId) : null, max_id: maxId ? Number(maxId) : null, saved_files: 0, skipped_media: 0, offset_id: 0, processed: 0, saved_links: 0, saved_docs: 0, progress_chat_id: chatId }, token));
-  await sendTelegramFormatted(token, chatId,
-    `${boldHtml('▶️')} Backfill started for ${codeHtml(chatIdArg)}${threadArg ? ` topic ${codeHtml('#' + threadArg)}` : ''} → ${boldHtml(escHtml(communityName || communityIdArg))}.\n${italicHtml('Live progress below ·')} ${codeHtml('/index_stop')} ${italicHtml('to stop ·')} ${codeHtml('/del '+cid)} ${italicHtml('to delete.')}`,
-    forumThreadId).catch(() => {});
+  const cid = normalizeTgChatId(chatIdArg);
+  if (!userbotLabel) userbotLabel = await resolveJobLabel(env, athenaUser?.id);
+  if (!userbotLabel) return { ok: false, reason: 'No saved account. Use /userbot_add in a DM.' };
+  if (!CHANNEL_TARGETS.has(target) || !athenaUser?.id || (target !== 'personal' && !communityIdArg)) throw new Error('Invalid clone destination');
+  const active = await env.DB.prepare("SELECT id FROM index_jobs WHERE chat_id=? AND COALESCE(thread_id,'')=COALESCE(?,'') AND userbot_label=? AND target=? AND community_id=? AND user_id=? AND COALESCE(parent_id,'')=COALESCE(?,'') AND status IN ('queued','running','stopping')")
+    .bind(cid, threadArg || null, userbotLabel, target, communityIdArg || '', athenaUser.id, parentId).first();
+  if (active) return { ok: false, reason: 'already running', jobId: active.id };
+  jobId ||= 'ij_' + randomToken().slice(0, 20);
+  const chatName = parentId ? cid : await resolveChatTitle(env, token, cid);
+  await env.DB.prepare(`INSERT INTO index_jobs (id,community_id,chat_id,user_id,status,offset_id,progress_chat_id,created_at,updated_at,thread_id,min_id,max_id,chat_name,userbot_label,target,parent_id,silent_progress,total_messages,known_total,progress_msg_id,progress_thread_id,topic_name)
+    VALUES (?,?,?,?,'queued',0,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`)
+    .bind(jobId, communityIdArg || '', cid, athenaUser.id, chatId, Date.now(), Date.now(), threadArg || null, minId ? Number(minId) : null, maxId == null || maxId === '' ? null : Number(maxId), chatName, userbotLabel, target, parentId, silentProgress ? 1 : 0, knownTotal == null ? 0 : Number(knownTotal), knownTotal == null ? 0 : 1, progressMsgId, forumThreadId == null ? null : String(forumThreadId), topicName).run();
+  const job = await env.DB.prepare('SELECT * FROM index_jobs WHERE id=?').bind(jobId).first();
+  // A backfill subscribes the chat for live capture under the same account:
+  // cloning a chat implies live indexing afterwards, or the chat goes dark
+  // the moment history ends. Upsert follows the chat (or the single topic).
+  try {
+    await ensureChatFollow(env, { chatId: cid, threadId: threadArg || '', label: userbotLabel, communityId: target === 'personal' ? '' : communityIdArg || '', target, createdBy: athenaUser.id });
+  } catch (_) {}
+  runInBackground(env, runHistoryIndexJob(env, job, token));
+  if (!silentProgress) await sendTelegramFormatted(token, chatId, `Backfill started: ${codeHtml(cid)} → ${escHtml(communityName || communityIdArg || 'Personal brain')}. Stop anytime from the ⏹ button on its /stats row.`, forumThreadId);
   return { ok: true, jobId };
 }
 
-async function runHistoryIndexJob(env, job, token) {
-  const log = (...a) => console.log(`[index ${job.id}]`, ...a);
-  const patch = async (fields) => {
-    const keys = Object.keys(fields);
-    const sets = keys.map((k) => `${k} = ?`).join(', ');
-    await env.DB.prepare(`UPDATE index_jobs SET ${sets}, updated_at = ? WHERE id = ?`)
-      .bind(...keys.map((k) => fields[k]), Date.now(), job.id).run().catch(() => {});
-  };
-  // Live progress: edit one message with a bar instead of spamming new ones.
-  let progressMsgId = null;
-  let lastProgressAt = 0;
-  const renderBar = (done, total) => {
-    // Message ids are not sequential (deleted/legacy gaps), so the "total"
-    // (latest id) is approximate. When done exceeds it, show done as truth.
-    const denom = Math.max(done, total || 0);
-    const pct = denom ? Math.min(100, Math.round((done / denom) * 100)) : 0;
-    const filled = Math.round((pct / 100) * 18);
-    const bar = '▮'.repeat(filled) + '▯'.repeat(18 - filled);
-    const parts = [`${bar} ${pct}%`, `${done}${total && total >= done ? `/${total}` : ''} msgs`];
-    if (job.saved_links) parts.push(`${job.saved_links} links`);
-    if (job.saved_docs) parts.push(`${job.saved_docs} docs`);
-    if (job.saved_files) parts.push(`${job.saved_files} files`);
-    if (job.urls_seen) parts.push(`${job.urls_seen} urls found`);
-    if (job.skipped_media) parts.push(`${job.skipped_media} media skipped`);
-    return parts.join(' · ');
-  };
-  const pushProgress = async (force = false, done = 0) => {
-    const now = Date.now();
-    if (!force && now - lastProgressAt < 10_000) return;
-    lastProgressAt = now;
-    try {
-      const text = `${boldHtml('🗂 Backfill')} ${job.thread_id ? codeHtml('#' + job.thread_id) : codeHtml(job.chat_id)}\n${codeHtml(renderBar(done, job.total_messages || 0))}\n${italicHtml('/index_stop to stop · /del '+job.chat_id+' to delete')}`;
-      if (progressMsgId) {
-        await telegramApi(token, 'editMessageText', { chat_id: job.progress_chat_id, message_id: progressMsgId, text, parse_mode: 'HTML' }).catch(() => {});
-      } else {
-        const m = await sendTelegramFormatted(token, job.progress_chat_id, text, null);
-        progressMsgId = m?.message_id || null;
-        if (progressMsgId) await env.DB.prepare('UPDATE index_jobs SET progress_msg_id = ? WHERE id = ?').bind(progressMsgId, job.id).run().catch(() => {});
-      }
-    } catch (_) {}
-  };
+const HISTORY_RUNS = new Map();
+async function ensureCloneSources(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS clone_sources (
+    destination TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT NOT NULL, message_id TEXT NOT NULL,
+    content_key TEXT NOT NULL, topic_name TEXT, message_date BIGINT, sender_id TEXT, source_url TEXT,
+    content_id TEXT, storage_path TEXT, status TEXT NOT NULL, error_category TEXT, transfer_id TEXT NOT NULL,
+    PRIMARY KEY(destination,chat_id,topic_id,message_id,content_key))`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS clone_job_items (
+    job_id TEXT NOT NULL, message_id TEXT NOT NULL, counters_json TEXT NOT NULL,
+    PRIMARY KEY(job_id,message_id))`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS clone_posts (
+    destination TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT NOT NULL, message_id TEXT NOT NULL,
+    message_text TEXT NOT NULL, message_json TEXT NOT NULL, urls_json TEXT NOT NULL,
+    topic_name TEXT, message_date BIGINT, source_url TEXT, transfer_id TEXT NOT NULL,
+    PRIMARY KEY(destination,chat_id,topic_id,message_id))`).run();
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_clone_sources_content ON clone_sources(destination,content_id)').run();
+}
+
+function cloneWriteCounters() {
+  return { ...emptyCloneCounters(), copiedMessages: 0, duplicates: 0, failed: 0, retries: 0,
+    savedLinkPosts: 0, savedLinks: 0, savedFiles: 0, savedDocs: 0, savedPdfs: 0,
+    savedMarkdown: 0, savedJson: 0, savedHtml: 0, savedOther: 0, savedImages: 0, savedAudio: 0 };
+}
+
+function cloneCheckpointError(counters) {
+  const sample = String(counters?.errorSample || '').trim();
+  return 'Database associations/checkpoints could not be saved. Retry resumes from the last safe page.' +
+    (sample ? ` First failure: ${sample}` : '');
+}
+
+/**
+ * Which userbot account a backfill should run as: the requester's own
+ * selection first (their /userbot_select choice), the first enabled account
+ * only as a fallback.  Picking alphabetically first silently runs other
+ * people's jobs on the wrong account — e.g. ripper failing on a chat only
+ * the requester's account can see.
+ */
+async function resolveJobLabel(env, athenaUserId) {
   try {
-    // Session comes from the named userbot account (job.userbot_label),
-    // or the first enabled one. One connect powers live cloning AND backfills.
-    await ensureUserbotTables(env);
-    let sess = null;
-    if (job.userbot_label) sess = await env.DB.prepare('SELECT * FROM userbot_accounts WHERE label = ? AND enabled = 1').bind(job.userbot_label).first().catch(() => null);
-    if (!sess) sess = await env.DB.prepare('SELECT * FROM userbot_accounts WHERE enabled = 1 ORDER BY label LIMIT 1').first();
-    if (!sess) {
-      await patch({ status: 'error', error: 'no userbot session — /userbot_add first' });
-      await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('❌')} No connected session. Run ${codeHtml('/userbot_add')} once, then retry.`).catch(() => {});
-      return;
-    }
-    const _ubLabel = sess.label;
-    let gramjs;
-    try {
-      // Non-literal specifier: bundlers must never try to resolve the native
-      // gramjs package — it is an optional, self-host-only dependency.
-      const spec = 'telegram';
-      gramjs = await import(spec);
-    } catch (_) {
-      await patch({ status: 'error', error: 'gramjs not installed (npm install telegram)' });
-      await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('❌')} History backfill needs the optional package. On the server: ${codeHtml('npm install telegram')}, then ${codeHtml('/index_start')} again.`).catch(() => {});
-      return;
-    }
-    const { TelegramClient } = gramjs;
-    const { StringSession } = gramjs.sessions;
-    const sessionString = await decryptBotToken(env, sess.session_enc);
-    const apiHash = await decryptBotToken(env, sess.api_hash_enc);
-    if (!sessionString || !apiHash) { await patch({ status: 'error', error: 'session decrypt failed (STORAGE_KEY rotated?)' }); return; }
-    const client = new TelegramClient(new StringSession(sessionString), Number(sess.api_id) || 0, apiHash, { connectionRetries: 3 });
-    await client.connect();
-    let offsetId = job.offset_id || 0;
-    let processed = job.processed || 0;
-    job.saved_files = Number(job.saved_files || 0);
-    job.skipped_media = Number(job.skipped_media || 0);
-    job.urls_seen = Number(job.urls_seen || 0);
-    // Approximate total for the progress bar: latest message id in the chat.
-    try {
-      const head = await client.getMessages(job.chat_id, { limit: 1 });
-      job.total_messages = Number(head?.[0]?.id || 0) || null;
-    } catch (_) { job.total_messages = null; }
-    await pushProgress(true, processed);
-    let savedLinks = job.saved_links || 0;
-    let savedDocs = job.saved_docs || 0;
-    let lastProgress = 0;
-    await patch({ status: 'running', error: null });
-    log(`start chat=${job.chat_id} offset=${offsetId}`);
-    while (processed < INDEX_MAX_MESSAGES) {
-      const row = await env.DB.prepare('SELECT status FROM index_jobs WHERE id = ?').bind(job.id).first();
-      if (!row || row.status === 'stopping') { await patch({ status: 'stopped' }); log('stopped'); break; }
-      let messages;
-      try {
-        messages = await client.getMessages(job.chat_id, {
-          limit: INDEX_BATCH,
-          offsetId,
-          ...(job.thread_id ? { replyTo: Number(job.thread_id) } : {})
-        });
-      } catch (e) {
-        if (e && typeof e.seconds === 'number') { // FloodWaitError
-          log(`flood-wait ${e.seconds}s — sleeping`);
-          await patch({ error: `flood-wait ${e.seconds}s` });
-          await sleep(Math.min(e.seconds * 1000, 300_000));
-          continue;
-        }
-        if (/input entity/i.test(String(e?.message))) {
-          log('entity cache cold — priming once, then retrying');
-          const ok = await primeEntity(client, job.chat_id, 60_000);
-          if (!ok) {
-            e.message = `The session account cannot see ${job.chat_id}. Join this channel/group with that account, then retry.`;
-            throw e;
-          }
-          messages = await client.getMessages(job.chat_id, {
-            limit: INDEX_BATCH,
-            offsetId,
-            ...(job.thread_id ? { replyTo: Number(job.thread_id) } : {})
-          });
-        } else { throw e; }
-      }
-      if (!messages || !messages.length) { await patch({ status: 'done' }); log('done (end of history)'); break; }
-      if (job.min_id && offsetId && offsetId < Number(job.min_id)) { await patch({ status: 'done' }); log('done (reached min_id)'); break; }
-      for (const message of messages) {
-        offsetId = offsetId ? Math.min(offsetId, Number(message.id || 0)) : Number(message.id || 0);
-        // Explicit id range (/clone <chat> <min> <max>): skip outside it.
-        if (job.max_id && Number(message.id || 0) > Number(job.max_id)) continue;
-        processed++;
-        const text = String(message.text || message.message || '');
-        if (text.startsWith('/')) continue;
-        const urls = urlsFromGramjsMessage(message);
-        if (urls.length) {
-          job.urls_seen = (job.urls_seen || 0) + urls.length;
-          // Fast path: insert now with caption-as-notes, then let the shared
-          // background enrichment do scrape + AI/context tags. Sequential
-          // per-URL scraping here made backfills crawl for hours.
-          await ensureTransferColumns(env);
-          const fresh = [];
-          for (const rawUrl of [...new Set(urls)]) {
-            try {
-              if (await findExistingLink(env, 'links', 'community_id', job.community_id, rawUrl)) continue;
-              const urlHash = generateUrlHash(rawUrl);
-              const id = 'ix_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
-              await ensureLinkMetaColumns(env);
-              const capTitle = titleFromUrl(rawUrl);
-              try {
-                await env.DB.prepare(
-                  `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
-                    added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at, image_url, site_name, source_chat_id, source_message_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'telegram', ?, 0, 0, ?, NULL, NULL, ?, ?)`
-                ).bind(id, job.community_id, rawUrl, urlHash, capTitle, (text || '').slice(0, 3000),
-                  JSON.stringify(['telegram', 'backfill']), 'history backfill', 'history backfill',
-                  Date.now(), job.chat_id, message.id != null ? String(message.id) : null).run();
-                savedLinks++; fresh.push({ id, url: rawUrl });
-              } catch (error) {
-                if (isUniqueConstraintError(error)) continue;
-                if (!isMissingLinkMetaColumnError(error)) throw error;
-                await env.DB.prepare(
-                  'INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by, created_at, source_chat_id, source_message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-                ).bind(id, job.community_id, rawUrl, urlHash, capTitle, (text || '').slice(0, 3000),
-                  JSON.stringify(['telegram', 'backfill']), 'history backfill', Date.now(), job.chat_id, message.id != null ? String(message.id) : null).run();
-                savedLinks++; fresh.push({ id, url: rawUrl });
-              }
-              try {
-                await ensureTransferColumns(env);
-                await env.DB.prepare('UPDATE links SET transfer_id = ? WHERE id = ?').bind(job.id, id).run().catch(() => {});
-              } catch (_) {}
-            } catch (e) {
-              console.error(`[index] link insert failed (${rawUrl})`, e?.message || e);
-            }
-          }
-          if (fresh.length) {
-            markMeiliScopeDirty(env, 'community', job.community_id);
-            runInBackground(env, enrichLinksInBackground(env, 'community', job.community_id, fresh));
-          }
-        }
-        // Media vault: keep the ORIGINAL file on the VPS for every media type
-        // (photos/videos/audio/archives/apk included), independent of indexing.
-        const mediaAny = message.media;
-        if (MEDIA_VAULT_DIR && mediaAny && mediaAny.className === 'MessageMediaDocument' && mediaAny.document) {
-          try {
-            const cls = classifyGramjsMedia(mediaAny.document);
-            if (Number(mediaAny.document.size || 0) <= 2 * 1024 * 1024 * 1024) {
-              const buf = await client.downloadMedia(message, {});
-              if (buf?.length && await vaultSave(job.chat_id, message.id, cls.filename || `media_${message.id}`, new Uint8Array(buf))) {
-                job.saved_files = (job.saved_files || 0) + 1;
-              }
-              await sleep(300);
-            }
-          } catch (e) {
-            if (e && typeof e.seconds === 'number') await sleep(Math.min(e.seconds * 1000, 300_000));
-            else console.error('[vault] media failed', e?.message || e);
-          }
-        }
-        // Count non-indexable media so the user sees why docs can be 0.
-        if (mediaAny && mediaAny.className === 'MessageMediaDocument' && mediaAny.document) {
-          const cls0 = classifyGramjsMedia(mediaAny.document);
-          const idxable = DOCUMENT_EXTENSIONS.has(cls0.ext) || CONVERTIBLE_EXTENSIONS.has(cls0.ext);
-          if (!idxable) job.skipped_media = (job.skipped_media || 0) + 1;
-        } else if (message.media && ['MessageMediaPhoto'].includes(message.media.className)) {
-          job.skipped_media = (job.skipped_media || 0) + 1;
-        }
-        // Full-history copy: substantial text-only posts become documents too.
-        if (!urls.length && text.length >= 80) {
-          try {
-            const safeName = String(job.chat_id).replace(/[^\w-]+/g, '_').slice(0, 40);
-            const filename = `${safeName}_${message.id}.md`;
-            const when = message.date ? new Date(message.date * 1000).toISOString().slice(0, 10) : '';
-            const md = `# History backfill${when ? ` — ${when}` : ''}\n\n${text}`;
-            const r = await saveIndexedDocument(env, job.community_id, filename, 'md', new TextEncoder().encode(md), `backfill:${job.chat_id}`, { chatId: job.chat_id, messageId: message.id }, job.id);
-            if (r?.saved) savedDocs++;
-          } catch (e) {
-            console.error('[index] text post failed', e?.message || e);
-          }
-        }
-        const media = message.media;
-        if (media && media.className === 'MessageMediaDocument' && media.document) {
-          const docu = media.document;
-          const fnameAttr = (docu.attributes || []).find((a) => a.className === 'MessageAttributeFilename');
-          const filename = fnameAttr?.fileName || '';
-          const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
-          // Positive allowlist: video/audio/archives (mkv, mp4, mp3, zip, …)
-          // never match DOCUMENT_EXTENSIONS/CONVERTIBLE_EXTENSIONS.
-          if (filename && (DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) && Number(docu.size || 0) <= CONVERT_SOURCE_MAX_BYTES) {
-            try {
-              const buf = await client.downloadMedia(message, {});
-              if (buf && buf.length) {
-                const r = await saveIndexedDocument(env, job.community_id, filename, ext, new Uint8Array(buf), `backfill:${job.chat_id}`, { chatId: job.chat_id, messageId: message.id }, job.id);
-                if (r?.saved) savedDocs++;
-              }
-              await sleep(400);
-            } catch (e) {
-              if (e && typeof e.seconds === 'number') { await sleep(Math.min(e.seconds * 1000, 300_000)); }
-              else console.error('[index] media failed', e?.message || e);
-            }
-          }
+    if (athenaUserId) {
+      const u = await env.DB.prepare('SELECT telegram_api_id FROM users WHERE id=?').bind(String(athenaUserId)).first().catch(() => null);
+      const tg = u?.telegram_api_id ? String(u.telegram_api_id) : '';
+      if (tg) {
+        const sel = await env.DB.prepare('SELECT label FROM userbot_selections WHERE requester_tg_id=?').bind(tg).first().catch(() => null);
+        if (sel?.label) {
+          const ok = await env.DB.prepare('SELECT label FROM userbot_accounts WHERE label=? AND enabled=1').bind(sel.label).first().catch(() => null);
+          if (ok) return sel.label;
         }
       }
-      job.saved_links = savedLinks; job.saved_docs = savedDocs;
-      await patch({ offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs, saved_files: job.saved_files || 0, skipped_media: job.skipped_media || 0, urls_seen: job.urls_seen || 0 });
-      log(`batch done · total ${processed} · +${messages.length} · urls ${job.urls_seen || 0}`);
-      if (processed - lastProgress >= 50) lastProgress = processed;
-      await pushProgress(false, processed);
-      await sleep(INDEX_BATCH_DELAY_MS);
     }
-    if (processed >= INDEX_MAX_MESSAGES) {
-      const conts = Number(job.continuations || 0);
-      if (conts < INDEX_AUTO_CONTINUATIONS) {
-        const nextJob = { ...job, offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs, saved_files: job.saved_files || 0, skipped_media: job.skipped_media || 0, urls_seen: job.urls_seen || 0 };
-        await patch({ status: 'queued', continuations: conts + 1, offset_id: offsetId, processed, saved_links: savedLinks, saved_docs: savedDocs, skipped_media: job.skipped_media || 0, urls_seen: job.urls_seen || 0 });
-        log(`cap reached — auto-continuing (chunk ${conts + 2}) at offset ${offsetId}`);
-        runInBackground(env, runHistoryIndexJob(env, { ...nextJob, status: 'queued' }, token));
-      } else {
-        await patch({ status: 'error', error: `stopped after ${conts + 1} chunks (${processed} msgs) — /index_stop then /clone resumes`.slice(0, 300) });
-      }
-      await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('🧩')} Chunk complete: ${processed} msgs · continuing automatically…`).catch(() => {});
-      try { await client.disconnect(); } catch (_) {}
-      return;
-    }
-    const finalRow = await env.DB.prepare('SELECT status, saved_links, saved_docs FROM index_jobs WHERE id = ?').bind(job.id).first();
-    const doneText = `${finalRow?.status === 'done' ? '✅' : '⏸'} Backfill ${finalRow?.status || 'done'}: ${processed} scanned · ${savedLinks} links · ${savedDocs} docs saved.`;
-    if (progressMsgId) {
-      await telegramApi(token, 'editMessageText', { chat_id: job.progress_chat_id, message_id: progressMsgId, text: doneText, parse_mode: 'HTML' }).catch(() =>
-        sendTelegramFormatted(token, job.progress_chat_id, doneText).catch(() => {}));
-    } else {
-      await sendTelegramFormatted(token, job.progress_chat_id, doneText).catch(() => {});
-    }
-    // Session auto-delete when the job finishes cleanly — a stored user
-    // session is a live account key; it should not outlive its purpose.
-    if (finalRow?.status === 'done') {
-      await env.DB.prepare('DELETE FROM telegram_index_sessions WHERE id = ?').bind(job.id).run().catch(() => {});
-    }
-    try { await client.disconnect(); } catch (_) {}
-  } catch (e) {
-    console.error('[index] job failed', e?.message || e);
-    await userbotLogError(env, job.chat_id, e);
-    await patch({ status: 'error', error: String(e?.message || e).slice(0, 300) });
-    await sendTelegramFormatted(token, job.progress_chat_id, `${boldHtml('❌')} Backfill failed: ${escHtml(String(e?.message || e).slice(0, 200))}`).catch(() => {});
+  } catch (_) {}
+  const first = await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled=1 ORDER BY label LIMIT 1').first().catch(() => null);
+  return first?.label || '';
+}
+
+function recordCloneFailure(counters, category, detail) {
+  counters.failed++;
+  counters.errorCategories ||= {};
+  counters.errorCategories[category] = (counters.errorCategories[category] || 0) + 1;
+  // Keep the first concrete message so a failed run says WHAT failed instead
+  // of only showing the generic checkpoint error on /stats and /index_status.
+  if (detail && !counters.errorSample) {
+    counters.errorSample = String(detail?.message ?? detail).replace(/\s+/g, ' ').trim().slice(0, 180) || String(category);
   }
+}
+
+function addCloneCounters(total, item) {
+  for (const [key, value] of Object.entries(item)) {
+    if (key === 'errorCategories') {
+      total.errorCategories ||= {};
+      for (const [category, count] of Object.entries(value || {})) total.errorCategories[category] = (total.errorCategories[category] || 0) + Number(count || 0);
+    } else if (typeof value === 'number') total[key] = (total[key] || 0) + value;
+  }
+}
+
+// Retry only database operations, never the surrounding content write. A lost
+// checkpoint must not advance history past an item whose association is absent.
+async function cloneDatabaseWrite(operation) {
+  // A single failed association write marks the whole topic incomplete, which
+  // stops the run — so a connection/pool blip must not surface as a failure.
+  // 25/50ms is too tight for that; back off far enough to ride out a blip.
+  const delays = [200, 1000, 3000];
+  for (let attempt = 0; ; attempt++) {
+    try { return await operation(); }
+    catch (error) {
+      if (attempt >= delays.length) { error.cloneDatabaseFailure = true; throw error; }
+      await sleep(delays[attempt]);
+    }
+  }
+}
+
+async function persistClonePost(env, job, sink, message, classification, topicId) {
+  const destination = sink + ':' + (sink === 'personal' ? job.user_id : job.community_id);
+  const mid = String(message.id ?? message.message_id);
+  const post = sourceClonePost(message);
+  const sourceUrl = /^-100/.test(job.chat_id) ? `https://t.me/c/${job.chat_id.slice(4)}/${mid}` : null;
+  await cloneDatabaseWrite(() => env.DB.prepare(`INSERT INTO clone_posts
+    (destination,chat_id,topic_id,message_id,message_text,message_json,urls_json,topic_name,message_date,source_url,transfer_id)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(destination,chat_id,topic_id,message_id) DO UPDATE SET
+    message_text=excluded.message_text,message_json=excluded.message_json,urls_json=excluded.urls_json,
+    topic_name=excluded.topic_name,message_date=excluded.message_date,source_url=excluded.source_url`)
+    .bind(destination, job.chat_id, topicId, mid, post.text, JSON.stringify(post.message), JSON.stringify(classification.occurrences || []),
+      job.topic_name || null, message.date ? Number(message.date) : null, sourceUrl, job.id).run());
+}
+
+function countCloneSave(item, key, media, result) {
+  item.copiedMessages = 1;
+  if (key.startsWith('url:')) { item.savedLinks++; item.savedLinkPosts = 1; }
+  if (key === 'media') {
+    item.savedFiles++;
+    const subtype = media?.kind === 'photo' ? 'Images' : media?.kind === 'audio' ? 'Audio'
+      : ({ pdfs: 'Pdfs', markdown: 'Markdown', json: 'Json', html: 'Html', other: 'Other' })[documentCounter(media || {})];
+    item['saved' + subtype]++;
+  }
+  if (key === 'text' || (key === 'media' && result.saved)) item.savedDocs++;
+}
+
+async function persistCloneComponent(env, { job, sink, message, classification, topicId, item, key, save, replay = true, stopOnFlood = false }) {
+  const destination = sink + ':' + (sink === 'personal' ? job.user_id : job.community_id);
+  const mid = String(message.id ?? message.message_id);
+  const identity = [destination, job.chat_id, topicId, mid, key];
+  try {
+    const old = await cloneDatabaseWrite(() => env.DB.prepare('SELECT status,content_id,storage_path,transfer_id FROM clone_sources WHERE destination=? AND chat_id=? AND topic_id=? AND message_id=? AND content_key=?').bind(...identity).first());
+    if (old && ['saved', 'duplicate'].includes(old.status)) {
+      const table = key.startsWith('url:') ? (sink === 'personal' ? 'personal_links' : 'links') : 'uploaded_documents';
+      const ownerColumn = table === 'links' ? 'community_id' : sink === 'personal' ? 'user_id' : 'community_id';
+      const live = old.content_id ? await cloneDatabaseWrite(() => env.DB.prepare(`SELECT id FROM ${table} WHERE id=? AND ${ownerColumn}=?`).bind(old.content_id, sink === 'personal' ? job.user_id : job.community_id).first()) : null;
+      let vaultExists = false;
+      if (old.storage_path) {
+        try { await (await import('node:fs/promises')).access(old.storage_path); vaultExists = true; }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+      }
+      if ((old.content_id ? live : vaultExists) && (!old.storage_path || vaultExists)) {
+        // Same-job replay reconstructs a successful item whose checkpoint was
+        // lost; another clone is a duplicate rather than a second saved write.
+        if (replay && old.transfer_id === job.id && old.status === 'saved') countCloneSave(item, key, classification.media, { saved: old.content_id, path: old.storage_path });
+        else item.duplicates++;
+        return true;
+      }
+    }
+    let result, status = 'saved', category = null;
+    try {
+      result = await save();
+      if (!result || result.error || (!result.saved && !result.duplicate && !result.path)) throw new Error(result?.error || 'CONTENT_SAVE_FAILED');
+      if (result.duplicate) status = 'duplicate';
+    } catch (error) {
+      const failure = cloneFailure(error);
+      // A sustained flood is an account-level stop, not an item failure: the
+      // cursor is already checkpointed, so stopping lets the run resume cleanly
+      // instead of marking every remaining item failed.
+      if (error.name === 'AbortError' || ['session', 'permission'].includes(failure.category) || (stopOnFlood && failure.category === 'flood')) throw error;
+      status = 'failed'; category = failure.category;
+    }
+    const sourceUrl = /^-100/.test(job.chat_id) ? `https://t.me/c/${job.chat_id.slice(4)}/${mid}` : null;
+    await cloneDatabaseWrite(() => env.DB.prepare(`INSERT INTO clone_sources (destination,chat_id,topic_id,message_id,content_key,topic_name,message_date,sender_id,source_url,content_id,storage_path,status,error_category,transfer_id)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(destination,chat_id,topic_id,message_id,content_key) DO UPDATE SET content_id=excluded.content_id,storage_path=excluded.storage_path,status=excluded.status,error_category=excluded.error_category,transfer_id=excluded.transfer_id`)
+      .bind(...identity, job.topic_name || null, message.date ? Number(message.date) : null,
+        message.senderId == null ? (message.from?.id == null ? null : String(message.from.id)) : String(message.senderId), sourceUrl,
+        result?.saved || result?.id || null, result?.path || null, status, category, job.id).run());
+    if (status === 'saved') countCloneSave(item, key, classification.media, result);
+    else if (status === 'duplicate') item.duplicates++;
+    else recordCloneFailure(item, category);
+    return true;
+  } catch (error) {
+    if (error.name === 'AbortError' || ['session', 'permission'].includes(cloneFailure(error).category)) throw error;
+    recordCloneFailure(item, error.cloneDatabaseFailure ? 'database' : cloneFailure(error).category);
+    console.error('Clone association failed', { jobId: job.id, messageId: mid, destination, category: 'database' });
+    return false;
+  }
+}
+
+/** Remove the original vault files a deleted clone imported, then drop the
+ *  rows: clone_sources.storage_path is the only accurate record of what was
+ *  written (the vault dir key includes sink+owner, so a chat-named guess would
+ *  miss personal-sink media). */
+async function wipeCloneVaultPaths(env, { transferIds = [], chatKeys = [] } = {}) {
+  if (!transferIds.length && !chatKeys.length) return 0;
+  await ensureCloneSources(env);
+  const values = chatKeys.length ? chatKeys : transferIds;
+  const placeholders = values.map(() => '?').join(',');
+  const where = `${chatKeys.length ? 'chat_id' : 'transfer_id'} IN (${placeholders})`;
+  const { results } = await env.DB.prepare(`SELECT storage_path FROM clone_sources WHERE ${where} AND storage_path IS NOT NULL`).bind(...values).all();
+  const paths = new Set((results || []).map(row => row.storage_path));
+  const dirs = new Set();
+  let removed = 0;
+  if (paths.size) {
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+    if (!MEDIA_VAULT_DIR) throw new Error('VAULT_STORAGE_UNAVAILABLE');
+    const root = path.resolve(MEDIA_VAULT_DIR);
+    for (const file of paths) {
+      const resolved = path.resolve(file);
+      const relative = path.relative(root, resolved);
+      if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('VAULT_PATH_OUTSIDE_ROOT');
+      try { await fs.unlink(resolved); removed++; }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      dirs.add(path.dirname(resolved));
+    }
+    for (const dir of dirs) {
+      if (dir === root) continue;
+      try { await fs.rmdir(dir); }
+      catch (error) { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error.code)) throw error; }
+    }
+  }
+  await env.DB.prepare(`DELETE FROM clone_sources WHERE ${where}`).bind(...values).run();
+  // A post can be referenced by a later clone using the same canonical URL.
+  // Keep it while any surviving component still needs its original context.
+  await env.DB.prepare(`DELETE FROM clone_posts WHERE ${where} AND NOT EXISTS
+    (SELECT 1 FROM clone_sources s WHERE s.destination=clone_posts.destination AND s.chat_id=clone_posts.chat_id AND s.topic_id=clone_posts.topic_id AND s.message_id=clone_posts.message_id)`).bind(...values).run();
+  if (chatKeys.length) {
+    await env.DB.prepare(`DELETE FROM clone_job_items WHERE job_id IN (SELECT id FROM index_jobs WHERE chat_id IN (${placeholders}))`).bind(...values).run();
+  } else {
+    await env.DB.prepare(`DELETE FROM clone_job_items WHERE job_id IN (${placeholders})`).bind(...values).run();
+  }
+  return removed;
+}
+
+async function saveBackfillLink(env, job, sink, message, url) {
+  const personal = sink === 'personal';
+  const table = personal ? 'personal_links' : 'links';
+  const key = personal ? job.user_id : job.community_id;
+  const column = personal ? 'user_id' : 'community_id';
+  const existing = await findExistingLink(env, table, column, key, url);
+  if (existing) return { duplicate: true, id: existing.id };
+  const id = 'ix_' + randomToken().slice(0, 20);
+  const common = [id, key, url, generateUrlHash(url), titleFromUrl(url), String(message.message || message.text || message.caption || ''), JSON.stringify(['telegram', job.id.startsWith('live:') ? 'channel' : 'backfill']), Date.now(), job.chat_id, String(message.id ?? message.message_id), job.id];
+  try {
+    if (personal) await env.DB.prepare("INSERT INTO personal_links (id,user_id,url,url_hash,title,notes,tags,created_at,source_chat_id,source_message_id,transfer_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)").bind(...common).run();
+    else await env.DB.prepare("INSERT INTO links (id,community_id,url,url_hash,title,notes,tags,created_at,source_chat_id,source_message_id,transfer_id,added_by,added_by_user_id,added_by_provider) VALUES (?,?,?,?,?,?,?,?,?,?,?,'history backfill',?,'telegram')").bind(...common, job.user_id).run();
+  } catch (error) {
+    if (!isUniqueConstraintError(error)) throw error;
+    const duplicate = await findExistingLink(env, table, column, key, url);
+    if (!duplicate) throw error;
+    return { duplicate: true, id: duplicate.id };
+  }
+  markMeiliScopeDirty(env, sink, key);
+  return { saved: id };
+}
+
+async function runHistoryIndexJob(env, initialJob, token, runtime = {}) {
+  const wait = runtime.sleep || sleep;
+  if (HISTORY_RUNS.has(initialJob.id)) return HISTORY_RUNS.get(initialJob.id);
+  const operation = (async () => {
+    const job = await env.DB.prepare('SELECT * FROM index_jobs WHERE id=?').bind(initialJob.id).first();
+    if (!job || ['done', 'stopped', 'error'].includes(job.status)) return;
+    if (!job.userbot_label) {
+      job.userbot_label = await resolveJobLabel(env, job.user_id);
+      await env.DB.prepare('UPDATE index_jobs SET userbot_label=? WHERE id=?').bind(job.userbot_label, job.id).run();
+    }
+    return withCloneAccount(job.userbot_label, async () => {
+      const patch = async (fields) => {
+        const keys = Object.keys(fields);
+        await env.DB.prepare(`UPDATE index_jobs SET ${keys.map((key) => `${key}=?`).join(',')},updated_at=? WHERE id=?`).bind(...keys.map((key) => fields[key]), Date.now(), job.id).run();
+        Object.assign(job, fields);
+      };
+      let counters = cloneWriteCounters();
+      let nextEdit = 0;
+      const stopped = async () => {
+        const row = await env.DB.prepare('SELECT status FROM index_jobs WHERE id=?').bind(job.id).first();
+        if (!row || ['stopping', 'stopped'].includes(row.status)) return true;
+        if (job.parent_id) {
+          const parent = await env.DB.prepare('SELECT stats_json FROM pending_clones WHERE id=?').bind(job.parent_id).first();
+          if (!parent || JSON.parse(parent.stats_json).cancelled) return true;
+        }
+        return false;
+      };
+      const progress = async (force = false) => {
+        if (job.silent_progress || (!force && Date.now() < nextEdit)) return;
+        const text = renderCloneProgress({ sourceName: job.chat_name || job.chat_id, chatId: job.chat_id, destination: job.target === 'personal' ? 'Personal brain' : job.community_id,
+          status: job.status, currentTopic: job.thread_id ? { id: job.thread_id, name: job.topic_name || job.thread_id } : null,
+          processed: counters.messages, total: job.known_total ? Number(job.total_messages) : null, counters, overallCounters: counters, error: job.error });
+        const result = await telegramApi(token, job.progress_msg_id ? 'editMessageText' : 'sendMessage', {
+          chat_id: job.progress_chat_id, ...(job.progress_msg_id ? { message_id: job.progress_msg_id } : {}),
+          ...(job.progress_thread_id ? { message_thread_id: Number(job.progress_thread_id) } : {}), text, parse_mode: 'HTML',
+        });
+        if (!job.progress_msg_id && result?.result?.message_id) await patch({ progress_msg_id: result.result.message_id });
+        const retry = Number(result?.parameters?.retry_after || 0);
+        nextEdit = Date.now() + Math.max(8000, retry * 1000);
+        if (force && retry) { await sleep(retry * 1000); return progress(true); }
+      };
+      const request = async (operation) => {
+        let retries = 0;
+        let floodRetries = 0;
+        for (;;) {
+          if (await stopped()) { const error = new Error('Clone stopped'); error.name = 'AbortError'; throw error; }
+          await ubWaitForRelease(job.userbot_label);
+          try { return await operation(); } catch (error) {
+            const announced = Number(error?.seconds) || 0;
+            if (announced > 0) {
+              counters.retries++;
+              if (floodRetries >= FLOOD_PAUSE_SECONDS.length) throw error;
+              const pause = Math.max(announced, FLOOD_PAUSE_SECONDS[floodRetries]);
+              floodRetries++;
+              ubReportFlood(job.userbot_label, pause);
+              await progress();
+              continue;
+            }
+            if (cloneFailure(error).category === 'network' && retries++ < 3) { counters.retries++; await wait(1000 * 2 ** retries); continue; }
+            throw error;
+          }
+        }
+      };
+      try {
+        await ensureCloneSources(env);
+        await ensureLinkMetaColumns(env);
+        await ensureTransferColumns(env);
+        const { results: completed } = await env.DB.prepare('SELECT counters_json FROM clone_job_items WHERE job_id=?').bind(job.id).all();
+        for (const item of completed) addCloneCounters(counters, JSON.parse(item.counters_json));
+        if (!completed.length && Number(job.processed) > 0 && !job.counters_json) Object.assign(counters, { messages: Number(job.processed), links: Number(job.saved_links || 0), files: Number(job.saved_files || 0), pdfs: Number(job.saved_pdfs || 0), duplicates: Number(job.dupes_skipped || 0), savedLinks: Number(job.saved_links || 0), savedFiles: Number(job.saved_files || 0), savedDocs: Number(job.saved_docs || 0), savedPdfs: Number(job.saved_pdfs || 0) });
+        if (!runtime.client) {
+          const started = await startUserbotAccount(env, job.userbot_label);
+          if (!started.ok && started.reason !== 'starting') throw new Error('SESSION_UNAVAILABLE');
+          for (let i = 0; !USERBOT_ACCOUNTS.get(job.userbot_label)?.client && i < 30; i++) await wait(1000);
+        }
+        const client = runtime.client || USERBOT_ACCOUNTS.get(job.userbot_label)?.client;
+        if (!client) throw new Error('SESSION_UNAVAILABLE');
+        const entity = await request(() => client.getEntity(job.chat_id));
+        if (!entity || entity.left || entity.kicked || /Forbidden/.test(entity.className || '')) throw new Error('CHAT_FORBIDDEN');
+        await patch({ chat_name: entity.title || job.chat_name || job.chat_id, status: 'running', error: null });
+        let offset = Number(job.offset_id) || (job.max_id == null ? 0 : Number(job.max_id) + 1);
+        const sinks = sinkTargetsFor(job.target || 'community', job.user_id);
+        let incomplete = false;
+        for (;;) {
+          if (await stopped()) { await patch({ status: 'stopped' }); break; }
+          const messages = await request(() => client.getMessages(job.chat_id, { limit: INDEX_BATCH, offsetId: offset, ...(job.thread_id && String(job.thread_id) !== '1' ? { replyTo: Number(job.thread_id) } : {}) }));
+          if (!messages?.length) { await patch({ status: incomplete ? 'error' : 'done', ...(incomplete ? { error: cloneCheckpointError(counters) } : {}) }); break; }
+          let next = offset || Infinity;
+          for (const message of messages) {
+            const mid = Number(message.id);
+            if (!Number.isSafeInteger(mid) || mid < 1 || (offset && mid >= offset)) continue;
+            next = Math.min(next, mid);
+            if ((job.max_id != null && mid > Number(job.max_id)) || (job.min_id && mid < Number(job.min_id))) continue;
+            const classification = classifyCloneMessage(message);
+            if (job.thread_id && (String(job.thread_id) === '1' ? classification.topicId != null && classification.topicId !== '1' : classification.topicId !== String(job.thread_id))) continue;
+            try {
+              if (await cloneDatabaseWrite(() => env.DB.prepare('SELECT message_id FROM clone_job_items WHERE job_id=? AND message_id=?').bind(job.id, String(mid)).first())) continue;
+            } catch (err) { incomplete = true; recordCloneFailure(counters, 'database', err); continue; }
+            const item = cloneWriteCounters();
+            countCloneMessage(item, message);
+            if (!item.messages) continue;
+            if (await stopped()) { await patch({ status: 'stopped' }); break; }
+            const topicId = String(job.thread_id || classification.topicId || (entity.forum ? '1' : ''));
+            let downloaded, durable = true;
+            const component = async (sink, key, save) => {
+              for (let attempt = 0; attempt < 3; attempt++) {
+                if (await persistCloneComponent(env, { job, sink, message, classification, topicId, item, key, save, stopOnFlood: true })) return;
+                if (attempt < 2) await wait(500 * (attempt + 1));
+              }
+              durable = false;
+            };
+            for (const sink of sinks) {
+              let postSaved = false;
+              let postError = null;
+              for (let attempt = 0; attempt < 3 && !postSaved; attempt++) {
+                try { await persistClonePost(env, job, sink, message, classification, topicId); postSaved = true; }
+                catch (err) { postError = err; if (attempt < 2) await wait(500 * (attempt + 1)); }
+              }
+              if (!postSaved) { durable = false; recordCloneFailure(counters, 'database', postError); continue; }
+              const media = classification.media;
+              for (const url of classification.urls) await component(sink, 'url:' + generateUrlHash(url), () => saveBackfillLink(env, job, sink, message, url));
+              if (media && media.kind !== 'video') await component(sink, 'media', async () => {
+                if (!downloaded) {
+                  if (media.size > 2 * 1024 * 1024 * 1024) throw new Error('FILE_SIZE_LIMIT');
+                  try { downloaded = await request(() => client.downloadMedia(message, {})); }
+                  finally { await wait(MEDIA_DOWNLOAD_GAP_MS); }
+                  if (!downloaded?.length) throw new Error('EMPTY_DOWNLOAD');
+                }
+                const filename = media.filename || `${media.kind}_${mid}${media.ext ? '.' + media.ext : ''}`;
+                const path = await vaultSave(`${sink}_${sink === 'personal' ? job.user_id : job.community_id}_${job.chat_id}`, mid, filename, downloaded);
+                if (media.kind === 'document' && (DOCUMENT_EXTENSIONS.has(media.ext) || CONVERTIBLE_EXTENSIONS.has(media.ext))) {
+                  const save = sink === 'personal' ? savePersonalIndexedDocument : saveIndexedDocument;
+                  const result = await save(env, sink === 'personal' ? job.user_id : job.community_id, filename, media.ext, downloaded, `backfill:${job.chat_id}`, { chatId: job.chat_id, messageId: mid }, job.id);
+                  if (result?.error) throw new Error('CONVERSION_FAILED');
+                  return { ...result, path };
+                }
+                if (!path) throw new Error('MEDIA_VAULT_NOT_CONFIGURED');
+                return { path };
+              });
+              const text = String(message.message || message.text || message.caption || '');
+              if (!media && !classification.urls.length && text.length) await component(sink, 'text', async () => {
+                const save = sink === 'personal' ? savePersonalIndexedDocument : saveIndexedDocument;
+                return save(env, sink === 'personal' ? job.user_id : job.community_id, `${mid}.md`, 'md', new TextEncoder().encode(text), `backfill:${job.chat_id}`, { chatId: job.chat_id, messageId: mid }, job.id);
+              });
+            }
+            if (durable) {
+              try { await cloneDatabaseWrite(() => env.DB.prepare('INSERT INTO clone_job_items (job_id,message_id,counters_json) VALUES (?,?,?) ON CONFLICT(job_id,message_id) DO NOTHING').bind(job.id, String(mid), JSON.stringify(item)).run()); }
+              catch (err) { recordCloneFailure(item, 'database', err); durable = false; }
+            }
+            if (!durable) incomplete = true;
+            addCloneCounters(counters, item);
+          }
+          if (job.status === 'stopped') break;
+          if (!Number.isFinite(next) || next >= (offset || Infinity)) throw new Error('HISTORY_PAGINATION_STALLED');
+          offset = next;
+          await cloneDatabaseWrite(() => patch({ ...(!incomplete ? { offset_id: offset } : {}), processed: counters.messages, saved_links: counters.savedLinks, saved_files: counters.savedFiles, saved_docs: counters.savedDocs, saved_pdfs: counters.savedPdfs, skipped_media: counters.skippedVideos, urls_seen: counters.links, dupes_skipped: counters.duplicates, errors: counters.failed, retries: counters.retries, counters_json: JSON.stringify(counters) }));
+          await progress();
+          if (job.min_id && offset <= Number(job.min_id)) { await patch({ status: incomplete ? 'error' : 'done', ...(incomplete ? { error: cloneCheckpointError(counters) } : {}) }); break; }
+          await wait(INDEX_BATCH_DELAY_MS);
+        }
+        await progress(true);
+      } catch (error) {
+        const failure = cloneFailure(error);
+        await patch({ status: error.name === 'AbortError' ? 'stopped' : 'error', error: error.name === 'AbortError' ? null : failure.message, errors: counters.failed, counters_json: JSON.stringify(counters) });
+        await userbotLogError(env, job.userbot_label, job.chat_id, failure.message);
+        await progress(true);
+      }
+    });
+  })();
+  HISTORY_RUNS.set(initialJob.id, operation);
+  try { return await operation; } finally { HISTORY_RUNS.delete(initialJob.id); }
 }
 
 /**
@@ -9529,7 +11493,12 @@ if (scope === 'community' && !binding.community_id) {
 }
 // Topic lock already applied early for all group traffic
 const fullPost = telegramFullPostText(msg);
+const richPost = telegramRichNotesForSave(msg) || fullPost;
 const linkMode = (binding.dump_link_mode || dumpLinkMode || 'smart').toLowerCase();
+// A forum topic post belongs to exactly one topic: never let AI grouping or
+// primary-picking mix it with other topics. Save every URL with the full
+// entity-preserving copy instead.
+const topicLocked = forumThreadId != null || msg.message_thread_id != null || !!msg.is_topic_message;
 
 let toSave = urls;
 let titleHint = '';
@@ -9538,7 +11507,8 @@ let groupPlan = null;
 
 // Batch posts (many links, one message): ask AI to group them under shared
 // headings/tags; heuristics cover AI-off time. Every URL still gets saved.
-if (urls.length > 1) {
+// Skipped for topic-locked posts so one topic never bleeds into another.
+if (urls.length > 1 && !topicLocked) {
   const vocab = scope === 'community'
     ? await recentTagsForScope(env, 'community', binding.community_id).catch(() => [])
     : await recentTagsForScope(env, 'personal', athenaUser?.id || '').catch(() => []);
@@ -9548,7 +11518,7 @@ const useGrouping = !!(groupPlan && groupPlan.groups && groupPlan.groups.some((g
 
 if (useGrouping) {
   const built = buildMultiLinkNotes(fullPost);
-  notesForSave = built.notes || captionNotes || fullPost;
+  notesForSave = richPost || built.notes || captionNotes || fullPost;
   titleHint = built.titleHint;
   for (const g of groupPlan.groups) {
     for (const rawUrl of g.urls) {
@@ -9579,19 +11549,23 @@ if (useGrouping) {
   return;
 }
 
-if (urls.length > 1 && linkMode !== 'all') {
+if (topicLocked && urls.length > 1) {
+  toSave = urls;
+  const built = buildMultiLinkNotes(fullPost);
+  notesForSave = richPost || fullPost;
+  titleHint = built.titleHint;
+} else if (urls.length > 1 && linkMode !== 'all') {
   const picked = selectPrimaryLinks(urls, fullPost);
   toSave = picked.primary;
   const built = buildMultiLinkNotes(fullPost);
-  notesForSave = built.notes;
+  notesForSave = richPost || built.notes;
   titleHint = built.titleHint;
 } else if (urls.length > 1 && linkMode === 'all') {
-  notesForSave = captionNotes || fullPost;
+  notesForSave = richPost || captionNotes || fullPost;
 } else {
-  notesForSave = isDetailedNotes(fullPost) ? fullPost : captionNotes;
+  notesForSave = isDetailedNotes(fullPost) ? richPost : (richPost || captionNotes);
   const built = buildMultiLinkNotes(fullPost);
   if (built.titleHint) titleHint = built.titleHint;
-  if (isDetailedNotes(fullPost)) notesForSave = fullPost;
 }
 
 for (const rawUrl of toSave) {
@@ -9620,10 +11594,7 @@ for (const rawUrl of toSave) {
           try {
             await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
               .bind(r.title, JSON.stringify(merged), r.notes || '', r.id).run();
-            const gp = await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: r.title, notes: r.notes || '', tags: merged });
-            if (gp?.handled && !gp.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${gp.error||'unknown'}`, forumThreadId); }
           } catch (_) {}
-          reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: userTagsPersonal }, r.notes);
           reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: userTagsPersonal }, r.notes);
         } else {
           const vocab = await recentTagsForScope(env, 'personal', athenaUser.id);
@@ -9641,13 +11612,12 @@ for (const rawUrl of toSave) {
             try {
               await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
                 .bind(savedTitle, JSON.stringify(merged), ai.description || r.notes || '', r.id).run();
-              await storeMutateLink(env, 'personal', athenaUser.id, r.id, { title: savedTitle, notes: ai.description || r.notes || '', tags: merged });
             } catch (_) {}
           } else {
             const fb=fallbackTagsFromMeta(rawUrl, {title: r.title, notes: r.notes, content: r.content});
             if(fb.length && r.id){
               const mergedFb=[...new Set([...['telegram','personal'], ...fb])];
-              try{ await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`).bind(r.title, JSON.stringify(mergedFb), r.notes||'', r.id).run(); await storeMutateLink(env,'personal',athenaUser.id,r.id,{title:r.title, notes:r.notes||'', tags:mergedFb}); }catch(_){}
+              try{ await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`).bind(r.title, JSON.stringify(mergedFb), r.notes||'', r.id).run(); }catch(_){}
               reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, {title: r.title, description: r.notes||'', tags: fb}, r.notes);
             } else {
               reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, null, r.notes);
@@ -9714,6 +11684,7 @@ function cleanTitleText(title) {
 
 async function structureDatabase(env, { onProgress = null } = {}) {
   const stats = { scanned: 0, urlNormalized: 0, merged: 0, notesCleaned: 0, titlesCleaned: 0, errors: 0 };
+  const nameRe = await loadLinkNamePattern(env);
   const tables = [
     { name: 'links', scopeCol: 'community_id', cols: 'url, url_hash, title, notes, tags, created_at, upvotes, downvotes' },
     { name: 'personal_links', scopeCol: 'user_id', cols: 'url, url_hash, title, notes, tags, created_at, 0 AS upvotes, 0 AS downvotes' }
@@ -9763,7 +11734,7 @@ async function structureDatabase(env, { onProgress = null } = {}) {
             }
             const upd = {
               url: normUrl, url_hash: normHash,
-              title: cleanTitleText(row.title), notes: cleanNotesText(row.notes)
+              title: cleanTitleText(row.title), notes: cleanNotesText(repairContaminatedNotes(row.notes, row.url, row.title, nameRe))
             };
             if (upd.title !== row.title) stats.titlesCleaned++;
             if (upd.notes !== row.notes) stats.notesCleaned++;
@@ -9774,7 +11745,7 @@ async function structureDatabase(env, { onProgress = null } = {}) {
           }
           // Same URL: still clean notes/title
           const updTitle = cleanTitleText(row.title);
-          const updNotes = cleanNotesText(row.notes);
+          const updNotes = cleanNotesText(repairContaminatedNotes(row.notes, row.url, row.title, nameRe));
           if (updTitle !== row.title || updNotes !== row.notes) {
             await env.DB.prepare(`UPDATE ${t.name} SET title = ?, notes = ?, search_blob = NULL WHERE id = ?`)
               .bind(updTitle, updNotes, row.id).run();
@@ -9869,6 +11840,61 @@ function parseSqlInsert(stmt) {
     else row[c] = v;
   });
   return { table, row };
+}
+
+/** Scan a backup SQL dump for the single community its links belong to.
+ *  Returns the community_id when every sampled `links` row names the same
+ *  community (and that community exists locally), else ''. Bounded: skips
+ *  huge dumps and stops after enough rows or a second distinct id. */
+async function detectBackupCommunityId(env, sqlText) {
+  try {
+    if (!sqlText || sqlText.length > 30 * 1024 * 1024) return '';
+    const stmts = splitSqlStatements(String(sqlText));
+    const seen = new Set();
+    let scanned = 0;
+    for (const st of stmts) {
+      if (!/^INSERT\s+INTO\s+"links"/i.test(st)) continue;
+      const p = parseSqlInsert(st);
+      if (!p || p.table !== 'links') continue;
+      const cid = String(p.row?.community_id || '');
+      if (/^c_/.test(cid)) seen.add(cid);
+      if (seen.size > 1) return '';
+      if (++scanned >= 3000) break;
+    }
+    if (seen.size !== 1) return '';
+    const id = [...seen][0];
+    const row = await env.DB.prepare('SELECT id FROM communities WHERE id = ?').bind(id).first().catch(() => null);
+    return row ? id : '';
+  } catch (_) { return ''; }
+}
+
+/** Actionable "no import target" reply: lists communities the user can pick
+ *  with /import <id>. GOD never needs /community_join (it is a no-op for
+ *  them), so GOD is not sent down that dead end. */
+async function sendNoImportTargetMessage(env, token, chatId, forumThreadId, athenaUser, isGod) {
+  let rows = [];
+  try {
+    if (athenaUser) {
+      const r = await env.DB.prepare(
+        `SELECT m.community_id AS id, c.name AS name FROM community_members m LEFT JOIN communities c ON c.id = m.community_id WHERE m.user_id = ? ORDER BY m.community_id LIMIT 10`
+      ).bind(athenaUser.id).all().catch(() => null);
+      rows = (r && r.results) || [];
+    }
+    if (!rows.length && isGod) {
+      const r = await env.DB.prepare('SELECT id, name FROM communities ORDER BY created_at LIMIT 10').all().catch(() => null);
+      rows = (r && r.results) || [];
+    }
+  } catch (_) {}
+  if (rows.length) {
+    const list = rows.map(r => `• ${escHtml(r.name || r.id)} — ${codeHtml(escHtml(String(r.id)))}`).join('<br>');
+    await sendTelegramFormatted(token, chatId, [
+      `${boldHtml('⚠️')} No target community — reply to the backup file again with ${codeHtml('/import <community_id>')}:`,
+      '',
+      list,
+    ].join('\n'), forumThreadId);
+    return;
+  }
+  await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No target community. Link one with ${codeHtml('/community_verify')} / ${codeHtml('/community_join')}, or run ${codeHtml('/import <community_id>')}.`, forumThreadId);
 }
 
 const IMPORT_LINK_COLUMNS = {
@@ -9970,6 +11996,8 @@ async function importBackupSql(env, sqlText, { onProgress = null, targetCommunit
       if (c === 'id' || c === t.scopeCol || c === 'url' || c === 'url_hash') continue;
       if (!(liveCols[t.name].size) || liveCols[t.name].has(c)) cols.push(c);
     }
+    // search_blob is computed fresh below (never trusted from the dump).
+    if ((!liveCols[t.name].size || liveCols[t.name].has('search_blob')) && !cols.includes('search_blob')) cols.push('search_blob');
     const vectors = [];
     for (const row of byTable[t.name]) {
       const rawUrl = String(row.url || '');
@@ -9982,8 +12010,12 @@ async function importBackupSql(env, sqlText, { onProgress = null, targetCommunit
       const vec = [t.target, `ix_${randomToken().slice(0, 12)}`, url, newHash];
       for (const c of cols.slice(4)) {
         let v = row[c];
-        if (v == null && ['upvotes', 'downvotes', 'metadata_version'].includes(c)) v = 0;
-        vec.push(c === 'search_blob' ? null : (v ?? null));
+        // Searchable immediately: stamp the blob at import time instead of
+        // NULL (lazy backfill only covers a few hundred rows per search,
+        // so bulk imports stayed invisible to /search for dozens of queries).
+        if (c === 'search_blob') v = buildSearchBlob({ title: row.title, url, notes: row.notes, tags: row.tags });
+        else if (v == null && ['upvotes', 'downvotes', 'metadata_version'].includes(c)) v = 0;
+        vec.push(v ?? null);
       }
       vectors.push(vec);
       report[t.insertedKey]++;
@@ -10150,13 +12182,12 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   // Keep bot replies in the same forum topic as the user message (not General/#)
   const forumThreadId = msg.message_thread_id != null ? Number(msg.message_thread_id) : null;
 
-  const parts = text.split(/\s+/);
+  let parts = text.split(/\s+/);
   let cmd = (parts[0] || '').toLowerCase().replace(/@\w+$/, '');
-  // typos
-  if (cmd === '/perosnal') cmd = '/personal';
   // if first token is a URL, not a command
   if (cmd.startsWith('http')) cmd = '';
   const rest = cmd.startsWith('/') ? text.slice(parts[0].length).trim() : text;
+  if (cmd.startsWith('/')) { try { console.log(`[webhook] cmd ${cmd} chat=${chatId} from=${tgUserId || '?'} mid=${msg.message_id}`); } catch (_) {} }
 
   let binding = await findTelegramBinding(env, chatId, tgUserId);
   let token = (await tokenForBindingAsync(binding, env)) || env.TELEGRAM_BOT_TOKEN;
@@ -10175,13 +12206,13 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   if(!cmd.startsWith('/') && /^(yes|y|no|n)$/i.test(text.trim()) && tgUserId){
     try{
       await ensurePendingCloneTable(env);
-      const {results} = await env.DB.prepare(`SELECT * FROM pending_clones WHERE requester_tg_id=? AND expires_at>? ORDER BY created_at DESC LIMIT 1`).bind(String(tgUserId), Date.now()).all().catch(()=>({results:[]}));
-      const pend = results?.[0];
-      if(pend && String(pend.requester_tg_id)===String(tgUserId)){
+      const {results} = await env.DB.prepare('SELECT * FROM pending_clones WHERE requester_tg_id=? AND expires_at>? ORDER BY created_at DESC').bind(String(tgUserId), Date.now()).all();
+      const pend = (results || []).find(row => JSON.parse(row.stats_json || '{}').manager !== 'uclone');
+      if(pend && String(pend.requester_tg_id)===String(tgUserId) && JSON.parse(pend.stats_json || '{}').manager !== 'uclone'){
         const isYes = /^(yes|y)$/i.test(text.trim());
         const stats = JSON.parse(pend.stats_json||'{}');
-        await deletePendingClone(env, pend.id);
         if(!isYes){
+          await deletePendingClone(env, pend.id);
           await sendTelegramFormatted(token, chatId, `${boldHtml('❌ Cancelled.')}`, forumThreadId).catch(()=>{});
           return new Response('OK', {status:200, headers: corsHeaders});
         }
@@ -10189,11 +12220,30 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
           await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Login at ${await getWebsiteDisplayUrl(env)} first.`, forumThreadId).catch(()=>{});
           return new Response('OK', {status:200, headers: corsHeaders});
         }
+        if (stats.manager === 'botclone' && stats.stage !== 'choice') {
+          try {
+            await activateBotClone(env, { pendingId: pend.id, stats, chatId: pend.chat_id, token, messageId: msg.message_id, threadId: forumThreadId, user: athenaUser });
+          } catch (cloneErr) {
+            await deletePendingClone(env, pend.id);
+            await sendTelegramFormatted(token, chatId, `${boldHtml('❌ Bot clone failed:')} ${escHtml(String(cloneErr?.message || cloneErr).slice(0, 200))}`, forumThreadId).catch(()=>{});
+          }
+          return new Response('OK', {status:200, headers: corsHeaders});
+        }
+        await deletePendingClone(env, pend.id);
         await sendTelegramFormatted(token, chatId, `${boldHtml('✅ Confirmed — cloning started.')} ${codeHtml(pend.chat_id)}`, forumThreadId).catch(()=>{});
-        await doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUser, communityIdArg: pend.community_id||'', chatIdN: pend.chat_id, targetArg: pend.target||'', stats });
+        try {
+          await doCloneAfterConfirm(env, { token, chatId, forumThreadId, athenaUser, communityIdArg: pend.community_id||'', chatIdN: pend.chat_id, targetArg: pend.target||'', stats, threadArg: pend.thread_id||'' });
+        } catch (cloneErr) {
+          console.error('doCloneAfterConfirm failed:', cloneErr?.message || cloneErr);
+          await sendTelegramFormatted(token, chatId, `${boldHtml('❌ Clone failed:')} ${escHtml(String(cloneErr?.message || cloneErr).slice(0, 200))}`, forumThreadId).catch(()=>{});
+        }
         return new Response('OK', {status:200, headers: corsHeaders});
       }
-    }catch(_){}
+    }catch(handlerErr){
+      console.error('pending-clone yes/no handler failed:', handlerErr?.message || handlerErr);
+      await sendTelegramFormatted(token, chatId, `${boldHtml('❌ Clone confirm failed:')} ${escHtml(String(handlerErr?.message || handlerErr).slice(0, 200))}`, forumThreadId).catch(()=>{});
+      return new Response('OK', {status:200, headers: corsHeaders});
+    }
   }
   // Persist Bot API id whenever we see a logged-in Telegram user (needed for join + owner match)
   if (athenaUser?.id && tgUserId && isLikelyTelegramBotApiId(tgUserId)) {
@@ -10269,6 +12319,15 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     const personalBot = await findPersonalBotForOwner(env, athenaUser.id);
     if (personalBot?.bot_token) token = await decryptBotToken(env, personalBot.bot_token);
   }
+  if (['/uclone', '/ubclone', '/userbot_accounts', '/userbot_select'].includes(cmd)) {
+    try {
+      if (!isSelfHosted(env)) await sendTelegramMessage(token, chatId, 'Saved-account history cloning requires the self-hosted server.', forumThreadId);
+      else await ucloneManager(env).command({ text, tgUserId, user: athenaUser, chatId, threadId: forumThreadId, token, isGod: isGodTgId(tgUserId, env) });
+    } catch (error) {
+      await sendTelegramMessage(token, chatId, cloneFailure(error).message, forumThreadId);
+    }
+    return new Response('OK', { status: 200, headers: corsHeaders });
+  }
   // Prefer binding token, else any personal bot of this user, else env
   if (!token && athenaUser) {
     const pb = await findPersonalBotForOwner(env, athenaUser.id);
@@ -10312,6 +12371,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
           msg, token,
           communityId: fullCopy.communityId,
           personalOwner,
+          ownerId: fullCopy.owner,
           channelTitle: `${msg.chat?.title || 'group'}${threadId0 ? ` · #${threadId0}` : ''}`,
         }));
       }
@@ -10475,13 +12535,13 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   const dumpLinkMode = (binding?.dump_link_mode || 'smart').toLowerCase();
 
   const STAFF_OR_ABOVE = new Set([
-    '/delete', '/edit', '/topic', '/dumpall', '/dumpsmart', '/admin', '/demote', '/clear', '/kick',
+    '/delete', '/edit', '/topic', '/dumpall', '/dumpsmart', '/admin', '/demote', '/kick',
     '/personal', '/community', '/mode', '/community_verify', '/verify_community', '/communityverify',
     '/community_delete', '/delete_community', '/cdelete',
     // every /clear_db alias must be listed, or the alias skips this gate entirely
     '/clear_db', '/cleardb', '/clear_community_db',
-    '/clear_personal_db', '/clear_perosnal_db', '/clearpersonal',
-    '/sync', '/backup'
+    '/clear_personal_db', '/clearpersonal',
+    '/backup'
   ]);
   if (cmd && cmd.startsWith('/') && STAFF_OR_ABOVE.has(cmd) && !isCommAdmin && !isGod) {
     await sendTelegramMessage(token, chatId,
@@ -10608,7 +12668,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     if (isGod) {
-      await sendTelegramMessage(token, chatId, `You are GOD already — you don't need to /community_join. You have full access to ${c.name} (${c.id}) and all communities.`, forumThreadId);
+      await sendTelegramMessage(token, chatId, `You are GOD already — you don't need to /community_join. You have full access to ${c.name} (${c.id}) and all communities.\nIn DMs, reply to a backup file with /import ${c.id} to import into this community.`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     if (await isBannedFromCommunity(env, cid, athenaUser)) {
@@ -10761,193 +12821,85 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
-   // ---- /channel_link — index a channel's new posts into a community ----
-   // Owner/GOD only. The bot must already be an admin of the channel; the
-   // check runs server-side via this bot's own token, so a channel cannot be
-   // linked by anyone who merely knows its id.
-   if (cmd === '/channel_link' || cmd === '/channellink' || cmd === '/channel-link') {
-     if (!athenaUser) {
-       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const communityIdArg = (parts[1] || '').trim();
-     const channelIdArg = (parts[2] || '').trim() || (msg.reply_to_message?.sender_chat?.id ? String(msg.reply_to_message.sender_chat.id) : '');
-     const targetArg = (parts[3] || '').trim().toLowerCase();
-     if (targetArg && !CHANNEL_TARGETS.has(targetArg)) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Target must be ${codeHtml('community')}, ${codeHtml('personal')} or ${codeHtml('both')}.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if ((targetArg === 'personal' || targetArg === 'both') && !isGod) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} ${codeHtml('personal')}/${codeHtml('both')} targets are GOD rank only.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const channelTarget = targetArg || 'community';
-     if (!communityIdArg || !channelIdArg) {
-       await sendTelegramFormatted(token, chatId, [
-         `${boldHtml('📢 Link a channel for auto-indexing')}`,
-         '',
-         `Usage: ${codeHtml('/channel_link <community_id> <channel_id> [community|personal|both]}')}`,
-         `${codeHtml('personal')}/${codeHtml('both')} are GOD rank only.`,
-         `Or: forward a channel post here, reply to it with ${codeHtml('/channel_link <community_id>')}`,
-         '',
-         'Requires: community owner/GOD, and this bot added as ADMIN of the channel.',
-         'New channel posts (links + pdf/docx/md/json/… files) are indexed in real time.',
-         `Channel ID: forward a channel post to ${linkHtml('https://t.me/userinfobot', '@userinfobot')}`,
-         `Unlink: ${codeHtml('/channel_unlink <channel_id>')}`
-       ].join('\n'), forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (!(await ensureOwnerOrAdmin(communityIdArg, athenaUser.id, env)) && !isGod) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const community = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityIdArg).first();
-     if (!community) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(communityIdArg)} not found.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const cid = channelIdArg.startsWith('-') ? channelIdArg : `-100${channelIdArg.replace(/^-100/, '')}`;
-     if (!/^-\d+$/.test(cid)) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Invalid channel ID (use -100…).`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     await ensureUserbotTables(env);
-     // Validate: channel exists, bot is admin — with THIS bot's token.
-     const me = await telegramApi(token, 'getMe', {});
-     const botId = me?.result?.id;
-     const chk = await telegramApi(token, 'getChat', { chat_id: cid });
-     if (!chk?.ok || chk?.result?.type !== 'channel') {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} ${codeHtml(cid)} is not a reachable channel for this bot — add the bot as ADMIN first.\n${italicHtml('Or connect a userbot account (/userbot_add) and use /clone — no admin needed.')}`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const member = botId ? await telegramApi(token, 'getChatMember', { chat_id: cid, user_id: botId }) : null;
-     const botStatus = member?.result?.status || '';
-     if (!['administrator', 'creator'].includes(botStatus)) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} This bot is not an admin of that channel (status: ${escHtml(botStatus || 'unknown')}). Promote it and retry.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     await ensureBotBindingColumns(env);
-     const channelTitle = chk.result.title || cid;
-     const existingBinding = await env.DB.prepare(
-       `SELECT id, community_id FROM community_bots WHERE platform = 'telegram' AND group_id = ?`
-     ).bind(cid).first();
-     if (existingBinding) {
-       await env.DB.prepare('UPDATE community_bots SET community_id = ?, group_name = ?, channel_target = COALESCE(?, channel_target) WHERE id = ?')
-         .bind(communityIdArg, channelTitle, channelTarget, existingBinding.id).run();
-     } else {
-       const id = 'cb_' + Date.now().toString(36) + '_' + randomToken().slice(0, 6);
-       await env.DB.prepare(
-         `INSERT INTO community_bots (id, community_id, platform, bot_username, group_id, group_name, created_by, created_at, scope, user_id, bot_token, channel_target)
-          VALUES (?, ?, 'telegram', ?, ?, ?, ?, ?, 'community', NULL, NULL, ?)`
-       ).bind(id, communityIdArg, me?.result?.username || null, cid, channelTitle, athenaUser.id, Date.now(), channelTarget).run();
-     }
-     await sendTelegramFormatted(token, chatId, [
-       `${boldHtml('✅')} Channel ${boldHtml(escHtml(channelTitle))} linked to ${boldHtml(escHtml(community.name || communityIdArg))}.`,
-       '',
-       `${boldHtml('Target:')} ${codeHtml(channelTarget)}${channelTarget !== 'community' ? italicHtml(' (GOD personal brain included)') : ''}`,
-       `${boldHtml('From now on')} every new post is copied automatically — links, captions, documents (pdf/docx/md/…), and text-only announcements. Video/audio/apk are skipped.`,
-       '',
-       `${boldHtml('Copy the existing history too')} (everything already in the channel):`,
-       `1. On this server run: ${codeHtml('node scripts/gen-session.js')}`,
-       `2. DM me: ${codeHtml('/index_start <community_id> <chat_id> <api_id> <api_hash> <session_string>')}`,
-       `   • chat_id = ${codeHtml(cid)} · progress: ${codeHtml('/index_status')} · stop: ${codeHtml('/index_stop')}`,
-       `${italicHtml('The session string is encrypted at rest and auto-deleted when the backfill finishes.')}`
-     ].join('\n'), forumThreadId);
-     return new Response('OK', { status: 200, headers: corsHeaders });
+// ---- /clone shared flow: ask Personal vs community, then backfill + follow ----
+function cloneUsageHtml() {
+  return [
+    `Whole chat: ${codeHtml('/clone <chat_id> <community_id>')}.`,
+    `One topic: ${codeHtml('/clone <chat_id> <topic_id> <community_id>')}.`,
+    `A channel: ${codeHtml('/clone <channel_id> <community_id>')}.`,
+    `Guided tour with per-topic stats: ${codeHtml('/uclone <chat_id> [topic_id] [community_id]')} (whole chat: ${codeHtml('/uclone <chat_id> <community_id>')}).`,
+  ].join('\n');
+}
+
+async function cloneEligibleCommunities(env, athenaUser, isGod) {
+  const out = [];
+  try {
+    const rows = await env.DB.prepare(`SELECT id, name, created_at FROM communities WHERE id != 'default' ORDER BY created_at DESC`).all();
+    let linkCounts = {};
+    try {
+      const lr = await env.DB.prepare(`SELECT community_id, COUNT(*) AS n FROM links GROUP BY community_id`).all().catch(() => ({ results: [] }));
+      for (const r of lr?.results || lr || []) linkCounts[String(r.community_id || '')] = Number(r.n || 0);
+    } catch (_) {}
+    for (const c of (rows?.results || rows || [])) {
+      if (!c?.id) continue;
+      if (isGod || await ensureOwnerOrAdmin(c.id, athenaUser?.id || '', env)) out.push({ ...c, links: linkCounts[String(c.id)] || 0 });
+    }
+  } catch (_) {}
+  return out;
+}
+
+async function startCloneTargetAsk(env, ctx) {
+  const { token, chatId, forumThreadId, tgUserId, athenaUser, isGod, flowChat, flowThread, communityArg } = ctx;
+  const resolved = await resolveCloneChat(env, token, flowChat);
+  const chatTitle = resolved.title, chatType = resolved.type;
+  if (communityArg) {
+    const ok = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityArg).first().catch(() => null);
+    if (!ok || (!isGod && !(await ensureOwnerOrAdmin(communityArg, athenaUser.id, env)))) {
+      await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(communityArg)} not found or not yours.`, forumThreadId);
+      return;
+    }
+  }
+  const eligible = dedupeEligibleCommunities(await cloneEligibleCommunities(env, athenaUser, isGod));
+  if (!eligible.length) {
+    await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No community available — ask a community owner to make you owner/admin first.`, forumThreadId);
+    return;
+  }
+  const pinned = communityArg ? eligible.filter((c) => String(c.id) === communityArg) : [];
+  const rest = eligible.filter((c) => String(c.id) !== communityArg);
+  const display = cloneDisplayName(chatTitle, chatType, flowThread, '');
+  const pendingId = 'bc_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  const stats = { manager: 'botclone', stage: 'choice', sourceName: display, threadId: flowThread || null, communityId: communityArg || null, target: null, isForum: !!flowThread, sourceType: chatType === 'channel' ? 'channel' : 'group', label: '', destinationName: '', requesterTgId: String(tgUserId || ''), requesterUserId: String(athenaUser.id), topics: flowThread ? [{ id: flowThread }] : [], createdAt: Date.now() };
+  await storePendingClone(env, { id: pendingId, chat_id: flowChat, thread_id: flowThread || null, community_id: communityArg || null, target: null, requester_tg_id: String(tgUserId || ''), requester_user_id: String(athenaUser.id), stats, created_at: Date.now(), expires_at: Date.now() + 15 * 60 * 1000 });
+  const rows = [];
+  if (isGod) rows.push(richButtonRow([{ label: '📥 Personal brain', data: `clone:target:${pendingId}:personal` }]));
+  for (const c of [...pinned, ...rest].slice(0, 8)) rows.push(richButtonRow([{ label: `🗂 ${String(c.name || c.id).slice(0, 40)}`, data: `clone:target:${pendingId}:${c.id}` }]));
+  rows.push(richButtonRow([{ label: '❌ Cancel', data: `clone:no:${pendingId}` }]));
+  await sendTelegramRichMessage(token, chatId, [
+    richHeading(3, `🧬 Clone ${flowThread ? 'topic' : (chatType === 'channel' ? 'channel' : 'group')}`),
+    '',
+    richParagraph(`Source: ${escHtml(display)} ${codeHtml(flowChat)}`),
+    richParagraph('Where should it land? History backfills first, then live indexing follows.'),
+  ].join('\n'), forumThreadId, rows.join('\n'));
+}
+
+
+   // /group_copy removed: forums are auto-detected, clone/uclone copy per flow.
+
+   // `/topic link|unlink|list|target` is the spelling people reach for; the
+   // handlers are `/topic_<sub>`. Fold the subcommand into the command name and
+   // drop it from the argument list so both spellings run one path.
+   if (cmd === '/topic' && ['unlink', 'list', 'target'].includes(String(parts[1] || '').toLowerCase())) {
+     cmd = '/topic_' + String(parts[1]).toLowerCase();
+     parts.splice(1, 1);
    }
 
-   // ---- /group_copy — GOD toggles full-copy (text posts) for this group ----
-   if (cmd === '/group_copy' || cmd === '/groupcopy') {
-     if (!binding?.community_id) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Not a linked community group. ${codeHtml('/community_verify')} first.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (!isGod && !(await ensureOwnerOrAdmin(binding.community_id, athenaUser?.id || '', env))) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const arg = (parts[1] || '').trim().toLowerCase();
-     await ensureBotBindingColumns(env);
-     if (arg === 'on' || arg === 'off') {
-       const val = arg === 'on' ? 1 : 0;
-       await env.DB.prepare('UPDATE community_bots SET copy_text = ? WHERE id = ?').bind(val, binding.id).run();
-       await sendTelegramFormatted(token, chatId,
-         `${boldHtml('✅')} Group full-copy ${arg === 'on' ? 'ON' : 'OFF'}.` +
-         (arg === 'on' ? `\n${italicHtml('Text-only posts are now saved too. Target:')} ${codeHtml(binding.channel_target || 'community')} ${italicHtml('(change with /channel_target)')}` : ''),
-         forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const cur = Number(binding.copy_text || 0) === 1;
-     await sendTelegramFormatted(token, chatId,
-       `${boldHtml('Group full-copy:')} ${cur ? 'ON' : 'OFF'}\n${codeHtml('/group_copy on')} — also save text-only posts\n${codeHtml('/group_copy off')} — links & documents only`,
-       forumThreadId);
-     return new Response('OK', { status: 200, headers: corsHeaders });
-   }
-
-   // ---- /topic_link — clone a specific forum topic into the brain ----
-   if (cmd === '/topic_link' || cmd === '/topiclink') {
-     if (!msg.is_topic_message || msg.message_thread_id == null) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Use ${codeHtml('/topic_link')} inside the forum topic you want to clone.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (!athenaUser) {
-       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const communityIdArg = (parts[1] || '').trim();
-     const targetArg = (parts[2] || '').trim().toLowerCase();
-     if (!communityIdArg) {
-       await sendTelegramFormatted(token, chatId,
-         `Usage: ${codeHtml('/topic_link <community_id> [community|personal|both]')}\n${italicHtml('Run inside the topic. personal/both are GOD rank only.')}`,
-         forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (targetArg && !CHANNEL_TARGETS.has(targetArg)) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Target must be ${codeHtml('community')}, ${codeHtml('personal')} or ${codeHtml('both')}.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if ((targetArg === 'personal' || targetArg === 'both') && !isGod) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} ${codeHtml('personal')}/${codeHtml('both')} targets are GOD rank only.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (!(await ensureOwnerOrAdmin(communityIdArg, athenaUser.id, env)) && !isGod) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const community = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityIdArg).first();
-     if (!community) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(communityIdArg)} not found.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     await ensureTopicBindingTable(env);
-     const threadIdStr = String(msg.message_thread_id);
-     const existing = await env.DB.prepare(
-       'SELECT id FROM telegram_topic_bindings WHERE chat_id = ? AND thread_id = ?'
-     ).bind(chatId, threadIdStr).first();
-     if (existing) {
-       await env.DB.prepare('UPDATE telegram_topic_bindings SET community_id = ?, target = COALESCE(NULLIF(?, \'\'), target), created_by = ? WHERE id = ?')
-         .bind(communityIdArg, targetArg, athenaUser.id, existing.id).run();
-     } else {
-       await env.DB.prepare(
-         `INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`
-       ).bind('tb_' + Date.now().toString(36) + '_' + randomToken().slice(0, 5), chatId, threadIdStr, communityIdArg, targetArg || 'community', athenaUser.id, Date.now()).run();
-     }
-     // Backfill pointer for this topic
-     await sendTelegramFormatted(token, chatId, [
-       `${boldHtml('✅')} Topic ${codeHtml('#' + threadIdStr)} linked to ${boldHtml(escHtml(community.name || communityIdArg))} · target ${codeHtml(targetArg || 'community')}.`,
-       `${italicHtml('New posts in this topic are copied automatically (links, files, text).')}`,
-       `History: ${codeHtml('/index_start <community_id> <chat_id> <api_id> <api_hash> <session> ' + threadIdStr)} ${italicHtml('(last arg = thread)')}`,
-       `Manage: ${codeHtml('/topic_target ' + threadIdStr + ' <target>')} · ${codeHtml('/topic_unlink ' + threadIdStr)}`
-     ].join('\n'), forumThreadId);
-     return new Response('OK', { status: 200, headers: corsHeaders });
-   }
+   // /topic_link removed: /clone and /uclone bind topics with history + live follow.
 
    // ---- /topic_unlink ----
    if (cmd === '/topic_unlink' || cmd === '/topicunlink') {
      const threadArg = (parts[1] || '').trim() || (msg.message_thread_id != null ? String(msg.message_thread_id) : '');
      if (!threadArg) {
-       await sendTelegramFormatted(token, chatId, `Usage: ${codeHtml('/topic_unlink <thread_id>')}`, forumThreadId);
+       await sendTelegramFormatted(token, chatId, `Usage: ${codeHtml('/topic_unlink [thread_id]')}\n${italicHtml('Sent inside the topic, the argument can be omitted.')}`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      await ensureTopicBindingTable(env);
@@ -10974,7 +12926,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        'SELECT thread_id, community_id, target FROM telegram_topic_bindings WHERE chat_id = ? ORDER BY thread_id'
      ).bind(chatId).all();
      if (!results?.length) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No topics linked in this group yet. ${codeHtml('/topic_link <community_id>')} inside a topic.`, forumThreadId);
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No topics linked in this group yet. Clone one with ${codeHtml('/clone <chat_id> <topic_id> <community_id>')}.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      const lines = results.map((r) => `• ${codeHtml('#' + r.thread_id)} → ${escHtml(r.community_id)} · ${codeHtml(r.target || 'community')}`);
@@ -10982,94 +12934,6 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
-   // ---- /topic_target — GOD switches where a linked topic lands ----
-   if (cmd === '/topic_target' || cmd === '/topictarget') {
-     if (!isGod) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const threadArg = (parts[1] || '').trim();
-     const tArg = (parts[2] || '').trim().toLowerCase();
-     if (!threadArg || !CHANNEL_TARGETS.has(tArg)) {
-       await sendTelegramFormatted(token, chatId,
-         `Usage: ${codeHtml('/topic_target <thread_id> <community|personal|both>')}`,
-         forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     await ensureTopicBindingTable(env);
-     const row = await env.DB.prepare(
-       'SELECT id FROM telegram_topic_bindings WHERE chat_id = ? AND thread_id = ?'
-     ).bind(chatId, threadArg).first();
-     if (!row) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No linked topic ${codeHtml('#' + threadArg)}.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     await env.DB.prepare('UPDATE telegram_topic_bindings SET target = ? WHERE id = ?').bind(tArg, row.id).run();
-     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Topic ${codeHtml('#' + threadArg)} now indexes into: ${codeHtml(tArg)}`, forumThreadId);
-     return new Response('OK', { status: 200, headers: corsHeaders });
-   }
-
-   // ---- /channel_target — GOD switches where a linked channel lands ----
-   if (cmd === '/channel_target' || cmd === '/channeltarget') {
-     if (!athenaUser) {
-       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (!isGod) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const cidArg = (parts[1] || '').trim();
-     const tArg = (parts[2] || '').trim().toLowerCase();
-     if (!cidArg || !CHANNEL_TARGETS.has(tArg)) {
-       await sendTelegramFormatted(token, chatId,
-         `Usage: ${codeHtml('/channel_target <channel_id> <community|personal|both>')}\nCurrent: reply with just ${codeHtml('/channel_target <channel_id>')}`,
-         forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     await ensureBotBindingColumns(env);
-     const row = await env.DB.prepare(
-       `SELECT id, group_name, created_by, channel_target FROM community_bots WHERE platform = 'telegram' AND group_id = ? AND community_id IS NOT NULL`
-     ).bind(cidArg.startsWith('-') ? cidArg : `-100${cidArg.replace(/^-100/, '')}`).first();
-     if (!row) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No linked channel ${codeHtml(cidArg)}. Link it first with ${codeHtml('/channel_link')}.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     // personal/both write into the linking GOD's brain; the SELECT above must
-     // expose created_by for that ownership check.
-     await env.DB.prepare('UPDATE community_bots SET channel_target = ? WHERE id = ?').bind(tArg, row.id).run();
-     await sendTelegramFormatted(token, chatId,
-       `${boldHtml('✅')} ${escHtml(row.group_name || cidArg)} now indexes into: ${codeHtml(tArg)}` +
-       (tArg !== 'community' ? `\n${italicHtml('Personal content lands in the GOD account that ran /channel_link.')}` : ''),
-       forumThreadId);
-     return new Response('OK', { status: 200, headers: corsHeaders });
-   }
-
-   if (cmd === '/channel_unlink' || cmd === '/channel-unlink') {
-     if (!athenaUser) {
-       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const cid = (parts[1] || '').trim();
-     if (!cid) {
-       await sendTelegramFormatted(token, chatId, `Usage: ${codeHtml('/channel_unlink <channel_id>')}`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const row = await env.DB.prepare(
-       `SELECT id, community_id FROM community_bots WHERE platform = 'telegram' AND group_id = ? AND community_id IS NOT NULL`
-     ).bind(cid).first();
-     if (!row) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No linked channel with ID ${codeHtml(cid)}.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (!(await ensureOwnerOrAdmin(row.community_id, athenaUser.id, env)) && !isGod) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     await env.DB.prepare('DELETE FROM community_bots WHERE id = ?').bind(row.id).run();
-     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Channel ${codeHtml(cid)} unlinked — new posts are no longer indexed.`, forumThreadId);
-     return new Response('OK', { status: 200, headers: corsHeaders });
-   }
 
     // ---- /export — Telegram Bot API default + optional session history ----
     if (cmd === '/export' || cmd === '/telegram_export') {
@@ -11078,10 +12942,10 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         await sendTelegramFormatted(token, chatId, [
           `${boldHtml('🗂 Session history export')}`,
           '',
-          `${italicHtml('This is optional. Bot mode handles new posts; history needs')} ${codeHtml('/clone')} ${italicHtml('after')} ${codeHtml('/userbot_add')}${italicHtml('.')}`,
+          `${italicHtml('This is optional. Bot mode handles new posts in a linked group after')} ${codeHtml('/clone <chat_id> <community_id>')} ${italicHtml('; userbot history uses')} ${codeHtml('/uclone')} ${italicHtml('after')} ${codeHtml('/userbot_add')}${italicHtml('.')}`,
           `Install ${codeHtml('npm install telegram')} on the self-hosted server first.`,
           `${boldHtml('Never paste a session string in a group.')} It grants the user account access and is encrypted only when ${codeHtml('STORAGE_KEY')} is configured.`,
-          `Progress: ${codeHtml('/index_status')} · cancel and delete session: ${codeHtml('/index_stop')}`
+          `Progress: ${codeHtml('/status')} · stop anytime from the ⏹ button on its /stats row`
         ].join('\n'), forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
@@ -11096,7 +12960,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         `${boldHtml('Default: Bot API mode')}`,
         'New channel posts, links, captions, and supported documents are exported into the linked community brain as the webhook receives them.',
         channels.length ? `${boldHtml('Linked channels')}\n${channels.join('\n')}` : 'No channels linked yet.',
-        `Enable it with ${codeHtml('/channel_link <community_id> <channel_id>')} after promoting this bot to channel admin.`,
+        `Enable it with ${codeHtml('/clone <channel_id> <community_id>')} after promoting this bot to channel admin.`,
         '',
         `${boldHtml('Optional: session mode')}`,
         `Use ${codeHtml('/export session')} for the private history-backfill guide. Bots cannot read old history; a short-lived encrypted user session is required for that one task.`
@@ -11105,319 +12969,93 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     }
 
     // ---- /index — indexing status + backfill pointer ----
-   if (cmd === '/index') {
+   if (cmd === '/status') {
+     // What is being indexed right now (used to be /index) plus the running
+     // and recent backfill jobs (used to be /index_status). Stopping happens
+     // from the ⏹ button beside a live source on the /stats dashboard —
+     // there is no stop command anymore.
+     await ensureIndexTables(env);
      const linked = binding?.community_id ? await env.DB.prepare(
        `SELECT group_id, group_name FROM community_bots WHERE platform = 'telegram' AND community_id = ? AND group_id LIKE '-100%'`
      ).bind(binding.community_id).all() : { results: [] };
      const chanLines = (linked.results || []).map((r) => `• ${escHtml(r.group_name || '')} (${codeHtml(r.group_id)})`);
      const isGroup = String(msg.chat?.type || '').includes('group') || chatId.startsWith('-');
-     await sendTelegramFormatted(token, chatId, [
-       `${boldHtml('🗂 Indexing')}`,
+     const allUsers = isGod && /^all$/i.test((parts[1] || '').trim());
+     const { results: jobs } = allUsers
+       ? await env.DB.prepare('SELECT * FROM index_jobs ORDER BY updated_at DESC LIMIT 10').all()
+       : await env.DB.prepare('SELECT * FROM index_jobs WHERE user_id = ? ORDER BY updated_at DESC LIMIT 10').bind(athenaUser?.id || tgUserId || '').all();
+     const jobLines = (jobs || []).map((j) => `<li>${j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'error' ? '❌' : '⏸'} ${j.chat_name ? `${boldHtml(escHtml(j.chat_name))} ` : ''}${codeHtml(j.chat_id)}${j.thread_id ? ` topic ${codeHtml('#' + j.thread_id)}` : ''} — ${escHtml(j.status)} · ${j.processed || 0} scanned · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_pdfs ? ` · ${j.saved_pdfs} pdfs` : ''}${j.dupes_skipped ? ` · ${j.dupes_skipped} dupes` : ''}${j.saved_files ? ` · ${j.saved_files} files` : ''}${j.error ? ` — ${escHtml(String(j.error).slice(0, 80))}` : ''}</li>`);
+     await sendTelegramRichMessage(token, chatId, [
+       `${boldHtml('🗂 Status')}`,
        '',
        `${boldHtml('Real time (automatic)')}`,
        isGroup ? '• This group: every posted link and file is saved as it arrives.' : '• Linked groups: every posted link and file is saved as it arrives.',
-       chanLines.length ? `• Linked channels (new posts auto-copied):\n${chanLines.join('\n')}` : '• Channels: none linked yet — /channel_link <community_id> <channel_id>',
+       chanLines.length ? `• Linked channels (new posts auto-copied):\n${chanLines.join('\n')}` : `• Channels: none linked yet — ${codeHtml('/clone <channel_id> <community_id>')}`,
        '',
-       `${boldHtml('History backfill')}`,
-       `Use ${codeHtml('/clone')} — shows preview → Yes does topic-wise backfill + live indexing`,
-       `${codeHtml('/index_status')} — progress · ${codeHtml('/index_stop')} — stop · ${codeHtml('/del <chat_id>')} — delete`
+       `${boldHtml(`Backfill jobs${allUsers ? ' — all users' : ''}`)}`,
+       jobLines.length ? `<ul>${jobLines.join('')}</ul>` : `• No backfill jobs yet. ${codeHtml('/uclone <chat_id>')} starts the guided history scan; ${codeHtml('/clone')} in a linked group is Bot API live mode.`,
+       '',
+       `${italicHtml('Per-source totals and the ⏹/▶️ live toggle live on /stats. To remove saved data, use /delete.')}`,
      ].join('\n'), forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
-   // ---- /index_start — history backfill with a user session string ----
-   // Self-host only (gramjs is a native Node dependency), DM only (the
-   // session string is a live account key), GOD or community owner.
-     // ---- /clone (aliases /follow, /backfill): ONE command inside any chat ----
-     // Registers live following AND starts history backfill. Dedupe makes the
-     // overlap free. Works in channels/groups/topics where the userbot account
-     // is a member — no bot-admin, no group binding required.
-     if (cmd === '/clone' || cmd === '/follow' || cmd === '/backfill') {
-       const dmOnly = !chatId.startsWith('-');
-    // Remote mode (DM): /clone <chat_id> [thread_id] [target|community…]
-    // or reply-to a forwarded channel post. For channels you cannot type in.
-    let remoteChatId = '';
-    let remoteThread = '';
-    if (dmOnly) {
-      const fwd = msg.reply_to_message?.forward_from_chat?.id
-        ?? msg.reply_to_message?.forward_from_chat
-        ?? msg.forward_from_chat?.id;
-      for (const a of parts.slice(1)) {
-        const t = a.trim();
-        if (/^-?\d{8,}$/.test(t)) remoteChatId = t;
-        else if (/^\d{1,7}$/.test(t)) remoteThread = t;
-      }
-      if (!remoteChatId && fwd != null) remoteChatId = String(fwd);
-      if (!remoteChatId) {
-        await sendTelegramFormatted(token, chatId,
-          `${boldHtml('🧬 /clone from my DM')}\n\n${boldHtml('Easiest:')} forward any post from the channel here, then ${boldHtml('reply')} to it with ${codeHtml('/clone [target]')}\n\n${boldHtml('Or by id:')} ${codeHtml('/clone <chat_id> [thread_id] [target|community_id]')}\n${italicHtml('chat ids look like -100… (forward a post to @userinfobot to see one)')}`,
-          forumThreadId);
+   // (clone engine selection lives in the /clone command + startBackfillJob now.)
+    // ---- /clone — history backfill + live follow, community-scoped ----
+    // Grammar (community id always LAST):
+    //   /clone                                      in a topic = that topic; General/DM = whole chat or usage
+    //   /clone <community_id>                       in a topic = that topic into this community
+    //   /clone <chat_id> <community_id>             whole chat ([Channel] for channels)
+    //   /clone <topic_id> <community_id>            that topic of THIS group
+    //   /clone <chat_id> <topic_id> <community_id>  that topic of that chat (DM-friendly)
+    // Every run asks Personal vs community first, backfills history, then
+    // follows live. Stats show Group[Topic] / [Channel] with the usual ⏹.
+    if (cmd === '/clone') {
+      const args = parts.slice(1).map((a) => String(a || '').trim()).filter(Boolean);
+      const communityArg = args.find((a) => /^c_/i.test(a)) || '';
+      const chatArg = args.find((a) => /^-?\d{8,}$/.test(a)) || '';
+      const topicArg = args.find((a) => /^\d{1,7}$/.test(a) && a !== chatArg) || '';
+      const flagArg = args.find((a) => /^(bot|userbot|personal|community|both)$/i.test(a)) || '';
+      // No chat id, no answer: bare /clone (DM, General or topic) and
+      // community-only forms stay silent. Only explicit-ID forms respond.
+      if (!chatArg) return new Response('OK', { status: 200, headers: corsHeaders });
+      if (flagArg) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Engine/target flags are gone — every /clone asks Personal vs community from buttons, then backfills history and follows live.\n${cloneUsageHtml()}`, forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
-    }
-    if (!athenaUser) {
-      await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-    await ensureUserbotTables(env);
-    const { results: enabledAccounts } = await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled = 1 ORDER BY label').all();
-    if (!enabledAccounts?.length) {
-      await sendTelegramFormatted(token, chatId,
-        `${boldHtml('🤖')} No userbot account connected yet. GOD: ${codeHtml('/userbot_add <label> <api_id> <api_hash> <session>')} in my DM.`,
-        forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-
-    // Parse args: target word, community id, optional min/max id range.
-    let targetArg = '';
-    let communityIdArg = '';
-    let minIdArg = '';
-    let maxIdArg = '';
-    const rangeTokens = [];
-    for (const a of parts.slice(1)) {
-      const t = a.trim();
-      if (!t) continue;
-      if (CHANNEL_TARGETS.has(t.toLowerCase())) { targetArg = t.toLowerCase(); continue; }
-      if (/^c_/.test(t)) { communityIdArg = t; continue; }
-      if (/^\d{1,9}$/.test(t)) { rangeTokens.push(t); continue; }
-      if (t.length > 8 && !/^-?\d+$/.test(t)) communityIdArg = t;
-    }
-    if (rangeTokens.length === 1) maxIdArg = rangeTokens[0];
-    if (rangeTokens.length >= 2) { minIdArg = rangeTokens[0]; maxIdArg = rangeTokens[1]; }
-    if ((targetArg === 'personal' || targetArg === 'both') && !isGod) {
-      await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} ${codeHtml('personal')}/${codeHtml('both')} targets are GOD rank only.`, forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-
-    let threadArg = msg.is_topic_message && msg.message_thread_id != null ? String(msg.message_thread_id) : '';
-    let chatIdN = normalizeTgChatId(chatId);
-    if (dmOnly && remoteChatId) {
-      chatIdN = normalizeTgChatId(remoteChatId);
-      if (remoteThread) threadArg = remoteThread;
-    }
-
-    // Forum auto-detection: if no thread specified and chat is a forum
-    if (dmOnly && remoteChatId && !threadArg) {
-      const isForum = await isForumEnabled(token, chatIdN, env);
-      if (isForum) {
-        const topics = await getForumTopicsViaUserbot(env, chatIdN);
-        if (topics.length) {
-          // If user said "all" as target, clone every topic topic-wise
-          if (targetArg === 'all' || communityIdArg === 'all') {
-            let _created = 0;
-            for (const t of topics) {
-              try {
-                await env.DB.prepare(
-                  `INSERT INTO telegram_topic_bindings (id, chat_id, thread_id, community_id, target, created_by, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(chat_id, thread_id) DO UPDATE SET community_id=excluded.community_id, target=excluded.target`
-                ).bind('tb_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), chatIdN, String(t.id), communityIdArg || 'personal', targetArg === 'all' ? 'community' : (targetArg || 'community'), athenaUser.id, Date.now()).run();
-                // Also create follow+backfill for each topic
-                await env.DB.prepare(
-                  `INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(chat_id) DO NOTHING`
-                ).bind(chatIdN+':'+String(t.id), (await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled=1 LIMIT 1').first())?.label || 'main', communityIdArg || 'personal', targetArg === 'all' ? 'community' : (targetArg || 'community'), athenaUser.id, Date.now()).run().catch(()=>{});
-                _created++;
-              } catch(e) { console.error('topic clone all failed', e?.message); }
-            }
-            await sendTelegramFormatted(token, chatId,
-              `${boldHtml('✅ Cloning ' + topics.length + ' topics from ' + escHtml(chatIdN))} — each topic will be indexed separately. Check ${codeHtml('/userbot_status')} for per-topic progress.`,
-              forumThreadId);
-            return new Response('OK', { status: 200, headers: corsHeaders });
-          }
-          const lines = topics.slice(0, 15).map(t => `${codeHtml('/clone ' + chatIdN + ' ' + t.id)} — ${escHtml(t.title)}`);
-          await sendTelegramFormatted(token, chatId,
-            `${boldHtml('📋 Forum detected (' + topics.length + ' topics)')}\n${lines.join('\n')}\n\n${italicHtml('Run /clone with a topic id to clone just that topic, or /clone ' + chatIdN + ' all to clone all topics')}`,
-            forumThreadId);
-          return new Response('OK', { status: 200, headers: corsHeaders });
-        }
-      }
-    }
-
-    // Community resolution: explicit arg → topic binding → group binding →
-    // GOD fallback to personal.
-    if (!communityIdArg && threadArg) {
-      const tb = await env.DB.prepare('SELECT community_id FROM telegram_topic_bindings WHERE chat_id = ? AND thread_id = ?').bind(chatIdN, threadArg).first().catch(() => null);
-      communityIdArg = tb?.community_id || '';
-    }
-    if (!communityIdArg) communityIdArg = binding?.community_id || '';
-    if (!communityIdArg && !targetArg && isGod) targetArg = 'personal';
-    if (!communityIdArg && !targetArg) {
-      await sendTelegramFormatted(token, chatId,
-        `${boldHtml('⚠️')} No community bound here. GOD can use ${codeHtml('/clone personal')} or ${codeHtml('/clone both')}; otherwise pass the community: ${codeHtml('/clone <community_id>')}${dmOnly ? ` or ${codeHtml('/clone <chat_id> <community_id>')}` : ''}`,
-        forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-    let communityName = communityIdArg;
-    if (communityIdArg) {
-      if (!(await ensureOwnerOrAdmin(communityIdArg, athenaUser.id, env)) && !isGod) {
-        await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
+      // Old community-first order is removed: community goes last now.
+      if (args.length >= 2 && /^c_/i.test(args[0]) && /^-?\d{8,}$/.test(args[1])) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} That order is removed — community id goes LAST now: ${codeHtml('/clone ' + args[1] + ' ' + args[0])}.\n${cloneUsageHtml()}`, forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
-      const comm = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityIdArg).first();
-      if (!comm) {
-        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(communityIdArg)} not found.`, forumThreadId);
+      // Single chat id alone (old inspect form) is removed.
+      if (args.length === 1 && /^-?\d{8,}$/.test(args[0])) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} The inspect form is gone — clone it instead:\n${cloneUsageHtml()}`, forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
-      communityName = comm.name || communityIdArg;
-    }
-
-    // Account pick: single enabled → it; multiple → first (or match label arg).
-    let label = enabledAccounts[0].label;
-    if (enabledAccounts.length > 1) {
-      const wantLabel = parts.slice(1).find((a) => enabledAccounts.some((e) => e.label === a.trim().toLowerCase()));
-      if (wantLabel) label = wantLabel.trim().toLowerCase();
-    }
-    const acc = USERBOT_ACCOUNTS.get(label);
-    if (!acc) {
-      const startedNow = await startUserbotAccount(env, label);
-      if (!startedNow.ok) {
-        await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} Account ${codeHtml(label)} is stored but disconnected (${escHtml(startedNow.reason || 'unknown')}). Restart the server or re-add it.`, forumThreadId);
+      const inGroup = chatId.startsWith('-');
+      const threadCtx = (msg.is_topic_message && forumThreadId != null) ? String(forumThreadId) : '';
+      const flowChat = chatArg ? normalizeTgChatId(chatArg) : (inGroup ? normalizeTgChatId(chatId) : '');
+      if (!flowChat) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Clone a chat')}\n${cloneUsageHtml()}`, forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
-    }
-
-    // Probe NOW — instant feedback if this account cannot see the chat.
-    const visible = await primeEntity(USERBOT_ACCOUNTS.get(label).client, chatIdN, 45_000);
-    if (!visible) {
-      await sendTelegramFormatted(token, chatId,
-        `${boldHtml('⚠️')} The account ${codeHtml(label)} cannot see ${codeHtml(chatIdN)}.\n${italicHtml('Join this channel/group with that account, then run /clone again.')}`,
-        forumThreadId);
+      let flowThread = topicArg || '';
+      if (!flowThread && inGroup && !chatArg && threadCtx && threadCtx !== '1') flowThread = threadCtx;
+      if (!athenaUser) {
+        await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      if (!isSelfHosted(env)) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Cloning runs on the self-hosted server only.`, forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      // ID forms always ask Personal vs community first (the given
+      // community id is pre-selected first). Bare forms stay silent above.
+      await startCloneTargetAsk(env, { token, chatId, forumThreadId, msg, tgUserId, athenaUser, isGod, flowChat, flowThread, communityArg });
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
 
-    // Preview → confirm flow: show stats then wait for Yes
-    const preview = await collectClonePreview(env, label, chatIdN);
-    // If explicit thread requested, filter preview to single topic
-    let previewStats = preview;
-    if(threadArg){
-      const single = preview.topics?.find(x=> String(x.id)===String(threadArg));
-      if(single) previewStats = { ...preview, isForum: true, topics: [single], topicCount: 1 };
-      else previewStats = { ...preview, isForum: false, topics: [], topicCount: 0 };
-    }
-    if(minIdArg || maxIdArg) previewStats = { ...previewStats, minId: minIdArg||'', maxId: maxIdArg||'', isForum: false, topics: [], topicCount: 0 };
-    const pendingId = 'pc_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
-    await storePendingClone(env, { id: pendingId, chat_id: chatIdN, thread_id: threadArg||null, community_id: communityIdArg||'', target: targetArg||'', requester_tg_id: String(tgUserId||''), requester_user_id: athenaUser.id, stats: previewStats, created_at: Date.now(), expires_at: Date.now()+10*60*1000 });
-    const scopeLabel = targetArg==='personal' ? 'personal' : targetArg==='both' ? 'personal + community' : escHtml(communityName||communityIdArg||'community');
-    const lines = [
-      `${boldHtml('🔍 Clone preview')} ${codeHtml(chatIdN)}${threadArg?` topic ${codeHtml('#'+threadArg)}`:''} → ${boldHtml(scopeLabel)}`,
-      `${boldHtml('Topics:')} ${previewStats.isForum? previewStats.topicCount+' (forum)':'0 (not a forum)'}`,
-      `${boldHtml('Msgs:')} ${previewStats.totalMsgs && previewStats.totalMsgs > 0 ? previewStats.totalMsgs.toLocaleString() : '—'} · ${boldHtml('Links:')} ${formatPreviewEst(previewStats.estLinks ?? null, previewStats.sampleLinks, previewStats.sampleSize)} · ${boldHtml('Files:')} ${formatPreviewEst(previewStats.estFiles ?? null, previewStats.sampleFiles, previewStats.sampleSize)} · ${boldHtml('URLs:')} ${formatPreviewEst(previewStats.estUrls ?? null, previewStats.sampleUrls, previewStats.sampleSize)}`,
-    ];
-    if(previewStats.isForum && previewStats.topics?.length){
-      lines.push('', `${boldHtml('Topics list:')}`);
-      for(const tp of previewStats.topics.slice(0,10)) lines.push(`• #${tp.id} ${escHtml(tp.title||'Untitled')}`);
-      if(previewStats.topicCount>10) lines.push(italicHtml(`+ ${previewStats.topicCount-10} more`));
-      lines.push('', italicHtml('Yes will clone topic-wise (real backfill per topic) + live indexing each topic afterwards.'));
-    } else {
-      lines.push('', italicHtml('Yes will clone the whole chat + live indexing afterwards.'));
-    }
-    lines.push('', `${codeHtml('/index_stop')} to stop · ${codeHtml('/del '+chatIdN)} to delete after.`, `Reply ${codeHtml('yes')} or tap Yes.`);
-    await sendTelegramFormatted(token, chatId, lines.join('\n'), forumThreadId).catch(()=>{});
-    await telegramApi(token,'sendMessage',{chat_id: chatId, text: 'Confirm clone?', reply_markup:{inline_keyboard:[[{text:'✅ Yes, clone', callback_data:`clone:yes:${pendingId}`},{text:'❌ No', callback_data:`clone:no:${pendingId}`}]]}, message_thread_id: forumThreadId||undefined}).catch(()=>{});
-    return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-
-   if (cmd === '/index_start' || cmd === '/indexstart' || cmd === '/backfill') {
-     const dmOnly = !chatId.startsWith('-');
-     if (!isSelfHosted(env)) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} History backfill runs on the self-hosted server (it needs the optional gramjs package). This instance is on Cloudflare Workers.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (!athenaUser) {
-       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-
-     if (!dmOnly) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Session material never goes in groups. Use ${codeHtml('/backfill')} inside the chat, or run this in my DM.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const usage = [
-       `${boldHtml('🗂 History backfill')}`,
-       '',
-       `Usage (in bot DM): ${codeHtml('/index_start <community_id> <chat_id> <api_id> <api_hash> <session_string> [thread_id]')}`,
-       `• thread_id — optional; backfill only that forum topic`,
-       '',
-       `• chat_id — the group/channel to backfill (forward a post to ${linkHtml('https://t.me/userinfobot', '@userinfobot')}; channels are -100…)`,
-       '• api_id + api_hash — from my.telegram.org (the app the session belongs to)',
-       `• session_string — gramjs StringSession. On the server: ${codeHtml('npm install telegram')} then ${codeHtml('node scripts/gen-session.js')} (Athena repo) prints one interactively.`,
-       '',
-       'Pacing is built in (flood-wait honored, ~1.5s/page). The triggering message is deleted; the session is deleted when the job completes. Progress every 300 messages; stopped jobs resume from the cursor.',
-       `Full guide: /help → 📡 Channels · ${codeHtml('/index_status')} · ${codeHtml('/index_stop')}`
-     ].join('\n');
-     // Two forms:
-     //   short:  /index_start <community_id> <chat_id> [thread_id]
-     //           → reuses the connected userbot session automatically
-     //   legacy: /index_start <community_id> <chat_id> <api_id> <api_hash> <session_string> [thread_id]
-     const communityIdArg = parts[1] || '';
-     const chatIdArg = parts[2] || '';
-     const legacy = parts.length >= 6;
-     let apiIdArg = '';
-     let apiHashArg = '';
-     let sessionArg = '';
-     let threadArg = '';
-     if (legacy) {
-       apiIdArg = parts[3] || '';
-       apiHashArg = parts[4] || '';
-       sessionArg = parts.slice(5).join(' ');
-       const threadMatch = sessionArg.match(/\s(-?\d{6,})\s*$/);
-       if (threadMatch) {
-         threadArg = threadMatch[1];
-         sessionArg = sessionArg.slice(0, threadMatch.index).trim();
-       }
-     } else {
-       threadArg = parts[3] || '';
-     }
-     if (!communityIdArg || !chatIdArg || (legacy && (!apiIdArg || !apiHashArg || !sessionArg))) {
-       await sendTelegramFormatted(token, chatId, usage, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (!legacy) {
-       await ensureUserbotTables(env);
-       const st = await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled = 1 ORDER BY label LIMIT 1').first();
-       if (!st) {
-         await sendTelegramFormatted(token, chatId,
-           `${boldHtml('🤖')} No userbot session yet. Add one — after that backfills never ask again:\n${codeHtml('/userbot_add <label> <api_id> <api_hash> <session_string>')}\nGenerate a session on the server: ${codeHtml('node scripts/gen-session.js')}`,
-           forumThreadId);
-         return new Response('OK', { status: 200, headers: corsHeaders });
-       }
-     }
-     if (!(await ensureOwnerOrAdmin(communityIdArg, athenaUser.id, env)) && !isGod) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const community = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityIdArg).first();
-     if (!community) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(communityIdArg)} not found.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (!/^[-\d@_\w]+$/.test(chatIdArg)) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Invalid chat_id.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (legacy) {
-       // Manual one-off session: store encrypted, then reuse the standard pipeline.
-       await telegramApi(token, 'deleteMessage', { chat_id: chatId, message_id: msg.message_id }).catch(() => {});
-       await ensureUserbotTables(env);
-       const sessionEnc = await encryptSecret(env, sessionArg.trim());
-       const apiHashEnc = await encryptSecret(env, apiHashArg.trim());
-       if (!String(sessionEnc).startsWith('enc:v1:') || !String(apiHashEnc).startsWith('enc:v1:')) {
-         await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Server has no STORAGE_KEY — refusing to store the session string unencrypted. Set STORAGE_KEY and retry.`, forumThreadId);
-         return new Response('OK', { status: 200, headers: corsHeaders });
-       }
-       await env.DB.prepare(
-         `INSERT INTO userbot_accounts (label, api_id, api_hash_enc, session_enc, enabled, updated_at)
-          VALUES ('main', ?, ?, ?, 1, ?)
-          ON CONFLICT(label) DO UPDATE SET api_id = excluded.api_id, api_hash_enc = excluded.api_hash_enc,
-            session_enc = excluded.session_enc, enabled = 1, last_error = NULL, updated_at = excluded.updated_at`
-       ).bind(apiIdArg.trim(), apiHashEnc, sessionEnc, Date.now()).run();
-       if (USERBOT_ACCOUNTS.has('main')) { try { await USERBOT_ACCOUNTS.get('main').client.disconnect(); } catch (_) {} USERBOT_ACCOUNTS.delete('main'); }
-       await startUserbotAccount(env, 'main');
-     }
-     await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg, chatIdArg, threadArg, communityName: community.name || communityIdArg });
-     return new Response('OK', { status: 200, headers: corsHeaders });
-   }
 
    // ---- /userbot_add — GOD: store a named account (multiple allowed) ----
    if (cmd === '/userbot_add' || cmd === '/userbotadd' || cmd === '/userbot_connect' || cmd === '/userbotconnect') {
@@ -11434,7 +13072,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Session strings are secrets — DM only.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
-     const label = (parts[1] || 'main').toLowerCase().replace(/[^\w-]/g, '').slice(0, 24) || 'main';
+     const label = (parts[1] || 'main').toLowerCase();
      const apiIdArg = parts[2] || '';
      const apiHashArg = parts[3] || '';
      const sessionArg = parts.slice(4).join(' ');
@@ -11448,7 +13086,15 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      await telegramApi(token, 'deleteMessage', { chat_id: chatId, message_id: msg.message_id }).catch(() => {});
+     if (!/^[\w-]{1,24}$/.test(label) || !/^\d+$/.test(apiIdArg) || !Number.isSafeInteger(Number(apiIdArg)) || Number(apiIdArg) <= 0) {
+       await sendTelegramFormatted(token, chatId, 'Use a label of 1–24 letters, numbers, underscores or hyphens, and a valid numeric API ID. No account was changed.', forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
      await ensureUserbotTables(env);
+     if (USERBOT_STARTING.has(label)) {
+       await sendTelegramFormatted(token, chatId, 'This account is connecting. Wait for it to finish, then retry reauthentication with the same label. No credentials were changed.', forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
      const sessionEnc = await encryptSecret(env, sessionArg.trim());
      const apiHashEnc = await encryptSecret(env, apiHashArg.trim());
      if (!String(sessionEnc).startsWith('enc:v1:') || !String(apiHashEnc).startsWith('enc:v1:')) {
@@ -11459,14 +13105,27 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        `INSERT INTO userbot_accounts (label, api_id, api_hash_enc, session_enc, enabled, updated_at)
         VALUES (?, ?, ?, ?, 1, ?)
         ON CONFLICT(label) DO UPDATE SET api_id = excluded.api_id, api_hash_enc = excluded.api_hash_enc,
-          session_enc = excluded.session_enc, enabled = 1, last_error = NULL, updated_at = excluded.updated_at`
+          session_enc = excluded.session_enc, enabled = 1, last_error = NULL, telegram_id = NULL, telegram_username = NULL,
+          display_name = NULL, phone_masked = NULL, verified_at = NULL, updated_at = excluded.updated_at`
      ).bind(label, apiIdArg.trim(), apiHashEnc, sessionEnc, Date.now()).run();
-     if (USERBOT_ACCOUNTS.has(label)) { try { await USERBOT_ACCOUNTS.get(label).client.disconnect(); } catch (_) {} USERBOT_ACCOUNTS.delete(label); }
-     const started = await startUserbotAccount(env, label);
+     const previousAccount = USERBOT_ACCOUNTS.get(label);
+     if (previousAccount) {
+       clearInterval(previousAccount.keepalive);
+       try { await previousAccount.client.disconnect(); } catch (_) {}
+       USERBOT_ACCOUNTS.delete(label);
+     }
+     let started;
+     try { started = await startUserbotAccount(env, label); }
+     catch (error) { started = { ok: false, reason: cloneFailure(error).message }; }
+     if (started.ok) {
+       await ensureUcloneTables(env);
+       await env.DB.prepare('INSERT INTO userbot_selections (requester_tg_id,label,updated_at) VALUES (?,?,?) ON CONFLICT(requester_tg_id) DO NOTHING').bind(String(tgUserId), label, Date.now()).run();
+     }
+     const identity = started.ok ? await env.DB.prepare('SELECT label,telegram_id,telegram_username,display_name,phone_masked FROM userbot_accounts WHERE label=?').bind(label).first() : null;
      await sendTelegramFormatted(token, chatId,
        started.ok
-         ? `${boldHtml('✅')} Account ${codeHtml(label)} connected.\n${codeHtml('/follow [target]')} inside any chat this account can see · ${codeHtml('/backfill')} for history · ${codeHtml('/userbot_del ' + label)} to remove.`
-         : `${boldHtml('❌')} Connect failed for ${codeHtml(label)}: ${escHtml(started.reason || 'unknown')}`,
+         ? `${boldHtml('Userbot Setup Complete')}\n${formatUserbotIdentity(identity, 'Active')}\n\nSaved securely for future connections. Open /userbot_accounts to select an account, or ${codeHtml('/uclone <chat_id>')} to clone.`
+         : `${boldHtml('Userbot setup needs attention')}\nLabel: ${codeHtml(label)}\nStatus: Error\n${escHtml(started.reason || cloneFailure(new Error('SESSION_UNAVAILABLE')).message)}\nReauthenticate this label with ${codeHtml('/userbot_add <label> <api_id> <api_hash> <session_string>')} in this DM.`,
        forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
@@ -11507,286 +13166,74 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
    }
 
    // ---- /userbot_follow — GOD/owner: add a chat to live clone ----
-   if (cmd === '/userbot_follow' || cmd === '/userbotfollow') {
-     if (!isSelfHosted(env)) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Userbot mode is self-host only.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (!athenaUser) {
-       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const communityIdArg = (parts[1] || '').trim();
-     const chatIdArg = normalizeTgChatId((parts[2] || '').trim());
-     const targetArg = (parts[3] || '').trim().toLowerCase();
-     if (!communityIdArg || !chatIdArg) {
-       await sendTelegramFormatted(token, chatId,
-         `Usage: ${codeHtml('/userbot_follow <community_id> <chat_id> [community|personal|both]')}\n${italicHtml('The userbot account must be a member of that chat. personal/both are GOD rank only.')}`,
-         forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (targetArg && !CHANNEL_TARGETS.has(targetArg)) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Target must be ${codeHtml('community')}, ${codeHtml('personal')} or ${codeHtml('both')}.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if ((targetArg === 'personal' || targetArg === 'both') && !isGod) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} ${codeHtml('personal')}/${codeHtml('both')} targets are GOD rank only.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     if (!(await ensureOwnerOrAdmin(communityIdArg, athenaUser.id, env)) && !isGod) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community owner/GOD only.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const community = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityIdArg).first();
-     if (!community) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(communityIdArg)} not found.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     await ensureUserbotTables(env);
-     const { results: enabledAccounts } = await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled = 1 ORDER BY label').all();
-     if (!enabledAccounts?.length) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🤖')} No userbot accounts. GOD: ${codeHtml('/userbot_add <label> <api_id> <api_hash> <session>')}`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const label = enabledAccounts.length === 1 ? enabledAccounts[0].label
-       : (enabledAccounts.find((a) => a.label === (parts[4] || ''))?.label || '');
-     if (!label) {
-       await sendTelegramFormatted(token, chatId,
-         `${boldHtml('ℹ️')} Multiple accounts — specify which:\n${enabledAccounts.map((a) => codeHtml(`/userbot_follow ${communityIdArg} ${chatIdArg} ${targetArg || 'community'} ${a.label}`)).join('\n')}`,
-         forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     // Probe now so the user learns immediately if this account can see the chat.
-     const probe = USERBOT_ACCOUNTS.get(label);
-     let probeNote = '';
-     if (probe) {
-       const ok = await primeEntity(probe.client, chatIdArg, 30_000);
-       probeNote = ok ? '' : `\n${boldHtml('⚠️')} That account cannot see ${codeHtml(chatIdArg)} yet — join the chat with it, then re-run.`;
-     }
-     await env.DB.prepare(
-       `INSERT INTO userbot_follows (chat_id, label, community_id, target, created_by, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(chat_id) DO UPDATE SET label = excluded.label, community_id = excluded.community_id,
-          target = excluded.target, created_by = excluded.created_by`
-     ).bind(chatIdArg, label, communityIdArg, targetArg || 'community', athenaUser.id, Date.now()).run();
-     await sendTelegramFormatted(token, chatId,
-       `${boldHtml('✅')} Following ${codeHtml(chatIdArg)} → ${boldHtml(escHtml(community.name || communityIdArg))} · account ${codeHtml(label)} · target ${codeHtml(targetArg || 'community')}${probeNote}\n${italicHtml('New messages clone automatically. History: /clone')}`,
-       forumThreadId);
-     return new Response('OK', { status: 200, headers: corsHeaders });
-   }
-
    // ---- /userbot_unfollow ----
    if (cmd === '/userbot_unfollow' || cmd === '/userbotunfollow') {
-     const cidArg = (parts[1] || '').trim();
-     if (!cidArg) {
-       await sendTelegramFormatted(token, chatId, `Usage: ${codeHtml('/userbot_unfollow <chat_id>')}`, forumThreadId);
+     const cidArg = normalizeTgChatId((parts[1] || '').trim());
+     const commArg = String(parts[2] || '').trim();
+     if (!cidArg || !/^c_/i.test(commArg)) {
+       await sendTelegramFormatted(token, chatId, `Usage: ${codeHtml('/userbot_unfollow <chat_id> <community_id>')}`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      await ensureUserbotTables(env);
-     const r = await env.DB.prepare('DELETE FROM userbot_follows WHERE chat_id = ?').bind(cidArg).run();
-     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Unfollowed ${codeHtml(cidArg)}${r?.changes ? '' : italicHtml(' (was not followed)')}.`, forumThreadId);
+     // /userbot_follow stores the normalized id, so normalize here too or the
+     // delete matches nothing while the follow keeps cloning the chat.
+     // Community-scoped: the same chat can feed several communities.
+     const bareUnf = cidArg.replace(/^-100/, '');
+     const r = await env.DB.prepare(
+       `DELETE FROM userbot_follows WHERE (chat_id = ? OR chat_id = ? OR chat_id LIKE ? OR chat_id LIKE ?) AND community_id = ?`
+     ).bind(cidArg, bareUnf, `${cidArg}:%`, `${bareUnf}:%`, commArg).run();
+     await sendTelegramFormatted(token, chatId, `${boldHtml('✅')} Unfollowed ${codeHtml(cidArg)} in ${codeHtml(commArg)}${rowsChanged(r) ? '' : italicHtml(' (was not followed)')}.`, forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
-   // ---- /forcetags — GOD: backfill tags for every untagged link ----
+   // ---- /forcetags — GOD: AI-native retag review of every link in scope ----
+   // Drops junk/provenance tags, fixes wrong ones, scrapes thin links, then
+   // reports every change. Tags that already fit are left untouched.
    if (cmd === '/forcetags') {
      if (!isGod) { await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId); return new Response('OK', { status: 200, headers: corsHeaders }); }
-     await ensureAiConfigTable(env);
-     const cfgFt = await getInstanceAiConfig(env);
-     const BATCH = 150;
-     // Scope: /forcetags [community|personal|both|<community_id>] (default both)
-     let scopeArg = '';
-     let scopeCommunity = '';
-     for (const a of parts.slice(1)) {
-       const t = a.trim();
-       if (['community', 'personal', 'both'].includes(t.toLowerCase())) scopeArg = t.toLowerCase();
-       else if (/^c_/.test(t)) scopeCommunity = t;
-     }
-     scopeArg = scopeArg || 'both';
-     const think = await sendTelegramFormatted(token, chatId, `${boldHtml('🏷')} Scanning (${scopeArg}${scopeCommunity ? ` · ${scopeCommunity}` : ''})…`, forumThreadId);
-     const thinkId = think?.message_id;
-     const targets = [];
-     const pick = async (table, col) => {
-       await ensureSearchColumns(env);
-       const extra = (table === 'links' && scopeCommunity) ? ` AND community_id = '${scopeCommunity.replace(/'/g, '')}'` : '';
-       const { results } = await env.DB.prepare(
-         `SELECT id, url, title, notes, search_blob FROM ${table}
-          WHERE COALESCE(tags,'') IN ('', '[]', 'null') OR metadata_version IS NULL OR metadata_version < 1${extra}
-          ORDER BY created_at DESC LIMIT ${BATCH}`
-       ).all();
-       for (const r of results || []) targets.push({ table, col, row: r });
-     };
-     if (scopeArg !== 'personal') {
-       if (scopeCommunity) await pick('links', scopeCommunity);
-       else {
-         const { results: cids } = await env.DB.prepare('SELECT DISTINCT community_id AS id FROM links').all();
-         for (const row of cids || []) await pick('links', row.id);
-       }
-     }
-     if (scopeArg !== 'community') {
-       const godRow = await env.DB.prepare("SELECT id FROM users WHERE id LIKE 'telegram_%' ORDER BY created_at ASC LIMIT 1").first().catch(() => null);
-       const godId = isGodTgId(tgUserId, env) ? `telegram_${tgUserId}` : (godRow?.id || '');
-       if (godId) await pick('personal_links', godId);
-     }
-     if (!targets.length) {
-       if (thinkId) await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: thinkId, text: `${boldHtml('✅')} Every link already has tags.`, parse_mode: 'HTML' }).catch(() => {});
+     const ftArgs = parts.slice(1).map((a) => a.trim()).filter(Boolean);
+     const ftAll = ftArgs.some((a) => a.toLowerCase() === 'all');
+     const ftCommunity = ftArgs.find((a) => /^c_/.test(a)) || '';
+     if (!ftCommunity) {
+       await sendTelegramFormatted(token, chatId, [
+         `${boldHtml('🏷 Retag review')}`,
+         `Needs a community id: ${codeHtml('/forcetags <community_id>')} reviews one batch of 150.`,
+         `${codeHtml('/forcetags <community_id> all')} sweeps that brain in the background.`,
+         `${italicHtml('You then pick community or personal brain.')}`,
+       ].join('\n'), forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
-     let done = 0, aiHits = 0, ctxHits = 0;
-     const editProgress = async () => {
-       const pct = Math.min(100, Math.round((done / targets.length) * 100));
-       const filled = Math.round((pct / 100) * 18);
-       const bar = '▮'.repeat(filled) + '▯'.repeat(18 - filled);
-       await telegramApi(token, 'editMessageText', {
-         chat_id: chatId, message_id: thinkId, parse_mode: 'HTML',
-         text: `${boldHtml('🏷 Force tags')}\n${codeHtml(bar + ' ' + pct + '%')}\n${done}/${targets.length} · AI ${aiHits} · context ${ctxHits}`
-       }).catch(() => {});
-     };
-     for (const t of targets) {
-       try {
-         const r = t.row;
-         const meta = { title: r.title || '', notes: r.notes || '', content: r.search_blob || '' };
-         let tags = null; let title = r.title || ''; let notes = r.notes || '';
-         if (cfgFt?.api_key) {
-           try {
-             const vocab = await recentTagsForScope(env, t.table === 'links' ? 'community' : 'personal', t.col);
-             const ai = await aiDescribeAndTag(env, r.url, meta, vocab, cfgFt);
-             if (ai) {
-               aiHits++;
-               title = ai.title || title;
-               notes = ai.description || notes;
-               tags = ai.tags || [];
-             }
-           } catch (_) {}
-         }
-         if (!tags?.length) {
-           tags = fallbackTagsFromMeta(r.url, meta);
-           ctxHits++;
-         }
-         if (!tags.length) tags = ['untagged'];
-         await env.DB.prepare(
-           `UPDATE ${t.table} SET tags = ?, title = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
-         ).bind(JSON.stringify(tags), title, notes, r.id).run();
-         markMeiliScopeDirty(env, t.table === 'links' ? 'community' : 'personal', t.col);
-       } catch (_) {}
-       done++;
-       if (done % 10 === 0) await editProgress();
+     const ftRow = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(ftCommunity).first().catch(() => null);
+     if (!ftRow) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No community ${codeHtml(escHtml(ftCommunity))}.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
      }
-     await editProgress();
-     await sendTelegramFormatted(token, chatId,
-       `${boldHtml('✅')} Tagged ${done} link(s): ${aiHits} via AI · ${ctxHits} via context fallback.\n${italicHtml(targets.length >= BATCH ? 'More remain — run /forcetags again to continue.' : 'All caught up.')}`,
-       forumThreadId);
+     // The id names the community, but the review runs on either that
+     // community brain or the personal one — ask before touching anything.
+     await sendTelegramMessageWithKeyboard(token, chatId, [
+       `${boldHtml('🏷 Retag review')}`,
+       `Community: <b>${escHtml(ftRow.name || ftCommunity)}</b> ${codeHtml(escHtml(ftCommunity))}`,
+       `Volume: ${ftAll ? 'whole brain, background sweep' : 'one batch of 150'}`,
+       '',
+       'Which brain should I review?',
+     ].join('\n'), {
+       inline_keyboard: [[
+         { text: '📚 Community brain', callback_data: `ft:c:${ftCommunity}:${ftAll ? 'a' : '1'}` },
+         { text: '👤 Personal brain', callback_data: `ft:p:${ftCommunity}:${ftAll ? 'a' : '1'}` },
+       ]],
+     }, forumThreadId, 'HTML');
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
-   // ---- /tag_untagged — GOD: tag every link with no real tags, AI first, context fallback, never touches tagged rows ----
-  if (cmd === '/tag_untagged' || cmd === '/taguntagged' || cmd === '/tag_missing') {
-    if (!isGod) { await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId); return new Response('OK', { status: 200, headers: corsHeaders }); }
-    await ensureAiConfigTable(env);
-    const cfgU = await getInstanceAiConfig(env);
-    const thinkU = await sendTelegramFormatted(token, chatId, `${boldHtml('🏷')} Tagging every untagged link… (AI ${cfgU?.api_key ? 'on' : 'OFF → context tags'})`, forumThreadId);
-    const thinkIdU = thinkU?.message_id;
-    let totalU = 0;
-    try { const cU = await env.DB.prepare(`SELECT COUNT(*) AS n FROM links WHERE tags IS NULL OR tags = '' OR tags = '[]' OR tags = 'null'`).first(); totalU += Number(cU?.n || 0); } catch (_) {}
-    try { const cU2 = await env.DB.prepare(`SELECT COUNT(*) AS n FROM personal_links WHERE tags IS NULL OR tags = '' OR tags = '[]' OR tags = 'null'`).first(); totalU += Number(cU2?.n || 0); } catch (_) {}
-    if (!totalU) {
-      if (thinkIdU) await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: thinkIdU, text: '✅ Every link already has tags.', parse_mode: 'HTML' }).catch(() => {});
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-    runInBackground(env, tagUntaggedLinksInBackground(env, token, chatId, forumThreadId, thinkIdU, totalU, cfgU));
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-
-  // ---- /transfers — GOD: recent clone/backfill sessions with ids ----
-   if (cmd === '/transfers' || cmd === '/clone_sessions') {
-     if (!isGod) { await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId); return new Response('OK', { status: 200, headers: corsHeaders }); }
-     await ensureIndexTables(env);
-     await ensureTransferColumns(env);
-     const { results } = await env.DB.prepare(
-       'SELECT id, chat_id, status, processed, saved_links, saved_docs, saved_files, created_at FROM index_jobs ORDER BY created_at DESC LIMIT 10'
-     ).all();
-     if (!results?.length) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No clone/backfill sessions yet.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const lines = results.map((j) => `• ${codeHtml(j.id)}\n  ${escHtml(j.chat_id)} · ${j.status} · ${j.processed || 0} msgs · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs${j.saved_files ? ` · ${j.saved_files} files` : ''}`);
-     await sendTelegramFormatted(token, chatId,
-       `${boldHtml('🗂 Clone sessions')}\n\n${lines.join('\n\n')}\n\n${italicHtml('Delete one:')} ${codeHtml('/clone_del <id> [files]')}${italicHtml(' — add "files" to also wipe its vault media')}`,
-       forumThreadId);
-     return new Response('OK', { status: 200, headers: corsHeaders });
-   }
-
-   // ---- /clone_del — GOD: delete one transfer session's imported data ----
-   if (cmd === '/clone_del' || cmd === '/clonedel') {
-     if (!isGod) { await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId); return new Response('OK', { status: 200, headers: corsHeaders }); }
-     await ensureUserbotTables(env);
-     await ensureIndexTables(env);
-     await ensureTransferColumns(env);
-     const target = (parts[1] || '').trim();
-     const withFiles = (parts[2] || '').toLowerCase() === 'files';
-     if (!target) {
-       await sendTelegramFormatted(token, chatId,
-         `Usage:\n${codeHtml('/clone_del <job_id> [files]')} — delete that session's imports\n${codeHtml('/clone_del <chat_id> [files]')} — delete ALL sessions for a chat\n${codeHtml('/transfers')} — list ids`,
-         forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     let transferIds;
-     let jobIds;
-     if (target.startsWith('ij_')) {
-       transferIds = [target]; jobIds = [target];
-     } else {
-       const cid = normalizeTgChatId(target);
-       const { results } = await env.DB.prepare('SELECT id FROM index_jobs WHERE chat_id = ?').bind(cid).all();
-       jobIds = (results || []).map((r) => r.id);
-       transferIds = [...jobIds, `live:${cid}`];
-     }
-     if (!transferIds.length) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Nothing found for ${codeHtml(target)}. See ${codeHtml('/transfers')}.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const ph = transferIds.map(() => '?').join(',');
-     const args = [...transferIds];
-     const d1 = await env.DB.prepare(`DELETE FROM links WHERE transfer_id IN (${ph})`).bind(...args).run().catch(() => ({ changes: 0 }));
-     const d2 = await env.DB.prepare(`DELETE FROM personal_links WHERE transfer_id IN (${ph})`).bind(...args).run().catch(() => ({ changes: 0 }));
-     const d3 = await env.DB.prepare(`DELETE FROM uploaded_documents WHERE transfer_id IN (${ph})`).bind(...args).run().catch(() => ({ changes: 0 }));
-     // vault files for the whole chat when asked
-     let filesWiped = false;
-     if (withFiles && MEDIA_VAULT_DIR) {
-       try {
-         const fsSpec = 'node:fs/promises';
-         const { rm } = await import(fsSpec);
-         const dir = `${MEDIA_VAULT_DIR}/${String(jobIds[0] ? target : transferIds.find(t => t.startsWith('live:'))?.slice(5) || target).replace(/[^\w-]+/g, '_')}`;
-         await rm(dir, { recursive: true, force: true });
-         filesWiped = true;
-       } catch (_) {}
-     }
-     if (jobIds.length) {
-       await env.DB.prepare(`DELETE FROM index_jobs WHERE id IN (${jobIds.map(() => '?').join(',')})`).bind(...jobIds).run().catch(() => {});
-     }
-     // meili dirty for affected scopes
-     try {
-       const cidForMeili = target.startsWith('ij_') ? null : normalizeTgChatId(target);
-       if (cidForMeili) markMeiliScopeDirty(env, 'community', cidForMeili);
-     } catch (_) {}
-     await sendTelegramFormatted(token, chatId,
-       `${boldHtml('🗑 Deleted session')} ${codeHtml(target)}\n• links removed: ${d1?.changes || 0}\n• personal links: ${d2?.changes || 0}\n• documents: ${d3?.changes || 0}${filesWiped ? '\n• vault media folder wiped' : ''}\n${italicHtml(withFiles ? '' : 'Vault media files were kept — repeat with "files" to wipe them.')}`,
-       forumThreadId);
-     return new Response('OK', { status: 200, headers: corsHeaders });
-   }
-
-   // ---- /userbot_status — the one dashboard: accounts, channels, live + backfill status ----
+    // ---- /userbot_status — the one dashboard: accounts, channels, live + backfill status ----
      // ---- /stats — clone dashboard (channel + per-topic) ----
   if (cmd === '/stats') {
     try {
-      const report = await buildStatsReport(env, token);
-      if (!report.chats || !report.chats.length) {
-        await sendTelegramFormatted(token, chatId, `Nothing cloned yet — run ${codeHtml('/clone')} inside the chat or ${codeHtml('/uclone <chat_id>')} in DM.`, forumThreadId);
-        return new Response('OK', { status: 200, headers: corsHeaders });
-      }
-      // Rich message: headings, <details> per chat, buttons INSIDE the body.
-      await sendTelegramRichMessage(token, chatId, formatStatsRichReport(report), forumThreadId, statsRichButtons());
+      const isGodStats = isGodTgId(tgUserId, env);
+      const report = await buildStatsReport(env, token, { requesterTgId: isGodStats ? null : tgUserId, athenaUserId: isGodStats ? null : (athenaUser ? String(athenaUser.id) : '') });
+      const view = formatStatsRichReport(report);
+      await sendTelegramRichMessage(token, chatId, view.html, forumThreadId, view.buttons);
       return new Response('OK', { status: 200, headers: corsHeaders });
-      
     } catch (e) {
       console.error('/stats failed', e?.message || e);
       await sendTelegramFormatted(token, chatId, `${boldHtml('\u274C')} Stats failed: ${codeHtml(escHtml(String(e?.message || e).slice(0, 200)))}`, forumThreadId);
@@ -11794,22 +13241,28 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     }
   }
 
-  if (cmd === '/userbot_status' || cmd === '/userbotstatus' || cmd === '/indexing') {
+  if (cmd === '/userbot_status' || cmd === '/userbotstatus') {
+     if (!isGod || String(chatId).startsWith('-')) {
+       await sendTelegramFormatted(token, chatId, 'Account identity and status are available to GOD rank in a DM only.', forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
      if (!isSelfHosted(env)) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Userbot mode is self-host only.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
      await ensureUserbotTables(env);
      await ensureIndexTables(env);
-     const { results: accounts } = await env.DB.prepare('SELECT label, enabled, last_error FROM userbot_accounts ORDER BY label').all();
-     const { results: follows } = await env.DB.prepare('SELECT chat_id, label, community_id, target FROM userbot_follows ORDER BY label, chat_id').all();
+     const { results: accounts } = await env.DB.prepare('SELECT label, enabled, last_error, telegram_id, telegram_username, display_name, phone_masked, verified_at FROM userbot_accounts ORDER BY label').all();
+     const { results: follows } = await env.DB.prepare('SELECT chat_id, label, community_id, target, last_seen_at FROM userbot_follows ORDER BY label, chat_id').all();
      const { results: jobs } = await env.DB.prepare(
-       'SELECT id, chat_id, status, processed, saved_links, saved_docs, error, updated_at FROM index_jobs ORDER BY updated_at DESC'
+       'SELECT id, chat_id, thread_id, status, processed, total_messages, saved_links, saved_docs, saved_pdfs, dupes_skipped, saved_files, urls_seen, chat_name, error, updated_at FROM index_jobs ORDER BY updated_at DESC'
      ).all();
 
-     const accLines = (accounts || []).map((a) => {
-       const live = USERBOT_ACCOUNTS.has(a.label) ? `🟢 connected (${Math.round((Date.now() - USERBOT_ACCOUNTS.get(a.label).startedAt) / 60000)}m)` : '🔴 stored, disconnected';
-       return `• ${codeHtml(a.label)} — ${live}${a.last_error ? ` · ${escHtml(a.last_error)}` : ''}`;
+     const accItems = (accounts || []).map((a) => {
+       const connection = USERBOT_ACCOUNTS.get(a.label);
+       const connected = !!connection && connection.client?.connected !== false;
+       const live = !a.enabled ? 'Disabled' : a.last_error ? 'Error — reauthenticate this label with /userbot_add' : connected ? 'Active' : 'Stored, disconnected';
+       return `<li>${formatUserbotIdentity(a, live)}</li>`;
      });
 
      const jobByChat = new Map();
@@ -11825,29 +13278,64 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        if (!jobsByChatThread.has(k)) jobsByChatThread.set(k, j);
      }
      for (const f of follows || []) {
-       let name = f.chat_id;
+       const followKey = String(f.chat_id || '');
+       const baseFollowChat = normalizeTgChatId(followKey.split(':')[0]);
+       const isTopicFollow = followKey.includes(':');
+       const tidPart = isTopicFollow ? String(followKey.split(':')[1] || '') : '';
+       let name = baseFollowChat;
        const ubAcc = USERBOT_ACCOUNTS.get(f.label);
        if (ubAcc) {
-         try { const ent = await ubAcc.client.getEntity(f.chat_id); if (ent?.title || ent?.username) name = ent.title || `@${ent.username}`; } catch (_) {}
+         try { const ent = await ubAcc.client.getEntity(baseFollowChat); if (ent?.title || ent?.username) name = ent.title || `@${ent.username}`; } catch (_) {}
        }
        try {
-         const ch = await telegramApi(token, 'getChat', { chat_id: f.chat_id });
+         const ch = await telegramApi(token, 'getChat', { chat_id: baseFollowChat });
          if (ch?.ok && (ch.result?.title || ch.result?.username)) name = ch.result.title ? `${ch.result.title}` : `@${ch.result.username}`;
        } catch (_) {}
-       const s = USERBOT_STATS.get(f.chat_id) || USERBOT_STATS.get(String(Number(f.chat_id))) || {};
-       const liveBits = [`msgs ${s.msgs || 0}`, `links ${s.links || 0}`, `docs ${s.docs || 0}`];
-       if (s.lastAt) liveBits.push(`last ${Math.max(1, Math.round((Date.now() - s.lastAt) / 60000))}m ago`);
-       else liveBits.push(italicHtml('waiting for new posts'));
-       const jb = jobByChat.get(normalizeTgChatId(f.chat_id));
+       if (isTopicFollow) name = `${name}#${tidPart}`;
+       const baseChatId = baseFollowChat;
+       const ledgerRows = await env.DB.prepare("SELECT id,updated_at FROM index_jobs WHERE id LIKE 'live_%' AND chat_id=? AND userbot_label=? AND community_id=? AND user_id=?")
+         .bind(baseChatId, f.label, f.community_id || '', f.created_by || '').all();
+       const durable = {};
+       let lastAt = 0;
+       for (const row of ledgerRows.results || []) { statsAddCounters(durable, await liveCaptureCounters(env, row.id)); lastAt = Math.max(lastAt, Number(row.updated_at || 0)); }
+       const s = { msgs: durable.messages, links: durable.savedLinks, docs: durable.savedFiles, lastAt };
+       let liveBits = [];
+        if (!isTopicFollow) {
+          const connection = USERBOT_ACCOUNTS.get(f.label);
+          const fl = followLiveness(!!connection && connection.client?.connected !== false, f.last_seen_at);
+          const sActive = (s.msgs || s.links || s.docs) ? [`msgs ${s.msgs || 0}`, `links ${s.links || 0}`, `docs ${s.docs || 0}`] : [];
+          liveBits = [`${fl.emoji}`, ...sActive];
+          if (s.lastAt) liveBits.push(`last ${Math.max(1, Math.round((Date.now() - s.lastAt) / 60000))}m ago`);
+          else liveBits.push(italicHtml('waiting for new posts'));
+          // Today (rolling 24h) from the DB, scoped per-chat like /stats.
+          try {
+            const norm = baseChatId;
+            const comm = f.community_id || null;
+            let tLinks = 0, tDocs = 0;
+            if (comm) {
+              const lr = await env.DB.prepare('SELECT COUNT(*) as c FROM links WHERE community_id = ? AND source_chat_id IN (?, ?) AND created_at > ?').bind(comm, norm, norm.replace(/^-100/, ''), Date.now() - 86400000).first().catch(() => null);
+              if (lr) tLinks = Number(lr.c || 0);
+            }
+            const dr = await env.DB.prepare('SELECT COUNT(*) as c FROM uploaded_documents WHERE source_chat_id IN (?, ?) AND created_at > ?').bind(norm, norm.replace(/^-100/, ''), Date.now() - 86400000).first().catch(() => null);
+            if (dr) tDocs = Number(dr.c || 0);
+            if (tLinks || tDocs) liveBits.push(italicHtml(`today ${tLinks} links · ${tDocs} files`));
+          } catch (_) {}
+        }
+       const jb = isTopicFollow ? jobsByChatThread.get(baseChatId + ':' + tidPart) : jobByChat.get(baseChatId);
        let bf = 'backfill: not run';
        if (jb) {
-         const capNote = jb.processed >= INDEX_MAX_MESSAGES ? ' · cap hit, auto-continuing' : '';
-         const totalBit = jb.processed ? `${jb.processed} msgs` : '';
-         bf = `backfill: ${jb.status}${totalBit ? ` (${totalBit})` : ''}${capNote}`;
-         if (jb.urls_seen) bf += ` · ${jb.urls_seen} urls`;
-         if (jb.saved_links) bf += ` · ${jb.saved_links} links saved`;
-         if (jb.saved_files) bf += ` · ${jb.saved_files} files`;
-         if (jb.error) bf += ` — ${String(jb.error).slice(0, 80)}`;
+         if (isTopicFollow) {
+           bf = 'backfill: ' + formatTopicProgressLine(jb);
+         } else {
+          const totalBit = jb.processed ? `${jb.processed} msgs` : '';
+          bf = `backfill: ${jb.status}${totalBit ? ` (${totalBit})` : ''}`;
+           if (jb.urls_seen) bf += ` · ${jb.urls_seen} urls`;
+           if (jb.saved_links) bf += ` · ${jb.saved_links} links saved`;
+           if (jb.dupes_skipped) bf += ` · ${jb.dupes_skipped} dupes`;
+           if (jb.saved_pdfs) bf += ` · ${jb.saved_pdfs} pdfs`;
+           if (jb.saved_files) bf += ` · ${jb.saved_files} files`;
+           if (jb.error) bf += ` — ${String(jb.error).slice(0, 80)}`;
+         }
        }
        // Per-topic breakdown for forum groups
        let topicLines = [];
@@ -11855,38 +13343,49 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
          const { results: topics } = await env.DB.prepare('SELECT thread_id, target FROM telegram_topic_bindings WHERE chat_id = ? ORDER BY thread_id').bind(f.chat_id).all();
          for (const t of topics || []) {
            const tj = jobsByChatThread.get(normalizeTgChatId(f.chat_id) + ':' + t.thread_id);
-           const tStatus = tj ? `${tj.status}${tj.processed ? ` ${tj.processed} msgs` : ''}${tj.saved_links ? ` · ${tj.saved_links} links` : ''}${tj.saved_docs ? ` · ${tj.saved_docs} docs` : ''} — ${escHtml(String(tj.error || 'ok').slice(0,60))}` : 'not started';
-           // Fallback: if no per-thread job, check if whole-chat job covered it
-           topicLines.push(`    ${codeHtml('#' + t.thread_id)} [${escHtml(t.target || 'community')}] — ${tStatus}`);
+           // Per-topic backfill progress bar (from the job), not live stats.
+           const tStatus = tj ? formatTopicProgressLine(tj) : italicHtml('not started');
+           topicLines.push(`<li>${codeHtml('#' + t.thread_id)} [${escHtml(t.target || 'community')}] — ${tStatus}</li>`);
          }
          // Also bare topic jobs without binding (DM clone)
          for (const [k, j] of jobsByChatThread) {
            if (k.startsWith(normalizeTgChatId(f.chat_id) + ':') && k.split(':')[1]) {
              const tid = k.split(':')[1];
              if (!topics?.some(t => String(t.thread_id) === tid)) {
-               topicLines.push(`    ${codeHtml('#' + tid)} — ${j.status} ${j.processed || 0} msgs · ${j.saved_links || 0} links`);
+               topicLines.push(`<li>${codeHtml('#' + tid)} — ${formatTopicProgressLine(j)}</li>`);
              }
            }
          }
        } catch (_) {}
+       const connection = USERBOT_ACCOUNTS.get(f.label);
+       const liveMark = isTopicFollow ? '' : `— live: ${liveBits.join(' · ')}${connection?.client?.connected !== false ? ' ' + italicHtml('(active — new posts clone automatically)') : ''}`;
        followLines.push(
-         `• ${boldHtml(escHtml(name))} ${italicHtml(`[${f.target || 'community'}]`)}\n` +
-         `  live: ${liveBits.join(' · ')}${USERBOT_ACCOUNTS.has(f.label) ? ' ' + italicHtml('(active — new posts clone automatically)') : ''}\n` +
-         `  ${bf}` +
-         (topicLines.length ? `\n  ${boldHtml('Topics:')}\n${topicLines.join('\n')}` : '')
+         `<p>• ${boldHtml(escHtml(name))} ${italicHtml(`[${f.target || 'community'}]`)} ${liveMark}</p>` +
+         `<p>${bf}</p>` +
+         (topicLines.length ? `<ul>${topicLines.join('')}</ul>` : '')
        );
      }
 
-     let errLines = [];
+     const errLines = [];
      try {
-       const { results: errs } = await env.DB.prepare('SELECT t, label, chat, error FROM userbot_errors ORDER BY t DESC LIMIT 5').all();
-       errLines = (errs || []).map((e) => `• ${new Date(e.t).toISOString().slice(11, 19)} [${escHtml(e.label || '-')}] ${escHtml(String(e.error).slice(0, 110))}`);
+       const { results: errs } = await env.DB.prepare('SELECT t, label, chat, error FROM userbot_errors ORDER BY t DESC LIMIT 20').all();
+       const seenErrors = new Set();
+       for (const e of errs || []) {
+         const normalized = cloneFailure(new Error(String(e.error || ''))).message;
+         const key = `${e.label || '-'}|${e.chat || '-'}|${normalized}`;
+         if (seenErrors.has(key)) continue;
+         seenErrors.add(key);
+         errLines.push(`• ${new Date(e.t).toISOString().slice(11, 19)} [${escHtml(e.label || '-')}] ${escHtml(normalized)}`);
+         if (errLines.length >= 5) break;
+       }
      } catch (_) {}
 
-     await sendTelegramFormatted(token, chatId,
-       `${boldHtml('🤖 Accounts')}\n${accLines.length ? accLines.join('\n') : italicHtml('none — /userbot_add')}` +
-       `\n\n${boldHtml('📡 Channels/chats being indexed')}\n${followLines.length ? followLines.join('\n\n') : italicHtml('none — run /clone inside a chat, or /clone <chat_id> in DM')}` +
-       (errLines.length ? `\n\n${boldHtml('⚠️ Recent errors')}\n${errLines.join('\n')}` : ''),
+     await sendTelegramRichMessage(token, chatId,
+       `<h3>🤖 Userbot status</h3>` +
+       `<p>${boldHtml('Accounts')}</p><ul>${accItems.length ? accItems.join('') : `<li>${italicHtml('none — /userbot_add')}</li>`}</ul>` +
+       `<p>${boldHtml('📡 Channels/chats being indexed')}</p>` +
+       (followLines.length ? followLines.join('') : `<p>${italicHtml('none — run /uclone <chat_id> for history + live indexing, or /userbot_follow for a saved live follow')}</p>`) +
+       (errLines.length ? `<p>${boldHtml('⚠️ Recent errors')}</p><ul>${errLines.map((e) => `<li>${e.replace(/^• /, '')}</li>`).join('')}</ul>` : ''),
        forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
@@ -11911,40 +13410,6 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
-   if (cmd === '/index_status') {
-     await ensureIndexTables(env);
-     const { results } = await env.DB.prepare(
-       `SELECT j.* FROM index_jobs j WHERE j.user_id = ? ORDER BY j.updated_at DESC LIMIT 5`
-     ).bind(athenaUser?.id || tgUserId || '').all();
-     if (!results || !results.length) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No backfill jobs yet. ${codeHtml('/clone')} to begin.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     const lines = results.map((j) => `${j.status === 'running' ? '▶️' : j.status === 'done' ? '✅' : j.status === 'error' ? '❌' : '⏸'} ${codeHtml(j.chat_id)} — ${escHtml(j.status)}: ${j.processed || 0} scanned · ${j.saved_links || 0} links · ${j.saved_docs || 0} docs\n   ${codeHtml(j.id)} · delete: /clone_del ${codeHtml(j.id)}${j.error ? `\n   ${escHtml(j.error)}` : ''}`);
-     await sendTelegramFormatted(token, chatId, `${boldHtml('🗂 Backfill jobs')}\n\n${lines.join('\n\n')}`, forumThreadId);
-     return new Response('OK', { status: 200, headers: corsHeaders });
-   }
-
-   if (cmd === '/index_stop') {
-     if (!athenaUser) {
-       await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     await ensureIndexTables(env);
-     const { results } = await env.DB.prepare(
-       `SELECT id FROM index_jobs WHERE user_id = ? AND status IN ('queued','running')`
-     ).bind(athenaUser.id).all();
-     if (!results || !results.length) {
-       await sendTelegramFormatted(token, chatId, `${boldHtml('🗂')} No running backfill jobs.`, forumThreadId);
-       return new Response('OK', { status: 200, headers: corsHeaders });
-     }
-     for (const j of results) {
-       await env.DB.prepare(`UPDATE index_jobs SET status = 'stopping', updated_at = ? WHERE id = ?`).bind(Date.now(), j.id).run();
-       await env.DB.prepare('DELETE FROM telegram_index_sessions WHERE id = ?').bind(j.id).run().catch(() => {});
-     }
-     await sendTelegramFormatted(token, chatId, `${boldHtml('⏹')} Stopping ${results.length} job(s) and deleting the stored session(s).`, forumThreadId);
-     return new Response('OK', { status: 200, headers: corsHeaders });
-   }
 
    // ---- /restart (GOD restarts the service) ----
    if (cmd === '/restart') {
@@ -11952,20 +13417,21 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
        await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Only GOD rank can restart the service.`, forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
+     // Restart is a self-host-only capability. Cloudflare Workers cannot access
+     // the host process, so expose it through the Node adapter instead of
+     // bundling node:child_process into the Worker. Checked BEFORE the
+     // "Restarting…" message so the reply never claims a restart that cannot run.
+     if (env.ATHENA_RUNTIME !== 'selfhost' || typeof env.restartService !== 'function') {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Restart is only available on the self-hosted backend.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
      await sendTelegramFormatted(token, chatId, `${boldHtml('🔄')} Restarting Athena… Back in ~5 seconds.\nSend /start to check.`, forumThreadId);
-      // Restart is a self-host-only capability. Cloudflare Workers cannot
-      // access the host process, so expose it through the Node adapter instead
-      // of bundling node:child_process into the Worker.
-      if (env.ATHENA_RUNTIME !== 'selfhost' || typeof env.restartService !== 'function') {
-        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Restart is only available on the self-hosted backend.`, forumThreadId);
-        return new Response('OK', { status: 200, headers: corsHeaders });
-      }
-      env.restartService();
-      return new Response('OK', { status: 200, headers: corsHeaders });
+     env.restartService();
+     return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
    if (cmd === '/help') {
-    await sendTelegramRichMessage(token, chatId, richHelpHtml('menu', isGod), forumThreadId, helpRichButtonRows(false, isGod));
+    await sendTelegramRichMessage(token, chatId, richHelpHtml('menu', isGod), forumThreadId, helpRichButtonRows('menu', 0, 1, isGod));
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
@@ -12036,7 +13502,46 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
 
+      // Group not linked yet: reuse an owned community instead of minting a
+      // duplicate (re-verify after an unlink used to create a new one).
       const chatTitle = (msg.chat?.title || 'Telegram group').slice(0, 80);
+      const verifyArg = String(parts[1] || '').trim();
+      const ownedRows = await env.DB.prepare(
+        `SELECT DISTINCT c.id, c.name FROM communities c
+         LEFT JOIN community_members m ON m.community_id = c.id AND m.user_id = ?
+         WHERE c.id != 'default' AND (c.creator_id = ? OR (m.user_id IS NOT NULL AND m.role = 'owner'))`
+      ).bind(owner.id, owner.id).all().catch(() => ({ results: [] }));
+      const owned = (ownedRows?.results || ownedRows || []).filter((c) => c?.id);
+      const pick = pickVerifyTarget(owned, verifyArg);
+      if (pick.action === 'link') {
+        const target = await resolveCommunityByIdOrName(env, owner.id, pick.id);
+        if (!target || !(await ensureOwnerOrAdmin(target.id, owner.id, env))) {
+          await sendTelegramMessage(replyToken, chatId, `Community not found or not yours: ${codeHtml(pick.id)}`, forumThreadId);
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        binding = await linkGroupToCommunity(env, { chatId, chatTitle, communityId: target.id, ownerId: owner.id, personal });
+        await logOperationalEvent(env, '🔗 Community relinked', `${chatTitle} → ${target.name || target.id} (${target.id}) by ${owner.username || owner.display_name || owner.id}`, owner.id);
+        await sendTelegramMessage(replyToken, chatId, [
+          'Group linked to your existing community ✓ (no duplicate created)',
+          `${target.name || 'Community'} | ${target.id}`,
+          '',
+          'Members must:',
+          `1) Login at ${await getWebsiteDisplayUrl(env)}`,
+          `2) DM bot → /community_join ${target.id}`,
+          'Then they can dump links (group or site).',
+          '',
+          'You: /community to dump · /personal · /admin · /topic · /community_list',
+        ].join('\n'), forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      if (pick.action === 'ask') {
+        await sendTelegramMessage(replyToken, chatId, [
+          'You own more than one community. Reply with which one to link:',
+          ...pick.list.map((c) => `• ${c.name} — ${codeHtml(`/community_verify ${c.id}`)}`),
+          `• or ${codeHtml('/community_verify new')} to create a fresh one.`,
+        ].join('\n'), forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
       const id = 'c_' + Date.now().toString(36) + '_' + randomToken().slice(0, 4);
       const now = Date.now();
       await env.DB.prepare(
@@ -12044,22 +13549,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       ).bind(id, chatTitle, owner.id, now).run();
       await upsertCommunityMember(env, id, owner.id, 'owner');
 
-      const storeToken = (await decryptBotToken(env, personal.bot_token)) || replyToken || null;
-      const botUname = personal.bot_username || 'bot';
-      const encStore = storeToken ? await encryptSecret(env, storeToken) : null;
-      if (existingGroup) {
-        await env.DB.prepare(
-          `UPDATE community_bots SET community_id = ?, scope = 'community', group_name = ?, created_by = ?, user_id = ?, bot_token = COALESCE(?, bot_token), bot_username = COALESCE(?, bot_username) WHERE id = ?`
-        ).bind(id, chatTitle, owner.id, owner.id, encStore, botUname, existingGroup.id).run();
-        binding = await env.DB.prepare('SELECT * FROM community_bots WHERE id = ?').bind(existingGroup.id).first();
-      } else {
-        const botId = 'bot_' + Date.now().toString(36);
-        await env.DB.prepare(
-          `INSERT INTO community_bots (id, community_id, platform, bot_username, group_id, group_name, created_by, created_at, scope, user_id, bot_token)
-           VALUES (?, ?, 'telegram', ?, ?, ?, ?, ?, 'community', ?, ?)`
-        ).bind(botId, id, botUname, chatId, chatTitle, owner.id, now, owner.id, encStore).run();
-        binding = await env.DB.prepare('SELECT * FROM community_bots WHERE id = ?').bind(botId).first();
-      }
+      binding = await linkGroupToCommunity(env, { chatId, chatTitle, communityId: id, ownerId: owner.id, personal });
 
       await logOperationalEvent(env, '🆕 Community created', `${chatTitle} (${id}) by ${owner.username || owner.display_name || owner.id}`, owner.id);
       await sendTelegramMessage(replyToken, chatId, [
@@ -12170,7 +13660,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     }
     const arg = rest.trim().split(/\s+/)[0] || binding?.community_id || '';
     if (!arg) {
-      await sendTelegramMessage(token, chatId, 'Usage: /clear_db <community_id>\n/community_list for ids.', forumThreadId);
+      await sendTelegramMessage(token, chatId, 'Usage: /clear_db [community_id]\nIn the linked group the community id can be omitted.\n/community_list for ids.', forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     const c = await resolveCommunityByIdOrName(env, athenaUser.id, arg);
@@ -12195,8 +13685,8 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
-  // ---- /clear_personal_db (GOD only) ----
-  if (cmd === '/clear_personal_db' || cmd === '/clear_perosnal_db' || cmd === '/clearpersonal') {
+  // ---- /clear_personal_db (GOD only, explicit confirmation) ----
+  if (cmd === '/clear_personal_db' || cmd === '/clearpersonal') {
     if (!isGod) {
       await sendTelegramMessage(token, chatId, 'GOD rank only (instance host).', forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
@@ -12205,12 +13695,28 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       await sendTelegramMessage(token, chatId, 'Login on website first.', forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
+    // Irreversible, so the argument is the confirmation — matching what /help
+    // has always told the user. Without it, ask and stop.
+    if (!/^yes$/i.test((parts[1] || '').trim())) {
+      let count = 0;
+      try { count = Number((await env.DB.prepare('SELECT COUNT(*) AS n FROM personal_links WHERE user_id = ?').bind(athenaUser.id).first())?.n || 0); } catch (_) {}
+      await sendTelegramFormatted(token, chatId, [
+        `${boldHtml('⚠️ Confirm personal brain wipe')}`,
+        `This deletes every link in your personal brain${count ? ` (${count} link${count === 1 ? '' : 's'})` : ''}. Community brains are untouched.`,
+        '',
+        `Reply ${codeHtml('/clear_personal_db YES')} to confirm.`,
+        italicHtml('There is no undo.')
+      ].join('\n'), forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    let removed = 0;
     try {
-      await env.DB.prepare('DELETE FROM personal_links WHERE user_id = ?').bind(athenaUser.id).run();
+      const r = await env.DB.prepare('DELETE FROM personal_links WHERE user_id = ?').bind(athenaUser.id).run();
+      removed = rowsChanged(r);
     } catch (_) {}
     markMeiliScopeDirty(env, 'personal', athenaUser.id);
     await logOperationalEvent(env, '🧹 Personal database cleared', `${athenaUser.username || athenaUser.display_name || athenaUser.id} cleared personal links`, athenaUser.id);
-    await sendTelegramMessage(token, chatId, 'Personal DB cleared for your GOD account.', forumThreadId);
+    await sendTelegramMessage(token, chatId, `Personal DB cleared for your GOD account.\nRemoved ~${removed} links.`, forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
@@ -12411,7 +13917,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   }
 
   // ---- /kick (alias /clear) — remove from community without a Telegram ban ----
-  if (cmd === '/clear' || cmd === '/kick') {
+  if (cmd === '/kick') {
     const cid = binding?.community_id;
     if (!cid) {
       await sendTelegramMessage(token, chatId, 'Use /kick in a verified community group (or with community linked).', forumThreadId);
@@ -12574,8 +14080,8 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     if (!topicArg) {
       await sendTelegramMessage(token, chatId,
         currentTopic
-          ? `Topic lock ON: ${currentTopic}\n/topic off to clear`
-          : `Topic lock OFF (whole group).\n/topic <id> to lock${msgThreadId ? `\nThis topic id: ${msgThreadId}` : ''}`, forumThreadId);
+          ? `Topic lock ON: ${currentTopic}\nThe bot only answers in that topic — this is not a clone binding.\n/topic off to clear · /clone to clone a topic into a brain`
+          : `Topic lock OFF (whole group).\nThe bot answers in every topic — this is not a clone binding.\n/topic <id> to lock · /clone to clone a topic into a brain${msgThreadId ? `\nThis topic id: ${msgThreadId}` : ''}`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
 
@@ -12594,11 +14100,11 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       ? msgThreadId
       : topicArg.replace(/[^\d]/g, '');
     if (!topicId) {
-      await sendTelegramMessage(token, chatId, 'Usage: /topic <topic_id> | /topic here | /topic off', forumThreadId);
+      await sendTelegramMessage(token, chatId, 'Usage: /topic <topic_id> | /topic here | /topic off\nTo clone a topic into a brain: /topic link', forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     await env.DB.prepare(`UPDATE community_bots SET topic_id = ? WHERE id = ?`).bind(topicId, targetBinding.id).run();
-    await sendTelegramMessage(token, chatId, `Topic lock set: ${topicId}\nOnly links in that topic are saved for this community.`, forumThreadId);
+    await sendTelegramMessage(token, chatId, `Topic lock set: ${topicId}\nThe bot now answers only in that topic. Links posted in other topics are ignored until /topic off.`, forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
@@ -12844,13 +14350,24 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       // RAG retrieval — Meilisearch finds a small candidate set, PostgreSQL
       // hydrates the authoritative rows, and SQL remains the fallback.
       const scopeKey = scope === 'personal' ? athenaUser.id : aiCommunityId;
-      await ensureFresh(env, scope, scopeKey);
-      const retrieval = await retrieveAiRows(env, scope, scopeKey, q, { limit: AI_RETRIEVAL_LIMIT });
+      // Ack BEFORE the slow retrieval so the chat responds instantly; the
+      // answer (or a failure) edits this message later — never silence.
+      const t0 = Date.now();
+      const thinkMsg = await sendTelegramFormatted(token, chatId, `${boldHtml('🧠')} Thinking with your${scope === 'personal' ? ' personal' : ''} brain…`, forumThreadId);
+      const thinkMsgId = thinkMsg.message_id;
+      let retrieval;
+      try {
+        retrieval = await retrieveAiRows(env, scope, scopeKey, q, { limit: AI_RETRIEVAL_LIMIT });
+      } catch (err) {
+        await editTelegramMessage(token, chatId, thinkMsgId, `${boldHtml('❌ Search failed:')} ${escHtml(String(err?.message || err).slice(0, 200))}`, null, forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
       const rows = retrieval.rows;
       const docs = rows;
       queueMissingLinkEnrichment(env, scope, scopeKey, rows);
       if (!docs.length) {
-        await sendTelegramFormatted(token, chatId, 'You have no saved link on this in your brain', forumThreadId);
+        await editTelegramMessage(token, chatId, thinkMsgId, 'You have no saved link on this in your brain', null, forumThreadId);
+        try { console.log(`[ai] done in ${Date.now() - t0}ms scope=${scope} docs=0`); } catch (_) {}
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
 
@@ -12880,9 +14397,6 @@ Rules:
 6. Stay strictly grounded in BRAIN CONTEXT; never invent facts not present in it.
 
 `;
-
-     const thinkMsg = await sendTelegramFormatted(token, chatId, `${boldHtml('🧠')} Thinking with your${scope === 'personal' ? ' personal' : ''} brain…`, forumThreadId);
-     const thinkMsgId = thinkMsg.message_id;
 
       const model = normalizeModelId(cfg.model, cfg.base_url);
 
@@ -12995,36 +14509,144 @@ Rules:
              ON CONFLICT(key) DO UPDATE SET ai_msg_id = excluded.ai_msg_id, history = excluded.history, updated_at = excluded.updated_at`
           ).bind(aiThreadKey(chatId, forumThreadId), thinkMsgId, trimmed, Date.now()).run();
         } catch (_) {}
+        try { console.log(`[ai] done in ${Date.now() - t0}ms scope=${scope} docs=${docs.length}`); } catch (_) {}
       } catch (err) {
         await editTelegramMessage(token, chatId, thinkMsgId, `${boldHtml('❌ AI failed:')} ${escHtml(err.message)}`, null, forumThreadId);
       }
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
-  // ---- /logs (GOD): tail of the in-memory structured log ----
+  // ---- /log (GOD): real runtime logs. /log [n] — in-process app logs
+  // (everything the self-hosted Node process prints, plus instrumented events);
+  // /log dokploy [app] [n] — live container runtime logs via Dokploy;
+  // /log buildlogs [app] [n] — last deployment build output. Machine-readable:
+  // /log --json [n] (NDJSON). No simulated output; errors classify per source.
   if (cmd === '/logs' || cmd === '/log') {
     if (!isGod) {
       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒 GOD rank only')}`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    const argN = rest.trim().split(/\s+/)[0] || '';
+    const words = rest.trim().split(/\s+/).filter(Boolean);
+    if (words[0] === '--json') {
+      const n = Math.min(1000, Math.max(1, parseInt(words[1] || '50', 10) || 50));
+      const { records, cursor, reset } = runtimeLogs.snapshot('', n);
+      // Telegram caps a message near 4096 chars: keep only whole records so the
+      // payload stays valid JSON (slicing a serialized string would truncate it
+      // mid-record). Agents needing unbounded history use GET /api/logs.
+      const payload = { source: 'app', cursor, reset, truncated: false, records: [] };
+      for (const record of records) {
+        payload.records.push(record);
+        if (JSON.stringify(payload).length <= 3800) continue;
+        payload.records.pop();
+        payload.truncated = true;
+        break;
+      }
+      const text = JSON.stringify(payload);
+      await telegramApi(token, 'sendMessage', { chat_id: chatId, text: codeHtml(text), parse_mode: 'HTML', message_thread_id: forumThreadId ?? undefined });
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    if (words[0] === 'dokploy' || words[0] === 'buildlogs') {
+      const source = words[0] === 'buildlogs' ? 'deployment' : 'container';
+      const appId = words[1] || String(env.DOKPLOY_APP_ID || '').trim();
+      const n = Math.min(1000, Math.max(1, parseInt(words[2] || '40', 10) || 40));
+      try {
+        const snapshot = await (source === 'container' ? dokployLogSnapshot(env, appId, n, 'container') : dokployLogSnapshot(env, appId, n, 'deployment'));
+        const lines = snapshot.lines.slice(-60).map((line) => codeHtml(escHtml(line))).join('\n');
+        const title = source === 'container' ? '🐳 Container runtime logs' : '🛠 Build logs (last deployment)';
+        await sendTelegramFormatted(token, chatId, `${boldHtml(title)} ${codeHtml(escHtml(snapshot.service))} (${escHtml(snapshot.state || 'unknown')})\n\n${lines || italicHtml('No logs available.')}`, forumThreadId);
+      } catch (error) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} ${codeHtml(escHtml(String(error.code || 'ERROR')))} — ${escHtml(redactLog(error.message || error).slice(0, 800))}`, forumThreadId);
+      }
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    const argN = words[0] || '';
     if (argN === 'clear') {
-      LOG_RING.length = 0;
+      runtimeLogs.clear();
       await sendTelegramFormatted(token, chatId, `${boldHtml('🧹')} Log buffer cleared.`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    let n = Math.min(100, Math.max(5, parseInt(argN, 10) || 30));
-    const tail = LOG_RING.slice(-n).reverse();
+    const n = Math.min(100, Math.max(5, parseInt(argN, 10) || 30));
+    const tail = runtimeLogs.snapshot('', n).records;
     if (!tail.length) {
       await sendTelegramFormatted(token, chatId, `${italicHtml('Log buffer is empty (recently restarted?).')}`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     const lines = [richHeading(3, `📋 Last ${tail.length} log lines`), ''];
-    for (const e of tail) {
-      lines.push(`${codeHtml(e.t.slice(11, 19))} ${boldHtml(e.level.toUpperCase())} ${escHtml(e.component)} — ${escHtml(e.message)}${e.data ? ' ' + escHtml(String(e.data).slice(0, 120)) : ''}`);
+    for (const e of tail.reverse()) {
+      lines.push(`${codeHtml(e.timestamp.slice(11, 19))} ${boldHtml(e.level)} ${escHtml(e.service)} — ${escHtml(e.message)}${e.data ? ' ' + escHtml(String(e.data).slice(0, 120)) : ''}${e.trace ? ' ' + italicHtml('(trace attached in /log --json)') : ''}`);
     }
     await sendTelegramRichMessage(token, chatId, lines.join('\n'), forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
+  }
+
+  // ---- /dok (GOD, self-host): verified Dokploy tRPC REST adapter.
+  // application.readLogs = container runtime logs (getContainerLogs);
+  // deployment.readLogs = last deployment build output (logPath tail).
+  if (cmd === '/dock' || cmd === '/dok' || cmd === '/dokploy') {
+    if (!isGod) {
+      await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    if (!isSelfHosted(env)) {
+      await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Dokploy control runs on the self-hosted server.`, forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    const say = (html) => sendTelegramFormatted(token, chatId, html, forumThreadId);
+    const words = rest.trim().split(/\s+/).filter(Boolean);
+    const sub = (words[0] || 'help').toLowerCase();
+    if (!dokployConfigured(env)) {
+      await say(`${boldHtml('🔧 Dokploy control is not configured.')}\nSet ${codeHtml('DOKPLOY_URL')} (e.g. https://dokploy.example.com) and ${codeHtml('DOKPLOY_API_KEY')} (Dokploy profile → API/CLI) in the app env, then redeploy.`);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    try {
+      if (sub === 'help') {
+        await say(`${boldHtml('🐳 Dokploy control')}\n\n${codeHtml('/dok apps')} — list applications (project.all)\n${codeHtml('/dok status [app]')} — app status + last deployment\n${codeHtml('/dok logs [app] [n]')} — container runtime logs\n${codeHtml('/dok buildlogs [app] [n]')} — last deployment build output\n${codeHtml('/dok deploy [app]')} — fresh deploy of latest commit\n${codeHtml('/dok redeploy [app]')} — rebuild deployment\n${codeHtml('/dok restart [app]')} — restart container, no rebuild\n${codeHtml('/dok stop [app] /dok start [app]')} — stop / start\n\n${italicHtml('App id optional when DOKPLOY_APP_ID is set.')} ${italicHtml('Deploy/redeploy only confirm the accepted request — Dokploy queues it. Follow /dok buildlogs and verify /dok status.')}`);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      const appId = words[1] || String(env.DOKPLOY_APP_ID || '').trim();
+      if (sub !== 'apps' && !appId) {
+        await say(`${boldHtml('⚠️')} Pass an app id (${codeHtml('/dok apps')} to list) or set ${codeHtml('DOKPLOY_APP_ID')}.`);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      if (sub === 'apps') {
+        const apps = await dokployApps(env);
+        if (!apps.length) { await say(`${boldHtml('🐳')} No applications visible to this API key.`); return new Response('OK', { status: 200, headers: corsHeaders }); }
+        const list = apps.slice(0, 20).map((a) => `• ${codeHtml(String(a.applicationId || '?'))} — ${escHtml(String(a.name || a.appName || ''))}${a.applicationStatus ? ` (${escHtml(String(a.applicationStatus))})` : ''}`).join('\n');
+        await say(`${boldHtml('🐳 Applications')}\n\n${list}`);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      if (sub === 'status') {
+        const status = await dokployStatus(env, appId);
+        const ld = status.lastDeployment;
+        const lastLine = ld ? `Last deployment ${codeHtml(String(ld.id).slice(0, 8))}: ${escHtml(ld.status || 'unknown')} at ${escHtml(ld.createdAt || '?')}${ld.error ? ` — ${escHtml(redactLog(ld.error).slice(0, 200))}` : ''}` : italicHtml('No deployments recorded.');
+        await say(`${boldHtml('🐳 Status')} ${codeHtml(escHtml(appId))}\n\n${codeHtml(escHtml(JSON.stringify({ name: status.name, service: status.service, status: status.status, branch: status.branch, sourceType: status.sourceType }, null, 1)))}\n\n${lastLine}`);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      if (sub === 'logs' || sub === 'buildlogs') {
+        const n = Math.min(1000, Math.max(1, parseInt(words[2] || '40', 10) || 40));
+        const snapshot = await dokployLogSnapshot(env, appId, n, sub === 'buildlogs' ? 'deployment' : 'container');
+        const title = sub === 'buildlogs' ? '🛠 Build logs (last deployment)' : '🐳 Container runtime logs';
+        await say(`${boldHtml(title)} ${codeHtml(escHtml(snapshot.service))} (${escHtml(snapshot.state || 'unknown')})\n\n${snapshot.lines.slice(-60).map((line) => codeHtml(escHtml(line))).join('\n') || italicHtml('No logs available.')}`);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      if (sub === 'deploy' || sub === 'redeploy') {
+        await dokployDeploy(env, appId, { rebuild: sub === 'redeploy' });
+        await say(`${boldHtml('🚀 Deploy request accepted')} ${codeHtml(escHtml(appId))}${sub === 'redeploy' ? ' (rebuild)' : ''}\n${italicHtml('Dokploy queues it — this is NOT deployment completion.')} ${italicHtml('Follow /dok buildlogs, verify with /dok status.')}`);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      if (sub === 'restart' || sub === 'stop' || sub === 'start') {
+        await dokploySimple(env, appId, sub);
+        const label = sub === 'restart' ? '🔁 Restart requested' : sub === 'stop' ? '⏸ Stop requested' : '▶️ Start requested';
+        await say(`${boldHtml(label)} ${codeHtml(escHtml(appId))} — verify with ${codeHtml('/dok status')}.`);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      await say(`${boldHtml('⚠️')} Unknown subcommand ${codeHtml(escHtml(sub))} — try ${codeHtml('/dok help')}.`);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    } catch (e) {
+      console.error('[dokploy] command failed:', e?.message || e);
+      await say(`${boldHtml('❌')} ${codeHtml(escHtml(String(e.code || 'ERROR')))} — ${escHtml(redactLog(e?.message || e).slice(0, 500))}`);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
   }
 
   // ---- /db — show storage backend (all ranks) ----
@@ -13045,12 +14667,6 @@ Rules:
     }
     lines.push('', `${codeHtml('/backup')} ${italicHtml('for Telegram/Drive backup (self-host)')}`);
     await sendTelegramFormatted(token, chatId, lines.join('\n'), forumThreadId);
-    return new Response('OK', { status: 200, headers: corsHeaders });
-  }
-
-  // ---- /sync — removed (PostgreSQL only). Keep command as stub for compat.
-  if (cmd === '/sync') {
-    await sendTelegramFormatted(token, chatId, `${boldHtml('ℹ️ Sync removed')} — PostgreSQL is the only store (D1/GitHub deprecated). Use ${codeHtml('/backup')} on self-host or ${codeHtml('pg_dump')}.`, forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
@@ -13094,7 +14710,7 @@ Rules:
   }
 
   // ---- /import (GOD): merge a /backup SQL(.gz) file replied to this command ----
-  if (cmd === '/import' || cmd === '/restore') {
+  if (cmd === '/import') {
     if (!isGod) {
       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒 GOD rank only')}\n/import merges a ${codeHtml('/backup')} file. Reply to the backup document with ${codeHtml('/import')}.`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
@@ -13112,7 +14728,7 @@ Rules:
         `1. ${codeHtml('/backup')} sends ${codeHtml('athena-<date>.sql.gz')} to this chat`,
         `2. ${boldHtml('Reply')} to that file with ${codeHtml('/import')}`,
         '',
-        `${italicHtml('Everything merges into your CURRENT brains: backup community links → the linked community, personal links → your personal brain. Duplicates (same URL or source message) are skipped, everything else is added. Optional: ' + codeHtml('/import <community_id>') + ' targets another community.')}`,
+        `${italicHtml('Everything merges into your CURRENT brains: backup community links → the linked community (in DMs: the backup’s original community, or ' + codeHtml('/import <community_id>') + '), personal links → your personal brain. Duplicates (same URL or source message) are skipped, everything else is added.')}`,
       ].join('\n'), forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
@@ -13126,25 +14742,20 @@ Rules:
       await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️ Too large:')} ${codeHtml((fileSize / 1048576).toFixed(1) + ' MB')} — import parts up to 200 MB (split a big backup with ${codeHtml('/backup')} parts).`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    // Target brains: explicit <community_id> arg, else the linked community,
-    // else the only community that exists. Personal always → the importing GOD.
-    let targetCommunityId = rest.trim().split(/\s+/)[0] || '';
-    if (targetCommunityId && !/^c_/.test(targetCommunityId)) targetCommunityId = '';
-    if (!targetCommunityId) targetCommunityId = binding?.community_id || '';
-    let _targetNote = '';
-    if (!targetCommunityId) {
-      const all = await env.DB.prepare('SELECT id, name FROM communities ORDER BY created_at').all();
-      const list = (all && all.results) || [];
-      if (list.length === 1) { targetCommunityId = list[0].id; _targetNote = list[0].name; }
-    }
-    if (!targetCommunityId) {
-      await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No target community. Link one with ${codeHtml('/community_verify')} / ${codeHtml('/community_join')}, or run ${codeHtml('/import <community_id>')}.`, forumThreadId);
+    // Explicit <community_id> arg wins and is validated now; everything else
+    // resolves after the file downloads (linked community, backup's own
+    // community, memberships). Personal always → the importing GOD.
+    let explicitCommunityId = rest.trim().split(/\s+/)[0] || '';
+    if (explicitCommunityId && !/^c_/.test(explicitCommunityId)) {
+      await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} ${codeHtml(escHtml(explicitCommunityId))} is not a community id — they start with ${codeHtml('c_')}. ${codeHtml('/community_list')} lists yours. Nothing was imported.`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    const commRow = await env.DB.prepare('SELECT name FROM communities WHERE id = ?').bind(targetCommunityId).first().catch(() => null);
-    if (!commRow) {
-      await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(targetCommunityId)} not found.`, forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
+    if (explicitCommunityId) {
+      const ok = await env.DB.prepare('SELECT id FROM communities WHERE id = ?').bind(explicitCommunityId).first().catch(() => null);
+      if (!ok) {
+        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(escHtml(explicitCommunityId))} not found.`, forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
     }
     const importStarted = Date.now();
     const startMsg = await telegramApi(token, 'sendMessage', { chat_id: chatId, text: `${boldHtml('📥 Importing')} ${codeHtml(escHtml(fileName))}${fileSize ? ` (${(fileSize / 1048576).toFixed(1)} MB)` : ''}…`, parse_mode: 'HTML' }).catch(() => null);
@@ -13160,6 +14771,30 @@ Rules:
         } else {
           sqlText = new TextDecoder().decode(buf);
         }
+        // Resolve the target community now that the backup can be inspected:
+        // explicit arg, else the linked community, else the backup's own
+        // community (same-instance re-import), else the user's only
+        // membership, else the only community that exists.
+        let targetCommunityId = explicitCommunityId || binding?.community_id || '';
+        if (!targetCommunityId) targetCommunityId = await detectBackupCommunityId(env, sqlText);
+        if (!targetCommunityId && athenaUser) {
+          const mem = await env.DB.prepare('SELECT community_id FROM community_members WHERE user_id = ? LIMIT 2').bind(athenaUser.id).all().catch(() => null);
+          const ids = ((mem && mem.results) || []).map(r => String(r.community_id || '')).filter(Boolean);
+          if (ids.length === 1) targetCommunityId = ids[0];
+        }
+        if (!targetCommunityId) {
+          const all = await env.DB.prepare('SELECT id, name FROM communities ORDER BY created_at').all();
+          const list = (all && all.results) || [];
+          if (list.length === 1) targetCommunityId = list[0].id;
+        }
+        const commRow = targetCommunityId
+          ? await env.DB.prepare('SELECT name FROM communities WHERE id = ?').bind(targetCommunityId).first().catch(() => null)
+          : null;
+        if (!targetCommunityId || !commRow) {
+          if (statusId) await telegramApi(token, 'deleteMessage', { chat_id: chatId, message_id: statusId }).catch(() => {});
+          await sendNoImportTargetMessage(env, token, chatId, forumThreadId, athenaUser, isGod);
+          return;
+        }
         let lastEdit = Date.now();
         const report = await importBackupSql(env, sqlText, {
           onProgress: async (p) => {
@@ -13172,6 +14807,12 @@ Rules:
           targetCommunityId,
           targetUserId: athenaUser ? athenaUser.id : null
         });
+        // Imported rows bypass the normal save path — mark the search index
+        // scopes dirty so Meilisearch resyncs instead of serving pre-import hits.
+        try {
+          markMeiliScopeDirty(env, 'community', targetCommunityId);
+          if (athenaUser) markMeiliScopeDirty(env, 'personal', athenaUser.id);
+        } catch (_) {}
         const secs = ((Date.now() - importStarted) / 1000).toFixed(1);
         const lines = [
           richHeading(3, '📥 Import complete'),
@@ -13277,7 +14918,6 @@ Rules:
         await sendTelegramMessage(token, chatId, 'Login with Telegram on the website once.', forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
-      await ensureFresh(env, 'personal', athenaUser.id);
       rows = await candidateLinks(env, 'personal', athenaUser.id, queryPart);
     } else {
       if (!binding.community_id) {
@@ -13289,7 +14929,6 @@ Rules:
         await sendTelegramMessage(token, chatId, 'Only owner/admins can /edit community links.', forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
-      await ensureFresh(env, 'community', binding.community_id);
       rows = await candidateLinks(env, 'community', binding.community_id, queryPart);
     }
 
@@ -13338,11 +14977,6 @@ Rules:
       }
     }
     const storeScopeKey = scope === 'personal' ? athenaUser.id : binding.community_id;
-    const storePatch = await storeMutateLink(env, scope, storeScopeKey, hit.id, { title, notes });
-    if (storePatch.handled && !storePatch.ok) {
-      await sendTelegramMessage(token, chatId, `Updated in database, but storage sync failed: ${storePatch.error}`, forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
     markMeiliScopeDirty(env, scope, storeScopeKey);
     await sendTelegramMessage(token, chatId,
       `Updated:\nTitle: ${title || '(untitled)'}\nURL: ${hit.url}\nNotes: ${String(notes || '(empty)')}`, forumThreadId);
@@ -13350,7 +14984,24 @@ Rules:
   }
 
   // ---- /delete and /del (alias) ----
+  // One command with three jobs. Bare /delete opens this picker; the direct
+  // forms still work: /delete <url> removes one link, /delete <chat_id>
+  // [thread_id] [files] removes a whole clone (imports + live capture).
   if (cmd === '/delete' || cmd === '/del') {
+    if (!rest.trim() && !msg.reply_to_message) {
+      const optsHtml = [
+        `${boldHtml('🗑 What do you want to delete?')}`,
+        '',
+        `Deleting is permanent. Pick a kind — each one asks you to confirm.`,
+      ].join('\n');
+      const optsButtons = [
+        [{ label: '🗑 One link', data: 'del:link' }],
+        [{ label: '📡 Cloned chat…', data: 'del:chats' }],
+        [{ label: '🧬 Backfill session…', data: 'del:jobs' }],
+      ].map((r) => richButtonRow(r)).join('\n');
+      await sendTelegramRichMessage(token, chatId, optsHtml, forumThreadId, optsButtons);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
     // TG ID delete: /delete -100123... [thread_id] [files]  -> delete backfill+live for that chat/topic
     const delParts = rest.trim().split(/\s+/).filter(Boolean);
     const looksTgId = delParts.length && /^-?\d{5,}$/.test(delParts[0]);
@@ -13359,129 +15010,13 @@ Rules:
         await sendTelegramMessage(token, chatId, 'Only community owner/GOD can delete cloned data.', forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
-      await ensureTransferColumns(env);
-      await ensureUserbotTables(env);
       const chatArg = normalizeTgChatId(delParts[0]);
-      const bare = chatArg.replace(/^-100/, '');
       const threadArg = delParts[1] && /^\d{1,10}$/.test(delParts[1]) && !/^c_/.test(delParts[1]) ? delParts[1] : '';
       const withFiles = delParts.includes('files');
-      const chatKeys = [...new Set([chatArg, bare])];
-      const threadLive = threadArg ? chatKeys.map(k => `live:${k}:${threadArg}`) : [];
-      const liveTransfers = [...chatKeys.map(k => `live:${k}`), ...threadLive];
-
-      // 1. Remember the path(s) this chat was cloned into: follows (userbot) and
-      //    bindings (bot-linked channels/groups). Topic follows are keyed chat:thread.
-      const followKeys = threadArg
-        ? chatKeys.map(k => `${k}:${threadArg}`)
-        : chatKeys;
-      let communityIds = new Set();
-      let personalUserIds = new Set();
-      try {
-        const fph = followKeys.map(() => '?').join(',');
-        const { results: follows } = await env.DB.prepare(`SELECT community_id, target, created_by FROM userbot_follows WHERE chat_id IN (${fph})`).bind(...followKeys).all();
-        for (const f of follows || []) {
-          const t = String(f.target || 'community');
-          if (f.community_id) {
-            if (t === 'community' || t === 'both') communityIds.add(f.community_id);
-          }
-          if ((t === 'personal' || t === 'both') && f.created_by) personalUserIds.add(String(f.created_by));
-        }
-      } catch (_) {}
-      try {
-        const bph = chatKeys.map(() => '?').join(',');
-        const { results: binds } = await env.DB.prepare(`SELECT community_id, COALESCE(channel_target,'community') AS target, created_by FROM community_bots WHERE platform='telegram' AND group_id IN (${bph}) AND community_id IS NOT NULL`).all().catch(() => ({ results: [] }));
-        for (const b of binds || []) {
-          const t = String(b.target || 'community');
-          if ((t === 'community' || t === 'both') && b.community_id) communityIds.add(b.community_id);
-          if ((t === 'personal' || t === 'both') && b.created_by) personalUserIds.add(String(b.created_by));
-        }
-      } catch (_) {}
-      // Backfill jobs still record the community even if the follow row is gone.
-      try {
-        const jph = chatKeys.map(() => '?').join(',');
-        const { results: jobsMeta } = await env.DB.prepare(`SELECT DISTINCT community_id FROM index_jobs WHERE chat_id IN (${jph}) AND community_id IS NOT NULL`).all().catch(() => ({ results: [] }));
-        for (const j of jobsMeta || []) if (j.community_id) communityIds.add(j.community_id);
-      } catch (_) {}
-
-      // 2. Transfer ids: backfill jobs for this chat/topic + live sessions.
-      const jobQs = threadArg
-        ? `SELECT id FROM index_jobs WHERE chat_id IN (${chatKeys.map(()=>'?').join(',')}) AND thread_id = ?`
-        : `SELECT id FROM index_jobs WHERE chat_id IN (${chatKeys.map(()=>'?').join(',')})`;
-      const jobArgs = threadArg ? [...chatKeys, threadArg] : [...chatKeys];
-      let transferIds = [];
-      let jobIds = [];
-      try {
-        const { results } = await env.DB.prepare(jobQs).bind(...jobArgs).all().catch(() => ({ results: [] }));
-        jobIds = (results || []).map(r => r.id);
-        transferIds = [...jobIds, ...liveTransfers];
-      } catch (_) {}
-      if (!transferIds.length && !communityIds.size && !personalUserIds.size) {
-        await sendTelegramMessage(token, chatId, `Nothing found for ${chatArg}${threadArg ? ':' + threadArg : ''}. Try /transfers to see ids.`, forumThreadId);
-        return new Response('OK', { status: 200, headers: corsHeaders });
-      }
-      const ph = transferIds.map(() => '?').join(',');
-      const d1 = transferIds.length ? await env.DB.prepare(`DELETE FROM links WHERE transfer_id IN (${ph})`).bind(...transferIds).run().catch(() => ({ changes: 0 })) : { changes: 0 };
-      const d2 = transferIds.length ? await env.DB.prepare(`DELETE FROM personal_links WHERE transfer_id IN (${ph})`).bind(...transferIds).run().catch(() => ({ changes: 0 })) : { changes: 0 };
-      const d3 = transferIds.length ? await env.DB.prepare(`DELETE FROM uploaded_documents WHERE transfer_id IN (${ph})`).bind(...transferIds).run().catch(() => ({ changes: 0 })) : { changes: 0 };
-
-      // 3. Scoped orphan cleanup (chat-scoped, never whole-DB): rows whose
-      //    transfer_id is NULL (early clones) but which carry source provenance.
-      const cIds = [...communityIds];
-      const pIds = [...personalUserIds];
-      let orphanLinks = 0, orphanPersonal = 0, orphanDocs = 0;
-      if (cIds.length) {
-        const cph = cIds.map(() => '?').join(',');
-        const kph = chatKeys.map(() => '?').join(',');
-        const r1 = await env.DB.prepare(`DELETE FROM links WHERE source_chat_id IN (${kph}) AND community_id IN (${cph})`).bind(...chatKeys, ...cIds).run().catch(() => ({ changes: 0 }));
-        orphanLinks = r1.changes || 0;
-        const r3 = await env.DB.prepare(`DELETE FROM uploaded_documents WHERE source_chat_id IN (${kph}) AND scope = 'community' AND community_id IN (${cph})`).bind(...chatKeys, ...cIds).run().catch(() => ({ changes: 0 }));
-        orphanDocs += r3.changes || 0;
-      }
-      if (pIds.length) {
-        const pph = pIds.map(() => '?').join(',');
-        const k2 = chatKeys.map(() => '?').join(',');
-        const r2 = await env.DB.prepare(`DELETE FROM personal_links WHERE source_chat_id IN (${k2}) AND user_id IN (${pph})`).bind(...chatKeys, ...pIds).run().catch(() => ({ changes: 0 }));
-        orphanPersonal = r2.changes || 0;
-        const r3b = await env.DB.prepare(`DELETE FROM uploaded_documents WHERE source_chat_id IN (${k2}) AND scope = 'personal' AND user_id IN (${pph})`).bind(...chatKeys, ...pIds).run().catch(() => ({ changes: 0 }));
-        orphanDocs += r3b.changes || 0;
-      }
-      // Docs for this chat regardless of path (chat-scoped, precise).
-      try {
-        const k3 = chatKeys.map(() => '?').join(',');
-        const rd = await env.DB.prepare(`DELETE FROM uploaded_documents WHERE source_chat_id IN (${k3})`).bind(...chatKeys).run().catch(() => ({ changes: 0 }));
-        orphanDocs += rd.changes || 0;
-      } catch (_) {}
-      if (withFiles && MEDIA_VAULT_DIR) {
-        try {
-          const { rm } = await import('node:fs/promises');
-          const dir = `${MEDIA_VAULT_DIR}/${chatArg.replace(/[^\w-]+/g, '_')}`;
-          await rm(dir, { recursive: true, force: true });
-        } catch (_) {}
-      }
-      if (jobIds.length) {
-        await env.DB.prepare(`DELETE FROM index_jobs WHERE id IN (${jobIds.map(() => '?').join(',')})`).bind(...jobIds).run().catch(() => {});
-        if (threadArg) {
-          await env.DB.prepare('DELETE FROM telegram_topic_bindings WHERE chat_id IN (' + chatKeys.map(() => '?').join(',') + ') AND thread_id = ?').bind(...chatKeys, threadArg).run().catch(() => {});
-          const fk = chatKeys.map(k => `${k}:${threadArg}`);
-          await env.DB.prepare('DELETE FROM userbot_follows WHERE chat_id IN (' + fk.map(() => '?').join(',') + ')').bind(...fk).run().catch(() => {});
-        } else {
-          await env.DB.prepare('DELETE FROM userbot_follows WHERE chat_id IN (' + chatKeys.map(() => '?').join(',') + ')').bind(...chatKeys).run().catch(() => {});
-          await env.DB.prepare('DELETE FROM telegram_topic_bindings WHERE chat_id IN (' + chatKeys.map(() => '?').join(',') + ')').bind(...chatKeys).run().catch(() => {});
-        }
-      }
-      const scopeTxt = [];
-      if (cIds.length) scopeTxt.push('community: ' + cIds.map(c => escHtml(c.replace(/^c_/, ''))).join(', '));
-      if (pIds.length) scopeTxt.push('personal: ' + pIds.length + ' user(s)');
-      const totalLinks = (d1?.changes || 0) + orphanLinks;
-      const totalPersonal = (d2?.changes || 0) + orphanPersonal;
-      const totalDocs = (d3?.changes || 0) + orphanDocs;
-      await sendTelegramMessage(token, chatId,
-        `🗑 Deleted ${threadArg ? 'topic ' + threadArg + ' of ' : ''}${chatArg}
-• community links: ${totalLinks}
-• personal links: ${totalPersonal}
-• documents: ${totalDocs}${scopeTxt.length ? '\n• path: ' + scopeTxt.join(' · ') : ''}${withFiles ? '\n• vault files wiped' : ''}`,
-        forumThreadId);
+      const res = await deleteChatClone(env, { chatArg, threadArg, withFiles });
+      await sendTelegramMessage(token, chatId, res.text, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
+
     }
     if (!binding) {
       await sendTelegramMessage(token, chatId, 'Not linked.', forumThreadId);
@@ -13526,11 +15061,6 @@ Rules:
                 await env.DB.prepare(
                   `UPDATE personal_links SET title = ?, notes = ?, tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
                 ).bind(savedTitle, ai.description || add.notes || '', JSON.stringify(tags), add.id).run();
-                await storeMutateLink(env, 'personal', athenaUser.id, add.id, {
-                  title: savedTitle,
-                  notes: ai.description || add.notes || '',
-                  tags
-                });
               }
             } catch (_) {}
             await sendTelegramMessage(token, chatId, `Was not in DB — added to personal: ${rawUrl}`, forumThreadId);
@@ -13576,8 +15106,6 @@ Rules:
               await env.DB.prepare(
                 `UPDATE links SET title = ?, notes = ?, tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
               ).bind(meta.title, meta.notes || '', JSON.stringify(tags), id).run();
-              const gd = await storeMutateLink(env, 'community', binding.community_id, id, { title: meta.title, notes: meta.notes || '', tags });
-              if (gd?.handled && !gd.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${gd.error||'unknown'}`, forumThreadId); }
             } else {
               const vocab = await recentTagsForScope(env, 'community', binding.community_id);
               const ai = await aiDescribeAndTag(env, rawUrl, meta, vocab);
@@ -13588,16 +15116,12 @@ Rules:
                 await env.DB.prepare(
                   `UPDATE links SET title = ?, notes = ?, tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
                 ).bind(savedTitle, ai.description || meta.notes || '', JSON.stringify(tags), id).run();
-                const ga2 = await storeMutateLink(env, 'community', binding.community_id, id, { title: savedTitle, notes: ai.description || meta.notes || '', tags });
-                if (ga2?.handled && !ga2.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${ga2.error||'unknown'}`, forumThreadId); }
               } else {
                 const fb = fallbackTagsFromMeta(rawUrl, meta);
                 if (fb.length) {
                   const tagsFb = [...new Set([...['telegram'], ...fb])];
                   await ensureSearchColumns(env);
                   await env.DB.prepare(`UPDATE links SET title = ?, notes = ?, tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`).bind(meta.title, meta.notes||'', JSON.stringify(tagsFb), id).run();
-                  const gf = await storeMutateLink(env, 'community', binding.community_id, id, { title: meta.title, notes: meta.notes||'', tags: tagsFb });
-                  if (gf?.handled && !gf.ok) { await sendTelegramMessage(token, chatId, `Saved to DB but GitHub sync failed: ${gf.error||'unknown'}`, forumThreadId); }
                 }
               }
             }
@@ -13965,10 +15489,6 @@ function isUiNoiseText(text) {
     || /^(home|about|contact|blog|docs|pricing|login)\b/i.test(t.trim());
 }
 
-function isGithubUiNoise(text) {
-  return isUiNoiseText(text);
-}
-
 function scoreDescriptionCandidate(text) {
   const t = cleanGenericSummary(text);
   if (!t || isUiNoiseText(t)) return -100;
@@ -14083,7 +15603,7 @@ function parseReadmeIntro(md) {
   let title = '';
   const descLines = [];
   for (const line of lines) {
-    if (isGithubUiNoise(line)) continue;
+    if (isUiNoiseText(line)) continue;
     if (/^license|^badges?$|^download|^install|^features?$/i.test(line)) break;
     if (!title && line.length <= 60 && !/[.!?]$/.test(line) && line.split(/\s+/).length <= 6) {
       title = line.replace(/^[*_]+|[*_]+$/g, '').trim();
@@ -14953,6 +16473,15 @@ async function enrichLinksInBackground(env, scope, key, links) {
             try { existingTags = Array.isArray(link.tags) ? link.tags : JSON.parse(link.tags || '[]'); } catch (_) {}
             update.tags = [...new Set([...ai.tags, ...existingTags])];
           }
+        } else {
+          // AI down → context tags from the URL/caption, same as the synchronous
+          // save path — clones stay tagged even during a model rate-limit storm.
+          const fb = fallbackTagsFromMeta(link.url, { title: update.title, notes: update.notes, content: meta.content || '' });
+          if (fb.length) {
+            let existingTags = [];
+            try { existingTags = Array.isArray(link.tags) ? link.tags : JSON.parse(link.tags || '[]'); } catch (_) {}
+            update.tags = [...new Set([...fb, ...existingTags])];
+          }
         }
         if (!update.notes && !update.image_url && !update.site_name && !update.tags) continue;
         const metadataVersion = ai?.tags?.length && ai.description ? AI_METADATA_VERSION : 2;
@@ -14965,95 +16494,11 @@ async function enrichLinksInBackground(env, scope, key, links) {
             `UPDATE links SET title = ?, notes = ?, image_url = ?, site_name = ?, metadata_version = ${metadataVersion}, search_blob = NULL` + (update.tags ? ', tags = ?' : '') + ' WHERE id = ?'
           ).bind(update.title, update.notes, update.image_url, update.site_name, ...(update.tags ? [JSON.stringify(update.tags)] : []), link.id).run();
         }
-        // Best effort on GitHub storage: the .md entry catches up with the row.
-        await storeMutateLink(env, scope, key, link.id, update);
         markMeiliScopeDirty(env, scope, key);
       } catch (_) { /* one bad link must not stall the rest */ }
     }
   };
   await Promise.all(Array.from({ length: CONCURRENCY }, run));
-}
-
-/** Background full-DB tag sweep for /tag_untagged (GOD). Only rows whose
- *  tags are empty/[]/null are touched; every tagged link is left alone.
- *  AI first when the instance AI is configured, else context fallback. */
-async function tagUntaggedLinksInBackground(env, token, chatId, forumThreadId, thinkId, total, cfg) {
-  const BATCH = 200;
-  let done = 0, aiHits = 0, ctxHits = 0, errors = 0;
-  const edit = async () => {
-    const pct = Math.min(100, Math.round((done / Math.max(1, total)) * 100));
-    const filled = Math.round((pct / 100) * 18);
-    const bar = '▮'.repeat(filled) + '▯'.repeat(18 - filled);
-    await telegramApi(token, 'editMessageText', {
-      chat_id: chatId, message_id: thinkId, parse_mode: 'HTML',
-      text: `${boldHtml('🏷 Tag untagged')}\n${codeHtml(bar + ' ' + pct + '%')}\n${done}/${total} · AI ${aiHits} · context ${ctxHits}`
-    }).catch(() => {});
-  };
-  await ensureSearchColumns(env);
-  const emptyTags = `(tags IS NULL OR tags = '' OR tags = '[]' OR tags = 'null')`;
-  // Community table: re-query first BATCH each pass — updated rows drop out, so
-  // the sweep is resumable and never revisits a tagged link.
-  for (;;) {
-    let rows = [];
-    try {
-      const { results } = await env.DB.prepare(`SELECT id, community_id, url, title, notes, search_blob FROM links WHERE ${emptyTags} ORDER BY created_at DESC LIMIT ${BATCH}`).all();
-      rows = results || [];
-    } catch (_) {}
-    if (!rows.length) break;
-    for (const r of rows) {
-      try {
-        const meta = { title: r.title || '', notes: r.notes || '', content: r.search_blob || '' };
-        let tags = null; let title = r.title || ''; let notes = r.notes || '';
-        if (cfg?.api_key) {
-          try {
-            const vocab = await recentTagsForScope(env, 'community', r.community_id);
-            const ai = await aiDescribeAndTag(env, r.url, meta, vocab, cfg);
-            if (ai) { aiHits++; title = ai.title || title; notes = ai.description || notes; tags = ai.tags || []; }
-          } catch (_) {}
-        }
-        if (!tags?.length) { tags = fallbackTagsFromMeta(r.url, meta); ctxHits++; }
-        if (!tags.length) tags = ['untagged'];
-        await env.DB.prepare(`UPDATE links SET tags = ?, title = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
-          .bind(JSON.stringify(tags), title, notes, r.id).run().catch(() => {});
-        markMeiliScopeDirty(env, 'community', r.community_id);
-      } catch (_) { errors++; }
-      done++;
-      if (done % 10 === 0) await edit();
-    }
-  }
-  // Personal table: every user's brain, same filter.
-  for (;;) {
-    let rows = [];
-    try {
-      const { results } = await env.DB.prepare(`SELECT id, user_id, url, title, notes, search_blob FROM personal_links WHERE ${emptyTags} ORDER BY created_at DESC LIMIT ${BATCH}`).all();
-      rows = results || [];
-    } catch (_) {}
-    if (!rows.length) break;
-    for (const r of rows) {
-      try {
-        const meta = { title: r.title || '', notes: r.notes || '', content: r.search_blob || '' };
-        let tags = null; let title = r.title || ''; let notes = r.notes || '';
-        if (cfg?.api_key) {
-          try {
-            const vocab = await recentTagsForScope(env, 'personal', r.user_id);
-            const ai = await aiDescribeAndTag(env, r.url, meta, vocab, cfg);
-            if (ai) { aiHits++; title = ai.title || title; notes = ai.description || notes; tags = ai.tags || []; }
-          } catch (_) {}
-        }
-        if (!tags?.length) { tags = fallbackTagsFromMeta(r.url, meta); ctxHits++; }
-        if (!tags.length) tags = ['untagged'];
-        await env.DB.prepare(`UPDATE personal_links SET tags = ?, title = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
-          .bind(JSON.stringify(tags), title, notes, r.id).run().catch(() => {});
-        markMeiliScopeDirty(env, 'personal', r.user_id);
-      } catch (_) { errors++; }
-      done++;
-      if (done % 10 === 0) await edit();
-    }
-  }
-  await edit();
-  await sendTelegramFormatted(token, chatId,
-    `${boldHtml('✅')} Tagged ${done} untagged link(s): ${aiHits} via AI · ${ctxHits} via context${errors ? ` · ${errors} errors` : ''}.`,
-    forumThreadId);
 }
 
 function queueMissingLinkEnrichment(env, scope, key, rows) {
@@ -15072,48 +16517,27 @@ function queueMissingLinkEnrichment(env, scope, key, rows) {
 }
 
 // ---- Structured logger -----------------------------------------------------
-// Ring buffer + leveled console output. GOD-facing via /logs [n].
-const LOG_LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
-const LOG_RING = [];
-const LOG_RING_MAX = 500;
-let LOG_CONSOLE_MIN = 'info';
-function athenaLog(level, component, message, data = null) {
-  const lvl = LOG_LEVELS[level] || LOG_LEVELS.info;
-  const entry = {
-    t: new Date().toISOString(),
-    level,
-    component: String(component || 'app').slice(0, 24),
-    message: String(message || '').slice(0, 400)
-  };
-  if (data != null) {
-    try { entry.data = typeof data === 'string' ? data.slice(0, 400) : JSON.stringify(data).slice(0, 600); } catch (_) {}
-  }
-  // Redact values that look like secrets (tokens, keys, passwords) before logging
-  const _redact = (s) => String(s).replace(/(?:token|key|secret|password|apikey|api_key)["'\s:=]+[^\s"']+/gi, '$1=***');
-  entry.message = _redact(entry.message);
-  if (entry.data) entry.data = _redact(entry.data);
-  LOG_RING.push(entry);
-  if (LOG_RING.length > LOG_RING_MAX) LOG_RING.shift();
-  if (lvl >= LOG_LEVELS[LOG_CONSOLE_MIN]) {
-    // Sanitize for console: format as static template, break data-flow to env
-    const ts = entry.t.slice(11, 23);
-    const lvlTag = level.toUpperCase();
-    const comp = entry.component;
-    const msg = String(entry.message || '');
-    const dt = entry.data ? ' ' + String(entry.data) : '';
-    if (level === 'error') console.error(`[${ts}][${lvlTag}][${comp}] ${msg}${dt}`);
-    else if (level === 'warn') console.warn(`[${ts}][${lvlTag}][${comp}] ${msg}${dt}`);
-    else console.log(`[${ts}][${lvlTag}][${comp}] ${msg}${dt}`);
-  }
-  return entry;
-}
-const logInfo = (c, m, d) => athenaLog('info', c, m, d);
-const logWarn = (c, m, d) => athenaLog('warn', c, m, d);
-const logError = (c, m, d) => athenaLog('error', c, m, d);
-
+// Backed by worker/runtime-logs.js: bounded ring, redacted fields, unique
+// cursors (survives rotation), full stack traces for Error payloads, and a
+// machine-readable /log --json + GET /api/logs. /log [n] shows the same ring.
+const logInfo = (c, m, d) => writeRuntimeLog('info', c, m, d);
+const logWarn = (c, m, d) => writeRuntimeLog('warn', c, m, d);
+const logError = (c, m, d) => writeRuntimeLog('error', c, m, d);
 function runInBackground(env, promise) {
   if (env.__ctx?.waitUntil) env.__ctx.waitUntil(promise);
   else Promise.resolve(promise).catch(() => {});
+}
+
+/** Persisted follow heartbeat, throttled to one write per chat per minute
+ *  (capture runs per message — unthrottled this would double DB writes). */
+const FOLLOW_SEEN_AT = new Map();
+async function touchFollowSeen(env, chatId) {
+  const key = String(chatId || '');
+  if (!key) return;
+  const now = Date.now();
+  if ((FOLLOW_SEEN_AT.get(key) || 0) > now - 60_000) return;
+  FOLLOW_SEEN_AT.set(key, now);
+  await env.DB.prepare('UPDATE userbot_follows SET last_seen_at = ? WHERE chat_id = ?').bind(now, key).run().catch(() => {});
 }
 
 /** Collect the tag vocabulary a community/user already uses, newest rows first. */
@@ -15166,7 +16590,16 @@ function parseAiDescribeResponse(text) {
   return { title, description, tags };
 }
 
-async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], config = undefined) {
+// AI circuit breaker: once the model chain is exhausted (provider down / 429
+// / model missing), stop hammering it and let every caller fall through to the
+// inbuilt context-tag logic for a cooldown window, instead of retrying a dead
+// endpoint thousands of times during a backfill. A successful call clears it.
+let AI_DOWN_UNTIL = 0;
+const AI_DOWN_COOLDOWN_MS = 60_000;
+function aiTrip() { AI_DOWN_UNTIL = Date.now() + AI_DOWN_COOLDOWN_MS; }
+
+async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], config = undefined, reviewTags = null, bannedTags = null) {
+  if (Date.now() < AI_DOWN_UNTIL) return null;
   let cfg;
   if (config === undefined) {
     try { cfg = await getInstanceAiConfig(env); } catch (_) { return null; }
@@ -15194,24 +16627,33 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
     .map(tag => String(tag).replace(/^#/, '').trim().toLowerCase())
     .filter(tag => tag && !['telegram', 'community', 'personal', 'dump'].includes(tag))
     .filter((tag, index, all) => all.indexOf(tag) === index);
+  const canonical = [...CANONICAL_TAGS].sort();
   const mode = (cfg.mode || 'openai').toLowerCase();
 
+  const reviewing = Array.isArray(reviewTags);
   const system = [
     'You are a bookmarking assistant for a link archive.',
     'Translate the title, summary, and tags to English before returning them, even when the source page is in another language.',
     'Return a useful context summary in 1-2 factual English sentences: preserve the question, problem, subject, or decision the page is about, not just the site name.',
     'Return an English title when the source title is not English.',
-    'Choose 3-7 short lowercase English tags (no #, no spaces) that describe the content.',
+    'Choose 3-7 short lowercase English tags (no #, no spaces) that describe WHAT the page is and does — its topic, type, and platform.',
+    'Tags must be common nouns for the subject matter (music, video, vpn, coding, tutorial, app, bot, game). NEVER use proper nouns as tags: no site names, project names, person names, usernames, or domain words — even if they appear in the title or URL. The one exception is a brand from the canonical list, and only when the page is about that brand.',
     'Reuse an existing tag exactly whenever it fits; do not invent a synonym for an existing tag.',
-    'Derive tags from the extracted page content, title, URL, and existing vocabulary; never use a fixed application taxonomy.',
+    'Choose tags only from the canonical list and the existing vocabulary given below. Never invent a word; returning fewer tags is correct when nothing fits.',
+    reviewing
+      ? 'REVIEW the current tags: DROP ingest junk (backfill, dump, untagged, duplicate, saved, link, file, community, personal, post, channel, feed, archive, auto, import, share, forward, media, attachment, document, upload, rss) and anything unrelated to the content; KEEP every current tag that truly describes it (e.g. keep telegram only for Telegram-related links); ADD missing topic and platform tags. For apps include the platform: android, ios, or multiplatform when it runs on several OSes.'
+      : '',
     'Reply with ONLY one JSON object: {"title": "...", "description": "...", "tags": ["a", "b", "c"]}'
-  ].join(' ');
+  ].filter(Boolean).join(' ');
 
   const user = [
     `Title: ${title || '(unknown)'}`,
     `URL: ${rawUrl}`,
     snippet ? `Page content: ${snippet}` : '',
     vocab.length ? `Existing tags: ${vocab.join(', ')}` : '',
+    `Canonical tags: ${canonical.join(', ')}`,
+    reviewing ? `Current tags on this bookmark: ${reviewTags.join(', ') || '(none)'}` : '',
+    Array.isArray(bannedTags) && bannedTags.length ? `NEVER use as tags (site/project names): ${bannedTags.join(', ')}` : '',
     '',
     'JSON:'
   ].filter(Boolean).join('\n');
@@ -15247,6 +16689,7 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
         console.error(`AI link enrichment failed ${curModel} ${res.status}`, errorText.slice(0,180));
         recordAiError({ model: curModel, status: res.status, endpoint, message: `link enrichment: ${errorText.slice(0, 200) || res.statusText}`, source: 'enrichment' });
         if (isRetryable && mi < tryModels.length-1) { await new Promise(r=>setTimeout(r, waitMs)); continue; }
+        aiTrip();
         return null;
       }
       const contentType = res.headers.get('content-type') || '';
@@ -15286,15 +16729,23 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
               : String(data?.choices?.[0]?.message?.reasoning_content || data?.output_text || JSON.stringify(content || ''));
         }
       }
-      return parseAiDescribeResponse(text);
+      const parsed = parseAiDescribeResponse(text);
+      if (parsed) {
+        // Enforce the vocabulary once, here, so no model output reaches storage
+        // unvalidated on any path (save, backfill, review).
+        parsed.tags = validateTags(parsed.tags, { vocabulary: vocab }).tags;
+      }
+      return parsed;
     } catch (err) {
       lastError = err;
       console.error('AI link enrichment request failed', err?.message || err);
       if (mi < tryModels.length-1) continue;
+      aiTrip();
       return null;
     }
   }
   console.error('AI all fallbacks failed', lastError?.message||'');
+  aiTrip();
   return null;
 }
 
@@ -15324,6 +16775,10 @@ async function formatSavedLinkReply(env, kindLabel, title, rawUrl, ai, fallbackN
 // and rank-aware targets as channel indexing. The session is AES-GCM
 // encrypted at rest; /userbot_disconnect deletes it entirely.
 
+function formatUserbotIdentity(account, status) {
+  return `Label: ${codeHtml(account.label)}\nAccount: ${account.telegram_username ? escHtml('@' + account.telegram_username) : 'username not set'}\nName: ${escHtml(account.display_name || 'not verified')}\nUser ID: ${codeHtml(account.telegram_id || 'not verified')}\nPhone: ${escHtml(account.phone_masked || 'not shared')}\nSession: ********\nStatus: ${escHtml(status)}`;
+}
+
 async function ensureUserbotTables(env) {
   await env.DB.prepare(
     `CREATE TABLE IF NOT EXISTS userbot_accounts (
@@ -15331,11 +16786,16 @@ async function ensureUserbotTables(env) {
        session_enc TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
        last_error TEXT, updated_at BIGINT)`
   ).run();
+  for (const definition of ['telegram_id TEXT', 'telegram_username TEXT', 'display_name TEXT', 'phone_masked TEXT', 'verified_at BIGINT']) {
+    try { await env.DB.prepare(`ALTER TABLE userbot_accounts ADD COLUMN ${definition}`).run(); }
+    catch (error) { if (!/duplicate column|already exists/i.test(String(error.message))) throw error; }
+  }
   await env.DB.prepare(
     `CREATE TABLE IF NOT EXISTS userbot_follows (
-       chat_id TEXT PRIMARY KEY, label TEXT NOT NULL DEFAULT 'main',
-       community_id TEXT NOT NULL, target TEXT NOT NULL DEFAULT 'community',
-       created_by TEXT, created_at BIGINT NOT NULL)`
+       chat_id TEXT NOT NULL, label TEXT NOT NULL DEFAULT 'main',
+       community_id TEXT NOT NULL DEFAULT '', target TEXT NOT NULL DEFAULT 'community',
+       created_by TEXT, created_at BIGINT NOT NULL,
+       PRIMARY KEY (chat_id, community_id))`
   ).run();
   await env.DB.prepare(
     `CREATE TABLE IF NOT EXISTS userbot_errors (
@@ -15344,6 +16804,10 @@ async function ensureUserbotTables(env) {
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_userbot_errors_t ON userbot_errors(t)').run().catch(() => {});
   // live-DB migration: older installs created userbot_follows without label
   try { await env.DB.prepare("ALTER TABLE userbot_follows ADD COLUMN label TEXT DEFAULT 'main'").run(); } catch (_) {}
+  // persisted liveness for the 🟢/⚪ follow indicator (memory-only before)
+  try { await env.DB.prepare('ALTER TABLE userbot_follows ADD COLUMN last_seen_at BIGINT').run(); } catch (_) {}
+  // one-chat-one-community → one chat in many communities: rebuild the key.
+  await migrateFollowKeys(env);
   // one-time migration from the old singleton table
   try {
     const legacy = await env.DB.prepare("SELECT * FROM userbot_state WHERE id = 'singleton' AND enabled = 1").first().catch(() => null);
@@ -15361,22 +16825,7 @@ async function ensureUserbotTables(env) {
 
 const USERBOT_ACCOUNTS = new Map(); // label -> { client, startedAt }
 const USERBOT_STARTING = new Set();
-const USERBOT_STATS = new Map(); // chat_id -> {msgs, links, docs, lastAt}
 
-function userbotStat(chatId, field, threadId = null) {
-  const key = String(chatId || '');
-  const s = USERBOT_STATS.get(key) || { msgs: 0, links: 0, docs: 0, lastAt: 0 };
-  if (field) s[field] += 1;
-  s.lastAt = Date.now();
-  USERBOT_STATS.set(key, s);
-  if (threadId != null && String(threadId).trim() !== '' && !key.includes(':')) {
-    const tKey = `${key}:${String(threadId).trim()}`;
-    const t = USERBOT_STATS.get(tKey) || { msgs: 0, links: 0, docs: 0, lastAt: 0 };
-    if (field) t[field] += 1;
-    t.lastAt = Date.now();
-    USERBOT_STATS.set(tKey, t);
-  }
-}
 
 /** Accepts -100… and bare channel ids — returns a stable key. */
 function normalizeTgChatId(id) {
@@ -15386,7 +16835,7 @@ function normalizeTgChatId(id) {
 }
 
 async function userbotLogError(env, label, chatId, error) {
-  const msg = String(error?.message || error).slice(0, 300);
+  const msg = cloneFailure(error).message;
   console.error(`[userbot:${label}] ${chatId || '-'}:`, msg);
   try {
     await env.DB.prepare('INSERT INTO userbot_errors (t, label, chat, error) VALUES (?, ?, ?, ?)')
@@ -15396,53 +16845,6 @@ async function userbotLogError(env, label, chatId, error) {
 }
 
 
-async function isForumEnabled(token, chatId, env) {
-  // Try bot API first
-  try {
-    const res = await telegramApi(token, 'getChat', { chat_id: chatId });
-    if (res?.result?.is_forum) return true;
-  } catch (_) {}
-  // Try via userbot session - check forum flag on dialog
-  try {
-    await ensureUserbotTables(env);
-    const { results } = await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled=1 LIMIT 1').all();
-    if (results?.length) {
-      const label = results[0].label;
-      const acc = USERBOT_ACCOUNTS.get(label);
-      if (acc?.client) {
-        try {
-          const entity = await acc.client.getEntity(chatId);
-          if (entity?.forum) return true;
-        } catch (_) {}
-      }
-    }
-  } catch (_) {}
-  return false;
-}
-
-async function getForumTopicsViaUserbot(env, chatId) {
-  try {
-    await ensureUserbotTables(env);
-    const { results } = await env.DB.prepare('SELECT label FROM userbot_accounts WHERE enabled=1 LIMIT 1').all();
-    if (!results?.length) return [];
-    const label = results[0].label;
-    const acc = USERBOT_ACCOUNTS.get(label);
-    if (!acc?.client) return [];
-    // Use gramjs raw API: channels.GetForumTopics
-    const peer = await acc.client.getInputEntity(chatId);
-    const result = await acc.client.invoke(new (await import('telegram/tl')).Api.channels.GetForumTopics({ channel: peer }));
-    // result.topics is array of ForumTopic objects
-    return (result?.topics || []).map(t => ({
-      id: String(t.id),
-      title: t.title || `Topic ${t.id}`,
-      closed: !!t.closed
-    }));
-  } catch (e) {
-    console.error('[forum] get topics failed', e?.message || e);
-    return [];
-  }
-}
-
 function gramjsChatId(message) {
   // gramjs exposes marked ids on message.chatId (-100… for channels/supergroups)
   const id = Number(message?.chatId ?? 0);
@@ -15451,93 +16853,26 @@ function gramjsChatId(message) {
 
 /** Mirror one gramjs message into the sinks of its follow. */
 async function captureGramjsMessage(env, follow, message) {
-  const text = String(message.message || '').trim();
-  if (text.startsWith('/')) return;
-  const _threadId = message.replyTo?.replyToTopId != null ? String(message.replyTo.replyToTopId) : null;
-  userbotStat(follow.chat_id, 'msgs', _threadId);
   const target = CHANNEL_TARGETS.has(follow.target) ? follow.target : 'community';
   const personalOwner = target === 'community' ? null : String(follow.created_by || '');
-  const sinks = sinkTargetsFor(target, personalOwner);
-  const urls = urlsFromGramjsMessage(message);
-  try { console.log(`[userbot:${follow.label}] live msg ${follow.chat_id} id=${message.id} links=${urls.length}`); } catch (_) {}
   const acc = USERBOT_ACCOUNTS.get(follow.label);
-
-  const liveSrc = follow.chat_id != null ? String(follow.chat_id) : null;
-  const liveTransfer = follow.chat_id != null ? `live:${follow.chat_id}` : null;
-  const liveMsgId = message.id != null ? String(message.id) : null;
-
-  // Batch posts: group many links in one message under shared heading/tags.
-  let batchPlan = null;
-  if (urls.length > 1) {
-    try {
-      const _vocab = target === 'community'
-        ? await recentTagsForScope(env, 'community', follow.community_id).catch(() => [])
-        : await recentTagsForScope(env, 'personal', personalOwner || '').catch(() => []);
-      const _plan = await planBatchGroups(env, urls, text, _vocab || []);
-      if (_plan && _plan.groups && _plan.groups.some((g) => g.urls.length > 1 || (g.heading && g.urls.length >= 1))) {
-        const urlMap = new Map();
-        for (const g of _plan.groups) for (const u of g.urls) urlMap.set(u, { title: groupCardTitle(g, u), tags: g.tags || [] });
-        batchPlan = { urlMap };
-      }
-    } catch (_) { batchPlan = null; }
-  }
-
-  for (const sink of sinks) {
-    try {
-      if (sink === 'personal') {
-        if (urls.length) {
-          const n = await savePersonalIndexedLinks(env, personalOwner, urls, 'userbot', text, liveTransfer, liveSrc, liveMsgId, batchPlan);
-          if (n) { for (let i=0;i<n;i++) userbotStat(follow.chat_id, 'links', _threadId); }
-        }
-        const media = message.media;
-        if (media?.className === 'MessageMediaDocument' && media.document) {
-          const docu = media.document;
-          const fnameAttr = (docu.attributes || []).find((a) => a.className === 'MessageAttributeFilename');
-          const filename = fnameAttr?.fileName || '';
-          const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
-          if ((DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) && Number(docu.size || 0) <= CONVERT_SOURCE_MAX_BYTES) {
-            const buf = await acc.client.downloadMedia(message, {});
-            if (buf?.length) {
-              await savePersonalIndexedDocument(env, personalOwner, filename, ext, new Uint8Array(buf), `userbot:${follow.chat_id}`, { chatId: follow.chat_id, messageId: message.id }, liveTransfer);
-              userbotStat(follow.chat_id, 'docs', _threadId);
-            }
-          }
-        }
-        if (!urls.length && !message.media && text.length >= 80) {
-          const safeName = String(follow.chat_id).replace(/[^\w-]+/g, '_').slice(0, 40);
-          const md = `# Userbot clone ${follow.chat_id}\n\n${text}`;
-          await savePersonalIndexedDocument(env, personalOwner, `${safeName}_${message.id}.md`, 'md', new TextEncoder().encode(md), `userbot:${follow.chat_id}`, { chatId: follow.chat_id, messageId: message.id }, liveTransfer);
-        }
-        continue;
-      }
-      // community sink
-      if (urls.length) {
-        const n = await saveIndexedLinks(env, follow.community_id, urls, 'userbot', text, 'channel', liveTransfer, liveSrc, liveMsgId, batchPlan);
-        if (n) { for (let i=0;i<n;i++) userbotStat(follow.chat_id, 'links', _threadId); }
-      }
-      const media = message.media;
-      if (media?.className === 'MessageMediaDocument' && media.document) {
-        const docu = media.document;
-        const fnameAttr = (docu.attributes || []).find((a) => a.className === 'MessageAttributeFilename');
-        const filename = fnameAttr?.fileName || '';
-        const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
-        if ((DOCUMENT_EXTENSIONS.has(ext) || CONVERTIBLE_EXTENSIONS.has(ext)) && Number(docu.size || 0) <= CONVERT_SOURCE_MAX_BYTES) {
-          const buf = await acc.client.downloadMedia(message, {});
-          if (buf?.length) {
-            await saveIndexedDocument(env, follow.community_id, filename, ext, new Uint8Array(buf), `userbot:${follow.chat_id}`, { chatId: follow.chat_id, messageId: message.id }, liveTransfer);
-            userbotStat(follow.chat_id, 'docs', _threadId);
-          }
+  const counters = await capturePostIntoSinks(env, sinkTargetsFor(target, personalOwner), {
+    msg: message, communityId: follow.community_id, personalOwner,
+    sourceChatId: follow.chat_id, channelTitle: follow.chat_id,
+    accountLabel: follow.label, ownerId: follow.created_by,
+    downloadMedia: async () => {
+      for (;;) {
+        await ubWaitForRelease(follow.label);
+        try { return await acc.client.downloadMedia(message, {}); }
+        catch (error) {
+          if (!(Number(error?.seconds) > 0)) throw error;
+          ubReportFlood(follow.label, Number(error.seconds));
         }
       }
-      if (!urls.length && !message.media && text.length >= 80) {
-        const safeName = String(follow.chat_id).replace(/[^\w-]+/g, '_').slice(0, 40);
-        const md = `# Userbot clone ${follow.chat_id}\n\n${text}`;
-        await saveIndexedDocument(env, follow.community_id, `${safeName}_${message.id}.md`, 'md', new TextEncoder().encode(md), `userbot:${follow.chat_id}`, { chatId: follow.chat_id, messageId: message.id });
-      }
-    } catch (e) {
-      await userbotLogError(env, follow.label, follow.chat_id, e);
-    }
-  }
+    },
+  });
+  await touchFollowSeen(env, follow.chat_id);
+  return counters;
 }
 
 /** Page dialogs until the chat resolves; returns true when visible. */
@@ -15581,8 +16916,19 @@ export async function startUserbotAccount(env, label = 'main') {
       await env.DB.prepare("UPDATE userbot_accounts SET last_error = 'decrypt failed', updated_at = ? WHERE label = ?").bind(Date.now(), label).run();
       return { ok: false, reason: 'decrypt failed' };
     }
-    const client = new TelegramClient(new StringSession(sessionString), Number(st.api_id) || 0, apiHash, { connectionRetries: 5 });
-    await client.connect();
+    const client = new TelegramClient(new StringSession(sessionString), Number(st.api_id) || 0, apiHash, { connectionRetries: 5, floodSleepThreshold: 0 });
+    try {
+      await client.connect();
+      await ubWaitForRelease(label);
+      const identity = await client.getMe();
+      if (!identity?.id || identity.bot) throw new Error('SESSION_INVALID');
+      const phone = String(identity.phone || '');
+      await env.DB.prepare('UPDATE userbot_accounts SET telegram_id=?,telegram_username=?,display_name=?,phone_masked=?,verified_at=?,last_error=NULL WHERE label=?')
+        .bind(String(identity.id), identity.username ? String(identity.username).slice(0, 64) : null, [identity.firstName, identity.lastName].filter(Boolean).join(' ').slice(0, 200), phone ? '••••' + phone.slice(-4) : null, Date.now(), label).run();
+    } catch (error) {
+      await client.disconnect().catch(() => {});
+      throw error;
+    }
     // Prime entity cache so raw -100… ids resolve for this account.
     try {
       let offsetPeer;
@@ -15618,27 +16964,36 @@ export async function startUserbotAccount(env, label = 'main') {
         const variants = [chatId];
         if (/^-100\d+$/.test(chatId)) variants.push(chatId.slice(4)); // bare channel id
         else if (/^\d{9,}$/.test(chatId)) variants.push(`-100${chatId}`);
-        let follow = null;
+        // One chat can feed many communities: capture into EVERY matching
+        // follow (whole-chat keys, then topic keys) instead of the first.
+        const follows = [];
+        const seenFollowKeys = new Set();
         for (const v of variants) {
-          follow = await env.DB.prepare('SELECT * FROM userbot_follows WHERE chat_id = ? AND label = ?').bind(v, label).first();
-          if (follow) break;
+          const rows = await env.DB.prepare('SELECT * FROM userbot_follows WHERE chat_id = ? AND label = ?').bind(v, label).all().catch(() => null);
+          for (const r of (rows?.results || rows || [])) {
+            const k = `${r.chat_id}|${r.community_id}|${r.target}`;
+            if (!seenFollowKeys.has(k)) { seenFollowKeys.add(k); follows.push(r); }
+          }
         }
         // Forum topics: also try chatId:threadId when this message is in a topic
-        if (!follow) {
+        {
           const _tid = message?.replyTo?.replyToTopId != null ? String(message.replyTo.replyToTopId) : null;
           if (_tid) {
             for (const v of variants) {
               const tk = `${v}:${_tid}`;
-              const tf = await env.DB.prepare('SELECT * FROM userbot_follows WHERE chat_id = ? AND label = ?').bind(tk, label).first();
-              if (tf) { follow = tf; break; }
+              const rows = await env.DB.prepare('SELECT * FROM userbot_follows WHERE chat_id = ? AND label = ?').bind(tk, label).all().catch(() => null);
+              for (const r of (rows?.results || rows || [])) {
+                const k = `${r.chat_id}|${r.community_id}|${r.target}`;
+                if (!seenFollowKeys.has(k)) { seenFollowKeys.add(k); follows.push(r); }
+              }
             }
           }
         }
-        if (DEBUG_UB) console.log(`[userbot:${label}] msg from ${chatId} → ${follow ? 'FOLLOWED' : 'not followed'}`);
-        if (!follow) return;
+        if (DEBUG_UB) console.log(`[userbot:${label}] msg from ${chatId} → ${follows.length ? `FOLLOWED x${follows.length}` : 'not followed'}`);
+        if (!follows.length) return;
         // scrape + AI-tagging inside saveIndexedLinks can take seconds — run
         // it detached so it never blocks gramJS's update dispatch loop.
-        runInBackground(env, captureGramjsMessage(env, follow, message));
+        for (const follow of follows) runInBackground(env, captureGramjsMessage(env, follow, message));
       } catch (e) {
         if (e && typeof e.seconds === 'number') await sleep(Math.min(e.seconds * 1000, 300_000));
         else await userbotLogError(env, label, chatId, e);
@@ -15664,8 +17019,12 @@ export async function startUserbotAccount(env, label = 'main') {
     const liveCheck = async () => {
       let timer;
       try {
+        // A flood-wait is rate-limiting, not a wedged socket. Wait on the
+        // session gate (bounded) and treat a flood-style failure as alive so
+        // the reconnect counter is not tripped by a normal backoff.
+        await Promise.race([ubWaitForRelease(label), sleep(9000)]).catch(() => {});
         const raced = await Promise.race([
-          client.getDialogs({ limit: 1 }).then(() => true).catch(() => false),
+          client.getDialogs({ limit: 1 }).then(() => true).catch((e) => (e && typeof e.seconds === 'number') ? true : false),
           new Promise((res) => { timer = setTimeout(() => res(false), 10_000); })
         ]);
         return !!raced;
@@ -15691,7 +17050,7 @@ export async function startUserbotAccount(env, label = 'main') {
         console.error(`[userbot:${label}] wedged — full reconnect #${reconnectCycles}`);
         try { await client.disconnect(); } catch (_) {}
         try { await client.connect(); } catch (e) {
-          console.error(`[userbot:${label}] reconnect failed: ${e?.message || e}`);
+          console.error(`[userbot:${label}] reconnect failed: ${cloneFailure(e).message}`);
         }
         if (reconnectCycles >= 4) {
           try {
@@ -15700,6 +17059,7 @@ export async function startUserbotAccount(env, label = 'main') {
           } catch (_) {}
           console.error(`[userbot:${label}] session unreachable — stopping watchdog (refresh via /userbotconnect)`);
           if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = undefined; }
+          USERBOT_ACCOUNTS.delete(label);
         }
       } catch (_) {}
     };
@@ -15711,6 +17071,10 @@ export async function startUserbotAccount(env, label = 'main') {
     runInBackground(env, catchUpUserbotFollows(env, label));
     console.log(`[userbot:${label}] connected`);
     return { ok: true };
+  } catch (error) {
+    const failure = cloneFailure(error);
+    await env.DB.prepare('UPDATE userbot_accounts SET last_error=?,updated_at=? WHERE label=?').bind(failure.message, Date.now(), label).run();
+    return { ok: false, reason: failure.message };
   } finally {
     USERBOT_STARTING.delete(label);
   }
@@ -15742,10 +17106,13 @@ export async function catchUpUserbotFollows(env, label = 'main') {
       const opts = { limit: 12 };
       if (thread) opts.replyTo = Number(thread);
       // Resolve the entity so numeric ids keep working right after connect.
-      await acc.client.getEntity(base).catch(() => {});
+      // Shared session gate: coordinate this sweep with any backfill on the
+      // same account label instead of re-tripping its flood wait.
+      await ubWaitForRelease(label).catch(() => {});
+      await acc.client.getEntity(base).catch((e) => { if (e && typeof e.seconds === 'number') ubReportFlood(label, e.seconds); });
       let msgs = null;
-      try { msgs = await acc.client.getMessages(base, opts); }
-      catch (err) { await userbotLogError(env, label, base, err).catch(() => {}); }
+      try { await ubWaitForRelease(label); msgs = await acc.client.getMessages(base, opts); }
+      catch (err) { if (err && typeof err.seconds === 'number') ubReportFlood(label, err.seconds); await userbotLogError(env, label, base, err).catch(() => {}); }
       if (!msgs?.length) continue;
       chats++;
       const maxId = Math.max(...msgs.map((m) => Number(m.id || 0)));
@@ -15780,6 +17147,10 @@ async function stopUserbotAccount(env, label, deleteRow = true) {
   const acc = USERBOT_ACCOUNTS.get(label);
   if (acc) { try { await acc.client.disconnect(); } catch (_) {} if (acc.keepalive) clearInterval(acc.keepalive); USERBOT_ACCOUNTS.delete(label); }
   if (deleteRow) {
+    await ensureUcloneTables(env);
+    await ensureIndexTables(env);
+    await env.DB.prepare("UPDATE index_jobs SET status='stopping',updated_at=? WHERE userbot_label=? AND status IN ('queued','running')").bind(Date.now(), label).run();
+    await env.DB.prepare('DELETE FROM userbot_selections WHERE label=?').bind(label).run();
     await env.DB.prepare('DELETE FROM userbot_accounts WHERE label = ?').bind(label).run();
     await env.DB.prepare('DELETE FROM userbot_follows WHERE label = ?').bind(label).run();
   } else {
@@ -15788,389 +17159,431 @@ async function stopUserbotAccount(env, label, deleteRow = true) {
 }
 
 
-/** Build a stats dashboard snapshot for /stats. See docs/superpowers/plans/stats-data-notes.md . */
-export async function buildStatsReport(env, token = null) {
-  const todayCutoff = Date.now() - 86400000;
-  await ensureUserbotTables(env).catch(() => {});
-  await ensureIndexTables(env).catch(() => {});
-  await ensureTopicBindingTable(env).catch(() => {});
-  await ensureTransferColumns(env).catch(() => {});
-  await ensureDocumentsTable(env).catch(() => {});
+/** Sum numeric leaves of counters_json (nested per-sink objects tolerated). */
+function statsMergeCounters(target, obj) {
+  const walk = (node, key) => {
+    if (node == null) return;
+    if (Array.isArray(node)) { for (const v of node) walk(v, key); return; }
+    if (typeof node === 'object') { for (const [k, v] of Object.entries(node)) walk(v, key || k); return; }
+    if (typeof node === 'boolean') node = node ? 1 : 0;
+    if (typeof node !== 'number' || !Number.isFinite(node)) return;
+    const k = key || '_';
+    target[k] = (target[k] || 0) + node;
+  };
+  walk(obj, '');
+  return target;
+}
 
-  let follows = [];
-  try {
-    const r = await env.DB.prepare('SELECT chat_id, label, community_id, target, created_by, created_at FROM userbot_follows ORDER BY created_at DESC').all();
-    follows = r.results || r || [];
-  } catch (_) {}
-  // normalize - array or {results:[]}
-  if (!Array.isArray(follows)) follows = follows.results || [];
-
-  let topicBindings = [];
-  try {
-    const r = await env.DB.prepare('SELECT chat_id, thread_id, community_id, target FROM telegram_topic_bindings ORDER BY chat_id, thread_id').all();
-    topicBindings = r.results || r || [];
-  } catch (_) {}
-  if (!Array.isArray(topicBindings)) topicBindings = topicBindings.results || [];
-
-  let jobs = [];
-  try {
-    const r = await env.DB.prepare('SELECT id, community_id, chat_id, thread_id, status, processed, saved_links, saved_docs, saved_files, skipped_media, urls_seen, updated_at, created_at FROM index_jobs ORDER BY updated_at DESC').all();
-    jobs = r.results || r || [];
-  } catch (_) {}
-  if (!Array.isArray(jobs)) jobs = jobs.results || [];
-
-  // Group topic bindings by chat
-  const topicsByChat = new Map();
-  for (const tb of topicBindings) {
-    const k = normalizeTgChatId(tb.chat_id);
-    if (!topicsByChat.has(k)) topicsByChat.set(k, []);
-    topicsByChat.get(k).push(tb);
+function statsParseCounters(row) {
+  try { return statsMergeCounters({}, JSON.parse(row.counters_json || '{}')); }
+  catch (_) {
+    // Scalar columns are the fallback for jobs written before counters_json.
+    return {
+      messages: Number(row.processed || 0), links: Number(row.urls_seen || 0),
+      savedLinks: Number(row.saved_links || 0), savedFiles: Number(row.saved_files || 0),
+      savedDocs: Number(row.saved_docs || 0), savedPdfs: Number(row.saved_pdfs || 0),
+      other: Number(row.skipped_media || 0), failed: Number(row.errors || row.errors_count || 0),
+      retries: Number(row.retries || 0), duplicates: Number(row.dupes_skipped || 0),
+    };
   }
-  // Group follows: topic follows have suffix ':threadId'
-  const baseFollows = [];
-  const topicFollowMap = new Map(); // "chat:thread" -> follow
-  for (const f of follows) {
-    const raw = String(f.chat_id || '');
-    if (raw.includes(':')) {
-      topicFollowMap.set(raw, f);
-      // also ensure base chat grouping
-      const base = raw.split(':')[0];
-      if (!topicsByChat.has(normalizeTgChatId(base))) topicsByChat.set(normalizeTgChatId(base), []);
+}
+
+function statsAddCounters(a, b) {
+  for (const [k, v] of Object.entries(b || {})) a[k] = (a[k] || 0) + v;
+  return a;
+}
+
+/**
+ * Authoritative /stats snapshot. Managed clones: pending_clones parents
+ * (manager:'uclone') with their index_jobs children joined on the exact
+ * (parent_id, userbot_label, target, community_id, user_id) identity, using the
+ * same counters_json ledger the worker and clone progress render. Standalone
+ * (classic /clone, /uclone range, topic) jobs and live-catchup rows are kept
+ * per run too — destination/account/run isolated, never a source-wide count.
+ * Scope: stats for runs owned by tgUserId (falls back to every run when omitted,
+ * as GOD dashboards previously saw everything).
+ */
+/**
+ * Fresh intake for one source over the rolling 24h, straight from the
+ * destination tables — this is the "latest data" line on the /stats page,
+ * independent of whichever historical run page is open.
+ */
+async function statsLatestActivity(env, target, owner, chatId) {
+  const out = { links: 0, files: 0 };
+  if (!target || !owner || !chatId) return out;
+  const since = Date.now() - 86400000;
+  try {
+    const norm = normalizeTgChatId(chatId);
+    const variants = [String(norm), String(norm).replace(/^-100/, '')];
+    if (target === 'personal') {
+      const r = await env.DB.prepare(
+        'SELECT COUNT(*) AS c FROM personal_links WHERE user_id=? AND created_at>?'
+      ).bind(String(owner), since).first().catch(() => null);
+      out.links = Number(r?.c || 0);
+      const d = await env.DB.prepare(
+        "SELECT COUNT(*) AS c FROM uploaded_documents WHERE scope='personal' AND user_id=? AND created_at>?"
+      ).bind(String(owner), since).first().catch(() => null);
+      out.files = Number(d?.c || 0);
     } else {
-      baseFollows.push(f);
+      const ph = variants.map(() => '?').join(',');
+      const r = await env.DB.prepare(
+        `SELECT COUNT(*) AS c FROM links WHERE community_id=? AND source_chat_id IN (${ph}) AND created_at>?`
+      ).bind(String(owner), ...variants, since).first().catch(() => null);
+      out.links = Number(r?.c || 0);
+      const d = await env.DB.prepare(
+        `SELECT COUNT(*) AS c FROM uploaded_documents WHERE community_id=? AND source_chat_id IN (${ph}) AND created_at>?`
+      ).bind(String(owner), ...variants, since).first().catch(() => null);
+      out.files = Number(d?.c || 0);
     }
-  }
-  // Derive forum chat ids: either isForum via tokens or bindings exist or topic follows
-  const chatIds = new Set();
-  for (const f of baseFollows) chatIds.add(normalizeTgChatId(f.chat_id));
-  for (const k of topicsByChat.keys()) chatIds.add(k);
-  for (const k of topicFollowMap.keys()) chatIds.add(normalizeTgChatId(k.split(':')[0]));
+  } catch (_) {}
+  return out;
+}
 
-  // Helpers for counts
-  async function countLinksForTransfer(transferIds, communityId, userIdForPersonal, target, todayOnly = false) {
-    if (!transferIds.length && !communityId && !userIdForPersonal) return 0;
-    const cutoffClause = todayOnly ? ' AND created_at > ' + todayCutoff : '';
-    // personal
-    if (target === 'personal' && userIdForPersonal) {
-      if (transferIds.length) {
-        const ph = transferIds.map(() => '?').join(',');
-        try {
-          const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM personal_links WHERE (transfer_id IN (${ph}) OR user_id = ?) ${todayOnly ? 'AND created_at > ?' : ''}`).bind(...transferIds, userIdForPersonal, ...(todayOnly ? [todayCutoff] : [])).first();
-          return Number(r?.c || 0);
-        } catch (_) {}
-      }
-      try {
-        const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM personal_links WHERE user_id = ?${cutoffClause}`).bind(userIdForPersonal).first();
-        return Number(r?.c || 0);
-      } catch (_) { return 0; }
-    }
-    // community / both: count community plus personal for both case
-    let total = 0;
-    if (communityId) {
-      if (transferIds.length) {
-        const ph = transferIds.map(() => '?').join(',');
-        try {
-          const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM links WHERE (transfer_id IN (${ph}) OR community_id = ?) ${todayOnly ? 'AND created_at > ?' : ''}`).bind(...transferIds, communityId, ...(todayOnly ? [todayCutoff] : [])).first();
-          total += Number(r?.c || 0);
-        } catch (_e) {
-          try {
-            const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM links WHERE community_id = ?${cutoffClause}`).bind(communityId).first();
-            total += Number(r?.c || 0);
-          } catch (_) {}
-        }
-      } else {
-        try {
-          const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM links WHERE community_id = ?${cutoffClause}`).bind(communityId).first();
-          total += Number(r?.c || 0);
-        } catch (_) {}
-      }
-    }
-    if (target === 'both' && userIdForPersonal) {
-      if (transferIds.length) {
-        const ph = transferIds.map(() => '?').join(',');
-        try {
-          const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM personal_links WHERE (transfer_id IN (${ph}) OR user_id = ?) ${todayOnly ? 'AND created_at > ?' : ''}`).bind(...transferIds, userIdForPersonal, ...(todayOnly ? [todayCutoff] : [])).first();
-          total += Number(r?.c || 0);
-        } catch (_) {}
-      } else {
-        try {
-          const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM personal_links WHERE user_id = ?${cutoffClause}`).bind(userIdForPersonal).first();
-          total += Number(r?.c || 0);
-        } catch (_) {}
-      }
-    }
-    return total;
-  }
+/** True when a run has actually saved something worth a page. */
+function statsRunHasContent(overall) {
+  if (!overall) return false;
+  return ['savedLinks', 'savedLinkPosts', 'savedFiles', 'savedDocs', 'savedPdfs',
+    'savedMarkdown', 'savedJson', 'savedHtml', 'savedImages', 'savedAudio', 'savedOther']
+    .some((k) => Number(overall[k] || 0) > 0);
+}
 
-  async function countDocs(chatNorm, communityId, userIdForPersonal, target, todayOnly = false) {
-    const cutoff = todayOnly ? todayCutoff : 0;
-    let total = 0;
-    // docs are per-chat via source_chat_id when present, else transfer fallback is handled via transfer counts in jobs; but we also do source query
-    if (communityId && (target === 'community' || target === 'both')) {
-      try {
-        if (todayOnly) {
-          const r = await env.DB.prepare('SELECT COUNT(*) as c FROM uploaded_documents WHERE scope = ? AND community_id = ? AND source_chat_id = ? AND created_at > ?').bind('community', communityId, chatNorm, cutoff).first();
-          const r2 = await env.DB.prepare('SELECT COUNT(*) as c FROM uploaded_documents WHERE scope = ? AND community_id = ? AND source_chat_id = ? AND created_at > ?').bind('community', communityId, chatNorm.replace(/^-100/, ''), cutoff).first().catch(() => ({ c: 0 }));
-          total += Number(r?.c || 0) + Number(r2?.c || 0);
-        } else {
-          const r = await env.DB.prepare('SELECT COUNT(*) as c FROM uploaded_documents WHERE scope = ? AND community_id = ? AND source_chat_id = ?').bind('community', communityId, chatNorm).first();
-          const r2 = await env.DB.prepare('SELECT COUNT(*) as c FROM uploaded_documents WHERE scope = ? AND community_id = ? AND source_chat_id = ?').bind('community', communityId, chatNorm.replace(/^-100/, '')).first().catch(() => ({ c: 0 }));
-          total += Number(r?.c || 0) + Number(r2?.c || 0);
-        }
-      } catch (_) {}
-      // also bare docs without source_chat for community fallback (when source wasn't set on early rows)
-      try {
-        if (todayOnly) {
-          const r = await env.DB.prepare('SELECT COUNT(*) as c FROM uploaded_documents WHERE scope = ? AND community_id = ? AND created_at > ?').bind('community', communityId, cutoff).first();
-          // only use community-wide when no per-chat count (avoid double); prefer source-specific
-          if (!total) total = Number(r?.c || 0);
-        }
-      } catch (_) {}
-    }
-    if (userIdForPersonal && (target === 'personal' || target === 'both')) {
-      try {
-        if (todayOnly) {
-          const r = await env.DB.prepare('SELECT COUNT(*) as c FROM uploaded_documents WHERE scope = ? AND user_id = ? AND source_chat_id = ? AND created_at > ?').bind('personal', userIdForPersonal, chatNorm, cutoff).first();
-          total += Number(r?.c || 0);
-        } else {
-          const r = await env.DB.prepare('SELECT COUNT(*) as c FROM uploaded_documents WHERE scope = ? AND user_id = ? AND source_chat_id = ?').bind('personal', userIdForPersonal, chatNorm).first();
-          total += Number(r?.c || 0);
-        }
-      } catch (_) {}
-    }
-    return total;
-  }
+export async function buildStatsReport(env, _token = null, scope = null) {
+  const now = Date.now();
+  await ensureUcloneTables(env).catch(() => {});
+  await ensureIndexTables(env).catch(() => {});
 
-  async function countPhotos(chatNorm, communityId, userIdForPersonal, target, todayOnly = false) {
-    const cutoff = todayOnly ? todayCutoff : 0;
-    let total = 0;
-    // photos are vault docs with filename like photo-% (from vaultSave) OR MessageMediaPhoto stored as doc note
-    // check uploaded_documents where filename LIKE 'photo-%'
-    const whereToday = todayOnly ? ' AND created_at > ' + cutoff : '';
-    if (communityId && (target === 'community' || target === 'both')) {
-      try {
-        const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM uploaded_documents WHERE scope='community' AND community_id=? AND source_chat_id=? AND filename LIKE 'photo-%'${whereToday}`).bind(communityId, chatNorm).first();
-        total += Number(r?.c || 0);
-        const r2 = await env.DB.prepare(`SELECT COUNT(*) as c FROM uploaded_documents WHERE scope='community' AND community_id=? AND source_chat_id=? AND filename LIKE 'photo-%'${whereToday}`).bind(communityId, chatNorm.replace(/^-100/, '')).first().catch(() => ({ c: 0 }));
-        total += Number(r2?.c || 0);
-      } catch (_) {}
-    }
-    if (userIdForPersonal && (target === 'personal' || target === 'both')) {
-      try {
-        const r = await env.DB.prepare(`SELECT COUNT(*) as c FROM uploaded_documents WHERE scope='personal' AND user_id=? AND source_chat_id=? AND filename LIKE 'photo-%'${whereToday}`).bind(userIdForPersonal, chatNorm).first();
-        total += Number(r?.c || 0);
-      } catch (_) {}
-    }
-    return total;
-  }
+  const requesterTgId = scope?.requesterTgId != null ? String(scope.requesterTgId) : null;
+  const athenaUserId = scope?.athenaUserId != null ? String(scope.athenaUserId) : null;
 
-  const jobsByChat = new Map();
-  const jobsByChatThread = new Map();
-  for (const j of jobs) {
-    const kn = normalizeTgChatId(j.chat_id);
-    if (!jobsByChat.has(kn)) jobsByChat.set(kn, []);
-    jobsByChat.get(kn).push(j);
-    const kt = kn + ':' + (j.thread_id || '');
-    if (!jobsByChatThread.has(kt)) jobsByChatThread.set(kt, []);
-    jobsByChatThread.get(kt).push(j);
-  }
-
-  const chats = [];
-  for (const chatNorm of chatIds) {
-    const baseFollow = baseFollows.find((f) => normalizeTgChatId(f.chat_id) === chatNorm);
-    const anyFollow = baseFollow || [...topicFollowMap.values()].find((f) => normalizeTgChatId(String(f.chat_id).split(':')[0]) === chatNorm);
-    if (!anyFollow) continue;
-    const communityId = anyFollow.community_id || null;
-    const target = CHANNEL_TARGETS.has(anyFollow.target) ? anyFollow.target : 'community';
-    const personalOwner = target === 'community' ? null : String(anyFollow.created_by || '');
-    const label = anyFollow.label || 'main';
-
-    // jobs for this chat (all threads inclusive)
-    const allJobsForChat = jobsByChat.get(chatNorm) || [];
-    const transferIds = allJobsForChat.map((j) => j.id);
-    // also live prefix
-    const liveIds = [`live:${chatNorm}`, `live:${chatNorm.replace(/^-100/, '')}`];
-
-    // Resolve name via getChat or userbot entity
-    let name = chatNorm;
-    let chatType = 'unknown';
-    let isForum = false;
-    if (token) {
-      try {
-        const ch = await telegramApi(token, 'getChat', { chat_id: chatNorm });
-        if (ch?.ok && ch.result) {
-          name = ch.result.title || (ch.result.username ? '@' + ch.result.username : chatNorm);
-          if (ch.result.type === 'channel') chatType = 'channel';
-          else if (ch.result.type === 'supergroup') chatType = topicsByChat.has(chatNorm) ? 'forum' : 'group';
-          else if (ch.result.type === 'group') chatType = 'group';
-          isForum = !!ch.result.is_forum;
-        }
-      } catch (_) {}
-    }
-    if (name === chatNorm) {
-      const acc = USERBOT_ACCOUNTS.get(label);
-      if (acc?.client) {
-        try {
-          const ent = await acc.client.getEntity(chatNorm);
-          if (ent?.title || ent?.username) name = ent.title || '@' + ent.username;
-          if (ent?.forum) isForum = true;
-          if (ent?.broadcast) chatType = 'channel';
-          else if (ent?.megagroup) chatType = isForum ? 'forum' : 'group';
-        } catch (_) {}
-      }
-    }
-    if (!isForum && topicsByChat.has(chatNorm) && (topicsByChat.get(chatNorm) || []).length) isForum = true;
-    if (chatType === 'unknown') chatType = isForum ? 'forum' : 'group';
-
-    // Counts: links/files/photos, today
-    const totalLinks = await countLinksForTransfer([...transferIds, ...liveIds], communityId, personalOwner, target, false);
-    const todayLinks = await countLinksForTransfer([...transferIds, ...liveIds], communityId, personalOwner, target, true);
-    const totalDocs = await countDocs(chatNorm, communityId, personalOwner, target, false);
-    const todayDocs = await countDocs(chatNorm, communityId, personalOwner, target, true);
-    const totalPhotos = await countPhotos(chatNorm, communityId, personalOwner, target, false);
-    const todayPhotos = await countPhotos(chatNorm, communityId, personalOwner, target, true);
-
-    // Fallback to job aggregates when per-source counts are zero but jobs report saved values
-    let jobLinks = 0, jobDocs = 0, jobFiles = 0, jobSkipped = 0;
-    for (const j of allJobsForChat) {
-      jobLinks += Number(j.saved_links || 0);
-      jobDocs += Number(j.saved_docs || 0);
-      jobFiles += Number(j.saved_files || 0);
-      jobSkipped += Number(j.skipped_media || 0);
-    }
-
-    const totalMsgs = allJobsForChat.reduce((a, j) => a + Number(j.processed || 0), 0);
-
-    // Live flag: ephemeral USERBOT_STATS within 24h OR still connected account for that label
-    const stat = USERBOT_STATS.get(chatNorm) || USERBOT_STATS.get(chatNorm.replace(/^-100/, '')) || null;
-    const topicStatExists = [...USERBOT_STATS.keys()].some((k) => k.startsWith(chatNorm + ':'));
-    const live = (() => {
-      if (stat && stat.lastAt && Date.now() - stat.lastAt < 86400000) return true;
-      if (topicStatExists) {
-        for (const [k, v] of USERBOT_STATS.entries()) if (k.startsWith(chatNorm + ':') && v.lastAt && Date.now() - v.lastAt < 86400000) return true;
-      }
-      return USERBOT_ACCOUNTS.has(label) && stat && Date.now() - stat.lastAt < 86400000;
-    })();
-
-    // Topics breakdown if forum
-    let topics = null;
-    const bindingsForChat = topicsByChat.get(chatNorm) || [];
-    // include topic follows that have no binding yet (DM clone of topic)
-    const topicIds = new Set(bindingsForChat.map((b) => String(b.thread_id)));
-    for (const [k, f] of topicFollowMap.entries()) {
-      if (normalizeTgChatId(k.split(':')[0]) === chatNorm) {
-        const tid = k.split(':')[1];
-        if (!topicIds.has(tid)) {
-          topicIds.add(tid);
-          bindingsForChat.push({ chat_id: chatNorm, thread_id: tid, community_id: f.community_id, target: f.target });
-        }
-      }
-    }
-    if (isForum && bindingsForChat.length) {
-      topics = [];
-      // Try to resolve titles via userbot
-      let titleMap = new Map();
-      try {
-        const titles = await getForumTopicsViaUserbot(env, chatNorm).catch(() => []);
-        for (const t of titles || []) titleMap.set(String(t.id), t.title);
-      } catch (_) {}
-      for (const tb of bindingsForChat) {
-        const tid = String(tb.thread_id);
-        const tJobs = jobsByChatThread.get(chatNorm + ':' + tid) || [];
-        const tTransferIds = tJobs.map((j) => j.id);
-        // Per-topic counts prefer jobs aggregate + doc source; links transfer per-topic is exact when jobs have thread_id
-        let tLinks = 0, tLinksToday = 0;
-        if (tTransferIds.length) {
-          tLinks = await countLinksForTransfer([...tTransferIds, `live:${chatNorm}:${tid}`], tb.community_id || communityId, personalOwner, tb.target || target, false);
-          tLinksToday = await countLinksForTransfer([...tTransferIds, `live:${chatNorm}:${tid}`], tb.community_id || communityId, personalOwner, tb.target || target, true);
-        }
-        let jobTDocs = tJobs.reduce((a, j) => a + Number(j.saved_docs || 0), 0);
-        let jobTLinks = tJobs.reduce((a, j) => a + Number(j.saved_links || 0), 0);
-        if (!tLinks && jobTLinks) tLinks = jobTLinks;
-        const tDocs = jobTDocs;
-        const tStat = USERBOT_STATS.get(`${chatNorm}:${tid}`) || null;
-        topics.push({
-          threadId: tid,
-          title: titleMap.get(tid) || null,
-          target: tb.target || target,
-          total: { links: tLinks, docs: tDocs, files: tJobs.reduce((a, j) => a + Number(j.saved_files || 0), 0), photos: 0 },
-          today: { links: tLinksToday, docs: 0, photos: 0 },
-          live: tStat ? { msgs: tStat.msgs || 0, links: tStat.links || 0, docs: tStat.docs || 0, lastAt: tStat.lastAt || null } : { msgs: 0, links: 0, docs: 0, lastAt: null },
-          job: tJobs[0] ? { id: tJobs[0].id, status: tJobs[0].status, processed: tJobs[0].processed || 0, saved_links: tJobs[0].saved_links || 0, saved_docs: tJobs[0].saved_docs || 0 } : null,
-        });
-      }
-      topics.sort((a, b) => Number(a.threadId) - Number(b.threadId));
-    }
-
-    const running = allJobsForChat.filter((j) => j.status === 'running' || j.status === 'queued').length;
-    const done = allJobsForChat.filter((j) => j.status === 'done').length;
-    const err = allJobsForChat.filter((j) => j.status === 'error').length;
-
-    chats.push({
-      id: chatNorm,
-      name,
-      type: chatType,
-      target,
-      communityId,
-      live,
-      isForum: !!isForum,
-      total: {
-        links: totalLinks || jobLinks,
-        docs: totalDocs || jobDocs,
-        files: jobFiles || totalDocs,
-        photos: totalPhotos,
-        msgs: totalMsgs,
-        skippedMedia: jobSkipped,
-      },
-      today: { links: todayLinks, docs: todayDocs, photos: todayPhotos },
-      topics,
-      jobs: { running, done, error: err, all: allJobsForChat },
-    });
-  }
-
-  // Also include community_bots channel bindings that have no follow yet? Brief says userbot_follows + community_bots (channels)
-  // If a channel is linked via community_bots but not yet followed, show with zero counts so user knows
+  // Managed parents (all states — running, queued, error, done, stopped).
+  let parents = [];
   try {
-    const r = await env.DB.prepare("SELECT group_id as chat_id, community_id, COALESCE(channel_target,'community') as target, group_name FROM community_bots WHERE platform='telegram' AND group_id LIKE '-100%'").all().catch(() => ({ results: [] }));
-    const bots = r.results || r || [];
-    const existingIds = new Set(chats.map((c) => String(c.id)));
-    for (const b of (Array.isArray(bots) ? bots : [])) {
-      const cn = normalizeTgChatId(b.chat_id);
-      if (existingIds.has(cn)) continue;
-      let name = b.group_name || cn;
-      let chatType = 'channel';
-      let totalLinks = 0, todayLinks = 0;
-      if (b.community_id) {
-        try {
-          const rr = await env.DB.prepare('SELECT COUNT(*) as c FROM links WHERE community_id=?').bind(b.community_id).first();
-          totalLinks = Number(rr?.c || 0);
-          const rr2 = await env.DB.prepare('SELECT COUNT(*) as c FROM links WHERE community_id=? AND created_at > ?').bind(b.community_id, todayCutoff).first();
-          todayLinks = Number(rr2?.c || 0);
-        } catch (_) {}
-      }
-      chats.push({
-        id: cn,
-        name,
-        type: chatType,
-        target: b.target || 'community',
-        communityId: b.community_id || null,
-        live: false,
-        isForum: false,
-        total: { links: totalLinks, docs: 0, files: 0, photos: 0, msgs: 0, skippedMedia: 0 },
-        today: { links: todayLinks, docs: 0, photos: 0 },
-        topics: null,
-        jobs: { running: 0, done: 0, error: 0, all: [] },
+    const q = requesterTgId
+      ? 'SELECT * FROM pending_clones WHERE (stats_json LIKE \'%"manager":"uclone"%\' OR stats_json LIKE \'%"manager":"botclone"%\') AND requester_tg_id=? ORDER BY created_at DESC'
+      : 'SELECT * FROM pending_clones WHERE (stats_json LIKE \'%"manager":"uclone"%\' OR stats_json LIKE \'%"manager":"botclone"%\') ORDER BY created_at DESC';
+    const r = await env.DB.prepare(q).bind(...(requesterTgId ? [requesterTgId] : [])).all();
+    // Expired parents whose clone reached a terminal stage stay visible with
+    // their final totals; only non-terminal runs drop off after expiry.
+    parents = (r.results || r || []).map((row) => {
+      try {
+        const state = JSON.parse(row.stats_json);
+        if (!['uclone', 'botclone'].includes(state?.manager)) return null;
+        // The /userbot_accounts browser stores its wizard shell with a
+        // literal chat_id of 'accounts' — it is account management UI, never
+        // a cloned source, and must not appear on the dashboard.
+        if (String(row.chat_id || '') === 'accounts') return null;
+        return { ...row, state };
+      } catch (_) { return null; }
+    }).filter((p) => p && (Number(p.expires_at || 0) > now || ['done', 'stopped', 'error'].includes(String(p.state?.stage || ''))));
+    // One page per source, not per run: an old error/stopped transfer must not
+    // linger next to the newer retry of the same chat + destination + owner.
+    // Rows arrive newest-first, so the first row per source key wins.
+    {
+      const seen = new Set();
+      parents = parents.filter((p) => {
+        const key = [normalizeTgChatId(p.chat_id), String(p.target || ''), String(p.community_id || ''), String(p.requester_user_id || '')].join('|');
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
       });
     }
   } catch (_) {}
 
-  return { chats, generatedAt: Date.now() };
+  const ph = (ids) => ids.length ? ids.map(() => '?').join(',') : '';
+  const jobsByParent = new Map();
+  const standalone = [];
+  const liveFollowKeys = new Set();
+  try {
+    const { results: followRows } = await env.DB.prepare('SELECT chat_id, label, community_id, target, created_by FROM userbot_follows').all();
+    for (const f of followRows || []) liveFollowKeys.add([normalizeTgChatId(String(f.chat_id || '').split(':')[0]), String(f.label || ''), String(f.target || ''), String(f.community_id || ''), String(f.created_by || '')].join('|'));
+  } catch (_) {}
+  // Bot-mode live bindings. A linked channel, a whole-group copy or a
+  // followed chat keeps ingesting after every backfill job has finished, so
+  // a run's LIVE flag has to come from the binding too — job status alone
+  // reports OFF between posts, which reads as "live clone stopped" while it
+  // is still on. A topic binding alone is NOT a capture path: bot updates
+  // only reach chats the bot is in and userbot posts only match
+  // userbot_follows rows, so a topic-bound chat with no follow or bot
+  // binding (e.g. its follows were deleted along with their account) must
+  // not report LIVE ON.
+  const liveBoundChats = new Set();
+  const captureChats = new Set();
+  try {
+    const { results: bound } = await env.DB.prepare(
+      `SELECT group_id FROM community_bots
+        WHERE platform = 'telegram' AND group_id IS NOT NULL
+          AND (channel_target IS NOT NULL OR COALESCE(copy_text, 0) = 1)`
+    ).all();
+    for (const row of bound || []) captureChats.add(normalizeTgChatId(row.group_id));
+  } catch (_) {}
+  for (const key of liveFollowKeys) captureChats.add(key.split('|')[0]);
+  for (const c of captureChats) liveBoundChats.add(c);
+  try {
+    const { results: bound } = await env.DB.prepare('SELECT DISTINCT chat_id FROM telegram_topic_bindings').all();
+    for (const row of bound || []) {
+      const c = normalizeTgChatId(row.chat_id);
+      if (captureChats.has(c)) liveBoundChats.add(c);
+    }
+  } catch (_) {}
+  if (parents.length) {
+    let rows = [];
+    try {
+      const r = await env.DB.prepare(`SELECT * FROM index_jobs WHERE parent_id IN (${ph(parents)}) ORDER BY created_at`).bind(...parents.map((p) => p.id)).all();
+      rows = r.results || r || [];
+    } catch (_) {}
+    const kids = new Map();
+    for (const j of rows) {
+      const pid = String(j.parent_id || '');
+      if (!kids.has(pid)) kids.set(pid, []);
+      kids.get(pid).push(j);
+    }
+    for (const p of parents) {
+      const pLabel = String(p.state?.label || '');
+      const pTarget = String(p.target || '');
+      const pCommunity = String(p.community_id || '');
+      const pUser = String(p.requester_user_id || '');
+      const pChat = normalizeTgChatId(p.chat_id);
+      // Exact destination/account/run identity: counters never cross runs, users, destinations or accounts.
+      const mine = (kids.get(String(p.id)) || []).filter((j) =>
+        String(j.userbot_label || '') === pLabel && String(j.target || '') === pTarget &&
+        String(j.community_id || '') === pCommunity && String(j.user_id || '') === pUser &&
+        normalizeTgChatId(j.chat_id) === pChat);
+      const jobRows = [];
+      for (const j of mine) {
+        const counters = statsParseCounters(j);
+        // A topic may save canonical rows before its final checkpoint fails.
+        try {
+          const owner = j.target === 'personal' ? j.user_id : j.community_id;
+          if (owner) {
+            const destination = `${j.target}:${owner}`;
+            const row = await env.DB.prepare("SELECT COUNT(*) AS links, COUNT(DISTINCT message_id) AS posts FROM clone_sources WHERE destination=? AND chat_id=? AND transfer_id=? AND status='saved' AND content_key LIKE 'url:%'")
+              .bind(destination, j.chat_id, j.id).first();
+            counters.savedLinks = Math.max(Number(counters.savedLinks || 0), Number(row?.links || 0));
+            counters.savedLinkPosts = Math.max(Number(counters.savedLinkPosts || 0), Number(row?.posts || 0));
+          }
+        } catch (_) {}
+        jobRows.push({ ...j, counters });
+      }
+      const overall = jobRows.reduce((acc, j) => statsAddCounters(acc, j.counters), {});
+      // Abandoned wizard shells (no child jobs, session expired) are not runs.
+      // Idle shells are not runs either: a wizard parked at destination/topic
+      // picking with no destination saved yet must not add a second,
+      // zero-content row next to the finished clone of the same chat. Only
+      // actively working shells (measuring, queued, cloning) and recent
+      // error feedback stay visible without child jobs.
+      const shellStage = String(p.state?.stage || '');
+      const shellActive = ['scanning', 'queued', 'running', 'stopping'].includes(shellStage);
+      const shellRecentError = shellStage === 'error' && Number(p.expires_at || 0) > now;
+      if (jobRows.length || shellActive || shellRecentError) {
+        jobsByParent.set(String(p.id), { rows: jobRows, overall });
+      }
+    }
+  }
+
+  // Standalone clones are grouped by source chat, account, destination and
+  // owner. Topic rows belong to one run; treating every topic ledger row as a
+  // separate run produced misleading dashboards such as page 1/112.
+  try {
+    const liveFollows = liveFollowKeys;
+    const grouped = new Map();
+    const r = await env.DB.prepare("SELECT * FROM index_jobs WHERE (parent_id IS NULL OR parent_id='') AND status IN ('done','error','stopped','queued','running','stopping') ORDER BY created_at DESC").all();
+    for (const row of (r.results || r || [])) {
+      const baseChat = normalizeTgChatId(String(row.chat_id || '').split(':')[0]);
+      const key = [baseChat, String(row.userbot_label || ''), String(row.target || ''), String(row.community_id || ''), String(row.user_id || '')].join('|');
+      let group = grouped.get(key);
+      if (!group) {
+        group = { chat_id: baseChat, target: row.target, community_id: row.community_id, user_id: row.user_id, state: { label: row.userbot_label || '', sourceName: row.chat_name || baseChat, destinationName: row.target || null }, jobs: [], overall: {}, requester_tg_id: row.requester_tg_id || '', live: liveFollows.has(key) };
+        grouped.set(key, group);
+      }
+      const counters = String(row.id).startsWith('live_') ? await liveCaptureCounters(env, row.id) : statsParseCounters(row);
+      group.jobs.push({ ...row, counters });
+      statsAddCounters(group.overall, counters);
+      group.live ||= liveFollows.has(key);
+    }
+    standalone.push(...grouped.values());
+  } catch (_) {}
+
+  // Visibility: a requester sees their own runs; GOD sees everything.
+  const visibleStandalone = standalone.filter((s) => {
+    if (athenaUserId && String(s.user_id || '') !== athenaUserId) return false;
+    return true;
+  });
+
+  const runs = [];
+  const STALE_MS = 86400000;
+  for (const p of parents) {
+    const agg = jobsByParent.get(String(p.id));
+    // Dropped earlier: abandoned wizard shells with no child jobs.
+    if (!agg) continue;
+    const state = p.state || {};
+    const overall = { ...agg.overall };
+    if (!agg.rows.length) statsMergeCounters(overall, state.counters || {}); // measuring-stage snapshot fallback
+    const target = p.target || state.target;
+    const owner = target === 'personal' ? p.requester_user_id : (p.community_id || state.communityId);
+    const stored = await statsDatabaseCounters(env, target, owner, p.chat_id);
+    if (stored) Object.assign(overall, stored);
+    // Old terminal runs that never saved anything are old logs, not status.
+    if (['done', 'stopped', 'error', 'cancelled'].includes(String(state.stage || '')) &&
+        !statsRunHasContent(overall) && now - Number(p.created_at || 0) > STALE_MS) continue;
+    const topics = [];
+    if (state.isForum) {
+      const chosenList = Array.isArray(state.chosen) ? state.chosen : [];
+      const byThread = new Map();
+      for (const j of agg.rows) if (j.thread_id != null && j.thread_id !== '') byThread.set(String(j.thread_id), j);
+      const cursor = Number(state.cursor || 0);
+      const list = chosenList.length ? chosenList : [...byThread.values()].map((j) => ({ id: j.thread_id, name: j.topic_name || null }));
+      for (const t of list) {
+        const tid = String(t.id ?? '');
+        const job = byThread.get(tid);
+        // Only a real child job's counters_json counts as clone progress; a
+        // pending topic's preview-scan snapshot must not leak in as progress.
+        const c = statsNormalizeCounters(job ? job.counters : {});
+        const state2 = state.stage === 'done' ? 'done'
+          : byThread.has(tid) ? (byThread.get(tid).status === 'done' ? 'done' : 'running')
+          : (state.stage === 'running' || state.stage === 'stopping') && list.indexOf(t) < cursor ? 'done'
+          : (state.stage === 'running' && list.indexOf(t) === cursor) ? 'current' : 'pending';
+        const total = Number(t.counters?.messages ?? c.messages ?? 0);
+        const percent = state2 === 'done' ? 100
+          : total > 0 ? Math.min(100, Math.round(((c.messages || 0) / total) * 100)) : 0;
+        topics.push({
+          threadId: tid, title: t.name || null, total: { links: c.savedLinks || 0, files: c.savedFiles || 0, other: (c.savedOther || 0) + (c.savedHtml || 0) + (c.savedJson || 0) + (c.savedMarkdown || 0) + (c.savedImages || 0) + (c.savedAudio || 0) },
+          percent, done: state2 === 'done', stateMark: state2 === 'done' ? '✅ COMPLETE' : state2 === 'current' ? '🟢 LIVE' : state2 === 'running' ? '⏳ CLONING' : '⏳ PENDING',
+        });
+        if (byThread.get(tid)) byThread.delete(tid);
+      }
+      // Child jobs with no matching chosen topic (legacy/manual) still reported.
+      for (const [tid, j] of byThread) {
+        const c = statsNormalizeCounters(j.counters);
+        topics.push({ threadId: tid, title: j.topic_name || null, total: { links: c.savedLinks || 0, files: c.savedFiles || 0, other: 0 }, percent: j.status === 'done' ? 100 : 0, done: j.status === 'done', stateMark: j.status === 'done' ? '✅ COMPLETE' : '⏳ PENDING' });
+      }
+    }
+    const followKey = [normalizeTgChatId(p.chat_id), String(state.label || ''), String(p.target || ''), String(p.community_id || ''), String(p.requester_user_id || '')].join('|');
+    const latest = await statsLatestActivity(env, p.target, p.target === 'personal' ? p.requester_user_id : p.community_id, p.chat_id);
+    runs.push({
+      id: String(p.id), chat_id: normalizeTgChatId(p.chat_id), state: { ...state, overall, latest, requesterTgId: String(p.requester_tg_id || ''), requesterUserId: String(p.requester_user_id || '') },
+      jobs: agg.rows, live: state.stage === 'running' || agg.rows.some((j) => j.status === 'running' || j.status === 'queued') || liveFollowKeys.has(followKey) || liveBoundChats.has(normalizeTgChatId(p.chat_id)),
+      topics, standalone: false,
+      ids: { parents: [String(p.id)], jobs: (agg.rows || []).map((j) => String(j.id)) },
+      target: p.target || 'community',
+      owner: (p.target || 'community') === 'personal' ? String(p.requester_user_id || '') : String(p.community_id || ''),
+    });
+  }
+  for (const s of visibleStandalone) {
+    const overall = { ...s.overall };
+    const active = s.jobs.some((j) => j.status === 'running' || j.status === 'queued' || j.status === 'stopping');
+    const topicJobs = new Map();
+    for (const job of s.jobs) {
+      if (job.thread_id == null || job.thread_id === '') continue;
+      const tid = String(job.thread_id);
+      const current = topicJobs.get(tid);
+      if (!current || Number(job.updated_at || 0) >= Number(current.updated_at || 0)) topicJobs.set(tid, job);
+    }
+    const topics = [...topicJobs.entries()].map(([threadId, job]) => {
+      const c = statsNormalizeCounters(job.counters);
+      const done = job.status === 'done';
+      return { threadId, title: job.topic_name || null, total: { links: c.savedLinks || 0, files: c.savedFiles || 0, other: (c.savedOther || 0) + (c.savedHtml || 0) + (c.savedJson || 0) + (c.savedMarkdown || 0) + (c.savedImages || 0) + (c.savedAudio || 0) }, percent: done ? 100 : 0, done, stateMark: done ? '✅ COMPLETE' : active ? '🟢 LIVE' : '⏳ PENDING' };
+    });
+    const latest = await statsLatestActivity(env, s.target, s.target === 'personal' ? s.user_id : s.community_id, s.chat_id);
+    const newestJobAt = s.jobs.reduce((m, j) => Math.max(m, Number(j.updated_at || j.created_at || 0)), 0);
+    // Same rule as managed runs: stale terminal groups with zero saved content
+    // are old logs, not status. Live or active groups always stay.
+    if (!active && !s.live && !statsRunHasContent(overall) && now - newestJobAt > STALE_MS) continue;
+    // Remember the destination on the run so the report can group runs that
+    // belong to the same cloned source into one dashboard row.
+    s.target = s.target || 'community';
+    s.owner = s.target === 'personal' ? String(s.user_id || '') : String(s.community_id || '');
+    const state = { ...s.state, isForum: topics.length > 0, stage: active ? 'running' : (s.jobs.some((j) => j.status === 'error') ? 'error' : 'done'), sourceType: topics.length ? 'group' : null, username: null, overall, latest, requesterTgId: String(s.requester_tg_id || ''), requesterUserId: String(s.user_id || '') };
+    runs.push({ id: 'standalone:' + s.jobs.map((j) => j.id).sort().join(','), chat_id: normalizeTgChatId(s.chat_id), state, jobs: s.jobs, live: active || s.live || liveBoundChats.has(normalizeTgChatId(s.chat_id)), topics, standalone: true, ids: { parents: [], jobs: (s.jobs || []).map((j) => String(j.id)) }, target: s.target || 'community', owner: s.owner || '' });
+  }
+
+  // One dashboard row per cloned source: merge every run (managed parents
+  // and standalone backfills) that saved into the same chat + destination.
+  const sources = [];
+  {
+    const byKey = new Map();
+    for (const run of runs) {
+      const key = [run.chat_id, String(run.target || 'community'), String(run.owner || '')].join('|');
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push(run);
+    }
+    for (const groupRuns of byKey.values()) {
+      const first = groupRuns[0];
+      const overall = statsSourceOverall(groupRuns);
+      const live = groupRuns.some((r) => r.live === true);
+      const fresh = { links: 0, files: 0 };
+      for (const r of groupRuns) {
+        fresh.links = Math.max(fresh.links, Number(r.state?.latest?.links || 0));
+        fresh.files = Math.max(fresh.files, Number(r.state?.latest?.files || 0));
+      }
+      const tmap = new Map();
+      for (const r of groupRuns) {
+        for (const t of r.topics || []) {
+          const cur = tmap.get(t.threadId);
+          if (!cur || (t.done && !cur.done) || (Number(t.total?.links || 0) > Number(cur.total?.links || 0))) tmap.set(t.threadId, t);
+        }
+      }
+      const topics = [...tmap.values()].sort((a, b) => String(a.threadId).localeCompare(String(b.threadId)));
+      const st0 = first.state || {};
+      const isForum = groupRuns.some((r) => r.state?.isForum) || topics.length > 0;
+      const type = st0.sourceType === 'channel' ? 'channel' : groupRuns.some((r) => r.state?.sourceType === 'channel') ? 'channel' : (isForum ? 'forum' : (first.target === 'personal' ? 'personal' : 'group'));
+      const recent = await statsRecentLinks(env, first.target || 'community', first.owner || '', first.chat_id, 8);
+      const auth = {
+        tgIds: [...new Set(groupRuns.map((r) => String(r.state?.requesterTgId || '')).filter(Boolean))],
+        userIds: [...new Set(groupRuns.map((r) => String(r.state?.requesterUserId || '')).filter(Boolean))],
+      };
+      const idParents = new Set();
+      const idJobs = new Set();
+      for (const r of groupRuns) {
+        for (const id of r.ids?.parents || []) idParents.add(String(id));
+        for (const id of r.ids?.jobs || []) idJobs.add(String(id));
+      }
+      sources.push({
+        key: [first.chat_id, String(first.target || 'community'), String(first.community_id || ''), String(first.owner || '')].join('|'),
+        chat_id: first.chat_id, target: first.target || 'community', community: first.community_id || '', owner: first.owner || '',
+        name: st0.sourceName || first.chat_id, destinationName: st0.destinationName || '',
+        label: st0.label || '', type, isForum, topics, overall, fresh, recent, live, auth,
+        ids: { parents: [...idParents], jobs: [...idJobs] },
+      });
+    }
+    sources.sort((a, b) => String(a.name || a.chat_id).localeCompare(String(b.name || b.chat_id)));
+  }
+
+  return { runs, sources, chats: [], generatedAt: now };
 }
 
 export {
+  capturePostIntoSinks,
+  hydrateSourcePosts,
+  hydrateMeiliRows,
+  parseStoredTags,
+  normalizeTagList,
+  smartFallbackTags,
+  domainNameBans,
+  ECOSYSTEM_HOSTS,
+  searchAllLinks,
+  telegramSearchRowHtml,
+  handleSearchLinks,
+  generateUrlHash,
+  ensureUcloneTables,
+  cloneFailure,
+  withCloneAccount,
   scrapeViaKage,
+  detectBackupCommunityId,
+  followLiveness,
+  formatBackfillDone,
+  formatBackfillProgress,
+  importBackupSql,
+  loadLinkNamePattern,
+  notesForUrl,
+  progressBar,
+  repairContaminatedNotes,
   ensureIndexTables,
+  startBackfillJob,
   runHistoryIndexJob,
+  wipeCloneVaultPaths,
+  telegramEntityMarkdown,
+  telegramRichMarkdown,
+  telegramRichNotesForSave,
   buildSearchBlob,
   cleanApiBase,
   compactAiContext,
@@ -16181,6 +17594,8 @@ export {
   getSteroidMode,
   isGroundedAiAnswer,
   helpTextForSection,
+  helpPageHtml,
+  helpRichButtonRows,
   isFreeTierModel,
   normalizeModelId,
   parseAiDescribeResponse,
@@ -16189,5 +17604,9 @@ export {
   resolveChatEndpoint,
   resultLimitClause,
   syncAiConfigToPeer,
-  syncSteroidToPeer
+  syncSteroidToPeer,
+  formatStatsRichReport,
+  resolveJobLabel,
+  STATS_TOPICS_PAGE_MAX,
+  USERBOT_ACCOUNTS,
 };

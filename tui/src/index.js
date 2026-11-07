@@ -14,7 +14,7 @@ import { makeClient, ApiError, STORAGE_LABELS, rankOf } from './api.js';
 import { detectBookmarks, loadBookmarks, dedupe, scanDiagnose, filterSynthetic } from './browsers.js';
 import { loadConfig, saveConfig } from './config.js';
 import { parseSessionToken } from './session.js';
-import { launchAdvanced, isOpencodeAvailable } from './opencode-launcher.js';
+import { launchAdvanced } from './opencode-launcher.js';
 
 const theme = makeTheme();
 const stderr = (s) => process.stderr.write(s);
@@ -490,7 +490,11 @@ async function stepAdvanced() {
   const res = await launchAdvanced(state, io, theme);
   if (res?.error) {
     stderr(theme.danger(`Advanced mode failed: ${res.error}\n`));
-    stderr(theme.dim('Install opencode: npm i -g opencode  (https://github.com/anomalyco/opencode)\n'));
+    stderr(center(theme.dim('Press ↵ to continue'), columns()) + '\n');
+    const keys = await keyStream();
+    await keys.next();
+    keys.close();
+  } else {
     stderr(center(theme.dim('Press ↵ to continue'), columns()) + '\n');
     const keys = await keyStream();
     await keys.next();
@@ -513,7 +517,7 @@ async function mainMenu() {
     { label: 'Join community', hint: state.community_name || 'not joined' },
     { label: 'Scan bookmarks', hint: state.scanned ? `${state.scanned.count} found` : 'not scanned' },
     { label: 'Dump bookmarks', hint: state.last_dump ? `${state.last_dump.added} last time` : '' },
-    { label: 'Advanced (opencode)', hint: isOpencodeAvailable() ? 'any AI via opencode' : 'install opencode' },
+    { label: 'Advanced (MCP)', hint: 'MCP config for any agent' },
     { label: 'Status', hint: '' },
     ...(state.token ? [{ label: 'Logout', hint: '' }] : []),
     { label: 'Quit', hint: '' },

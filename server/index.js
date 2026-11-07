@@ -12,7 +12,8 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import worker, { getInstanceAiConfig, getSteroidMode, syncAiConfigToPeer, syncSteroidToPeer, startUserbotDaemon, ensureIndexTables, runHistoryIndexJob, syncInstanceTelegramCommands } from '../worker/index.js';
+import worker, { getInstanceAiConfig, getSteroidMode, syncAiConfigToPeer, syncSteroidToPeer, resumeCloneJobs, syncInstanceTelegramCommands } from '../worker/index.js';
+import { installConsoleLogging } from '../worker/runtime-logs.js';
 import { createAssets } from './assets.js';
 import { startBackups, runBackupOnce } from './backup.js';
 import { PostgresD1, translateSchema } from './pgdb.js';
@@ -58,6 +59,11 @@ const ALLOWED_ENV = [
   'KAGE_BIN', 'KAGE_CHROME',
   // Optional derived search index; PostgreSQL remains the source of truth.
   'MEILI_URL', 'MEILISEARCH_URL', 'MEILI_MASTER_KEY', 'MEILI_INDEX',
+  // Dokploy host control from /dok* (self-host only; inert without keys).
+  'DOKPLOY_URL', 'DOKPLOY_API_KEY', 'DOKPLOY_APP_ID',
+  'DOKPLOY_API_APPLICATIONS', 'DOKPLOY_API_APPLICATION_ONE', 'DOKPLOY_API_DEPLOY',
+  'DOKPLOY_API_RESTART', 'DOKPLOY_API_STOP', 'DOKPLOY_API_START',
+  'DOKPLOY_API_CLEARCACHE', 'DOKPLOY_API_LOGS',
 ];
 const allowedEnv = {};
 for (const k of ALLOWED_ENV) {
@@ -199,38 +205,14 @@ server.listen(PORT, HOST, () => {
   if (!process.env.TG_OWNER_IDS) {
     console.log('[athena] WARNING: TG_OWNER_IDS is empty — every logged-in user is GOD. Set it before exposing this.');
   }
+  installConsoleLogging(env);
   startBackups({ connectionString: DATABASE_URL, env: process.env, db: DB });
 
   // Refresh Telegram "/" command menus (default + GOD scopes) on boot.
   syncInstanceTelegramCommands(env).catch(() => {});
 
-  // Userbot live-clone daemon: connects the stored session (if configured)
-  // and mirrors new messages from followed chats. No-op when not set up.
-  startUserbotDaemon(env).catch((err) => console.error('[userbot] daemon failed:', err.message));
-
-  // Resume backfills that were interrupted by a restart/deploy — otherwise a
-  // job stays 'running' in the DB forever while nothing works on it.
-  (async () => {
-  try {
-    await ensureIndexTables(env);
-    const { results: stuck } = await DB.prepare(
-      "SELECT * FROM index_jobs WHERE status IN ('queued','running') ORDER BY created_at DESC LIMIT 5"
-    ).all();
-    for (const j of stuck || []) {
-      console.log(`[index] resuming interrupted job ${j.id} (${j.chat_id})`);
-      runHistoryIndexJob(env, {
-        id: j.id, community_id: j.community_id, chat_id: j.chat_id, thread_id: j.thread_id || null,
-        userbot_label: j.userbot_label || null, min_id: j.min_id || null, max_id: j.max_id || null,
-        offset_id: Number(j.offset_id || 0), processed: Number(j.processed || 0),
-        saved_links: Number(j.saved_links || 0), saved_docs: Number(j.saved_docs || 0),
-        saved_files: Number(j.saved_files || 0), skipped_media: Number(j.skipped_media || 0),
-        urls_seen: Number(j.urls_seen || 0), progress_chat_id: j.progress_chat_id,
-      }, process.env.TELEGRAM_BOT_TOKEN || '').catch((e) => console.error('[index] resume run failed:', e.message));
-    }
-  } catch (err) {
-    console.error('[index] resume failed:', err.message);
-  }
-  })();
+  // Durable parents resume their own current child, then remaining topics.
+  resumeCloneJobs(env, env.TELEGRAM_BOT_TOKEN || '').catch((error) => console.error('[index] resume failed:', error.message));
 
   if (process.env.CF_PURGE_CACHE === '1' && process.env.CF_ZONE_ID && process.env.CF_API_EMAIL && process.env.CF_API_KEY) {
     fetch(`https://api.cloudflare.com/client/v4/zones/${process.env.CF_ZONE_ID}/purge_cache`, {

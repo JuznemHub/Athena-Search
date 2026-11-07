@@ -115,59 +115,26 @@ export function chunkText(content, { chunkTokens = 600, overlap = 120 } = {}) {
 }
 
 export async function ensureChunksTable(pool) {
-  try {
-    await pool.query('CREATE EXTENSION IF NOT EXISTS vector');
-  } catch {}
-  try {
-    await pool.query(`CREATE TABLE IF NOT EXISTS document_chunks (
-      id TEXT PRIMARY KEY,
-      doc_id TEXT NOT NULL,
-      scope TEXT NOT NULL,
-      scope_key TEXT NOT NULL,
-      chunk_idx INTEGER NOT NULL,
-      page INTEGER,
-      para_idx INTEGER,
-      content TEXT NOT NULL,
-      token_count INTEGER,
-      embedding VECTOR(1536),
-      tsv TSVECTOR,
-      created_at BIGINT NOT NULL
-    )`);
-  } catch (e) {
-    const msg = String(e.message || '');
-    if (/vector/i.test(msg) || /type "vector" does not exist/i.test(msg)) {
-      await pool.query(`CREATE TABLE IF NOT EXISTS document_chunks (
-        id TEXT PRIMARY KEY,
-        doc_id TEXT NOT NULL,
-        scope TEXT NOT NULL,
-        scope_key TEXT NOT NULL,
-        chunk_idx INTEGER NOT NULL,
-        page INTEGER,
-        para_idx INTEGER,
-        content TEXT NOT NULL,
-        token_count INTEGER,
-        created_at BIGINT NOT NULL
-      )`);
-      try { await pool.query('ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS tsv TSVECTOR'); } catch {}
-      try { await pool.query('ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS embedding TEXT'); } catch {}
-    } else {
-      throw e;
-    }
-  }
+  // Lightweight: plain full-text table only. No pgvector extension, no
+  // embedding columns — keeps the MCP runnable on any Postgres and lets the
+  // HTTP API remain the default path for Hermes and other light hosts.
+  await pool.query(`CREATE TABLE IF NOT EXISTS document_chunks (
+    id TEXT PRIMARY KEY,
+    doc_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    chunk_idx INTEGER NOT NULL,
+    page INTEGER,
+    para_idx INTEGER,
+    content TEXT NOT NULL,
+    token_count INTEGER,
+    tsv TSVECTOR,
+    created_at BIGINT NOT NULL
+  )`);
   try { await pool.query('ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS tsv TSVECTOR'); } catch {}
-  // Self-heal: a TEXT fallback column (created before pgvector was installed)
-  // is upgraded to VECTOR once the extension exists, so the ivfflat index can build.
-  try {
-    const col = await pool.query(`SELECT data_type FROM information_schema.columns WHERE table_name = 'document_chunks' AND column_name = 'embedding'`);
-    const ext = await pool.query(`SELECT extname FROM pg_extension WHERE extname = 'vector'`);
-    if (col.rows[0]?.data_type === 'text' && ext.rows.length > 0) {
-      await pool.query('ALTER TABLE document_chunks ALTER COLUMN embedding TYPE VECTOR(1536) USING NULL');
-    }
-  } catch {}
   await pool.query('CREATE INDEX IF NOT EXISTS idx_chunks_doc ON document_chunks(doc_id, chunk_idx)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_chunks_scope ON document_chunks(scope, scope_key, para_idx)');
   try { await pool.query('CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON document_chunks USING gin(tsv)'); } catch {}
-  try { await pool.query('CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON document_chunks USING ivfflat (embedding vector_l2_ops)'); } catch {}
 }
 
 let _chunksEnsured = false;
@@ -397,11 +364,11 @@ export async function handleAthenaList({ scope = 'community', limit = 20 } = {},
 
 const server = new Server({ name: 'athena', version: '1.0.0' }, { capabilities: { tools: {} } });
 const _athenaTools = [
-  { name: 'athena_search', description: 'Rank-aware hybrid search over document_chunks', inputSchema: { type: 'object', properties: { query: { type: 'string' }, scope: { type: 'string', enum: ['personal', 'community'] }, limit: { type: 'number' } }, required: ['query'] } },
-  { name: 'athena_dump', description: 'Chunk and store document with rank gate', inputSchema: { type: 'object', properties: { content: { type: 'string' }, filename: { type: 'string' }, scope: { type: 'string', enum: ['personal', 'community'] } }, required: ['content', 'filename'] } },
-  { name: 'athena_get_chunk', description: 'Fetch chunk by doc_id and para_idx with rank gate', inputSchema: { type: 'object', properties: { doc_id: { type: 'string' }, para_idx: { type: 'number' }, scope: { type: 'string', enum: ['personal', 'community'] } }, required: ['doc_id', 'para_idx'] } },
-  { name: 'athena_get_doc', description: 'Fetch full document chunks by doc_id with rank gate', inputSchema: { type: 'object', properties: { doc_id: { type: 'string' }, scope: { type: 'string', enum: ['personal', 'community'] } }, required: ['doc_id'] } },
-  { name: 'athena_list', description: 'List documents for scope with rank gate', inputSchema: { type: 'object', properties: { scope: { type: 'string', enum: ['personal', 'community'] }, limit: { type: 'number' } } } },
+  { name: 'athena_search', description: 'Search the Athena brain. Returns id, title, snippet.', inputSchema: { type: 'object', properties: { query: { type: 'string' }, scope: { type: 'string', enum: ['personal', 'community'] }, limit: { type: 'number' } }, required: ['query'] } },
+  { name: 'athena_get_doc', description: 'Read a full document by doc_id.', inputSchema: { type: 'object', properties: { doc_id: { type: 'string' }, scope: { type: 'string', enum: ['personal', 'community'] } }, required: ['doc_id'] } },
+  { name: 'athena_get_chunk', description: 'Read one paragraph by doc_id and para_idx.', inputSchema: { type: 'object', properties: { doc_id: { type: 'string' }, para_idx: { type: 'number' }, scope: { type: 'string', enum: ['personal', 'community'] } }, required: ['doc_id', 'para_idx'] } },
+  { name: 'athena_list', description: 'List saved documents.', inputSchema: { type: 'object', properties: { scope: { type: 'string', enum: ['personal', 'community'] }, limit: { type: 'number' } } } },
+  { name: 'athena_dump', description: 'Save text into the brain.', inputSchema: { type: 'object', properties: { content: { type: 'string' }, filename: { type: 'string' }, scope: { type: 'string', enum: ['personal', 'community'] } }, required: ['content', 'filename'] } },
 ];
 
 async function _handleToolsCall(req) {
@@ -452,6 +419,29 @@ try {
 
 const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
+  const argv = new Set(process.argv.slice(2));
+  if (argv.has('--help') || argv.has('-h')) {
+    const here = new URL('./mcp-athena.js', import.meta.url).pathname;
+    process.stdout.write(
+      ['Athena MCP (works with Hermes, Claude Code, Codex, any MCP host).',
+        '',
+        'Stdio: node ' + here,
+        'Env: ATHENA_INSTANCE=https://your-instance ATHENA_TOKEN=... ATHENA_COMMUNITY_ID=...',
+        'No DATABASE_URL needed — uses the instance HTTP API.',
+        'Hermes mcpServers.athena: {"command":"node","args":["' + here + '"],"env":{"ATHENA_INSTANCE":"","ATHENA_TOKEN":"","ATHENA_COMMUNITY_ID":""}}',
+        'Tools: athena_search, athena_get_doc, athena_get_chunk, athena_list, athena_dump.',
+        '',
+      ].join('\n'),
+    );
+    process.exit(0);
+  }
+  if (argv.has('--config')) {
+    const here = new URL('./mcp-athena.js', import.meta.url).pathname;
+    process.stdout.write(
+      JSON.stringify({ mcpServers: { athena: { command: 'node', args: [here], env: { ATHENA_INSTANCE: '', ATHENA_TOKEN: '', ATHENA_COMMUNITY_ID: '' } } } }, null, 2) + '\n',
+    );
+    process.exit(0);
+  }
   await server.connect(new StdioServerTransport());
 }
 export { server };
