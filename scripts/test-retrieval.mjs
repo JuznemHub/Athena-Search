@@ -24,6 +24,7 @@ import {
   fuzzyMatchLinks,
   formatStatsRichReport,
   helpTextForSection,
+  hideSourceFromStats,
   isGroundedAiAnswer,
   normalizeModelId,
   parseAiDescribeResponse,
@@ -78,7 +79,39 @@ assert.match(helpTextForSection('god', true), /forcetags[\s\S]*?tag_untagged/);
   assert.match(dash.html, /MyGroup\[General\]/, 'dashboard row shows Group[topic]');
   const drill = formatStatsRichReport(fakeReport, { src: 0, topicPage: 0 });
   assert.match(drill.html, /MyGroup\[General\]/, 'drill-down heading shows Group[topic]');
-  assert.match(drill.buttons, /stats:stop:0/, 'drill-down page has a remove-live button');
+  assert.match(drill.buttons, /stats:del:0:0/, 'drill-down page has a delete-from-stats button');
+  assert.match(dash.buttons, /stats:stop:0/, 'live row keeps the ⏹ beside button');
+  const idleDash = formatStatsRichReport({ sources: [{ ...fakeReport.sources[0], live: false }] });
+  assert.match(idleDash.buttons, /stats:start:0/, 'idle row shows the ▶️ restart button');
+  assert.doesNotMatch(idleDash.buttons, /stats:stop/, 'idle row has no stop button');
+}
+// hideSourceFromStats: display-only delete removes run records, keeps imports.
+{
+  const sql = new DatabaseSync(':memory:');
+  sql.exec(`CREATE TABLE pending_clones (id TEXT PRIMARY KEY, chat_id TEXT, thread_id TEXT, community_id TEXT, target TEXT, requester_tg_id TEXT, requester_user_id TEXT, stats_json TEXT, created_at INTEGER, expires_at INTEGER);
+    CREATE TABLE index_jobs (id TEXT PRIMARY KEY, community_id TEXT, chat_id TEXT, user_id TEXT, status TEXT, parent_id TEXT, target TEXT, thread_id TEXT, userbot_label TEXT);
+    CREATE TABLE telegram_index_sessions (id TEXT PRIMARY KEY, user_id TEXT, community_id TEXT, chat_id TEXT);
+    CREATE TABLE clone_job_items (job_id TEXT, message_id TEXT, counters_json TEXT);`);
+  const DB = { prepare(query) {
+    const bind = (values = []) => ({ bind(...args) { return bind(args.map(v => v ?? null)); },
+      async first() { return sql.prepare(query).get(...values) || null; },
+      async all() { return { results: sql.prepare(query).all(...values) }; },
+      async run() { const r = sql.prepare(query).run(...values); return { meta: { changes: Number(r.changes) } }; }
+    }); return bind();
+  } };
+  const env = { DB };
+  sql.prepare(`INSERT INTO pending_clones (id, chat_id, community_id, target, requester_user_id) VALUES ('p1','-1001','c1','community','u1'),('p2','-1002','c1','community','u1'),('p3','-1001','','personal','u9')`).run();
+  sql.prepare(`INSERT INTO index_jobs (id, community_id, chat_id, user_id, status, target, parent_id) VALUES ('j1','c1','-1001','u1','done','community','p1'),('j2','c1','-1001:7','u1','done','community','p1'),('j3','c1','-1002','u1','done','community',NULL),('j4','','-1001','u9','done','personal',NULL)`).run();
+  sql.prepare(`INSERT INTO telegram_index_sessions (id, user_id, community_id, chat_id) VALUES ('j1','u1','c1','-1001'),('j3','u1','c1','-1002')`).run();
+  sql.prepare(`INSERT INTO clone_job_items (job_id, message_id) VALUES ('j1','m1'),('j3','m3')`).run();
+  const out = await hideSourceFromStats(env, { chat_id: '-1001', target: 'community', owner: 'c1' });
+  assert.deepEqual(out, { parents: 1, jobs: 2, sessions: 1, items: 1 });
+  assert.equal(sql.prepare(`SELECT COUNT(*) AS n FROM pending_clones`).get().n, 2);
+  assert.equal(sql.prepare(`SELECT COUNT(*) AS n FROM index_jobs`).get().n, 2);
+  assert.equal(sql.prepare(`SELECT COUNT(*) AS n FROM telegram_index_sessions`).get().n, 1);
+  assert.equal(sql.prepare(`SELECT COUNT(*) AS n FROM clone_job_items`).get().n, 1);
+  assert.equal(sql.prepare(`SELECT id FROM pending_clones ORDER BY id`).all().map((r) => r.id).join(','), 'p2,p3');
+  assert.equal(sql.prepare(`SELECT id FROM index_jobs ORDER BY id`).all().map((r) => r.id).join(','), 'j3,j4');
 }
 
 const replyEdit = parseTelegramEditPayload('| title: Correct title | notes: Correct notes', {

@@ -7715,7 +7715,7 @@ function helpTextForSection(section, isGod = false) {
       cmd(6, `${codeHtml('/uclone')} ${codeHtml('<chat_id> <community_id>')}`, 'Guided wizard for a whole chat: same measuring and stats, straight to the destination picker.'),
       spacer,
       richParagraph('<b>Watch & stop</b>'),
-      cmd(7, `${codeHtml('/stats')}`, 'Newest-first dashboard, one row per cloned source: totals, fresh-in-24h line, live ON/OFF, per-topic pages. Forum groups show Group[topic]. LIVE means a real capture path exists. The ⏹ button beside a live row stops its live capture AND its running backfills — saved history stays; tapping a source opens its drill-down page with a ⏹ Remove live button that does the same even when live reads OFF.'),
+      cmd(7, `${codeHtml('/stats')}`, 'Newest-first dashboard, one row per cloned source: totals, fresh-in-24h line, live ON/OFF, per-topic pages. Forum groups show Group[topic]. LIVE means a real capture path exists. The beside button toggles live: ⏹ on a live row stops its live capture AND its running backfills — saved history stays; ▶️ on an idle row runs a full clone first, then live follows (fails loud when the bot or the userbot account is not in the chat). Tapping a source opens its drill-down page with a 🗑 Delete from stats button: hides the row and stops live, saved links stay.'),
       cmd(8, `${codeHtml('/status')} ${codeHtml('[all]')}`, 'What is indexing right now plus running and recent backfill jobs (' + codeHtml('all') + ' lists every user\'s jobs, GOD). There is no stop command — stopping happens from the ⏹ button on /stats.'),
       cmd(9, `${codeHtml('/delete')}`, 'One delete command with a picker: one saved link, one whole cloned chat (imports + live capture, with confirm), or one backfill session (imports only, with confirm). Direct forms still work: ' + codeHtml('/delete <url>') + ' removes a link, ' + codeHtml('/delete <chat_id> [thread_id]') + ' removes a whole clone.'),
       spacer,
@@ -8281,7 +8281,8 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
     if (action === 'stop') {
-      // ⏹ beside a source: stop live capture (follows + bot link), keep history.
+      // ⏹ beside a live source: stop live capture (follows + bot link) and
+      // running backfills, keep history.
       try {
         const user = await resolveAthenaUserFromTg(env, tgUserId);
         const report = await buildStatsReport(env, token, { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user ? String(user.id) : '') });
@@ -8291,50 +8292,152 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
           await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Expired or not yours', show_alert: true }).catch(() => {});
           return new Response('OK', { status: 200, headers: corsHeaders });
         }
-        let allowed = isGodCb;
-        if (!allowed && src.target === 'personal') {
-          allowed = !!(user && (src.auth.userIds || []).includes(String(user.id)));
-        }
-        if (!allowed && src.target !== 'personal' && user) {
-          try { allowed = await ensureOwnerOrAdmin(src.owner, user.id, env); } catch (_) { allowed = false; }
-        }
-        if (!allowed) {
+        if (!(await statsSourceAllowed(env, { isGodCb, user, src }))) {
           await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Community owner/GOD only', show_alert: true }).catch(() => {});
           return new Response('OK', { status: 200, headers: corsHeaders });
         }
         await answered();
-        const stopped = await stopLiveCapture(env, src.chat_id, src.community || '');
-        const bits = [];
-        if (stopped.followsRemoved) bits.push(`${stopped.followsRemoved} follow${stopped.followsRemoved === 1 ? '' : 's'}`);
-        if (stopped.linksRemoved) bits.push(`${stopped.linksRemoved} bot link${stopped.linksRemoved === 1 ? '' : 's'}`);
-        // Running backfills have no stop command anymore — the ⏹ button stops
-        // them too (own jobs, or any job on this chat for GOD). Saved history stays.
-        let jobsStopped = 0;
-        try {
-          const stopComm = String(src.community || '');
-          const jobRows = await env.DB.prepare(
-            `SELECT id FROM index_jobs WHERE status IN ('queued','running') AND (chat_id = ? OR chat_id = ?) AND (community_id = ? OR ? = '')`
-          ).bind(stopped.chatId, stopped.chatId.replace(/^-100/, ''), stopComm, stopComm).all().catch(() => ({ results: [] }));
-          for (const j of jobRows?.results || jobRows || []) {
-            if (!isGodCb) {
-              const owner = await env.DB.prepare('SELECT user_id FROM index_jobs WHERE id = ?').bind(j.id).first().catch(() => null);
-              if (!owner || String(owner.user_id) !== String(user?.id || '—none—')) continue;
-            }
-            await env.DB.prepare(`UPDATE index_jobs SET status = 'stopping', updated_at = ? WHERE id = ?`).bind(Date.now(), j.id).run().catch(() => {});
-            await env.DB.prepare('DELETE FROM telegram_index_sessions WHERE id = ?').bind(j.id).run().catch(() => {});
-            jobsStopped++;
-          }
-        } catch (_) {}
-        if (jobsStopped) bits.push(`${jobsStopped} backfill${jobsStopped === 1 ? '' : 's'}`);
+        const { bits } = await stopSourceLiveJobs(env, src, { isGodCb, user });
         const fresh = await buildStatsReport(env, token, { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user ? String(user.id) : '') });
         const view = formatStatsRichReport(fresh);
+        const display = statsSourceDisplayName(src, 60);
         const note = bits.length
-          ? `${boldHtml('⏹')} Stopped for ${escHtml(src.name || src.chat_id)}: ${bits.join(' + ')} stopped. Saved history stays.`
-          : `${boldHtml('⏹')} ${escHtml(src.name || src.chat_id)} had nothing running left to stop.`;
+          ? `${boldHtml('⏹')} Stopped for ${escHtml(display)}: ${bits.join(' + ')} stopped. Saved history stays.`
+          : `${boldHtml('⏹')} ${escHtml(display)} had nothing running left to stop.`;
         await editTelegramRichMessage(token, chatId, msgId, note + '\n\n' + view.html, threadId, view.buttons);
       } catch (e) {
         console.error('stats stop failed', e?.message || e);
         await editTelegramMessage(token, chatId, msgId, boldHtml('❌') + ' Stop failed: ' + codeHtml(escHtml(String(e?.message || e).slice(0, 160))), null, threadId).catch(() => {});
+      }
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    if (action === 'start') {
+      // ▶️ beside a non-live source: full clone first, then live follows.
+      // Needs the bot AND the userbot account in the chat, else it fails loud.
+      try {
+        const user = await resolveAthenaUserFromTg(env, tgUserId);
+        const scope = { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user ? String(user.id) : '') };
+        const report = await buildStatsReport(env, token, scope);
+        const src = (report.sources || [])[Math.max(0, Number(parts[2]) || 0)];
+        const mine = (s) => s && s.auth && (isGodCb || (s.auth.tgIds || []).includes(String(tgUserId)) || (user && (s.auth.userIds || []).includes(String(user.id))));
+        if (!src || !mine(src)) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Expired or not yours', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        if (!(await statsSourceAllowed(env, { isGodCb, user, src }))) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Community owner/GOD only', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        if (src.live) {
+          await answered();
+          const fresh = await buildStatsReport(env, token, scope);
+          const view = formatStatsRichReport(fresh);
+          await editTelegramRichMessage(token, chatId, msgId, `${boldHtml('▶️')} ${escHtml(statsSourceDisplayName(src, 60))} is already live.` + '\n\n' + view.html, threadId, view.buttons);
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        if (!user) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Login on the website first', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        await answered();
+        const display = statsSourceDisplayName(src, 60);
+        const fail = async (why) => {
+          await editTelegramMessage(token, chatId, msgId, `${boldHtml('❌ Live clone failed:')} ${escHtml(why)}`, null, threadId).catch(() => {});
+        };
+        const label = await resolveJobLabel(env, user.id).catch(() => '');
+        if (!label) { await fail('no enabled userbot account. Connect one with /userbot_add in a DM, then retry.'); return new Response('OK', { status: 200, headers: corsHeaders }); }
+        try { await startUserbotAccount(env, label); } catch (_) {}
+        const client = USERBOT_ACCOUNTS.get(label)?.client;
+        let seen = false;
+        try { seen = client ? await primeEntity(client, src.chat_id, 30000) : false; } catch (_) { seen = false; }
+        if (!seen) { await fail(`userbot account ${label} is not in ${src.chat_id}. Add it to the chat, then tap ▶️ again.`); return new Response('OK', { status: 200, headers: corsHeaders }); }
+        let botStatus = '';
+        try {
+          const me = await telegramApi(token, 'getMe');
+          const botId = Number(me?.result?.id || 0);
+          if (botId) {
+            const m = await telegramApi(token, 'getChatMember', { chat_id: src.chat_id, user_id: botId });
+            botStatus = String(m?.result?.status || '');
+          }
+        } catch (_) {}
+        if (!['creator', 'administrator', 'member', 'restricted'].includes(botStatus)) {
+          await fail(`bot is not in ${src.chat_id}. Add it as admin/member, then tap ▶️ again.`);
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        const target = src.target || 'community';
+        const communityIdArg = target === 'personal' ? '' : (src.community || src.owner || '');
+        const communityName = communityIdArg
+          ? ((await env.DB.prepare('SELECT name FROM communities WHERE id = ?').bind(communityIdArg).first().catch(() => null))?.name || communityIdArg)
+          : 'Personal brain';
+        const threads = [...new Set((src.topics || []).map((t) => String(t.threadId ?? '')).filter((t) => t !== ''))];
+        if (threads.length > 1) {
+          runInBackground(env, startForumCloneSequential(env, { token, chatId: src.chat_id, chatName: src.name || src.chat_id, progressChatId: chatId, forumThreadId: threadId, topicIds: threads, communityIdArg, targetArg: target, athenaUser: user, label, communityName }).catch((e) => console.error('stats restart sequential failed', e?.message || e)));
+        } else {
+          let res = null;
+          try {
+            res = await startBackfillJob(env, { token, chatId, forumThreadId: threadId, athenaUser: user, communityIdArg, chatIdArg: src.chat_id, threadArg: threads.length === 1 ? threads[0] : '', communityName, userbotLabel: label, silentProgress: true, target });
+          } catch (e) { res = { ok: false, reason: String(e?.message || e).slice(0, 160) }; }
+          if (!res?.ok && res?.reason !== 'already running') {
+            await fail(`${src.chat_id}: ${res?.reason || 'could not start the full clone'}.`);
+            return new Response('OK', { status: 200, headers: corsHeaders });
+          }
+        }
+        const fresh = await buildStatsReport(env, token, scope);
+        const view = formatStatsRichReport(fresh);
+        const note = `${boldHtml('▶️')} Live clone restarted for ${escHtml(display)}: full clone running first, then live follows. Progress in ${codeHtml('/stats')}.`;
+        await editTelegramRichMessage(token, chatId, msgId, note + '\n\n' + view.html, threadId, view.buttons);
+      } catch (e) {
+        console.error('stats start failed', e?.message || e);
+        await editTelegramMessage(token, chatId, msgId, boldHtml('❌') + ' Live clone failed: ' + codeHtml(escHtml(String(e?.message || e).slice(0, 160))), null, threadId).catch(() => {});
+      }
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    if (action === 'del' || action === 'delyes') {
+      // 🗑 drill-down delete: hide the source from stats (saved links stay)
+      // and stop its live capture too. Two-step like the /delete picker.
+      try {
+        const user = await resolveAthenaUserFromTg(env, tgUserId);
+        const scope = { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user ? String(user.id) : '') };
+        const idx = Math.max(0, Number(parts[2]) || 0);
+        const tp = Math.max(0, Number(parts[3]) || 0);
+        const report = await buildStatsReport(env, token, scope);
+        const src = (report.sources || [])[idx];
+        const mine = (s) => s && s.auth && (isGodCb || (s.auth.tgIds || []).includes(String(tgUserId)) || (user && (s.auth.userIds || []).includes(String(user.id))));
+        if (!src || !mine(src)) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Expired or not yours', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        if (!(await statsSourceAllowed(env, { isGodCb, user, src }))) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Community owner/GOD only', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        const display = statsSourceDisplayName(src, 60);
+        if (action === 'del') {
+          await answered();
+          await editTelegramRichMessage(token, chatId, msgId, [
+            `${boldHtml('⚠️ Remove')} ${escHtml(display)} ${boldHtml('from stats?')}`,
+            `Stops its live capture too. Saved links and files stay — re-clone to bring it back.`,
+          ].join('\n'), threadId, [
+            [{ label: '✅ Yes, remove', data: 'stats:delyes:' + idx }],
+            [{ label: '« Back', data: 'stats:src:' + idx + ':' + tp }],
+          ].map((r) => richButtonRow(r)).join('\n'));
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        await answered();
+        const { bits } = await stopSourceLiveJobs(env, src, { isGodCb, user });
+        const hidden = await hideSourceFromStats(env, src);
+        const fresh = await buildStatsReport(env, token, scope);
+        const view = formatStatsRichReport(fresh);
+        const removed = [];
+        if (bits.length) removed.push(bits.join(' + ') + ' stopped');
+        if (hidden.parents + hidden.jobs) removed.push(`${hidden.parents + hidden.jobs} run${hidden.parents + hidden.jobs === 1 ? '' : 's'} hidden`);
+        const note = removed.length
+          ? `${boldHtml('🗑')} Removed ${escHtml(display)} from stats: ${removed.join(' · ')}. Saved history stays.`
+          : `${boldHtml('🗑')} ${escHtml(display)} is already gone from stats.`;
+        await editTelegramRichMessage(token, chatId, msgId, note + '\n\n' + view.html, threadId, view.buttons);
+      } catch (e) {
+        console.error('stats delete failed', e?.message || e);
+        await editTelegramMessage(token, chatId, msgId, boldHtml('❌') + ' Delete failed: ' + codeHtml(escHtml(String(e?.message || e).slice(0, 160))), null, threadId).catch(() => {});
       }
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
@@ -8500,7 +8603,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       await sendTelegramRichMessage(token, chatId, [
         richHeading(3, '🧬 Clone a chat'),
         '',
-        richParagraph(`• ${codeHtml('/clone <chat_id> <community_id>')} — whole chat ([Channel] for channels)<br>• ${codeHtml('/clone <chat_id> <topic_id> <community_id>')} — that topic of that chat<br>• ${codeHtml('/clone <channel_id> <community_id>')} — a channel<br>• ${codeHtml('/uclone <chat_id> <community_id>')} — whole-chat wizard · ${codeHtml('/uclone <chat_id> [topic_id] [community_id]')} — guided wizard with per-topic stats<br>• ${codeHtml('/stats')} — counters, live state, ⏹ stop button · ${codeHtml('/status')} — what is indexing + jobs<br>• ${codeHtml('/delete')} — picker: one link, one cloned chat, or one backfill session`)
+        richParagraph(`• ${codeHtml('/clone <chat_id> <community_id>')} — whole chat ([Channel] for channels)<br>• ${codeHtml('/clone <chat_id> <topic_id> <community_id>')} — that topic of that chat<br>• ${codeHtml('/clone <channel_id> <community_id>')} — a channel<br>• ${codeHtml('/uclone <chat_id> <community_id>')} — whole-chat wizard · ${codeHtml('/uclone <chat_id> [topic_id] [community_id]')} — guided wizard with per-topic stats<br>• ${codeHtml('/stats')} — counters, live state, ⏹/▶️ live toggle per row (drill-down has 🗑 remove-from-stats) · ${codeHtml('/status')} — what is indexing + jobs<br>• ${codeHtml('/delete')} — picker: one link, one cloned chat, or one backfill session`)
       ].join('\n'), threadId);
     }
     return new Response('OK', { status: 200, headers: corsHeaders });
@@ -9073,6 +9176,104 @@ const UCLONE_MANAGERS = new WeakMap();
 // link row(s) and every userbot follow (base chat and per-topic keys).
 // Saved history is untouched — this only stops future posts. Used by the
 // ⏹ button on /stats rows (unlinking moved there when /channel_unlink went away).
+/** Ownership check shared by the /stats beside toggle and drill-down buttons. */
+async function statsSourceAllowed(env, { isGodCb, user, src }) {
+  let allowed = !!isGodCb;
+  if (!allowed && src?.target === 'personal') {
+    allowed = !!(user && (src.auth?.userIds || []).includes(String(user.id)));
+  }
+  if (!allowed && src?.target !== 'personal' && user) {
+    try { allowed = await ensureOwnerOrAdmin(src.owner, user.id, env); } catch (_) { allowed = false; }
+  }
+  return allowed;
+}
+
+/**
+ * Stop live capture AND running backfills for one /stats source. Saved
+ * history stays — this only stops future posts. Shared by the ⏹ button and
+ * the drill-down delete (which additionally hides the source from stats).
+ */
+async function stopSourceLiveJobs(env, src, { isGodCb, user }) {
+  const stopped = await stopLiveCapture(env, src.chat_id, src.community || '');
+  const bits = [];
+  if (stopped.followsRemoved) bits.push(`${stopped.followsRemoved} follow${stopped.followsRemoved === 1 ? '' : 's'}`);
+  if (stopped.linksRemoved) bits.push(`${stopped.linksRemoved} bot link${stopped.linksRemoved === 1 ? '' : 's'}`);
+  // Running backfills have no stop command — the ⏹ button stops them too
+  // (own jobs, or any job on this chat for GOD). Saved history stays.
+  let jobsStopped = 0;
+  try {
+    const stopComm = String(src.community || '');
+    const jobRows = await env.DB.prepare(
+      `SELECT id FROM index_jobs WHERE status IN ('queued','running','stopping') AND (chat_id = ? OR chat_id = ?) AND (community_id = ? OR ? = '')`
+    ).bind(stopped.chatId, stopped.chatId.replace(/^-100/, ''), stopComm, stopComm).all().catch(() => ({ results: [] }));
+    for (const j of jobRows?.results || jobRows || []) {
+      if (!isGodCb) {
+        const owner = await env.DB.prepare('SELECT user_id FROM index_jobs WHERE id = ?').bind(j.id).first().catch(() => null);
+        if (!owner || String(owner.user_id) !== String(user?.id || '—none—')) continue;
+      }
+      await env.DB.prepare(`UPDATE index_jobs SET status = 'stopping', updated_at = ? WHERE id = ?`).bind(Date.now(), j.id).run().catch(() => {});
+      await env.DB.prepare('DELETE FROM telegram_index_sessions WHERE id = ?').bind(j.id).run().catch(() => {});
+      jobsStopped++;
+    }
+  } catch (_) {}
+  if (jobsStopped) bits.push(`${jobsStopped} backfill${jobsStopped === 1 ? '' : 's'}`);
+  return { stopped, bits, jobsStopped };
+}
+
+/**
+ * Remove one /stats source from the display only: its parent run rows and
+ * every job for the same chat + destination + owner. Saved links, files and
+ * vault media stay — live capture is stopped separately via
+ * stopSourceLiveJobs. Pure record surgery, exported for tests.
+ */
+export async function hideSourceFromStats(env, src) {
+  const cid = normalizeTgChatId(String(src?.chat_id || ''));
+  if (!cid) return { parents: 0, jobs: 0, sessions: 0, items: 0 };
+  const bare = cid.replace(/^-100/, '');
+  const target = String(src?.target || 'community');
+  const owner = String(src?.owner || '');
+  const out = { parents: 0, jobs: 0, sessions: 0, items: 0 };
+  const num = (r) => Number(r?.meta?.changes ?? r?.changes ?? 0);
+  let parentIds = [];
+  try {
+    const prow = await env.DB.prepare(
+      `SELECT id FROM pending_clones WHERE (chat_id = ? OR chat_id = ?) AND target = ? AND (community_id = ? OR requester_user_id = ?)`
+    ).bind(cid, bare, target, owner, owner).all().catch(() => ({ results: [] }));
+    parentIds = (prow?.results || prow || []).map((p) => String(p.id)).filter(Boolean);
+  } catch (_) {}
+  let jobIds = [];
+  try {
+    const jrow = await env.DB.prepare(
+      `SELECT id FROM index_jobs WHERE (chat_id = ? OR chat_id LIKE ? OR chat_id = ? OR chat_id LIKE ?) AND target = ? AND (community_id = ? OR user_id = ?)`
+    ).bind(cid, `${cid}:%`, bare, `${bare}:%`, target, owner, owner).all().catch(() => ({ results: [] }));
+    jobIds = (jrow?.results || jrow || []).map((j) => String(j.id)).filter(Boolean);
+  } catch (_) {}
+  try {
+    if (parentIds.length) {
+      const kids = await env.DB.prepare(
+        `SELECT id FROM index_jobs WHERE parent_id IN (${parentIds.map(() => '?').join(',')})`
+      ).bind(...parentIds).all().catch(() => ({ results: [] }));
+      for (const k of kids?.results || kids || []) {
+        const id = String(k.id);
+        if (!jobIds.includes(id)) jobIds.push(id);
+      }
+    }
+  } catch (_) {}
+  try {
+    for (const id of jobIds) {
+      out.sessions += num(await env.DB.prepare('DELETE FROM telegram_index_sessions WHERE id = ?').bind(id).run().catch(() => null));
+      out.items += num(await env.DB.prepare('DELETE FROM clone_job_items WHERE job_id = ?').bind(id).run().catch(() => null));
+      out.jobs += num(await env.DB.prepare('DELETE FROM index_jobs WHERE id = ?').bind(id).run().catch(() => null));
+    }
+  } catch (_) {}
+  try {
+    for (const id of parentIds) {
+      out.parents += num(await env.DB.prepare('DELETE FROM pending_clones WHERE id = ?').bind(id).run().catch(() => null));
+    }
+  } catch (_) {}
+  return out;
+}
+
 export async function stopLiveCapture(env, chatIdArg, communityId = '') {
   const cid = normalizeTgChatId(String(chatIdArg || ''));
   const bare = cid.replace(/^-100/, '');
@@ -9636,9 +9837,9 @@ function formatStatsRichReport(report, sel = {}) {
         { label: 'Next ▶', data: 'stats:src:' + src + ':' + Math.min(topicPagesList.length - 1, topicPage + 1) },
       ]);
     }
-    // Explicit remove-from-live button: works even when live reads OFF but a
-    // follow or bot link still exists. Same handler + ownership check as ⏹.
-    rows.push([{ label: '⏹ Remove live', data: 'stats:stop:' + src }]);
+    // Delete from the stats display: stops live capture too, saved links stay.
+    // Two-step (ask → yes) like the /delete picker.
+    rows.push([{ label: '🗑 Delete from stats', data: 'stats:del:' + src + ':' + (topicPage || 0) }]);
     rows.push([{ label: '« All sources', data: 'stats:dashboard' }]);
   } else {
     html = statsDashboardPage(sources);
@@ -9647,7 +9848,8 @@ function formatStatsRichReport(report, sel = {}) {
       const short = statsSourceDisplayName(s, 22);
       rows.push([
         { label: `${i + 1}. ${short} ▸`, data: 'stats:src:' + i },
-        ...(s.live ? [{ label: '⏹', data: 'stats:stop:' + i }] : []),
+        // Beside toggle: ⏹ stops live, ▶️ restarts it (full clone first).
+        { label: s.live ? '⏹' : '▶️', data: (s.live ? 'stats:stop:' : 'stats:start:') + i },
       ]);
     }
   }
@@ -12264,7 +12466,7 @@ async function startCloneTargetAsk(env, ctx) {
        `${boldHtml(`Backfill jobs${allUsers ? ' — all users' : ''}`)}`,
        jobLines.length ? `<ul>${jobLines.join('')}</ul>` : `• No backfill jobs yet. ${codeHtml('/uclone <chat_id>')} starts the guided history scan; ${codeHtml('/clone')} in a linked group is Bot API live mode.`,
        '',
-       `${italicHtml('Per-source totals and the ⏹ stop button live on /stats. To remove saved data, use /delete.')}`,
+       `${italicHtml('Per-source totals and the ⏹/▶️ live toggle live on /stats. To remove saved data, use /delete.')}`,
      ].join('\n'), forumThreadId);
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
