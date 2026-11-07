@@ -6908,6 +6908,31 @@ function parseStoredTags(raw) {
   return [];
 }
 
+/** Hosts whose name IS the topic (ecosystems, forges, package registries).
+ *  Any other domain is a name, never a tag. */
+const ECOSYSTEM_HOSTS = new Set([
+  'github', 'gitlab', 'codeberg', 'bitbucket', 'sourceforge', 'telegram',
+  'arxiv', 'huggingface', 'npmjs', 'pypi', 'fdroid', 'kaggle', 'docker',
+]);
+
+/** Tokens that name WHERE/WHO, never WHAT — derived per link from its own
+ *  domain (labels + first path segment). AI and rules must not emit these. */
+function domainNameBans(rawUrl) {
+  const bans = new Set();
+  try {
+    const u = new URL(String(rawUrl || '').startsWith('http') ? rawUrl : `https://${rawUrl}`);
+    const labels = u.hostname.replace(/^www\./, '').toLowerCase().split('.');
+    const suffix = new Set(['com', 'net', 'org', 'io', 'dev', 'app', 'so', 'me', 'co', 'in', 'ai', 'xyz', 'top', 'fun', 'site', 'online']);
+    for (const l of labels) {
+      const clean = l.replace(/[^a-z0-9]/g, '');
+      if (clean.length >= 3 && !suffix.has(clean) && !ECOSYSTEM_HOSTS.has(clean)) bans.add(clean);
+    }
+    const seg = (u.pathname.split('/').filter(Boolean)[0] || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (seg.length >= 4 && !ECOSYSTEM_HOSTS.has(seg)) bans.add(seg);
+  } catch (_) {}
+  return bans;
+}
+
 /** No-AI retag: drop junk tags the content never mentions, keep the rest,
  *  add platform + topic tags from keyword rules. Returns { tags, kept,
  *  added, removed }. */
@@ -6963,20 +6988,40 @@ function smartFallbackTags(rawUrl, meta, currentTags) {
   for (const [tag, keys] of TOPIC_RULES) {
     if (keys.some((k) => bag.includes(k))) add(tag);
   }
-  // Host identity (github, arxiv…) is topical for code/papers.
+  // Host identity counts only for ecosystems (github, arxiv…) — any other
+  // domain is a name, never a tag.
   try {
     const u = new URL(String(rawUrl || '').startsWith('http') ? rawUrl : `https://${rawUrl}`);
     const host = u.hostname.replace(/^www\./, '').toLowerCase();
-    const base = host.split('.').slice(-2, -1)[0] || '';
-    if (base && base.length >= 3 && !['com', 'net', 'org', 'io'].includes(base) && !RETAG_JUNK_TAGS.has(base)) add(base);
+    const labels = host.split('.');
+    for (const l of labels) {
+      const clean = l.replace(/[^a-z0-9]/g, '');
+      if (ECOSYSTEM_HOSTS.has(clean)) { add(clean); break; }
+    }
   } catch (_) {}
   // Title words for the long tail (same stopword discipline as before).
+  // Domain-derived names are stripped after this, so titles like
+  // "SpotiFlac Extension" contribute "extension", never "spotiflac".
   if (tags.length < 5) {
     const words = String(meta?.title || '').toLowerCase().match(/[a-z]{4,15}/g) || [];
     const stop = new Set(['the', 'and', 'with', 'from', 'this', 'that', 'client', 'project', 'independent', 'for', 'are', 'was', 'were', 'have', 'has', 'with', 'your', 'free', 'best', 'download', 'official', 'ultimate', 'guide', 'using', 'user', 'users']);
     for (const w of words) { if (!stop.has(w)) add(w); if (tags.length >= 8) break; }
   }
-  return { tags: tags.slice(0, 8), kept, added: added.slice(0, 8), removed };
+  // Never emit the link's own names, even if rules above added them.
+  {
+    const bans = domainNameBans(rawUrl);
+    const dropBanned = (arr) => { for (let i = arr.length - 1; i >= 0; i--) if (bans.has(arr[i])) arr.splice(i, 1); };
+    dropBanned(tags); dropBanned(added);
+  }
+  const finalTags = tags.slice(0, 8);
+  const finalSet = new Set(finalTags);
+  const normCurrent = normalizeTagList(currentTags);
+  return {
+    tags: finalTags,
+    kept: normCurrent.filter((t) => finalSet.has(t)),
+    added: added.filter((t) => finalSet.has(t)).slice(0, 8),
+    removed: normCurrent.filter((t) => !finalSet.has(t)),
+  };
 }
 
 /**
@@ -12986,7 +13031,9 @@ async function startCloneTargetAsk(env, ctx) {
          let title = r.title || ''; let notes = r.notes || '';
          let meta = { title, notes, content: r.search_blob || '' };
          // Thin link: scrape the page so the review (AI or rules) reads facts.
-         if (!meta.title && !meta.notes && !meta.content && /^https?:\/\//i.test(r.url || '')) {
+         // Title alone is not enough — names without a description are what
+         // produced name-plated tags, so scrape whenever notes+content are empty.
+         if (!meta.notes && !meta.content && /^https?:\/\//i.test(r.url || '')) {
            try {
              const sc = await scrapeLinkMetadata(r.url, env);
              if (sc) {
@@ -12997,15 +13044,20 @@ async function startCloneTargetAsk(env, ctx) {
            } catch (_) {}
          }
          let newTags = null, added = [], removed = [], usedAi = false;
+         const nameBans = [...domainNameBans(r.url)];
          if (aiMode) {
            try {
              const vocab = await recentTagsForScope(env, t.table === 'links' ? 'community' : 'personal', t.col);
-             const ai = await aiDescribeAndTag(env, r.url, meta, vocab, cfgFt, current);
+             const ai = await aiDescribeAndTag(env, r.url, meta, vocab, cfgFt, current, nameBans);
              if (ai?.tags?.length) {
-               usedAi = true; aiHits++;
-               newTags = normalizeTagList(ai.tags);
-               if (ai.title && !title) title = String(ai.title).slice(0, 200);
-               if (ai.description && !notes) notes = String(ai.description).slice(0, 600);
+               const banSet = new Set(nameBans);
+               newTags = normalizeTagList(ai.tags).filter((x) => !banSet.has(x));
+               if (!newTags.length) { newTags = null; }
+               else {
+                 usedAi = true; aiHits++;
+                 if (ai.title && !title) title = String(ai.title).slice(0, 200);
+                 if (ai.description && !notes) notes = String(ai.description).slice(0, 600);
+               }
              }
            } catch (_) {}
          }
@@ -16424,7 +16476,7 @@ let AI_DOWN_UNTIL = 0;
 const AI_DOWN_COOLDOWN_MS = 60_000;
 function aiTrip() { AI_DOWN_UNTIL = Date.now() + AI_DOWN_COOLDOWN_MS; }
 
-async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], config = undefined, reviewTags = null) {
+async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], config = undefined, reviewTags = null, bannedTags = null) {
   if (Date.now() < AI_DOWN_UNTIL) return null;
   let cfg;
   if (config === undefined) {
@@ -16461,7 +16513,8 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
     'Translate the title, summary, and tags to English before returning them, even when the source page is in another language.',
     'Return a useful context summary in 1-2 factual English sentences: preserve the question, problem, subject, or decision the page is about, not just the site name.',
     'Return an English title when the source title is not English.',
-    'Choose 3-7 short lowercase English tags (no #, no spaces) that describe the content.',
+    'Choose 3-7 short lowercase English tags (no #, no spaces) that describe WHAT the page is and does — its topic, type, and platform.',
+    'Tags must be common nouns for the subject matter (music, video, vpn, coding, tutorial, app, bot, game). NEVER use proper nouns: no site names, project names, person names, usernames, or domain words as tags — even if they appear in the title or URL.',
     'Reuse an existing tag exactly whenever it fits; do not invent a synonym for an existing tag.',
     'Derive tags from the extracted page content, title, URL, and existing vocabulary; never use a fixed application taxonomy.',
     reviewing
@@ -16476,6 +16529,7 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
     snippet ? `Page content: ${snippet}` : '',
     vocab.length ? `Existing tags: ${vocab.join(', ')}` : '',
     reviewing ? `Current tags on this bookmark: ${reviewTags.join(', ') || '(none)'}` : '',
+    Array.isArray(bannedTags) && bannedTags.length ? `NEVER use as tags (site/project names): ${bannedTags.join(', ')}` : '',
     '',
     'JSON:'
   ].filter(Boolean).join('\n');
@@ -17374,6 +17428,8 @@ export {
   parseStoredTags,
   normalizeTagList,
   smartFallbackTags,
+  domainNameBans,
+  ECOSYSTEM_HOSTS,
   searchAllLinks,
   telegramSearchRowHtml,
   handleSearchLinks,

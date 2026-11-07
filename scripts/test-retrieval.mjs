@@ -41,6 +41,7 @@ import {
   smartFallbackTags,
   parseStoredTags,
   normalizeTagList,
+  domainNameBans,
   telegramEntityMarkdown,
   telegramRichMarkdown,
   telegramRichNotesForSave,
@@ -703,6 +704,18 @@ assert.deepEqual(normalizeTagList(['Music', 'music', '#Pop']), ['music', 'pop'])
 {
   const r = smartFallbackTags('https://example.com/x', { title: '', notes: '', content: '' }, ['backfill', 'dump']);
   assert.equal(r.removed.length, 2, 'content-free rows lose all junk');
+}
+// Names are never tags: domains and usernames banned, ecosystems allowed.
+{
+  const bans = domainNameBans('https://spotiflac.zarz.moe/extension');
+  assert.ok(bans.has('spotiflac') && bans.has('zarz'), 'domain labels banned');
+  assert.ok(domainNameBans('https://github.com/user/repo').has('user'), 'path username banned');
+  assert.ok(!domainNameBans('https://github.com/user/repo').has('github'), 'ecosystem host never banned');
+  const r = smartFallbackTags('https://spotiflac.zarz.moe/extension', { title: 'SpotiFlac Extension', notes: 'music downloader', content: '' }, []);
+  assert.ok(!r.tags.includes('spotiflac') && !r.tags.includes('zarz'), 'rule fallback never emits site names');
+  assert.ok(r.tags.includes('music'), 'topic still detected');
+  const g = smartFallbackTags('https://github.com/u/r', { title: 'Cool tool', notes: 'a downloader tool', content: '' }, []);
+  assert.ok(g.tags.includes('github'), 'ecosystem host kept as tag');
 }
 
 console.log('retrieval tests passed');
