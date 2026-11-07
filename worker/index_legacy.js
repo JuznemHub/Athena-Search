@@ -7715,7 +7715,7 @@ function helpTextForSection(section, isGod = false) {
       cmd(6, `${codeHtml('/uclone')} ${codeHtml('<chat_id> <community_id>')}`, 'Guided wizard for a whole chat: same measuring and stats, straight to the destination picker.'),
       spacer,
       richParagraph('<b>Watch & stop</b>'),
-      cmd(7, `${codeHtml('/stats')}`, 'Newest-first dashboard, one row per cloned source: totals, fresh-in-24h line, live ON/OFF, per-topic pages. LIVE means a real capture path exists. The ⏹ button beside a live row stops its live capture AND its running backfills — saved history stays.'),
+      cmd(7, `${codeHtml('/stats')}`, 'Newest-first dashboard, one row per cloned source: totals, fresh-in-24h line, live ON/OFF, per-topic pages. Forum groups show Group[topic]. LIVE means a real capture path exists. The ⏹ button beside a live row stops its live capture AND its running backfills — saved history stays; tapping a source opens its drill-down page with a ⏹ Remove live button that does the same even when live reads OFF.'),
       cmd(8, `${codeHtml('/status')} ${codeHtml('[all]')}`, 'What is indexing right now plus running and recent backfill jobs (' + codeHtml('all') + ' lists every user\'s jobs, GOD). There is no stop command — stopping happens from the ⏹ button on /stats.'),
       cmd(9, `${codeHtml('/delete')}`, 'One delete command with a picker: one saved link, one whole cloned chat (imports + live capture, with confirm), or one backfill session (imports only, with confirm). Direct forms still work: ' + codeHtml('/delete <url>') + ' removes a link, ' + codeHtml('/delete <chat_id> [thread_id]') + ' removes a whole clone.'),
       spacer,
@@ -9530,11 +9530,23 @@ function statsSourcesTotalsText(sources) {
     ' · ' + (live ? '🟢 live on' : '🔴 live off'));
 }
 
+/** Display name for a /stats source: forum groups show Group[topic, …], capped. */
+function statsSourceTopicsSuffix(s, max = 5) {
+  const topics = Array.isArray(s?.topics) ? s.topics : [];
+  if (!s?.isForum || !topics.length) return '';
+  const names = topics.map((t) => String(t?.title || (t?.threadId != null && t.threadId !== '' ? '#' + t.threadId : '')).trim()).filter(Boolean);
+  if (!names.length) return '';
+  const shown = names.slice(0, max);
+  return '[' + shown.join(', ') + (names.length > shown.length ? `, +${names.length - shown.length} more` : '') + ']';
+}
+function statsSourceDisplayName(s, maxLen = 60) {
+  return String(String(s?.name || s?.chat_id || '?') + statsSourceTopicsSuffix(s)).slice(0, maxLen);
+}
 function statsSourceRowLine(s, index) {
   const o = s.overall || {};
   const liveMark = s.live ? '🟢 LIVE' : '🔴 off';
   const typeMark = s.type === 'channel' ? '📡' : s.isForum ? '👥' : '👤';
-  const name = escHtml(String(s.name || s.chat_id || '?').slice(0, 60));
+  const name = escHtml(statsSourceDisplayName(s, 60));
   return `<b>${index + 1}. ${typeMark} ${name}</b> · ${liveMark}<br>` +
     escHtml(String(s.chat_id || '') + ' → ' + String(s.destinationName || (s.target === 'personal' ? 'Personal brain' : 'community'))) + '<br>' +
     '🔗 ' + statsNum(o.savedLinkPosts) + ' posts · 🔗 ' + statsNum(o.savedLinks) + ' urls' +
@@ -9563,7 +9575,7 @@ function statsSourcePage(s, topicPagesList, topicPage) {
     freshByThread[t] = (freshByThread[t] || 0) + 1;
   }
   const lines = [];
-  lines.push(richHeading(3, '📊 ' + escHtml(String(s.name || s.chat_id || '?').slice(0, 60))));
+  lines.push(richHeading(3, '📊 ' + escHtml(statsSourceDisplayName(s, 60))));
   lines.push(richParagraph('Source: ' + statsSourceHtml({ chat_id: s.chat_id, state: { sourceName: s.name, label: s.label } }) +
     '<br>Type: ' + escHtml(s.type === 'channel' ? 'Channel' : s.isForum ? 'Group — Topics Enabled' : s.target === 'personal' ? 'Personal brain' : 'Group — No Topics') +
     '<br>Destination: ' + escHtml(String(s.destinationName || (s.target === 'personal' ? 'Personal brain' : 'community')))));
@@ -9624,12 +9636,15 @@ function formatStatsRichReport(report, sel = {}) {
         { label: 'Next ▶', data: 'stats:src:' + src + ':' + Math.min(topicPagesList.length - 1, topicPage + 1) },
       ]);
     }
+    // Explicit remove-from-live button: works even when live reads OFF but a
+    // follow or bot link still exists. Same handler + ownership check as ⏹.
+    rows.push([{ label: '⏹ Remove live', data: 'stats:stop:' + src }]);
     rows.push([{ label: '« All sources', data: 'stats:dashboard' }]);
   } else {
     html = statsDashboardPage(sources);
     for (let i = 0; i < sources.length; i++) {
       const s = sources[i];
-      const short = String(s.name || s.chat_id || '?').slice(0, 22);
+      const short = statsSourceDisplayName(s, 22);
       rows.push([
         { label: `${i + 1}. ${short} ▸`, data: 'stats:src:' + i },
         ...(s.live ? [{ label: '⏹', data: 'stats:stop:' + i }] : []),

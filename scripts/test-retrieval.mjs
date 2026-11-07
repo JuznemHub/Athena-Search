@@ -22,6 +22,7 @@ import {
   progressBar,
   repairContaminatedNotes,
   fuzzyMatchLinks,
+  formatStatsRichReport,
   helpTextForSection,
   isGroundedAiAnswer,
   normalizeModelId,
@@ -70,6 +71,15 @@ assert.doesNotMatch(helpTextForSection('channels'), /<b>\d+\. <code>\/clone<\/co
 assert.doesNotMatch(helpTextForSection('god', true), /<code>\/clone<\/code>/, 'channel clone form lives in 📡 Channels, not GOD');
 assert.doesNotMatch(helpTextForSection('channels'), /<code>\/index_start<\/code>|<code>\/index_status<\/code>|<code>\/index_stop<\/code>|<code>\/clone_stop<\/code>|<code>\/channel_link<\/code>|<code>\/channel_unlink<\/code>|<code>\/clone_del<\/code>|<code>\/userbot_follow<\/code>/, 'removed commands stay out of the channels panel');
 assert.match(helpTextForSection('god', true), /forcetags[\s\S]*?tag_untagged/);
+// /stats: forum groups show Group[topic], and the drill-down page offers Remove live.
+{
+  const fakeReport = { sources: [{ chat_id: '-100123', name: 'MyGroup', type: 'forum', isForum: true, live: true, target: 'community', community: 'c1', owner: 'c1', destinationName: 'Test community', overall: {}, fresh: {}, recent: [], topics: [{ threadId: '2', title: 'General', total: { links: 1, files: 0, other: 0 }, percent: 100, done: true, stateMark: '✅ COMPLETE' }], auth: { tgIds: [], userIds: [] } }] };
+  const dash = formatStatsRichReport(fakeReport);
+  assert.match(dash.html, /MyGroup\[General\]/, 'dashboard row shows Group[topic]');
+  const drill = formatStatsRichReport(fakeReport, { src: 0, topicPage: 0 });
+  assert.match(drill.html, /MyGroup\[General\]/, 'drill-down heading shows Group[topic]');
+  assert.match(drill.buttons, /stats:stop:0/, 'drill-down page has a remove-live button');
+}
 
 const replyEdit = parseTelegramEditPayload('| title: Correct title | notes: Correct notes', {
   text: 'Saved link https://example.com/item'
