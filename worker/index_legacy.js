@@ -7702,7 +7702,7 @@ function helpTextForSection(section, isGod = false) {
   if (section === 'channels') {
     return [
       richHeading(3, '📡 Cloning channels, groups & topics'),
-      richParagraph('<i>Two commands do everything. <b>/clone</b> backfills history first, then follows live; <b>/uclone</b> is the guided wizard with per-topic statistics. Community id always goes LAST: with the id given the clone starts at once, without it you pick Personal vs community first. Stats show Group[Topic] / [Channel] with the usual ⏹ button.</i>'),
+      richParagraph('<i>Two commands do everything. <b>/clone</b> backfills history first, then follows live; <b>/uclone</b> is the guided wizard with per-topic statistics. Community id always goes LAST, and every run asks Personal vs community before starting (your id comes pre-selected first). Stats show Group[Topic] / [Channel] with the usual ⏹ button.</i>'),
       spacer,
       richParagraph('<b>/clone — history + live, community-scoped</b>'),
       cmd(1, `${codeHtml('/clone')} ${codeHtml('<chat_id> <community_id>')}`, 'Whole chat (channels show as [Channel]): history first, then live. Runs as your selected account (' + codeHtml('/userbot_select') + '), first enabled if none.'),
@@ -7726,7 +7726,7 @@ function helpTextForSection(section, isGod = false) {
       cmd(13, `${codeHtml('/userbot_del')} ${codeHtml('<label>')} · ${codeHtml('/userbot_disconnect')}`, 'Remove one account, or disconnect all of them. Their follows and running clones stop too — switch accounts (12) instead if you just want to move live cloning elsewhere.'),
       spacer,
       richParagraph(`<b>Recipes:</b> group: ${codeHtml('/community_verify')} → ${codeHtml('/clone <chat_id> <community_id>')} → ${codeHtml('/stats')}; channel: ${codeHtml('/clone <-100…> <community_id>')} → ${codeHtml('/stats')}; history + live: ${codeHtml('/userbot_add')} → ${codeHtml('/userbot_select')} → ${codeHtml('/uclone <chat_id> <community_id>')} → ${codeHtml('/stats')}`),
-      richParagraph('<i>Cloning never edits the source chat. The selected userbot account must see the source chat; runs without a community id ask Personal vs community first, runs with the id start at once.</i>')
+      richParagraph('<i>Cloning never edits the source chat. The selected userbot account must see the source chat; every run asks Personal vs community first.</i>')
     ].join('\n');
   }
 
@@ -12572,34 +12572,8 @@ async function startCloneTargetAsk(env, ctx) {
         await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Cloning runs on the self-hosted server only.`, forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
-      if (communityArg) {
-        // Destination fully specified: no picker, clone straight away.
-        const choice = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityArg).first().catch(() => null);
-        if (!choice || (!isGod && !(await ensureOwnerOrAdmin(communityArg, athenaUser.id, env)))) {
-          await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Community not found or not yours.`, forumThreadId);
-          return new Response('OK', { status: 200, headers: corsHeaders });
-        }
-        const label = await resolveJobLabel(env, athenaUser.id);
-        if (!label) {
-          await sendTelegramFormatted(token, chatId, `${boldHtml('🤖')} No userbot account connected yet. GOD: ${codeHtml('/userbot_add <label> <api_id> <api_hash> <session>')}`, forumThreadId);
-          return new Response('OK', { status: 200, headers: corsHeaders });
-        }
-        let topicTitle = '';
-        if (flowThread) topicTitle = await resolveForumTopicTitle(env, label, flowChat, flowThread);
-        const resolved = await resolveCloneChat(env, token, flowChat);
-        const display = cloneDisplayName(resolved.title, resolved.type, flowThread, topicTitle);
-        const communityName = choice.name || communityArg;
-        const pendingId = 'bc_' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
-        const stats = { manager: 'botclone', stage: 'queued', sourceName: display, threadId: flowThread || null, communityId: communityArg, target: 'community', isForum: !!flowThread, sourceType: resolved.type === 'channel' ? 'channel' : 'group', label: '', destinationName: communityName, requesterTgId: String(tgUserId || ''), requesterUserId: String(athenaUser.id), topics: flowThread ? [{ id: String(flowThread), name: topicTitle || undefined }] : [], createdAt: Date.now() };
-        await storePendingClone(env, { id: pendingId, chat_id: flowChat, thread_id: flowThread || null, community_id: communityArg, target: 'community', requester_tg_id: String(tgUserId || ''), requester_user_id: String(athenaUser.id), stats, created_at: Date.now(), expires_at: Date.now() + 1000 * 60 * 60 * 24 * 30 });
-        const res = await startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg: communityArg, chatIdArg: flowChat, threadArg: flowThread || '', communityName, userbotLabel: label, target: 'community', topicName: topicTitle, silentProgress: true });
-        if (!res?.ok) {
-          await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} Clone failed: ${escHtml(String(res?.reason || 'unknown'))}`, forumThreadId);
-          return new Response('OK', { status: 200, headers: corsHeaders });
-        }
-        await sendTelegramFormatted(token, chatId, `${boldHtml('✅ Cloning')} ${escHtml(display)} → ${escHtml(communityName)}. History first, then live — progress in ${codeHtml('/stats')}.`, forumThreadId);
-        return new Response('OK', { status: 200, headers: corsHeaders });
-      }
+      // ID forms always ask Personal vs community first (the given
+      // community id is pre-selected first). Bare forms stay silent above.
       await startCloneTargetAsk(env, { token, chatId, forumThreadId, msg, tgUserId, athenaUser, isGod, flowChat, flowThread, communityArg });
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
