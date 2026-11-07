@@ -736,4 +736,32 @@ assert.deepEqual(normalizeTagList(['a', 'B', 'ai', '#Pop']), ['ai', 'pop']);
   assert.ok(r.removed.includes('backfill'), 'backfill still drops');
 }
 
+// Controlled taxonomy: rules classify, the model may not invent tags.
+const tagTaxonomy = await import('../worker/tag-taxonomy.js');
+{
+  const meta = { title: 'SpotiFlac Extension', notes: 'Spotify music client for Android, Windows and Linux. Download the app.', content: '' };
+  const { tags, facts } = tagTaxonomy.classifyTags('https://spotiflac.zarz.moe/extension', meta);
+  for (const t of ['spotify', 'app', 'android', 'windows', 'linux', 'multiplatform']) assert.ok(tags.includes(t), `classifier adds ${t}`);
+  assert.ok(facts.software && facts.telegram === false);
+  assert.ok(!tags.includes('spotiflac') && !tags.includes('zarz'), 'classifier never emits site names');
+  assert.ok(!tags.includes('digital') && !tags.includes('technology') && !tags.includes('music'), 'no fluff and no redundant brand category');
+  assert.deepEqual(tagTaxonomy.classifyTags('https://spotiflac.zarz.moe/extension', meta).tags, tags, 'classification is deterministic');
+}
+{
+  const { tags } = tagTaxonomy.classifyTags('https://example.com/x', { title: 'Music Player', notes: 'Android app', content: '' });
+  assert.ok(tags.includes('android') && !tags.includes('multiplatform'), 'one platform is never multiplatform');
+}
+{
+  const v = tagTaxonomy.validateTags(['#Spotify', 'spotify', 'technology', 'digitalmusic', 'app', 'spotiflac', 'backfill'], { banned: ['spotiflac'], max: 4 });
+  assert.deepEqual(v.tags, ['spotify', 'app']);
+  const reasons = v.rejected.map((r) => `${r.tag}:${r.reason}`);
+  assert.ok(reasons.includes('spotify:duplicate') && reasons.includes('technology:generic'), 'duplicates and fluff are named');
+  assert.ok(reasons.includes('digitalmusic:unknown') && reasons.includes('spotiflac:name') && reasons.includes('backfill:junk'), 'unknown, name and junk are named');
+}
+{
+  const vocab = ['my-curated-tag'];
+  const v = tagTaxonomy.validateTags(['my-curated-tag', 'made-up-tag'], { vocabulary: vocab });
+  assert.deepEqual(v.tags, ['my-curated-tag'], 'scope vocabulary survives, invented words do not');
+}
+
 console.log('retrieval tests passed');

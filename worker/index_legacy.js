@@ -4,6 +4,7 @@ import { renderCloneProgress } from './clone-ui.js';
 import { dokployConfigured, dokployApps, dokployStatus, dokployLogSnapshot, dokployDeploy, dokploySimple } from './dokploy.js';
 import { handleLogApi } from './log-api.js';
 import { runtimeLogs, redactLog, writeRuntimeLog } from './runtime-logs.js';
+import { classifyTags, validateTags, JUNK_TAGS, PLATFORM_SET, CANONICAL_TAGS } from './tag-taxonomy.js';
 
 function cloneDisplayName(chatTitle, chatType, flowThread, topicTitle) {
   const base = String(chatTitle || '');
@@ -6884,26 +6885,9 @@ function normalizeTagList(tags) {
 
 /** Provenance/ingest stamps, not topics. Dropped on review unless the
  *  content itself is about that word (e.g. telegram stays for Telegram
- *  clients/bots, backfill never stays). */
-const RETAG_JUNK_TAGS = new Set([
-  'backfill', 'dump', 'untagged', 'duplicate', 'duplicates', 'saved', 'link',
-  'links', 'file', 'files', 'community', 'personal', 'post', 'posts', 'message',
-  'messages', 'channel', 'channels', 'group', 'groups', 'feed', 'feeds',
-  'bookmark', 'bookmarks', 'archive', 'archived', 'auto', 'import', 'imported',
-  'shared', 'share', 'forward', 'forwarded', 'media', 'attachment', 'attachments',
-  'document', 'documents', 'upload', 'uploads', 'rss', 'bot-api', 'untagged-link',
-  'telegram',
-  // Browser bookmark folders arrive as tags from TUI imports ("Bookmarks
-  // Toolbar", "Trash") and describe no topic at all.
-  'bookmarks-toolbar', 'bookmarks-bar', 'bookmark-bar', 'bookmark-toolbar',
-  'other-bookmarks', 'mobile-bookmarks', 'unsorted', 'trash', 'favorites',
-  'folder', 'folders',
-  // Words title-scraping coins as tags that never describe a topic.
-  'junk', 'misc', 'stuff', 'thing', 'things', 'item', 'items', 'various',
-  'untitled', 'placeholder', 'temp', 'temporary', 'new', 'default', 'home',
-  'main', 'page', 'index', 'welcome', 'hello', 'title', 'text', 'description',
-  'header', 'footer', 'sidebar', 'content'
-]);
+ *  clients/bots, backfill never stays). The list lives with the vocabulary so
+ *  the review, the rules and the SQL junk ordering cannot drift apart. */
+const RETAG_JUNK_TAGS = JUNK_TAGS;
 
 function parseStoredTags(raw) {
   if (Array.isArray(raw)) return normalizeTagList(raw);
@@ -13059,7 +13043,7 @@ async function startCloneTargetAsk(env, ctx) {
        }
        return targets;
      };
-     const st = { done: 0, changed: 0, failed: 0, aiHits: 0, ruleHits: 0, addedCounts: {}, removedCounts: {}, changeLines: [], failLines: [] };
+     const st = { done: 0, changed: 0, failed: 0, aiHits: 0, ruleHits: 0, addedCounts: {}, removedCounts: {}, rejectCounts: {}, changeLines: [], failLines: [] };
      const editProgress = async (total) => {
        if (!thinkId) return;
        const bar = total
@@ -13090,32 +13074,39 @@ async function startCloneTargetAsk(env, ctx) {
              }
            } catch (_) {}
          }
-         let newTags = null, added = [], removed = [], usedAi = false;
          const nameBans = [...domainNameBans(r.url)];
-         if (aiMode) {
+         // Deterministic facts first: what the page plainly is drives the
+         // tags, so the same link always lands on the same words.
+         const rule = classifyTags(r.url, meta);
+         const vocab = await recentTagsForScope(env, t.table === 'links' ? 'community' : 'personal', t.col);
+         // Provenance stamps survive only when the content is about them.
+         const curated = current.filter((x) => !RETAG_JUNK_TAGS.has(x) || (x === 'telegram' && rule.facts.telegram));
+         st.rejectCounts.junk = (st.rejectCounts.junk || 0) + (current.length - curated.length);
+         let candidate = [...curated, ...rule.tags];
+         let usedAi = false;
+         // The model only fills gaps. When the rules already named a type and
+         // a topic there is nothing left to ask, which keeps the sweep cheap
+         // and repeatable.
+         const ruleTopics = rule.tags.filter((x) => !PLATFORM_SET.has(x)).length;
+         if (aiMode && ruleTopics < 2) {
            try {
-             const vocab = await recentTagsForScope(env, t.table === 'links' ? 'community' : 'personal', t.col);
-             const ai = await aiDescribeAndTag(env, r.url, meta, vocab, cfgFt, current, nameBans);
+             const ai = await aiDescribeAndTag(env, r.url, meta, vocab, cfgFt, curated, nameBans);
              if (ai?.tags?.length) {
-               const banSet = new Set(nameBans);
-               newTags = normalizeTagList(ai.tags).filter((x) => !banSet.has(x));
-               if (!newTags.length) { newTags = null; }
-               else {
-                 usedAi = true; st.aiHits++;
-                 if (ai.title && !title) title = String(ai.title).slice(0, 200);
-                 if (ai.description && !notes) notes = String(ai.description).slice(0, 600);
-               }
+               candidate = [...candidate, ...ai.tags];
+               usedAi = true; st.aiHits++;
+               if (ai.title && !title) title = String(ai.title).slice(0, 200);
+               if (ai.description && !notes) notes = String(ai.description).slice(0, 600);
              }
            } catch (_) {}
          }
-         if (!usedAi) {
-           const fb = smartFallbackTags(r.url, meta, current);
-           newTags = fb.tags; added = fb.added; removed = fb.removed; st.ruleHits++;
-         } else {
-           const after = new Set(newTags);
-           added = newTags.filter((x) => !current.includes(x));
-           removed = current.filter((x) => !after.has(x));
-         }
+         if (!usedAi) st.ruleHits++;
+         // Nothing reaches storage unless it is canonical or already in use in
+         // this scope. This is what stops model-invented tags.
+         const verdict = validateTags(candidate, { vocabulary: vocab, banned: nameBans, max: 8 });
+         for (const rej of verdict.rejected) st.rejectCounts[rej.reason] = (st.rejectCounts[rej.reason] || 0) + 1;
+         const newTags = verdict.tags;
+         const added = newTags.filter((x) => !current.includes(x));
+         const removed = current.filter((x) => !newTags.includes(x));
          const metaRescued = title !== (r.title || '') || notes !== (r.notes || '');
          if (added.length || removed.length || metaRescued) {
            await env.DB.prepare(
@@ -13145,11 +13136,13 @@ async function startCloneTargetAsk(env, ctx) {
      const top = (m) => Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([tag, c]) => `${escHtml(tag)}×${c}`).join(', ');
      const totalAdded = Object.values(st.addedCounts).reduce((a, b) => a + b, 0);
      const totalRemoved = Object.values(st.removedCounts).reduce((a, b) => a + b, 0);
+     const rejected = Object.entries(st.rejectCounts).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
      return [
        richHeading(3, '🏷 Force tags — report'),
        `<p>Mode: ${aiMode ? 'AI review' : 'rule fallback (no AI key)'} · Scope: ${escHtml(scopeArg)}${scopeCommunity ? ` · ${codeHtml(escHtml(scopeCommunity))}` : ''}</p>`,
        `<p>Reviewed ${st.done} · Changed ${st.changed} · Unchanged ${st.done - st.changed} (AI ${st.aiHits} · rules ${st.ruleHits})</p>`,
        `<p>Tags added: ${totalAdded}${top(st.addedCounts) ? ` (${top(st.addedCounts)})` : ''} · Removed: ${totalRemoved}${top(st.removedCounts) ? ` (${top(st.removedCounts)})` : ''}</p>`,
+       rejected.length ? `<p>Rejected ${rejected.reduce((a, [, n]) => a + n, 0)}: ${rejected.map(([reason, n]) => `${escHtml(reason)} ${n}`).join(' · ')}</p>` : '',
        st.changeLines.length ? `<ul>${st.changeLines.join('')}</ul>` : '<p>No tag changes needed — everything already fits.</p>',
        st.failed ? `<p>⚠️ ${st.failed} row(s) could not be updated${st.failLines.length ? `: ${st.failLines.join('; ')}` : ''}.</p>` : '',
        moreRemain ? '<p><i>More remain — run /forcetags again to continue.</i></p>' : (st.changed ? '' : '<p>All caught up.</p>'),
@@ -16596,6 +16589,7 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
     .map(tag => String(tag).replace(/^#/, '').trim().toLowerCase())
     .filter(tag => tag && !['telegram', 'community', 'personal', 'dump'].includes(tag))
     .filter((tag, index, all) => all.indexOf(tag) === index);
+  const canonical = [...CANONICAL_TAGS].sort();
   const mode = (cfg.mode || 'openai').toLowerCase();
 
   const reviewing = Array.isArray(reviewTags);
@@ -16605,9 +16599,9 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
     'Return a useful context summary in 1-2 factual English sentences: preserve the question, problem, subject, or decision the page is about, not just the site name.',
     'Return an English title when the source title is not English.',
     'Choose 3-7 short lowercase English tags (no #, no spaces) that describe WHAT the page is and does — its topic, type, and platform.',
-    'Tags must be common nouns for the subject matter (music, video, vpn, coding, tutorial, app, bot, game). NEVER use proper nouns: no site names, project names, person names, usernames, or domain words as tags — even if they appear in the title or URL.',
+    'Tags must be common nouns for the subject matter (music, video, vpn, coding, tutorial, app, bot, game). NEVER use proper nouns as tags: no site names, project names, person names, usernames, or domain words — even if they appear in the title or URL. The one exception is a brand from the canonical list, and only when the page is about that brand.',
     'Reuse an existing tag exactly whenever it fits; do not invent a synonym for an existing tag.',
-    'Derive tags from the extracted page content, title, URL, and existing vocabulary; never use a fixed application taxonomy.',
+    'Choose tags only from the canonical list and the existing vocabulary given below. Never invent a word; returning fewer tags is correct when nothing fits.',
     reviewing
       ? 'REVIEW the current tags: DROP ingest junk (backfill, dump, untagged, duplicate, saved, link, file, community, personal, post, channel, feed, archive, auto, import, share, forward, media, attachment, document, upload, rss) and anything unrelated to the content; KEEP every current tag that truly describes it (e.g. keep telegram only for Telegram-related links); ADD missing topic and platform tags. For apps include the platform: android, ios, or multiplatform when it runs on several OSes.'
       : '',
@@ -16619,6 +16613,7 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
     `URL: ${rawUrl}`,
     snippet ? `Page content: ${snippet}` : '',
     vocab.length ? `Existing tags: ${vocab.join(', ')}` : '',
+    `Canonical tags: ${canonical.join(', ')}`,
     reviewing ? `Current tags on this bookmark: ${reviewTags.join(', ') || '(none)'}` : '',
     Array.isArray(bannedTags) && bannedTags.length ? `NEVER use as tags (site/project names): ${bannedTags.join(', ')}` : '',
     '',
@@ -16696,7 +16691,13 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
               : String(data?.choices?.[0]?.message?.reasoning_content || data?.output_text || JSON.stringify(content || ''));
         }
       }
-      return parseAiDescribeResponse(text);
+      const parsed = parseAiDescribeResponse(text);
+      if (parsed) {
+        // Enforce the vocabulary once, here, so no model output reaches storage
+        // unvalidated on any path (save, backfill, review).
+        parsed.tags = validateTags(parsed.tags, { vocabulary: vocab }).tags;
+      }
+      return parsed;
     } catch (err) {
       lastError = err;
       console.error('AI link enrichment request failed', err?.message || err);
