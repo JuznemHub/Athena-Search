@@ -6875,7 +6875,8 @@ function normalizeTagList(tags) {
   const out = [];
   for (const t of Array.isArray(tags) ? tags : []) {
     const tag = String(t).replace(/^#/,'').trim().toLowerCase().replace(/\s+/g,'-').slice(0,40);
-    if (!tag || out.includes(tag)) continue;
+    // Single letters are import residue ("a", "b", "c"), never topics.
+    if (!tag || tag.length < 2 || out.includes(tag)) continue;
     out.push(tag);
   }
   return out;
@@ -6892,6 +6893,11 @@ const RETAG_JUNK_TAGS = new Set([
   'shared', 'share', 'forward', 'forwarded', 'media', 'attachment', 'attachments',
   'document', 'documents', 'upload', 'uploads', 'rss', 'bot-api', 'untagged-link',
   'telegram',
+  // Browser bookmark folders arrive as tags from TUI imports ("Bookmarks
+  // Toolbar", "Trash") and describe no topic at all.
+  'bookmarks-toolbar', 'bookmarks-bar', 'bookmark-bar', 'bookmark-toolbar',
+  'other-bookmarks', 'mobile-bookmarks', 'unsorted', 'trash', 'favorites',
+  'folder', 'folders',
   // Words title-scraping coins as tags that never describe a topic.
   'junk', 'misc', 'stuff', 'thing', 'things', 'item', 'items', 'various',
   'untitled', 'placeholder', 'temp', 'temporary', 'new', 'default', 'home',
@@ -6948,7 +6954,9 @@ function smartFallbackTags(rawUrl, meta, currentTags) {
   const removed = [];
   // Junk provenance tags drop unconditionally — except telegram, which is a
   // real topic when the content is actually about Telegram.
-  const junkRescued = (t) => t === 'telegram' && (word('telegram') || bag.includes('telegram'));
+  // t.me and telegram.me links are Telegram content without the word in them.
+  const aboutTelegram = word('telegram') || bag.includes('telegram') || bag.includes('telegram.me') || /(^|[^a-z0-9])t\.me\//.test(bag);
+  const junkRescued = (t) => t === 'telegram' && aboutTelegram;
   for (const t of normalizeTagList(currentTags)) {
     if (RETAG_JUNK_TAGS.has(t) && !junkRescued(t)) { if (!removed.includes(t)) removed.push(t); continue; }
     if (!kept.includes(t)) kept.push(t);
@@ -13002,7 +13010,9 @@ async function startCloneTargetAsk(env, ctx) {
      scopeArg = scopeArg || 'both';
      const think = await sendTelegramFormatted(token, chatId, `${boldHtml('🏷')} Retag review (${wantAll ? 'all · ' : ''}${scopeArg}${scopeCommunity ? ` · ${codeHtml(escHtml(scopeCommunity))}` : ''})… ${aiMode ? 'AI on' : 'no AI key → rule fallback'}`, forumThreadId);
      const thinkId = think?.message_id;
-     const junkLike = [...RETAG_JUNK_TAGS].slice(0, 14).map((j) => `tags LIKE '%${j}%'`).join(' OR ');
+     // Every junk tag drives junk-first ordering. slice(0, 14) silently left
+     // the rest unprioritised, so most junk rows were reviewed last.
+     const junkLike = [...RETAG_JUNK_TAGS].map((j) => `tags LIKE '%${j}%'`).join(' OR ');
      // All-mode pages each scope by stable id order with its own offset:
      // in-place tag edits never move a row, so every row is visited exactly
      // once and the sweep always terminates. Single-batch mode keeps the
@@ -13010,9 +13020,14 @@ async function startCloneTargetAsk(env, ctx) {
      const sweepOffsets = new Map();
      const pickTargets = async () => {
        const targets = [];
+       const seen = new Set();
        const pick = async (table, col) => {
+         if (!wantAll && targets.length >= BATCH) return;
          await ensureSearchColumns(env);
-         const extra = (table === 'links' && scopeCommunity) ? ` AND community_id = '${scopeCommunity.replace(/'/g, '')}'` : '';
+         // A community is a scope of its own. Filtering only when the id was
+         // typed re-read the same first page once per community, so links past
+         // that page were never reviewed and one batch did N× the work.
+         const extra = (table === 'links' && col) ? ` AND community_id = '${String(col).replace(/'/g, '')}'` : '';
          const key = `${table}:${col}`;
          const off = wantAll ? (sweepOffsets.get(key) || 0) : 0;
          const order = wantAll ? 'id ASC' : `CASE WHEN COALESCE(tags,'') IN ('', '[]', 'null', '["untagged"]') THEN 0 WHEN ${junkLike} THEN 1 ELSE 2 END, created_at DESC`;
@@ -13023,13 +13038,18 @@ async function startCloneTargetAsk(env, ctx) {
             ORDER BY ${order} ${page}`
          ).all();
          if (wantAll && (results || []).length) sweepOffsets.set(key, off + results.length);
-         for (const r of results || []) targets.push({ table, col, row: r });
+         for (const r of results || []) {
+           const id = `${table}:${col}:${r.id}`;
+           if (seen.has(id)) continue;
+           seen.add(id);
+           targets.push({ table, col, row: r });
+         }
        };
        if (scopeArg !== 'personal') {
          if (scopeCommunity) await pick('links', scopeCommunity);
          else {
            const { results: cids } = await env.DB.prepare('SELECT DISTINCT community_id AS id FROM links').all();
-           for (const row of cids || []) await pick('links', row.id);
+           for (const row of cids || []) if (row.id) await pick('links', row.id);
          }
        }
        if (scopeArg !== 'community') {
@@ -13039,8 +13059,9 @@ async function startCloneTargetAsk(env, ctx) {
        }
        return targets;
      };
-     const st = { done: 0, changed: 0, aiHits: 0, ruleHits: 0, addedCounts: {}, removedCounts: {}, changeLines: [] };
+     const st = { done: 0, changed: 0, failed: 0, aiHits: 0, ruleHits: 0, addedCounts: {}, removedCounts: {}, changeLines: [], failLines: [] };
      const editProgress = async (total) => {
+       if (!thinkId) return;
        const bar = total
          ? (() => { const pct = Math.min(100, Math.round((st.done / total) * 100)); const f = Math.round((pct / 100) * 18); return `▮`.repeat(f) + '▯'.repeat(18 - f) + `\n${codeHtml(pct + '% · ' + st.done + '/' + total)}`; })()
          : codeHtml(`${st.done} reviewed`);
@@ -13109,7 +13130,13 @@ async function startCloneTargetAsk(env, ctx) {
              st.changeLines.push(`<li><b>${escHtml((title || r.url || 'link').slice(0, 70))}</b> ${escHtml(bits)}${metaRescued && !added.length && !removed.length ? ' (title/notes rescued)' : ''}</li>`);
            }
          }
-       } catch (_) {}
+       } catch (e) {
+         // A rejected write (missing column, bad JSON, DB hiccup) used to count
+         // as reviewed with no trace — the report then claimed work that never
+         // landed. Count it and say so.
+         st.failed++;
+         if (st.failLines.length < 5) st.failLines.push(`${escHtml(String(t.row?.url || t.row?.id || 'row').slice(0, 60))}: ${escHtml(String(e?.message || e).slice(0, 120))}`);
+       }
        st.done++;
        if (st.done % 10 === 0) await editProgress(wantAll ? null : targets.length);
      }
@@ -13124,6 +13151,7 @@ async function startCloneTargetAsk(env, ctx) {
        `<p>Reviewed ${st.done} · Changed ${st.changed} · Unchanged ${st.done - st.changed} (AI ${st.aiHits} · rules ${st.ruleHits})</p>`,
        `<p>Tags added: ${totalAdded}${top(st.addedCounts) ? ` (${top(st.addedCounts)})` : ''} · Removed: ${totalRemoved}${top(st.removedCounts) ? ` (${top(st.removedCounts)})` : ''}</p>`,
        st.changeLines.length ? `<ul>${st.changeLines.join('')}</ul>` : '<p>No tag changes needed — everything already fits.</p>',
+       st.failed ? `<p>⚠️ ${st.failed} row(s) could not be updated${st.failLines.length ? `: ${st.failLines.join('; ')}` : ''}.</p>` : '',
        moreRemain ? '<p><i>More remain — run /forcetags again to continue.</i></p>' : (st.changed ? '' : '<p>All caught up.</p>'),
      ].join('\n');
      };
@@ -13133,9 +13161,19 @@ async function startCloneTargetAsk(env, ctx) {
          if (thinkId) await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: thinkId, text: `${boldHtml('✅')} Nothing to review — no links in scope.`, parse_mode: 'HTML' }).catch(() => {});
          return new Response('OK', { status: 200, headers: corsHeaders });
        }
-       await processTargets(targets);
-       await editProgress(targets.length);
-       await sendTelegramRichMessage(token, chatId, buildReport(targets.length >= BATCH), forumThreadId);
+       // Review in the background. A full batch scrapes thin links and calls
+       // the model per row, which outlives Telegram's webhook timeout — the
+       // retry then re-ran the same batch and the ACK never arrived. Reply now,
+       // report when the batch is done.
+       runInBackground(env, (async () => {
+         try {
+           await processTargets(targets);
+           await editProgress(targets.length);
+           await sendTelegramRichMessage(token, chatId, buildReport(targets.length >= BATCH), forumThreadId);
+         } catch (e) {
+           await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} Retag failed: ${escHtml(String(e?.message || e).slice(0, 200))}`, forumThreadId).catch(() => {});
+         }
+       })());
      } else {
        // Whole-scope sweep in the background: webhook ACKs now, progress
        // edits + final report land as the batches complete.

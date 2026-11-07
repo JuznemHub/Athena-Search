@@ -723,5 +723,17 @@ assert.deepEqual(normalizeTagList(['Music', 'music', '#Pop']), ['music', 'pop'])
   const g = smartFallbackTags('https://github.com/u/r', { title: 'Cool tool', notes: 'a downloader tool', content: '' }, []);
   assert.ok(g.tags.includes('github'), 'ecosystem host kept as tag');
 }
+// Import residue and bookmark-folder names are never topics.
+assert.deepEqual(normalizeTagList(['a', 'B', 'ai', '#Pop']), ['ai', 'pop']);
+{
+  const r = smartFallbackTags('https://example.com/x', { title: 'X', notes: '', content: '' }, ['bookmarks-toolbar', 'trash', 'a', 'telegram']);
+  assert.ok(r.removed.includes('bookmarks-toolbar') && r.removed.includes('trash'), 'bookmark-folder names drop as junk');
+  assert.ok(r.removed.includes('telegram'), 'telegram drops when nothing is about Telegram');
+}
+{
+  const r = smartFallbackTags('https://t.me/somechannel/12', { title: 'Post', notes: '', content: '' }, ['telegram', 'backfill']);
+  assert.ok(r.tags.includes('telegram'), 't.me links keep telegram without the word in the page');
+  assert.ok(r.removed.includes('backfill'), 'backfill still drops');
+}
 
 console.log('retrieval tests passed');
