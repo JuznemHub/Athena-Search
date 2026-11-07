@@ -14024,7 +14024,8 @@ async function startCloneTargetAsk(env, ctx) {
       const docs = rows;
       queueMissingLinkEnrichment(env, scope, scopeKey, rows);
       if (!docs.length) {
-        await sendTelegramFormatted(token, chatId, 'You have no saved link on this in your brain', forumThreadId);
+        await editTelegramMessage(token, chatId, thinkMsgId, 'You have no saved link on this in your brain', null, forumThreadId);
+        try { console.log(`[ai] done in ${Date.now() - t0}ms scope=${scope} docs=0`); } catch (_) {}
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
 
