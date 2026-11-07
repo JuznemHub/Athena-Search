@@ -7299,6 +7299,11 @@ async function ensureSearchColumns(env) {
     'ALTER TABLE personal_links ADD COLUMN search_blob TEXT',
     'ALTER TABLE links ADD COLUMN search_blob TEXT',
     'ALTER TABLE uploaded_documents ADD COLUMN search_blob TEXT',
+    'CREATE INDEX IF NOT EXISTS idx_links_community ON links(community_id)',
+    'CREATE INDEX IF NOT EXISTS idx_links_url_hash ON links(url_hash)',
+    'CREATE INDEX IF NOT EXISTS idx_personal_links_url_hash ON personal_links(url_hash)',
+    'CREATE INDEX IF NOT EXISTS idx_clone_sources_content_key ON clone_sources(destination, content_key)',
+    'CREATE INDEX IF NOT EXISTS idx_clone_posts_join ON clone_posts(destination, chat_id, topic_id, message_id)',
   ]) {
     try { await env.DB.prepare(sql).run(); } catch (_) {}
   }
@@ -7426,35 +7431,80 @@ async function searchAllLinks(env, scope, key, query, limit = null) {
   const bare = q.replace(/\/+$/, '');
   if (bare && bare !== q && bare.length >= 2 && !terms.includes(bare)) terms.push(bare);
   if (!terms.length) return [];
-  const clauses = terms.map(() => `(
-    lower(COALESCE(title,'')) LIKE ? OR
-    lower(COALESCE(url,'')) LIKE ? OR
-    lower(COALESCE(notes,'')) LIKE ? OR
-    lower(COALESCE(tags,'')) LIKE ? OR
-    COALESCE(search_blob,'') LIKE ?
-  )`).join(' OR ');
-  const params = [key];
-  for (const term of terms) {
-    const like = `%${term}%`;
-    params.push(like, like, like, like, `%${term.replace(/[^a-z0-9]/g, '')}%`);
-  }
-  const sourceClauses = terms.map(() => `(lower(COALESCE(p.message_text,'')) LIKE ? OR lower(COALESCE(p.urls_json,'')) LIKE ?)`);
-  params.push(`${scope === 'personal' ? 'personal' : 'community'}:${key}`);
-  for (const term of terms) params.push(`%${term}%`, `%${term}%`);
+  // Bound unbounded callers: one common word must not drag the whole store
+  // through hydrate+rank. 2000 rows is far beyond any page/AI budget.
+  const cap = limit == null ? 2000 : Math.max(1, Math.min(Number(limit) || 2000, 2000));
+  // The old single query evaluated a per-row EXISTS over clone_posts, which
+  // took minutes on active scopes. Three cheap phases instead: exact URL
+  // match, direct column matches, and (only when hits are thin) a separate
+  // set-based source-post pass. Same recall shape, no per-row subquery.
+  const needMore = (have) => have < Math.min(cap, 200);
   try {
-    const { results } = await env.DB.prepare(
-      `SELECT * FROM ${table}
-       WHERE ${col} = ?
-         AND ((${clauses}) OR EXISTS (
-           SELECT 1 FROM clone_sources s JOIN clone_posts p
-             ON p.destination=s.destination AND p.chat_id=s.chat_id
-             AND p.topic_id=s.topic_id AND p.message_id=s.message_id
-           WHERE s.destination=? AND s.status IN ('saved','duplicate')
-             AND (s.content_id=${table}.id OR s.content_key='url:' || ${table}.url_hash)
-             AND (${sourceClauses.join(' OR ')})
-         ))
-       ORDER BY created_at DESC${resultLimitClause(limit)}`
-    ).bind(...params).all();
+    const seen = new Map();
+    const addRows = (rows) => { for (const r of rows || []) if (r?.id && !seen.has(r.id)) seen.set(r.id, r); };
+    // Phase 0: exact URL lookup — one indexed query, instant for
+    // "did we save this link" questions.
+    try {
+      const urls = extractUrls(q);
+      const hashes = [...new Set(urls.map((u) => { try { return generateUrlHash(u); } catch (_) { return null; } }).filter(Boolean))].slice(0, 10);
+      if (hashes.length) {
+        const { results: exact } = await env.DB.prepare(
+          `SELECT * FROM ${table} WHERE ${col} = ? AND url_hash IN (${hashes.map(() => '?').join(',')}) ORDER BY created_at DESC`
+        ).bind(key, ...hashes).all();
+        addRows(exact);
+      }
+    } catch (_) {}
+    // Phase 1: direct column matches — indexed scope scan, no EXISTS.
+    if (needMore(seen.size)) {
+      const clauses = terms.map(() => `(
+        lower(COALESCE(title,'')) LIKE ? OR
+        lower(COALESCE(url,'')) LIKE ? OR
+        lower(COALESCE(notes,'')) LIKE ? OR
+        lower(COALESCE(tags,'')) LIKE ? OR
+        COALESCE(search_blob,'') LIKE ?
+      )`).join(' OR ');
+      const params = [key];
+      for (const term of terms) {
+        const like = `%${term}%`;
+        params.push(like, like, like, like, `%${term.replace(/[^a-z0-9]/g, '')}%`);
+      }
+      const { results } = await env.DB.prepare(
+        `SELECT * FROM ${table}
+         WHERE ${col} = ? AND (${clauses})
+         ORDER BY created_at DESC LIMIT ${cap}`
+      ).bind(...params).all();
+      addRows(results);
+    }
+    // Phase 2: source-post text — posts first, then links by id/key.
+    if (needMore(seen.size)) {
+      const sourceClauses = terms.map(() => `(lower(COALESCE(p.message_text,'')) LIKE ? OR lower(COALESCE(p.urls_json,'')) LIKE ?)`);
+      const srcParams = [];
+      for (const term of terms) srcParams.push(`%${term}%`, `%${term}%`);
+      const dest = `${scope === 'personal' ? 'personal' : 'community'}:${key}`;
+      const { results: srcs } = await env.DB.prepare(
+        `SELECT DISTINCT s.content_id, s.content_key FROM clone_sources s JOIN clone_posts p
+           ON p.destination=s.destination AND p.chat_id=s.chat_id
+           AND p.topic_id=s.topic_id AND p.message_id=s.message_id
+         WHERE s.destination=? AND s.status IN ('saved','duplicate')
+           AND (${sourceClauses.join(' OR ')})
+         LIMIT ${Math.min(cap, 500)}`
+      ).bind(dest, ...srcParams).all();
+      const ids = [...new Set((srcs || []).map((s) => s.content_id).filter(Boolean))].slice(0, 500);
+      const urlHashes = [...new Set((srcs || []).map((s) => s.content_key).filter(Boolean))]
+        .filter((k) => String(k).startsWith('url:')).map((k) => String(k).slice(4)).slice(0, 500);
+      const orBits = [];
+      const linkParams = [key];
+      if (ids.length) { orBits.push(`id IN (${ids.map(() => '?').join(',')})`); linkParams.push(...ids); }
+      if (urlHashes.length) { orBits.push(`url_hash IN (${urlHashes.map(() => '?').join(',')})`); linkParams.push(...urlHashes); }
+      if (orBits.length) {
+        const { results: viaSource } = await env.DB.prepare(
+          `SELECT * FROM ${table} WHERE ${col} = ? AND (${orBits.join(' OR ')}) ORDER BY created_at DESC LIMIT ${cap}`
+        ).bind(...linkParams).all();
+        addRows(viaSource);
+      }
+    }
+    const merged = [...seen.values()]
+      .sort((a, b) => (b.created_at || 0) - (a.created_at || 0)).slice(0, cap);
     await ensureDocumentsTable(env);
     const docCol = scope === 'personal' ? 'user_id' : 'community_id';
     const docClauses = terms.map(() => `(
@@ -7471,9 +7521,9 @@ async function searchAllLinks(env, scope, key, query, limit = null) {
       `SELECT * FROM uploaded_documents
        WHERE scope = ? AND ${docCol} = ?
          AND (${docClauses})
-        ORDER BY created_at DESC${resultLimitClause(limit)}`
+        ORDER BY created_at DESC LIMIT ${cap}`
     ).bind(...docParams).all();
-    return hydrateSourcePosts(env, scope, key, [...(results || []), ...(documents || []).map(documentAsLink)]);
+    return hydrateSourcePosts(env, scope, key, [...merged, ...(documents || []).map(documentAsLink)]);
   } catch (_) { return []; }
 }
 
