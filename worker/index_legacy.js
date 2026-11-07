@@ -6138,8 +6138,26 @@ async function startTelegramSearch(env, token, chatId, tgUserId, scope, scopeKey
      VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`
   ).bind(session.id, session.tg_user_id, session.chat_id, session.scope, session.scope_key,
     session.query, now, now + TG_SEARCH_SESSION_TTL_MS).run();
-  const view = await getTelegramSearchPage(env, session);
-  return sendTelegramRichMessage(token, chatId, view.html, threadId, searchRichButtonRow(session.id, view.page, view.total));
+  // Ack immediately so the chat never looks dead while SQL scans run, then
+  // edit the same message with the results (errors edit it too — no silence).
+  const t0 = Date.now();
+  let ackId = null;
+  try {
+    const ack = await sendTelegramRichMessage(token, chatId,
+      richParagraph(`🔍 Searching ${scope === 'personal' ? 'personal' : 'community'} brain…`), threadId);
+    ackId = ack?.message_id || null;
+  } catch (_) {}
+  try {
+    const view = await getTelegramSearchPage(env, session);
+    const buttons = searchRichButtonRow(session.id, view.page, view.total);
+    if (ackId) await editTelegramRichMessage(token, chatId, ackId, view.html, threadId, buttons);
+    else await sendTelegramRichMessage(token, chatId, view.html, threadId, buttons);
+  } catch (e) {
+    const msg = richParagraph(`${boldHtml('❌')} Search failed: ${escHtml(String(e?.message || e).slice(0, 200))}`);
+    if (ackId) await editTelegramRichMessage(token, chatId, ackId, msg, threadId).catch(() => {});
+    else await sendTelegramRichMessage(token, chatId, msg, threadId).catch(() => {});
+  }
+  try { console.log(`[search] ${scope} done in ${Date.now() - t0}ms q=${JSON.stringify(session.query.slice(0, 60))}`); } catch (_) {}
 }
 
 function isPrivChat(msg, chatId) {
@@ -7294,38 +7312,43 @@ function buildSearchBlob(row) {
   return bag.replace(/[^a-z0-9]/g, '');
 }
 
-/** Fill in search_blob for rows that do not have one yet. Incremental. */
+/** Fill in search_blob for rows that do not have one yet. Incremental.
+ * Single UPDATE statement (no per-row round trips) so searches never stall
+ * behind hundreds of sequential writes on the read path. */
 async function backfillSearchBlobs(env, table, whereCol, whereVal, batch = 400) {
   await ensureSearchColumns(env);
   try {
-    const { results } = await env.DB.prepare(
-      `SELECT id, title, url, notes, tags FROM ${table}
-       WHERE ${whereCol} = ? AND (search_blob IS NULL OR search_blob = '')
-       LIMIT ${batch}`
-    ).bind(whereVal).all();
-    for (const r of (results || [])) {
-      await env.DB.prepare(`UPDATE ${table} SET search_blob = ? WHERE id = ?`)
-        .bind(buildSearchBlob(r), r.id).run();
-    }
-    return (results || []).length;
+    const lim = Math.max(1, Math.min(Number(batch) || 400, 2000));
+    const res = await env.DB.prepare(
+      `UPDATE ${table} SET search_blob = regexp_replace(lower(
+         COALESCE(title,'') || ' ' || COALESCE(url,'') || ' ' || COALESCE(notes,'') || ' ' || COALESCE(tags,'')
+       ), '[^a-z0-9]', '', 'g')
+       WHERE id IN (
+         SELECT id FROM ${table}
+         WHERE ${whereCol} = ? AND (search_blob IS NULL OR search_blob = '')
+         LIMIT ${lim}
+       )`
+    ).bind(whereVal).run();
+    return Number(res?.meta?.changes ?? res?.changes ?? 0);
   } catch (_) { return 0; }
 }
 
-async function backfillDocumentSearchBlobs(env, scope, whereCol, whereVal, batch = 20) {
+async function backfillDocumentSearchBlobs(env, scope, whereCol, whereVal, batch = 200) {
   await ensureDocumentsTable(env);
   await ensureSearchColumns(env);
   try {
-    const { results } = await env.DB.prepare(
-      `SELECT id, filename, content
-       FROM uploaded_documents
-       WHERE scope = ? AND ${whereCol} = ? AND (search_blob IS NULL OR search_blob = '')
-       LIMIT ${batch}`
-    ).bind(scope, whereVal).all();
-    for (const r of (results || [])) {
-      await env.DB.prepare('UPDATE uploaded_documents SET search_blob = ? WHERE id = ?')
-        .bind(buildSearchBlob(r), r.id).run();
-    }
-    return (results || []).length;
+    const lim = Math.max(1, Math.min(Number(batch) || 200, 2000));
+    const res = await env.DB.prepare(
+      `UPDATE uploaded_documents SET search_blob = regexp_replace(lower(
+         COALESCE(filename,'') || ' ' || COALESCE(content,'')
+       ), '[^a-z0-9]', '', 'g')
+       WHERE id IN (
+         SELECT id FROM uploaded_documents
+         WHERE scope = ? AND ${whereCol} = ? AND (search_blob IS NULL OR search_blob = '')
+         LIMIT ${lim}
+       )`
+    ).bind(scope, whereVal).run();
+    return Number(res?.meta?.changes ?? res?.changes ?? 0);
   } catch (_) { return 0; }
 }
 
@@ -13985,7 +14008,18 @@ async function startCloneTargetAsk(env, ctx) {
       // RAG retrieval — Meilisearch finds a small candidate set, PostgreSQL
       // hydrates the authoritative rows, and SQL remains the fallback.
       const scopeKey = scope === 'personal' ? athenaUser.id : aiCommunityId;
-      const retrieval = await retrieveAiRows(env, scope, scopeKey, q, { limit: AI_RETRIEVAL_LIMIT });
+      // Ack BEFORE the slow retrieval so the chat responds instantly; the
+      // answer (or a failure) edits this message later — never silence.
+      const t0 = Date.now();
+      const thinkMsg = await sendTelegramFormatted(token, chatId, `${boldHtml('🧠')} Thinking with your${scope === 'personal' ? ' personal' : ''} brain…`, forumThreadId);
+      const thinkMsgId = thinkMsg.message_id;
+      let retrieval;
+      try {
+        retrieval = await retrieveAiRows(env, scope, scopeKey, q, { limit: AI_RETRIEVAL_LIMIT });
+      } catch (err) {
+        await editTelegramMessage(token, chatId, thinkMsgId, `${boldHtml('❌ Search failed:')} ${escHtml(String(err?.message || err).slice(0, 200))}`, null, forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
       const rows = retrieval.rows;
       const docs = rows;
       queueMissingLinkEnrichment(env, scope, scopeKey, rows);
@@ -14020,9 +14054,6 @@ Rules:
 6. Stay strictly grounded in BRAIN CONTEXT; never invent facts not present in it.
 
 `;
-
-     const thinkMsg = await sendTelegramFormatted(token, chatId, `${boldHtml('🧠')} Thinking with your${scope === 'personal' ? ' personal' : ''} brain…`, forumThreadId);
-     const thinkMsgId = thinkMsg.message_id;
 
       const model = normalizeModelId(cfg.model, cfg.base_url);
 
@@ -14135,6 +14166,7 @@ Rules:
              ON CONFLICT(key) DO UPDATE SET ai_msg_id = excluded.ai_msg_id, history = excluded.history, updated_at = excluded.updated_at`
           ).bind(aiThreadKey(chatId, forumThreadId), thinkMsgId, trimmed, Date.now()).run();
         } catch (_) {}
+        try { console.log(`[ai] done in ${Date.now() - t0}ms scope=${scope} docs=${docs.length}`); } catch (_) {}
       } catch (err) {
         await editTelegramMessage(token, chatId, thinkMsgId, `${boldHtml('❌ AI failed:')} ${escHtml(err.message)}`, null, forumThreadId);
       }
