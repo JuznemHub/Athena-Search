@@ -258,6 +258,11 @@ const HOST_BRANDS = [
   [/^google\.com$/, 'google'],
 ];
 
+const BRAND_CATEGORIES = {
+  spotify: 'music', youtube: 'video', netflix: 'movie', twitch: 'video',
+  soundcloud: 'music', steam: 'game',
+};
+
 const CATEGORY_RULES = [
   ['music', 'music|songs?|mp3|flac|albums?|playlists?'],
   ['video', 'videos?|mp4|streaming'],
@@ -488,7 +493,8 @@ export function tagsFromFacts(facts = {}) {
     if ((facts.platforms || []).length >= 2) add('multiplatform');
   }
   for (const a of facts.attributes || []) add(a);
-  for (const c of facts.categories || []) add(c);
+  const redundant = new Set((facts.brands || []).map((b) => BRAND_CATEGORIES[b]).filter(Boolean));
+  for (const c of facts.categories || []) if (!redundant.has(c)) add(c);
   for (const l of facts.languages || []) add(l);
 
   if (!tags.length) add('website');
