@@ -3772,6 +3772,15 @@ async function retrieveAiRows(env, scope, key, query, { limit = AI_RETRIEVAL_LIM
     const sqlRows = await searchAllLinks(env, scope, key, query, max);
     rows = rankLinks(dedupeLinkRows(sqlRows), query, max, 8);
   }
+  // Exact-URL safety net shared by the website and the bot: a bare domain or
+  // full URL that LIKE/rank missed (trailing slash, www, scheme) still
+  // resolves to the one saved record instead of an empty brain.
+  if (!rows.length) {
+    try {
+      const one = await resolveSavedLink(env, scope, key, query);
+      if (one) { rows = [one]; engine += '+resolve'; }
+    } catch (_) {}
+  }
 
   return {
     rows: rows.slice(0, max),
@@ -14365,21 +14374,12 @@ async function startCloneTargetAsk(env, ctx) {
       let rows = retrieval.rows;
       let docs = rows;
       queueMissingLinkEnrichment(env, scope, scopeKey, rows);
-      let resolvedVia = null;
-      if (!docs.length) {
-        const resolved = await resolveSavedLink(env, scope, scopeKey, q);
-        if (resolved) {
-          rows = [resolved];
-          docs = rows;
-          resolvedVia = 'resolveSavedLink';
-        }
-      }
       if (!docs.length) {
         await editTelegramMessage(token, chatId, thinkMsgId, 'You have no saved link on this in your brain', null, forumThreadId);
         try { console.log(`[ai] done in ${Date.now() - t0}ms scope=${scope} scopeKey=${scopeKey} engine=${retrieval.engine} docs=0 q=${JSON.stringify(String(q).slice(0, 80))}`); } catch (_) {}
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
-      try { console.log(`[ai] scope=${scope} engine=${retrieval.engine}${resolvedVia ? `+${resolvedVia}` : ''} docs=${docs.length} first=${docs[0]?.id || '?'}`); } catch (_) {}
+      try { console.log(`[ai] scope=${scope} engine=${retrieval.engine} docs=${docs.length} first=${docs[0]?.id || '?'}`); } catch (_) {}
 
       // Build context — same format as website (includes document content)
       const formatDoc = (item, i) => {
