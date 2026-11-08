@@ -8112,6 +8112,8 @@ function parseTelegramEditPayload(rest, replyMessage = null) {
 
 async function editTelegramMessage(token, chatId, messageId, text, replyMarkup, threadId = null, parseMode = 'HTML', previewLink = false) {
   if (!token || !chatId || !messageId) return { ok: false };
+  // Classic HTML has no <br> — same fold as the senders.
+  if (parseMode === 'HTML') text = String(text || '').replace(/<br\s*\/?>/gi, '\n');
   const payload = {
     chat_id: chatId,
     message_id: messageId,
@@ -15315,6 +15317,9 @@ Rules:
 async function sendTelegramMessage(token, chatId, text, threadId = null, parseMode = null, previewLink = false) {
   if (!token) return { ok: false, error: 'No bot token' };
   try {
+    // Telegram's classic HTML has no <br> (Bot API rejects it with
+    // "can't parse entities") — fold to newlines before chunking.
+    if (parseMode === 'HTML') text = String(text || '').replace(/<br\s*\/?>/gi, '\n');
     const parts = parseMode === 'HTML' ? chunkTelegramHtml(text) : chunkTelegramText(text, TG_MSG_MAX);
     if (!parts.length) return { ok: true };
     let last = { ok: true };
@@ -15350,6 +15355,8 @@ async function sendTelegramMessageWithKeyboard(token, chatId, text, replyMarkup,
   if (!token) return { ok: false, error: 'No bot token' };
   try {
     // Keyboard only on first chunk if we must split
+    // (classic HTML has no <br> — fold to newlines like the plain sender).
+    if (parseMode === 'HTML') text = String(text || '').replace(/<br\s*\/?>/gi, '\n');
     const parts = parseMode === 'HTML' ? chunkTelegramHtml(text) : chunkTelegramText(text, TG_MSG_MAX);
     if (!parts.length) return { ok: true };
     for (let i = 0; i < parts.length; i++) {
@@ -15364,10 +15371,14 @@ async function sendTelegramMessageWithKeyboard(token, chatId, text, replyMarkup,
         payload.message_thread_id = Number(threadId);
       }
       const data = await telegramApi(token, 'sendMessage', payload);
-      if (!data.ok) return { ok: false, error: data.description || 'sendMessage failed', raw: data };
+      if (!data.ok) {
+        try { console.error(`telegram send failed: sendMessage chat=${chatId} err=${String(data.description || data.error_code || 'unknown').slice(0, 160)}`); } catch (_) {}
+        return { ok: false, error: data.description || 'sendMessage failed', raw: data };
+      }
     }
     return { ok: true };
   } catch (err) {
+    try { console.error(`telegram send threw: chat=${chatId} err=${String(err?.message || err).slice(0, 160)}`); } catch (_) {}
     return { ok: false, error: err.message };
   }
 }
