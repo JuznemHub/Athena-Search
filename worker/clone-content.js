@@ -17,7 +17,11 @@ function topicOf(message) {
   const thread = positiveId(message?.message_thread_id);
   if (thread) return String(thread);
   const reply = message?.replyTo;
-  const top = positiveId(reply?.replyToTopId);
+  // replyToTopId is set on EVERY reply thread (any group), not just forum
+  // topics — only a forum-topic reply (forumTopic flag) names a topic.
+  // Without this gate, ordinary replies in channels and plain groups mint
+  // phantom topic ids that pollute per-topic stats and drill-downs.
+  const top = reply?.forumTopic ? positiveId(reply?.replyToTopId) : null;
   if (top) return String(top);
   if (reply?.forumTopic || message?.forumTopic) {
     return String(positiveId(reply?.replyToMsgId) || 1);

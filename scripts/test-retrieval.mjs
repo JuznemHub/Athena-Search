@@ -42,6 +42,7 @@ import {
   cleanTagsForStructure,
   mergePipelineTags,
   saveBackfillLink,
+  classifyCloneMessage,
   searchAllLinks,
   parseStoredTags,
   normalizeTagList,
@@ -991,3 +992,18 @@ const tagTaxonomy = await import('../worker/tag-taxonomy.js');
 }
 
 console.log('retrieval tests passed');
+
+{
+  // Phantom-topic gate: ordinary reply threads are not forum topics.
+  // A plain reply (replyToTopId, no forumTopic flag) must not mint a topic;
+  // a real forum-topic reply keeps its topic id.
+  const plain = classifyCloneMessage({ id: 10, message: 'hello https://example.com/', replyTo: { replyToTopId: 50 } });
+  assert.equal(plain.topicId, null, 'plain reply has no topic');
+  assert.deepEqual(plain.urls, ['https://example.com/'], 'urls still extracted');
+  const forum = classifyCloneMessage({ id: 11, message: 'hi', replyTo: { replyToTopId: 50, forumTopic: true } });
+  assert.equal(forum.topicId, '50', 'forum reply keeps topic');
+  const threaded = classifyCloneMessage({ id: 12, message: 'hi', message_thread_id: 7 });
+  assert.equal(threaded.topicId, '7', 'thread id kept');
+}
+
+console.log('clone attribution tests passed');

@@ -8702,6 +8702,12 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       if (pend.thread_id) topicTitle = await resolveForumTopicTitle(env, label, pend.chat_id, pend.thread_id);
       const resolved2 = await resolveCloneChat(env, token, pend.chat_id);
       const chatTitle2 = resolved2.title, chatType2 = resolved2.type;
+      // Broadcast channels have no topics: a topic id here (typed or guessed)
+      // would scope the job to a phantom thread. Drop it, clone whole-chat.
+      if (chatType2 === 'channel' && pend.thread_id) {
+        pend.thread_id = '';
+        topicTitle = '';
+      }
       const display = cloneDisplayName(chatTitle2, chatType2, pend.thread_id || '', topicTitle);
       const target = isPersonal ? 'personal' : 'community';
       st.destinationName = isPersonal ? 'Personal' : (communityName || communityId);
@@ -10382,6 +10388,29 @@ async function statsRecentLinks(env, target, owner, chatId, limit = 8) {
     }
     try {
       const dest = `community:${owner}`;
+      // Post-level recency: a re-post of a known URL creates no new links row
+      // (dedupe), but it IS the channel's latest activity — read the post
+      // ledger so re-posts show up instead of vanishing. message_date is
+      // Telegram seconds; links.created_at is ms.
+      const sinceSec = Math.floor(since / 1000);
+      const pr = await env.DB.prepare(
+        `SELECT DISTINCT s.snippet AS title, s.url AS url, s.mdate AS created_at, s.thread AS thread, s.linktitle AS linktitle FROM (
+           SELECT cp.message_text AS snippet, elem->>'url' AS url, cp.message_date * 1000 AS mdate, cp.topic_id AS thread, l.title AS linktitle
+           FROM (SELECT message_text, urls_json, message_date, topic_id FROM clone_posts
+                 WHERE destination = ? AND chat_id IN (${ph}) AND message_date > ?) cp
+           CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN cp.urls_json IS NULL OR cp.urls_json = '' THEN '[]'::jsonb ELSE cp.urls_json::jsonb END) AS elem
+           LEFT JOIN links l ON l.community_id = ? AND l.url = (elem->>'url')
+         ) s WHERE s.url IS NOT NULL AND s.url != '' ORDER BY s.mdate DESC LIMIT ${cap}`
+      ).bind(dest, ...variants, sinceSec, String(owner)).all().catch(() => null);
+      const prows = pr?.results || pr || [];
+      if (prows.length) {
+        return prows.slice(0, cap).map((x) => ({
+          title: String(x.linktitle || x.title || x.url || 'untitled').slice(0, 80),
+          url: String(x.url || ''),
+          created_at: Number(x.created_at || 0),
+          thread: String(x.thread || ''),
+        }));
+      }
       const r = await env.DB.prepare(
         `SELECT l.title AS title, l.url AS url, l.created_at AS created_at, MAX(cs.topic_id) AS thread FROM links l
          LEFT JOIN clone_sources cs ON cs.destination=? AND cs.chat_id IN (${ph}) AND cs.message_id=l.source_message_id AND cs.content_key LIKE 'url:%'
@@ -11561,7 +11590,11 @@ async function runHistoryIndexJob(env, initialJob, token, runtime = {}) {
             countCloneMessage(item, message);
             if (!item.messages) continue;
             if (await stopped()) { await patch({ status: 'stopped' }); break; }
-            const topicId = String(job.thread_id || classification.topicId || (entity.forum ? '1' : ''));
+            // Topic attribution is forum-only: page-level reply ids on plain
+            // chats and channels are ordinary reply threads, not topics.
+            // An explicitly scoped job keeps its thread; everything else on a
+            // non-forum chat lands on the whole-chat cursor ('').
+            const topicId = String(job.thread_id || (entity.forum ? (classification.topicId || '1') : ''));
             let downloaded, durable = true;
             const component = async (sink, key, save) => {
               for (let attempt = 0; attempt < 3; attempt++) {
@@ -17752,6 +17785,16 @@ async function refreshCloneCatchUp(env, { token, chatId, sources, isGodCb, user 
     out.checked++;
     const destination = `${target}:${owner}`;
     const normChat = normalizeTgChatId(src.chat_id);
+    // Per-topic fan-out is only valid for forums. Channels have no topics —
+    // stray topic ids on their saved rows (discussion replies, old junk) must
+    // never become jobs, or the drill-down fills with phantom topics.
+    let isForum = (src.topics || []).length > 0;
+    try {
+      try { await startUserbotAccount(env, label); } catch (_) {}
+      const entClient = USERBOT_ACCOUNTS.get(label)?.client;
+      const ent = entClient ? await entClient.getEntity(normChat).catch(() => null) : null;
+      if (ent) isForum = !!ent.forum;
+    } catch (_) {}
     let baselines = new Map();
     try {
       const r = await env.DB.prepare(
@@ -17762,9 +17805,16 @@ async function refreshCloneCatchUp(env, { token, chatId, sources, isGodCb, user 
       }
     } catch (_) {}
     const threads = new Set();
-    for (const t of src.topics || []) threads.add(String(t.threadId ?? ''));
-    for (const k of baselines.keys()) threads.add(k);
+    if (isForum) {
+      for (const t of src.topics || []) threads.add(String(t.threadId ?? ''));
+      for (const k of baselines.keys()) threads.add(k);
+    } else if (baselines.size) {
+      // Channels and plain groups: one whole-chat cursor over everything.
+      threads.add('');
+    }
     if (!threads.size) threads.add('');
+    // Whole-chat cursor for non-forums: newest message across all threads.
+    const chanMin = isForum ? 0 : Math.max(0, ...[...baselines.values(), 0]);
     for (const thr of threads) {
       try {
         const active = await env.DB.prepare(
@@ -17772,10 +17822,14 @@ async function refreshCloneCatchUp(env, { token, chatId, sources, isGodCb, user 
         ).bind(normChat, thr || null, target, communityId).first().catch(() => null);
         if (active) { out.running++; continue; }
         const latest = await env.DB.prepare(
-          "SELECT updated_at FROM index_jobs WHERE chat_id = ? AND COALESCE(thread_id,'') = COALESCE(?,'') AND target = ? AND community_id = ? ORDER BY updated_at DESC LIMIT 1"
+          "SELECT status, error, updated_at FROM index_jobs WHERE chat_id = ? AND COALESCE(thread_id,'') = COALESCE(?,'') AND target = ? AND community_id = ? ORDER BY updated_at DESC LIMIT 1"
         ).bind(normChat, thr || null, target, communityId).first().catch(() => null);
         if (latest && Date.now() - Number(latest.updated_at || 0) < 5 * 60_000) continue;
-        const minId = baselines.get(thr) || 0;
+        // A session/auth failure retries forever on every refresh and shadows
+        // the drill-down with error jobs — back off a day, manual fix needed.
+        if (latest && String(latest.status) === 'error' && /reauthenticate|SESSION_UNAVAILABLE|session/i.test(String(latest.error || '')) &&
+            Date.now() - Number(latest.updated_at || 0) < 24 * 3600_000) { out.skipped++; continue; }
+        const minId = isForum ? (baselines.get(thr) || 0) : chanMin;
         if (!minId) { out.skipped++; continue; }
         const topicName = (src.topics || []).find((t) => String(t.threadId) === thr)?.title || '';
         const res = await startBackfillJob(env, { token, chatId, forumThreadId: null, athenaUser: user, communityIdArg: communityId, chatIdArg: normChat, threadArg: thr, communityName: '', userbotLabel: label, minId: String(minId), silentProgress: true, target, topicName });
@@ -18106,6 +18160,7 @@ export {
   cleanTagsForStructure,
   mergePipelineTags,
   saveBackfillLink,
+  classifyCloneMessage,
   searchAllLinks,
   telegramSearchRowHtml,
   handleSearchLinks,
