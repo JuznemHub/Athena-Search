@@ -3828,8 +3828,12 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
     }
     await ensureLinkMetaColumns(env);
     const accelerated = await meiliSearchScope(env, 'personal', user.id, q, { limit: effectiveLimit });
-    const rows = accelerated?.rows || await searchAllLinks(env, 'personal', user.id, q, effectiveLimit);
-    const links = rankLinks(dedupeLinkRows(rows), q, effectiveLimit);
+    const rows = accelerated?.rows?.length ? accelerated.rows : await searchAllLinks(env, 'personal', user.id, q, effectiveLimit);
+    let links = rankLinks(dedupeLinkRows(rows), q, effectiveLimit);
+    if (!links.length) {
+      const one = await resolveSavedLink(env, 'personal', user.id, q).catch(() => null);
+      if (one) links = [one];
+    }
     const enrichmentPending = queueMissingLinkEnrichment(env, 'personal', user.id, links);
     const total = await countScopeLinks(env, 'personal', user.id);
     return Response.json(
@@ -3846,8 +3850,12 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
   if (gate) return gate;
   await ensureLinkMetaColumns(env);
   const accelerated = await meiliSearchScope(env, 'community', communityId, q, { limit: effectiveLimit });
-  const rows = accelerated?.rows || await searchAllLinks(env, 'community', communityId, q, effectiveLimit);
-  const links = rankLinks(dedupeLinkRows(rows), q, effectiveLimit);
+  const rows = accelerated?.rows?.length ? accelerated.rows : await searchAllLinks(env, 'community', communityId, q, effectiveLimit);
+  let links = rankLinks(dedupeLinkRows(rows), q, effectiveLimit);
+  if (!links.length) {
+    const one = await resolveSavedLink(env, 'community', communityId, q).catch(() => null);
+    if (one) links = [one];
+  }
   const enrichmentPending = queueMissingLinkEnrichment(env, 'community', communityId, links);
   const total = await countScopeLinks(env, 'community', communityId);
   return Response.json(
@@ -3862,6 +3870,11 @@ function rankLinks(rows, query, limit = null, minScore = 8) {
   const qa = q.replace(/[^a-z0-9]/g, '');
   if (!q) return takeResults(rows, limit);
   const terms = expandServerSearchTerms(q);
+  // Canonical URL identity for the query (www / scheme / trailing-slash
+  // spellings all hash alike), so "https://www.example.com/" ranks the stored
+  // "https://example.com/" even though the raw strings never match.
+  let qHashes = [];
+  try { qHashes = urlHashesForQuery(q); } catch (_) {}
   const scored = [];
   for (const r of rows) {
     const title = String(r.title || '').toLowerCase();
@@ -3874,6 +3887,9 @@ function rankLinks(rows, query, limit = null, minScore = 8) {
     const bag = [r.title, r.url, r.filename, r.notes, boundedContent, r.search_blob, r.tags, sources].join(' ').toLowerCase();
     const ba = bag.replace(/[^a-z0-9]/g, '');
     let score = 0;
+    if (qHashes.length && r.url) {
+      try { if (qHashes.includes(generateUrlHash(r.url))) score += 100; } catch (_) {}
+    }
     if (title === q) score += 100;
     if (title.startsWith(q)) score += 50;
     if (title.includes(q)) score += 30;
@@ -6119,6 +6135,14 @@ async function getTelegramSearchPage(env, session) {
     const start = Math.max(0, Number(session.page || 0)) * TG_SEARCH_PAGE_SIZE;
     hits = ranked.slice(start, start + TG_SEARCH_PAGE_SIZE);
   }
+  // Exact-URL safety net: a bare domain or full URL that LIKE/rank missed
+  // (trailing slash, www, scheme) still resolves to the one saved record.
+  if (!hits.length && !total) {
+    try {
+      const one = await resolveSavedLink(env, session.scope, session.scope_key, session.query);
+      if (one) { hits = [one]; total = 1; }
+    } catch (_) {}
+  }
   const pages = Math.max(1, Math.ceil(total / TG_SEARCH_PAGE_SIZE));
   const page = Math.min(Math.max(0, Number(session.page || 0)), pages - 1);
   if (page !== Number(session.page || 0)) {
@@ -7465,6 +7489,53 @@ function takeResults(rows, limit) {
   return limit == null ? rows : rows.slice(0, Math.max(0, Number(limit)));
 }
 
+/** URL candidates for a free-text query. Protocol URLs come straight out;
+ *  bare-domain tokens ("example.com", "example.com/path") are expanded with
+ *  both schemes because Telegram users rarely type the protocol. Host-only
+ *  fragments without a dot ("namashkarbharat/ai") are not URLs and are left
+ *  to the text search. Capped so one query cannot fan out into many hashes. */
+function urlCandidatesForQuery(query) {
+  const out = [];
+  try {
+    for (const u of extractUrls(query)) if (!out.includes(u)) out.push(u);
+  } catch (_) {}
+  for (const token of String(query || '').split(/\s+/)) {
+    const t = String(token || '').trim().replace(/^[()["']+|[)"'.,;:!?]+$/g, '');
+    if (!t || /^https?:\/\//i.test(t) || !t.includes('.')) continue;
+    if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+(:\d+)?(\/\S*)?$/i.test(t)) continue;
+    for (const scheme of ['https://', 'http://']) {
+      const cand = scheme + t;
+      if (!out.includes(cand)) out.push(cand);
+    }
+    if (out.length >= 10) break;
+  }
+  return out.slice(0, 10);
+}
+
+/** Hashes for the URL candidates above. Trailing-slash and www variants hash
+ *  to the same canonical identity, so all spellings of one page collide.
+ *  http/https twins are both included: the stored hash keeps its scheme, but
+ *  a search for either scheme must find the page (plain-http saves upgraded
+ *  to https are the same bookmark). */
+function urlHashesForQuery(query) {
+  const cands = urlCandidatesForQuery(query);
+  const withSchemes = [...cands];
+  for (const u of cands) {
+    const twin = /^https:\/\//i.test(u)
+      ? u.replace(/^https:\/\//i, 'http://')
+      : u.replace(/^http:\/\//i, 'https://');
+    if (twin !== u && !withSchemes.includes(twin)) withSchemes.push(twin);
+  }
+  const hashes = [];
+  for (const u of withSchemes) {
+    try {
+      const h = generateUrlHash(u);
+      if (h && !hashes.includes(h)) hashes.push(h);
+    } catch (_) {}
+    if (hashes.length >= 20) break;
+  }
+  return hashes;
+}
 
 /** Shared single-record resolver used by /search, /ai and /forcetags.
  *  Tries exact URL hash, canonical host/domain, then broad LIKE, so a saved
@@ -7478,13 +7549,8 @@ async function resolveSavedLink(env, scope, key, query) {
   const seen = new Map();
   const add = (rows) => { for (const r of rows || []) if (r?.id && !seen.has(r.id)) seen.set(r.id, r); };
   try {
-    // 1. Exact URL / hash match.
-    const candidates = [q];
-    if (!/^https?:\/\//i.test(q)) candidates.push(`https://${q}`, `http://${q}`);
-    const urls = [];
-    for (const c of candidates) { try { urls.push(...extractUrls(c)); } catch (_) {} }
-    if (!urls.length && q.includes('.')) urls.push(q);
-    const hashes = [...new Set(urls.map((u) => { try { return generateUrlHash(u); } catch (_) { return null; } }).filter(Boolean))].slice(0, 10);
+    // 1. Exact URL / hash match — bare domains expand to both schemes.
+    const hashes = urlHashesForQuery(q);
     if (hashes.length) {
       const { results } = await env.DB.prepare(
         `SELECT * FROM ${table} WHERE ${col} = ? AND url_hash IN (${hashes.map(() => '?').join(',')}) ORDER BY created_at DESC`
@@ -7548,10 +7614,10 @@ async function searchAllLinks(env, scope, key, query, limit = null) {
     const seen = new Map();
     const addRows = (rows) => { for (const r of rows || []) if (r?.id && !seen.has(r.id)) seen.set(r.id, r); };
     // Phase 0: exact URL lookup — one indexed query, instant for
-    // "did we save this link" questions.
+    // "did we save this link" questions. Bare domains expand to https/http
+    // so "example.com" hits the same hash as the stored "https://example.com/".
     try {
-      const urls = extractUrls(q);
-      const hashes = [...new Set(urls.map((u) => { try { return generateUrlHash(u); } catch (_) { return null; } }).filter(Boolean))].slice(0, 10);
+      const hashes = urlHashesForQuery(q);
       if (hashes.length) {
         const { results: exact } = await env.DB.prepare(
           `SELECT * FROM ${table} WHERE ${col} = ? AND url_hash IN (${hashes.map(() => '?').join(',')}) ORDER BY created_at DESC`
@@ -14299,18 +14365,21 @@ async function startCloneTargetAsk(env, ctx) {
       let rows = retrieval.rows;
       let docs = rows;
       queueMissingLinkEnrichment(env, scope, scopeKey, rows);
+      let resolvedVia = null;
       if (!docs.length) {
         const resolved = await resolveSavedLink(env, scope, scopeKey, q);
         if (resolved) {
           rows = [resolved];
           docs = rows;
+          resolvedVia = 'resolveSavedLink';
         }
       }
       if (!docs.length) {
         await editTelegramMessage(token, chatId, thinkMsgId, 'You have no saved link on this in your brain', null, forumThreadId);
-        try { console.log(`[ai] done in ${Date.now() - t0}ms scope=${scope} docs=0`); } catch (_) {}
+        try { console.log(`[ai] done in ${Date.now() - t0}ms scope=${scope} scopeKey=${scopeKey} engine=${retrieval.engine} docs=0 q=${JSON.stringify(String(q).slice(0, 80))}`); } catch (_) {}
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
+      try { console.log(`[ai] scope=${scope} engine=${retrieval.engine}${resolvedVia ? `+${resolvedVia}` : ''} docs=${docs.length} first=${docs[0]?.id || '?'}`); } catch (_) {}
 
       // Build context — same format as website (includes document content)
       const formatDoc = (item, i) => {
@@ -15305,14 +15374,29 @@ function generateUrlHash(rawUrl) {
 async function findExistingLink(env, table, scopeColumn, scopeKey, rawUrl, excludeId = null) {
   const currentHash = generateUrlHash(rawUrl);
   const oldHash = legacyUrlHash(rawUrl);
-  let sql = `SELECT * FROM ${table} WHERE ${scopeColumn} = ? AND (url_hash = ? OR url_hash = ? OR url = ?)`;
-  const params = [scopeKey, currentHash, oldHash, rawUrl];
+  // Scheme twins: a plain-http re-save of a stored https bookmark (or vice
+  // versa) is the same page, so both hashes are consulted. Storage keeps its
+  // original hash; this only widens the lookup.
+  let twinHash = null;
+  try {
+    const twin = /^https:\/\//i.test(rawUrl)
+      ? String(rawUrl).replace(/^https:\/\//i, 'http://')
+      : String(rawUrl).replace(/^http:\/\//i, 'https://');
+    if (twin !== rawUrl) twinHash = generateUrlHash(twin);
+  } catch (_) {}
+  const hashList = [currentHash, oldHash, twinHash].filter(Boolean);
+  let sql = `SELECT * FROM ${table} WHERE ${scopeColumn} = ? AND (${hashList.map(() => 'url_hash = ?').join(' OR ')} OR url = ?)`;
+  const params = [scopeKey, ...hashList, rawUrl];
   if (excludeId) { sql += ' AND id != ?'; params.push(excludeId); }
   const { results } = await env.DB.prepare(sql).bind(...params).all();
   let target;
   try { target = canonicalUrlForHash(rawUrl); } catch (_) { target = `raw:${String(rawUrl)}`; }
+  const schemeFree = (identity) => String(identity).replace(/^https?:\/\//i, '');
   return (results || []).find((row) => {
-    try { return canonicalUrlForHash(row.url) === target; } catch (_) { return String(row.url) === String(rawUrl); }
+    try {
+      const rowIdentity = canonicalUrlForHash(row.url);
+      return rowIdentity === target || schemeFree(rowIdentity) === schemeFree(target);
+    } catch (_) { return String(row.url) === String(rawUrl); }
   }) || null;
 }
 

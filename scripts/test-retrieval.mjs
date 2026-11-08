@@ -36,6 +36,7 @@ import {
   parseTelegramEditPayload,
   rankLinks,
   resolveChatEndpoint,
+  resolveSavedLink,
   resultLimitClause,
   searchAllLinks,
   parseStoredTags,
@@ -747,6 +748,58 @@ const tagTaxonomy = await import('../worker/tag-taxonomy.js');
   const v = tagTaxonomy.validateTags(['spotify', 'app'], { allowedBrands: [], max: 8 });
   assert.deepEqual(v.tags, ['app']);
   assert.ok(v.rejected.some((r) => r.tag === 'spotify' && r.reason === 'brand'));
+}
+
+{
+  // Regression: a bare-domain save must resolve from every spelling.
+  // Mirrors a real row saved as https://namashkarbharat.com/ with a
+  // domain-only title, hashtag notes and no search blob.
+  const sqlite = new DatabaseSync(':memory:');
+  sqlite.exec(fs.readFileSync(new URL('../worker/schema.sql', import.meta.url), 'utf8')
+    .replace(/^CREATE EXTENSION[^;]*;/gm, '').replace(/^CREATE INDEX[^;]*USING gin[^;]*;/gm, ''));
+  const DB = {
+    prepare(sql) {
+      const statement = (params = []) => ({
+        bind(...values) { return statement(values.map(value => value ?? null)); },
+        async run() { const result = sqlite.prepare(sql).run(...params); return { success: true, meta: { changes: Number(result.changes) } }; },
+        async first(column) { const row = sqlite.prepare(sql).get(...params); return row ? (column ? row[column] : row) : null; },
+        async all() { return { results: sqlite.prepare(sql).all(...params) }; }
+      });
+      return statement();
+    }
+  };
+  const env = { DB };
+  const storedUrl = 'https://namashkarbharat.com/';
+  sqlite.prepare('INSERT INTO users (id,username,created_at) VALUES (?,?,?)').run('u1', 'u1', 1);
+  sqlite.prepare('INSERT INTO communities (id,name,creator_id,created_at) VALUES (?,?,?,?)').run('c_domain', 'Domain', 'u1', 1);
+  sqlite.prepare(`INSERT INTO links (id,community_id,url,url_hash,title,notes,tags,added_by,created_at,metadata_version)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
+    'domain_hit', 'c_domain', storedUrl, generateUrlHash(storedUrl),
+    'namashkarbharat.com', '#gov', '["website"]', 'tester', 1, 3);
+  const spellings = [
+    'namashkarbharat',
+    'namashkarbharat.com',
+    'namashkarbharat.com/',
+    'https://namashkarbharat.com',
+    'https://namashkarbharat.com/',
+    'https://www.namashkarbharat.com/',
+    'http://namashkarbharat.com',
+  ];
+  for (const spelling of spellings) {
+    const rows = await searchAllLinks(env, 'community', 'c_domain', spelling);
+    assert.ok(rows.some((r) => r.id === 'domain_hit'), `searchAllLinks finds the domain for ${spelling}`);
+    assert.ok(rankLinks(rows, spelling).some((r) => r.id === 'domain_hit'), `rankLinks keeps the domain for ${spelling}`);
+    const one = await resolveSavedLink(env, 'community', 'c_domain', spelling);
+    assert.equal(one?.id, 'domain_hit', `resolveSavedLink resolves ${spelling}`);
+  }
+  // Multi-token user input ("namashkarbharat/ai namashkarbharat.com") still
+  // resolves via the domain token's exact hash.
+  const mixed = await resolveSavedLink(env, 'community', 'c_domain', 'namashkarbharat/ai namashkarbharat.com');
+  assert.equal(mixed?.id, 'domain_hit', 'mixed query resolves via the domain token');
+  // Negative and scope checks: no invention, no cross-brain leak.
+  assert.equal(await resolveSavedLink(env, 'community', 'c_domain', 'something entirely different'), null, 'unrelated query resolves to nothing');
+  assert.equal(await resolveSavedLink(env, 'community', 'c_other', 'namashkarbharat.com'), null, 'other brains never leak');
+  assert.equal(await resolveSavedLink(env, 'community', 'c_domain', ''), null, 'empty query resolves to nothing');
 }
 
 console.log('retrieval tests passed');
