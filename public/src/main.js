@@ -55,7 +55,12 @@ document.addEventListener('DOMContentLoaded', () => {
     authConfig: null,
     hasSearched: false,
     authReady: false,
-    isInstanceOwner: true // until /auth/me says otherwise; empty owner lists = all owners
+    isInstanceOwner: true, // until /auth/me says otherwise; empty owner lists = all owners
+    filterTag: '',
+    filterStatus: 'all',
+    filterSort: 'created_desc',
+    tags: [],
+    tagStats: null
   };
   function isGod() {
     return !!state.currentUser?.is_god;
@@ -706,6 +711,14 @@ document.addEventListener('DOMContentLoaded', () => {
         updateScopeUI();
       }
     }
+    const mainScopeSelect = $('mainScopeSelect');
+    if (mainScopeSelect) {
+      const personalOpt = mainScopeSelect.querySelector('option[value="personal"]');
+      if (personalOpt) {
+        personalOpt.disabled = !god;
+        personalOpt.textContent = god ? 'Personal (GOD)' : 'Personal (GOD locked)';
+      }
+    }
     const backendInput = $('backendUrl');
     if (backendInput) backendInput.disabled = !god;
     $('defaultBackendBtn')?.classList.toggle('hidden', !god);
@@ -739,6 +752,7 @@ document.addEventListener('DOMContentLoaded', () => {
     await step('corpus', () => Promise.all([loadPersonalLinks(), loadCommunityLinksIfAny(), loadPersonalDocuments(), loadCommunityDocumentsIfAny()]));
     await step('bot bindings', () => loadCommunityBots());
     await step('community admins', () => loadCommunityAdmins());
+    await step('tags', () => loadMainTags());
     await step('notifications', () => loadNotifications());
 
     // These must run even if every fetch above failed, or there is no usable UI.
@@ -1000,6 +1014,21 @@ document.addEventListener('DOMContentLoaded', () => {
     if (state.activeCommunity && !state.communities.find(c => c.id === state.activeCommunity)) {
       state.activeCommunity = '';
       localStorage.removeItem('athena_active_community');
+    }
+    const mainCommSel = $('mainCommunitySelect');
+    if (mainCommSel) {
+      mainCommSel.innerHTML = '';
+      if (!state.communities.length) {
+        mainCommSel.innerHTML = '<option value="">No communities</option>';
+      } else {
+        state.communities.forEach(c => {
+          const opt = document.createElement('option');
+          opt.value = c.id;
+          opt.textContent = `${c.name}${c.link_count != null ? ` (${c.link_count})` : ''}`;
+          if (c.id === state.activeCommunity) opt.selected = true;
+          mainCommSel.appendChild(opt);
+        });
+      }
     }
     renderCommunityDetails();
     updateDeleteModeVisibility();
@@ -1422,6 +1451,8 @@ document.addEventListener('DOMContentLoaded', () => {
     searchBarBox.classList.toggle('mode-ai', mode === 'ai');
     searchBarBox.classList.toggle('mode-search', mode === 'search');
     searchBarBox.classList.toggle('mode-delete', mode === 'delete');
+    const mainDbPanel = $('mainDbPanel');
+    if (mainDbPanel) mainDbPanel.classList.toggle('hidden', mode !== 'search');
 
     if (mode === 'search') {
       modeBadgeText.textContent = 'Search';
@@ -1467,6 +1498,14 @@ document.addEventListener('DOMContentLoaded', () => {
   function updateScopeUI() {
     personalScopeBtn.classList.toggle('active', state.scope === 'personal');
     communityScopeBtn.classList.toggle('active', state.scope === 'community');
+    const mainScopeSelect = $('mainScopeSelect');
+    if (mainScopeSelect && mainScopeSelect.value !== state.scope) {
+      mainScopeSelect.value = state.scope;
+    }
+    const commWrap = $('mainCommunityWrap');
+    if (commWrap) {
+      commWrap.style.display = state.scope === 'community' ? 'flex' : 'none';
+    }
     if (state.mode === 'search') {
       scopeSubtitle.textContent = state.scope === 'personal'
         ? 'Search personal notes & links'
@@ -1492,19 +1531,45 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function filterLinks(links, query) {
-    if (!query) return links;
-    // Prefer Athena fuzzy search (ytdlp ↔ yt-dlp)
-    if (window.AthenaSearch?.searchCorpus) {
-      const limit = window.__athenaSteroid ? 500 : 80;
-      return window.AthenaSearch.searchCorpus(links, query, limit);
+    let list = links || [];
+    if (query) {
+      // Prefer Athena fuzzy search (ytdlp ↔ yt-dlp)
+      if (window.AthenaSearch?.searchCorpus) {
+        const limit = window.__athenaSteroid ? 500 : 80;
+        list = window.AthenaSearch.searchCorpus(list, query, limit);
+      } else {
+        const q = query.toLowerCase();
+        const qa = q.replace(/[^a-z0-9]/g, '');
+        list = list.filter(item => {
+          const bag = [item.title, item.url, item.notes, (item.tags || []).join(' ')].join(' ').toLowerCase();
+          const ba = bag.replace(/[^a-z0-9]/g, '');
+          return bag.includes(q) || (qa.length >= 2 && ba.includes(qa));
+        });
+      }
     }
-    const q = query.toLowerCase();
-    const qa = q.replace(/[^a-z0-9]/g, '');
-    return links.filter(item => {
-      const bag = [item.title, item.url, item.notes, item.tags].join(' ').toLowerCase();
-      const ba = bag.replace(/[^a-z0-9]/g, '');
-      return bag.includes(q) || (qa.length >= 2 && ba.includes(qa));
-    });
+    if (state.filterTag) {
+      const tagLower = state.filterTag.toLowerCase();
+      if (tagLower === 'notags') {
+        list = list.filter(item => !item.tags || item.tags.length === 0);
+      } else {
+        list = list.filter(item => (item.tags || []).some(t => String(t).toLowerCase() === tagLower));
+      }
+    }
+    if (state.filterStatus === 'edited') {
+      list = list.filter(item => Boolean(item.manualEditedAt || item.manual_edited_at));
+    } else if (state.filterStatus === 'unedited') {
+      list = list.filter(item => !item.manualEditedAt && !item.manual_edited_at);
+    }
+    if (state.filterSort === 'edited_desc') {
+      list = [...list].sort((a, b) => Number(b.manualEditedAt || b.manual_edited_at || 0) - Number(a.manualEditedAt || a.manual_edited_at || 0));
+    } else if (state.filterSort === 'created_asc') {
+      list = [...list].sort((a, b) => Number(a.createdAt || a.created_at || 0) - Number(b.createdAt || b.created_at || 0));
+    } else if (state.filterSort === 'title_asc') {
+      list = [...list].sort((a, b) => String(a.title || '').localeCompare(String(b.title || '')));
+    } else if (state.filterSort === 'created_desc') {
+      list = [...list].sort((a, b) => Number(b.createdAt || b.created_at || 0) - Number(a.createdAt || a.created_at || 0));
+    }
+    return list;
   }
 
   function highlight(text, query) {
@@ -1573,7 +1638,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const isCommunity = state.scope === 'community';
     // Owner/admin only: everyone else sees no edit/delete affordance, and the
     // server rejects the call with "Only owner/admins can edit or delete".
-    const canModerate = state.scope === 'personal' || isCommunityStaff();
+    const canModerate = state.scope === 'personal' || isStaffRank() || isCommunityStaff();
 
     items.forEach(item => {
       const card = document.createElement('article');
@@ -1629,28 +1694,51 @@ document.addEventListener('DOMContentLoaded', () => {
         : `<div class="g-meta">${escapeHtml(when)}${(item.tags || []).length ? ' · ' + item.tags.map(t => '#' + escapeHtml(t)).join(' ') : ''}</div>`;
 
       const editAuditHtml = item.manualEditedAt
-        ? `<div class="g-edit-audit">✏️ Last edited by <strong class="g-editor-name">${escapeHtml(item.lastEditedByName || 'Admin')}</strong> · ${escapeHtml(formatDateTime(item.manualEditedAt))}</div>`
+        ? `<div class="g-audit-row">
+            <span class="admin-edit-badge" title="Manually edited">
+              ✏️ Last edited by <strong>${escapeHtml(item.lastEditedByName || 'Admin')}</strong> · ${escapeHtml(formatDateTime(item.manualEditedAt))}
+            </span>
+           </div>`
         : '';
+
+      const tagsList = (item.tags || []).filter(Boolean);
+      const tagsHtml = tagsList.length
+        ? `<div class="g-card-tags">
+            ${tagsList.map(t => `<button type="button" class="g-tag-chip" data-tag="${escapeHtml(t)}">#${escapeHtml(t)}</button>`).join('')}
+           </div>`
+        : `<div class="g-card-tags">
+            <button type="button" class="g-tag-chip g-tag-empty" data-tag="notags" title="Untagged link — click to filter">#notags</button>
+           </div>`;
+
+      const cardActionsHtml = canModerate ? `
+        <div class="g-card-actions">
+          <button type="button" class="btn btn-secondary btn-sm edit-link-btn" data-id="${escapeHtml(item.id)}" title="Edit link and tags">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+            <span>Edit</span>
+          </button>
+          <button type="button" class="btn btn-sm g-card-del-btn del-link-btn" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(item.title || item.url || 'this link')}" title="Delete link from database">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+            <span>Delete</span>
+          </button>
+        </div>` : '';
 
       card.innerHTML = `
         ${authorLine}
         <div class="g-url-row">
-          ${favicon
-            ? `<img class="g-favicon-img" src="${safeHref(favicon)}" alt="" width="18" height="18" loading="lazy" referrerpolicy="no-referrer" onerror="this.classList.add('hidden');this.nextElementSibling?.classList.remove('hidden')">`
-            : ''}
-          <span class="g-favicon ${favicon ? 'hidden' : ''}"></span>
-          <cite class="g-cite">${site ? escapeHtml(site) + ' · ' : ''}${highlight(displayUrl, query)}</cite>
+          <div class="g-url-meta">
+            ${favicon
+              ? `<img class="g-favicon-img" src="${safeHref(favicon)}" alt="" width="18" height="18" loading="lazy" referrerpolicy="no-referrer" onerror="this.classList.add('hidden');this.nextElementSibling?.classList.remove('hidden')">`
+              : ''}
+            <span class="g-favicon ${favicon ? 'hidden' : ''}"></span>
+            <cite class="g-cite">${site ? escapeHtml(site) + ' · ' : ''}${highlight(displayUrl, query)}</cite>
+          </div>
+          ${cardActionsHtml}
         </div>
         <a class="g-title" href="${safeHref(href)}" ${item.url ? 'target="_blank" rel="noopener noreferrer"' : ''}>${highlight(item.title || 'Untitled', query)}</a>
-        <p class="g-snippet">${highlight(desc, query)}</p>
+        ${desc ? `<p class="g-snippet">${highlight(desc, query)}</p>` : ''}
+        ${tagsHtml}
         ${voteRow}
         ${editAuditHtml}
-        ${canModerate ? `<button type="button" class="edit-link-btn" data-id="${escapeHtml(item.id)}" title="Edit" aria-label="Edit">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-        </button>
-        <button type="button" class="del-link-btn" data-id="${escapeHtml(item.id)}" title="Delete from database" aria-label="Delete">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
-        </button>` : ''}
         <div class="edit-panel hidden" data-edit-for="${escapeHtml(item.id)}">
           <label>Title</label>
           <input type="text" class="edit-title" value="${escapeHtml(item.title || '')}" />
@@ -1663,11 +1751,29 @@ document.addEventListener('DOMContentLoaded', () => {
           <div class="edit-panel-actions">
             <button type="button" class="btn btn-primary btn-sm edit-save">Save</button>
             <button type="button" class="btn btn-secondary btn-sm edit-cancel">Cancel</button>
-            <button type="button" class="btn btn-sm edit-delete">Delete</button>
+            <button type="button" class="btn btn-sm g-card-del-btn edit-delete">Delete</button>
           </div>
         </div>
       `;
       resultsList.appendChild(card);
+    });
+
+    resultsList.querySelectorAll('.g-tag-chip').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const tag = btn.dataset.tag;
+        if (!tag) return;
+        if (tag.toLowerCase() === 'notags') {
+          state.filterTag = 'notags';
+        } else if (state.filterTag && state.filterTag.toLowerCase() === tag.toLowerCase()) {
+          state.filterTag = '';
+        } else {
+          state.filterTag = tag;
+        }
+        renderMainTags();
+        runSearch();
+      });
     });
 
     resultsList.querySelectorAll('.edit-link-btn').forEach(btn => {
@@ -1742,15 +1848,13 @@ document.addEventListener('DOMContentLoaded', () => {
               lastEditedByName: data.last_edited_by_name || state.currentUser?.displayName || state.currentUser?.username || 'Admin'
             };
           }
-          showToast('Link updated');
+          showToast('Link updated in database');
           panel.classList.add('hidden');
           card?.classList.remove('editing');
           card?.classList.add('edited-flash');
           setTimeout(() => card?.classList.remove('edited-flash'), 1200);
-          renderGoogleResults(
-            filterLinks(corpus(), searchInput.value.trim() || query || ''),
-            searchInput.value.trim() || query || ''
-          );
+          await loadMainTags();
+          runSearch();
         } catch (err) {
           showToast(err.message || 'Edit failed', true);
         } finally {
@@ -1761,31 +1865,30 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Delete from the same DB row the card shows (website + bot stay in sync).
     const deleteLinkById = async (id, btn) => {
-      const item = (state.scope === 'community' ? state.communityLinks : state.personalLinks).find(l => l.id === id);
+      const isComm = state.scope === 'community';
+      const item = (isComm ? state.communityLinks : state.personalLinks).find(l => l.id === id);
       const label = item?.title || item?.url || 'this link';
       if (!window.confirm(`Delete "${String(label).slice(0, 80)}" from the database? This cannot be undone.`)) return;
       if (btn) btn.disabled = true;
       try {
-        const path = state.scope === 'community' ? '/api/links' : '/api/personal-links';
-        const body = state.scope === 'community'
-          ? JSON.stringify({ id, community_id: state.currentCommunityId })
+        const path = isComm ? '/api/links' : '/api/personal-links';
+        const body = isComm
+          ? JSON.stringify({ id, community_id: state.activeCommunity })
           : JSON.stringify({ id });
         const { res, data } = await api(path, { method: 'DELETE', body });
         if (!res.ok || !data.success) {
           showToast(data.error || 'Delete failed', true);
+          if (btn) btn.disabled = false;
           return;
         }
-        const list = state.scope === 'community' ? state.communityLinks : state.personalLinks;
+        const list = isComm ? state.communityLinks : state.personalLinks;
         const idx = list.findIndex(l => l.id === id);
         if (idx >= 0) list.splice(idx, 1);
-        showToast('Link deleted');
-        renderGoogleResults(
-          filterLinks(corpus(), searchInput.value.trim() || query || ''),
-          searchInput.value.trim() || query || ''
-        );
+        showToast('Link deleted from database');
+        await loadMainTags();
+        runSearch();
       } catch (err) {
         showToast(err.message || 'Delete failed', true);
-      } finally {
         if (btn) btn.disabled = false;
       }
     };
@@ -1865,7 +1968,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const q = searchInput.value.trim();
     state.hasSearched = true;
     aiAnswerCard.classList.add('hidden');
-    if (!q) {
+    const hasFilter = Boolean(state.filterTag || (state.filterStatus && state.filterStatus !== 'all') || (state.filterSort && state.filterSort !== 'created_desc'));
+
+    if (!q && !hasFilter) {
       enrichmentRefreshKey = '';
       renderHome();
       return;
@@ -1897,7 +2002,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const seq = ++searchSeq;
     const skSeq = seq;
     try {
-      const params = new URLSearchParams({ q, scope: state.scope });
+      const params = new URLSearchParams({ scope: state.scope });
+      if (q) params.set('q', q);
+      if (state.filterTag) params.set('tag', state.filterTag);
+      if (state.filterStatus && state.filterStatus !== 'all') params.set('edited', state.filterStatus);
+      if (state.filterSort) params.set('sort', state.filterSort);
       if (state.scope === 'community') {
         if (!state.activeCommunity) return;
         params.set('community_id', state.activeCommunity);
@@ -1921,6 +2030,78 @@ document.addEventListener('DOMContentLoaded', () => {
       if (skeletonTimer) clearTimeout(skeletonTimer);
       if (!resultsList.children.length || resultsList.querySelector('.g-result-skeleton')) renderGoogleResults([], q);
     }
+  }
+
+  async function loadMainTags() {
+    const summaryEl = $('mainTagsSummary');
+    const cloudEl = $('mainTagsCloud');
+    if (!cloudEl) return;
+    try {
+      const qParams = new URLSearchParams({ scope: state.scope });
+      if (state.scope === 'community' && state.activeCommunity) {
+        qParams.set('community_id', state.activeCommunity);
+      }
+      const { res, data } = await api(`/api/tags?${qParams.toString()}`);
+      if (res.ok && data.success && Array.isArray(data.tags)) {
+        state.tags = data.tags;
+        state.tagStats = {
+          total: data.total || 0,
+          taggedCount: data.tagged_count || 0,
+          untaggedCount: data.untagged_count || 0,
+          uniqueTags: data.unique_tags || 0
+        };
+        renderMainTags();
+      } else if (summaryEl) {
+        summaryEl.textContent = 'Tags unavailable';
+      }
+    } catch (_) {
+      if (summaryEl) summaryEl.textContent = '';
+    }
+  }
+
+  function renderMainTags() {
+    const summaryEl = $('mainTagsSummary');
+    const cloudEl = $('mainTagsCloud');
+    const clearBtn = $('mainTagClearBtn');
+    if (!cloudEl) return;
+
+    if (clearBtn) {
+      clearBtn.classList.toggle('hidden', !state.filterTag);
+    }
+
+    if (summaryEl && state.tagStats) {
+      summaryEl.textContent = `${state.tagStats.uniqueTags} tags · ${state.tagStats.total} total links`;
+    }
+
+    if (!state.tags || !state.tags.length) {
+      cloudEl.innerHTML = '<span style="color:var(--text-muted);font-size:0.75rem;">No tags found in this corpus.</span>';
+      return;
+    }
+
+    cloudEl.innerHTML = state.tags.map(t => {
+      const isSelected = state.filterTag && state.filterTag.toLowerCase() === t.name.toLowerCase();
+      const isNoTags = t.name.toLowerCase() === 'notags';
+      return `
+        <button type="button" class="main-tag-chip ${isSelected ? 'active' : ''}" data-tag="${escapeHtml(t.name)}" title="${isNoTags ? 'Untagged links' : `Tag #${escapeHtml(t.name)}`} (${t.count})">
+          <span>#${escapeHtml(t.name)}</span>
+          <span class="admin-tag-count" style="opacity:0.8;font-size:0.7rem;">(${t.count.toLocaleString()})</span>
+        </button>
+      `;
+    }).join('');
+
+    cloudEl.querySelectorAll('.main-tag-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        const selected = chip.dataset.tag;
+        if (!selected) return;
+        if (state.filterTag && state.filterTag.toLowerCase() === selected.toLowerCase()) {
+          state.filterTag = '';
+        } else {
+          state.filterTag = selected;
+        }
+        renderMainTags();
+        runSearch();
+      });
+    });
   }
 
   function renderInlineMarkdown(text) {
@@ -3168,6 +3349,86 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  function setupMainDbEvents() {
+    const scopeSel = $('mainScopeSelect');
+    if (scopeSel) {
+      scopeSel.addEventListener('change', async (e) => {
+        const val = e.target.value;
+        if (val === 'personal') {
+          if (!isGod()) {
+            showToast('Personal mode is GOD only', true);
+            scopeSel.value = state.scope;
+            return;
+          }
+          state.scope = 'personal';
+        } else {
+          state.scope = 'community';
+          if (!state.activeCommunity && state.communities.length) {
+            state.activeCommunity = state.communities[0].id;
+            localStorage.setItem('athena_active_community', state.activeCommunity);
+            if (communitySelect) communitySelect.value = state.activeCommunity;
+            if ($('mainCommunitySelect')) $('mainCommunitySelect').value = state.activeCommunity;
+          }
+        }
+        updateScopeUI();
+        if (state.scope === 'community') {
+          await Promise.all([loadCommunityLinksIfAny(), loadCommunityDocumentsIfAny()]);
+        }
+        await loadMainTags();
+        runSearch();
+      });
+    }
+
+    const commSel = $('mainCommunitySelect');
+    if (commSel) {
+      commSel.addEventListener('change', async (e) => {
+        state.activeCommunity = e.target.value || '';
+        if (state.activeCommunity) localStorage.setItem('athena_active_community', state.activeCommunity);
+        else localStorage.removeItem('athena_active_community');
+        if (communitySelect) communitySelect.value = state.activeCommunity;
+        state.scope = 'community';
+        updateScopeUI();
+        await loadCommunityAdmins();
+        await Promise.all([loadCommunityLinksIfAny(), loadCommunityDocumentsIfAny()]);
+        await loadMainTags();
+        runSearch();
+      });
+    }
+
+    const statusSel = $('mainStatusSelect');
+    if (statusSel) {
+      statusSel.addEventListener('change', (e) => {
+        state.filterStatus = e.target.value;
+        runSearch();
+      });
+    }
+
+    const sortSel = $('mainSortSelect');
+    if (sortSel) {
+      sortSel.addEventListener('change', (e) => {
+        state.filterSort = e.target.value;
+        runSearch();
+      });
+    }
+
+    const tagsToggleBtn = $('mainTagsToggleBtn');
+    const tagsCard = $('mainTagsCard');
+    if (tagsToggleBtn && tagsCard) {
+      tagsToggleBtn.addEventListener('click', () => {
+        tagsCard.classList.toggle('hidden');
+      });
+    }
+
+    const tagClearBtn = $('mainTagClearBtn');
+    if (tagClearBtn) {
+      tagClearBtn.addEventListener('click', () => {
+        state.filterTag = '';
+        renderMainTags();
+        runSearch();
+      });
+    }
+  }
+
   // ---- Events ----
 
   function setupEventListeners() {
@@ -3175,6 +3436,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initAccentColor();
     initDice();
     setupAdminDbEvents();
+    setupMainDbEvents();
 
     function openDrawer() {
       if (sideDrawer) sideDrawer.classList.add('active');
@@ -3338,15 +3600,15 @@ document.addEventListener('DOMContentLoaded', () => {
       searchInput.focus();
     });
 
-    personalScopeBtn.addEventListener('click', () => {
-        if (!isGod()) {
-          showToast('Personal mode is GOD only. Join a community via bot: /community_join <id>', true);
-          return;
-        }
+    personalScopeBtn.addEventListener('click', async () => {
+      if (!isGod()) {
+        showToast('Personal mode is GOD only. Join a community via bot: /community_join <id>', true);
+        return;
+      }
       state.scope = 'personal';
       updateScopeUI();
-      if (state.mode === 'search' && searchInput.value.trim()) runSearch();
-      else if (state.mode === 'search') renderHome();
+      await loadMainTags();
+      runSearch();
     });
 
     communityScopeBtn.addEventListener('click', async () => {
@@ -3358,13 +3620,14 @@ document.addEventListener('DOMContentLoaded', () => {
         state.activeCommunity = state.communities[0].id;
         localStorage.setItem('athena_active_community', state.activeCommunity);
         if (communitySelect) communitySelect.value = state.activeCommunity;
+        if ($('mainCommunitySelect')) $('mainCommunitySelect').value = state.activeCommunity;
       }
       state.scope = 'community';
       updateScopeUI();
       if (state.mode === 'delete' && !isCommunityStaff()) setMode('search');
       await Promise.all([loadCommunityLinksIfAny(), loadCommunityDocumentsIfAny()]);
-      if (state.mode === 'search' && searchInput.value.trim()) runSearch();
-      else if (state.mode === 'search') renderHome();
+      await loadMainTags();
+      runSearch();
     });
 
     const backendUrl = $('backendUrl');
@@ -3457,11 +3720,13 @@ document.addEventListener('DOMContentLoaded', () => {
         if (state.activeCommunity) localStorage.setItem('athena_active_community', state.activeCommunity);
         else localStorage.removeItem('athena_active_community');
         if (state.activeCommunity) state.scope = 'community';
+        if ($('mainCommunitySelect')) $('mainCommunitySelect').value = state.activeCommunity;
         updateDeleteModeVisibility();
         updateScopeUI();
         await loadCommunityAdmins();
         await Promise.all([loadCommunityLinksIfAny(), loadCommunityDocumentsIfAny()]);
-        if (state.mode === 'search') renderHome();
+        await loadMainTags();
+        if (state.mode === 'search') runSearch();
       });
     }
 

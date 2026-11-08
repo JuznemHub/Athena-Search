@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { handleAdminGetLinks } from '../worker/index.js';
+import { handleAdminGetLinks, handleGetTags } from '../worker/index.js';
 
 function makeMockDb() {
   const db = new DatabaseSync(':memory:');
@@ -162,6 +162,14 @@ async function runTests() {
   const dataQuery = await resQuery.json();
   assert.equal(dataQuery.total, 1);
   assert.equal(dataQuery.links[0].id, 'link_2');
+
+  // Test 6: handleGetTags
+  const resTags = await handleGetTags(new URL('https://athena.test/api/tags?community_id=comm_1'), adminUser, env, corsHeaders);
+  const dataTags = await resTags.json();
+  assert.equal(resTags.status, 200);
+  assert.equal(dataTags.success, true);
+  assert.ok(dataTags.tags.some(t => t.name === 'notags'));
+  assert.ok(dataTags.tags.some(t => t.name === 'tool'));
 
   console.log('admin database explorer tests passed');
 }

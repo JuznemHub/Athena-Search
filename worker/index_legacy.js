@@ -181,7 +181,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.55',
+          version: '1.0.56',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -349,6 +349,10 @@ export default {
 
       if (pathname === '/api/admin/links' && request.method === 'GET') {
         return await handleAdminGetLinks(url, user, env, corsHeaders);
+      }
+
+      if (pathname === '/api/tags' && request.method === 'GET') {
+        return await handleGetTags(url, user, env, corsHeaders);
       }
 
       // Community links — members only (join required before dump)
@@ -3378,6 +3382,84 @@ async function handleDeleteCommunityLink(request, user, env, corsHeaders) {
   return Response.json({ success: true, deleted: link.id }, { headers: corsHeaders });
 }
 
+async function handleGetTags(url, user, env, corsHeaders) {
+  const scope = (url.searchParams.get('scope') || 'community').toLowerCase();
+  const rawCommId = (url.searchParams.get('community_id') || '').trim();
+  let table = 'links';
+  let scopeKey = rawCommId;
+
+  if (scope === 'personal') {
+    if (!(await isInstanceOwnerUserAsync(user, env))) {
+      return deny(corsHeaders, 'Personal mode is for GOD rank (instance host) only', 'PERSONAL_LOCKED', 403);
+    }
+    table = 'personal_links';
+    scopeKey = user.id;
+  } else {
+    if (!scopeKey) {
+      const firstComm = await env.DB.prepare('SELECT id FROM communities ORDER BY created_at DESC LIMIT 1').first();
+      scopeKey = firstComm?.id || '';
+    }
+    if (!scopeKey) {
+      return Response.json({ success: true, tags: [], total: 0 }, { headers: corsHeaders });
+    }
+  }
+
+  const scopeWhereOnly = scope === 'personal' ? 'WHERE user_id = ?' : 'WHERE community_id = ?';
+  const tagRows = await env.DB.prepare(
+    `SELECT tags, COUNT(*) AS cnt FROM ${table} ${scopeWhereOnly} GROUP BY tags`
+  ).bind(scopeKey).all();
+
+  let notagsCount = 0;
+  const tagCount = new Map();
+  for (const r of (tagRows?.results || [])) {
+    const rowCount = Number(r.cnt ?? 1) || 1;
+    const rawTags = r.tags;
+    if (!rawTags || (typeof rawTags === 'string' && (rawTags.trim() === '' || rawTags === '[]' || rawTags === 'null' || rawTags === '[""]'))) {
+      notagsCount += rowCount;
+      continue;
+    }
+    let tArr = [];
+    if (typeof rawTags === 'string') {
+      try {
+        tArr = JSON.parse(rawTags);
+      } catch (_) {
+        tArr = rawTags.split(/[\s,]+/);
+      }
+    } else if (Array.isArray(rawTags)) {
+      tArr = rawTags;
+    }
+
+    if (!Array.isArray(tArr) || tArr.length === 0) {
+      notagsCount += rowCount;
+      continue;
+    }
+
+    let validTagFound = false;
+    for (let t of tArr) {
+      if (!t) continue;
+      t = String(t).trim().replace(/^#+/, '').toLowerCase();
+      if (t && t.length < 35) {
+        tagCount.set(t, (tagCount.get(t) || 0) + rowCount);
+        validTagFound = true;
+      }
+    }
+    if (!validTagFound) {
+      notagsCount += rowCount;
+    }
+  }
+
+  const topTags = [{ name: 'notags', count: notagsCount }];
+  const sorted = Array.from(tagCount.entries()).sort((a, b) => b[1] - a[1]).slice(0, 45);
+  for (const [name, count] of sorted) {
+    topTags.push({ name, count });
+  }
+
+  const countRow = await env.DB.prepare(`SELECT COUNT(*) AS total FROM ${table} ${scopeWhereOnly}`).bind(scopeKey).first();
+  const total = Number(countRow?.total || 0);
+
+  return Response.json({ success: true, tags: topTags, total }, { headers: corsHeaders });
+}
+
 async function handleAdminGetLinks(url, user, env, corsHeaders) {
   const isOwner = await isInstanceOwnerUserAsync(user, env);
   const isStaff = isOwner || (!ownerListsConfigured(env)) || (await isCommunityAdminUser(user, env));
@@ -3742,7 +3824,10 @@ function meiliDocumentFromRow(row, scope, key) {
     tags: Array.isArray(tags) ? tags : [],
     image_url: String(row.image_url || ''),
     site_name: String(row.site_name || ''),
-    created_at: Number(row.created_at || 0)
+    created_at: Number(row.created_at || 0),
+    manual_edited_at: row.manual_edited_at ? Number(row.manual_edited_at) : null,
+    last_edited_by: row.last_edited_by ? String(row.last_edited_by) : null,
+    last_edited_by_name: row.last_edited_by_name ? String(row.last_edited_by_name) : null
   };
 }
 
@@ -3759,7 +3844,10 @@ function meiliRowFromHit(hit) {
     tags: Array.isArray(hit.tags) ? hit.tags : (hit.tags || []),
     image_url: hit.image_url || '',
     site_name: hit.site_name || '',
-    created_at: Number(hit.created_at || 0)
+    created_at: Number(hit.created_at || 0),
+    manual_edited_at: hit.manual_edited_at ? Number(hit.manual_edited_at) : null,
+    last_edited_by: hit.last_edited_by ? String(hit.last_edited_by) : null,
+    last_edited_by_name: hit.last_edited_by_name ? String(hit.last_edited_by_name) : null
   };
 }
 
@@ -4016,16 +4104,19 @@ async function retrieveAiRows(env, scope, key, query, { limit = AI_RETRIEVAL_LIM
 async function handleSearchLinks(url, user, env, corsHeaders) {
   const q = (url.searchParams.get('q') || '').trim();
   const scope = (url.searchParams.get('scope') || 'community').toLowerCase();
+  const tag = (url.searchParams.get('tag') || '').trim();
+  const edited = (url.searchParams.get('edited') || 'all').toLowerCase();
+  const sort = (url.searchParams.get('sort') || 'created_desc').toLowerCase();
   const rawLimit = (url.searchParams.get('limit') || '').trim().toLowerCase();
   const requestedLimit = rawLimit === 'all'
     ? null
     : Math.max(parseInt(rawLimit || '1000', 10) || 1000, 1);
   const steroid = await getSteroidMode(env);
   const effectiveLimit = steroid ? requestedLimit : (requestedLimit == null ? 50 : Math.min(requestedLimit, 50));
-  if (!q) return Response.json({ success: true, links: [], query: '' }, { headers: corsHeaders });
   const aiPurpose = url.searchParams.get('purpose') === 'ai';
 
   if (aiPurpose) {
+    if (!q) return Response.json({ success: true, links: [], query: '' }, { headers: corsHeaders });
     if (scope === 'personal') {
       if (!(await isInstanceOwnerUserAsync(user, env))) {
         return deny(corsHeaders, 'Personal mode is for GOD rank (instance host) only', 'PERSONAL_LOCKED');
@@ -4055,11 +4146,43 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
     }, { headers: corsHeaders });
   }
 
+  const cleanTag = tag ? tag.replace(/^#+/, '').toLowerCase() : '';
+
   if (scope === 'personal') {
     if (!(await isInstanceOwnerUserAsync(user, env))) {
       return deny(corsHeaders, 'Personal mode is for GOD rank (instance host) only', 'PERSONAL_LOCKED');
     }
     await ensureLinkMetaColumns(env);
+
+    if (!q) {
+      const whereClauses = ['user_id = ?'];
+      const params = [user.id];
+      if (cleanTag) {
+        if (cleanTag === 'notags') {
+          whereClauses.push("(tags IS NULL OR TRIM(tags) = '' OR tags = '[]' OR tags = 'null' OR tags = '[\"\"]')");
+        } else {
+          whereClauses.push('(LOWER(tags) LIKE ? OR LOWER(tags) LIKE ?)');
+          params.push(`%"${cleanTag}"%`, `%#${cleanTag}%`);
+        }
+      }
+      if (edited === 'edited') whereClauses.push('manual_edited_at IS NOT NULL');
+      else if (edited === 'unedited') whereClauses.push('manual_edited_at IS NULL');
+
+      let orderSql = 'ORDER BY created_at DESC';
+      if (sort === 'created_asc') orderSql = 'ORDER BY created_at ASC';
+      else if (sort === 'edited_desc') orderSql = 'ORDER BY COALESCE(manual_edited_at, 0) DESC, created_at DESC';
+      else if (sort === 'title_asc') orderSql = 'ORDER BY LOWER(COALESCE(title, url)) ASC';
+
+      const whereSql = `WHERE ${whereClauses.join(' AND ')}`;
+      const countRow = await env.DB.prepare(`SELECT COUNT(*) AS total FROM personal_links ${whereSql}`).bind(...params).first();
+      const total = Number(countRow?.total || 0);
+      const { results } = await env.DB.prepare(`SELECT * FROM personal_links ${whereSql} ${orderSql} LIMIT ${effectiveLimit}`).bind(...params).all();
+      return Response.json(
+        { success: true, query: '', scope, links: results || [], total, enrichment_pending: false },
+        { headers: corsHeaders }
+      );
+    }
+
     const accelerated = await meiliSearchScope(env, 'personal', user.id, q, { limit: effectiveLimit });
     const rows = accelerated?.rows?.length ? accelerated.rows : await searchAllLinks(env, 'personal', user.id, q, effectiveLimit);
     let links = rankLinks(dedupeLinkRows(rows), q, effectiveLimit);
@@ -4067,6 +4190,30 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
       const one = await resolveSavedLink(env, 'personal', user.id, q).catch(() => null);
       if (one) links = [one];
     }
+
+    if (cleanTag) {
+      if (cleanTag === 'notags') {
+        links = links.filter(l => !l.tags || (Array.isArray(l.tags) && l.tags.length === 0) || l.tags === '[]' || l.tags === 'null' || l.tags === '""');
+      } else {
+        links = links.filter(l => {
+          const tStr = Array.isArray(l.tags) ? l.tags.join(' ').toLowerCase() : String(l.tags || '').toLowerCase();
+          return tStr.includes(cleanTag);
+        });
+      }
+    }
+    if (edited === 'edited') {
+      links = links.filter(l => Boolean(l.manual_edited_at || l.manualEditedAt));
+    } else if (edited === 'unedited') {
+      links = links.filter(l => !l.manual_edited_at && !l.manualEditedAt);
+    }
+    if (sort === 'created_asc') {
+      links.sort((a, b) => Number(a.created_at || a.createdAt || 0) - Number(b.created_at || b.createdAt || 0));
+    } else if (sort === 'edited_desc') {
+      links.sort((a, b) => Number(b.manual_edited_at || b.manualEditedAt || 0) - Number(a.manual_edited_at || a.manualEditedAt || 0));
+    } else if (sort === 'title_asc') {
+      links.sort((a, b) => String(a.title || a.url || '').localeCompare(String(b.title || b.url || '')));
+    }
+
     const enrichmentPending = queueMissingLinkEnrichment(env, 'personal', user.id, links);
     const total = await countScopeLinks(env, 'personal', user.id);
     return Response.json(
@@ -4082,6 +4229,36 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
   const gate = await requireActiveMember(env, communityId, user, corsHeaders);
   if (gate) return gate;
   await ensureLinkMetaColumns(env);
+
+  if (!q) {
+    const whereClauses = ['community_id = ?'];
+    const params = [communityId];
+    if (cleanTag) {
+      if (cleanTag === 'notags') {
+        whereClauses.push("(tags IS NULL OR TRIM(tags) = '' OR tags = '[]' OR tags = 'null' OR tags = '[\"\"]')");
+      } else {
+        whereClauses.push('(LOWER(tags) LIKE ? OR LOWER(tags) LIKE ?)');
+        params.push(`%"${cleanTag}"%`, `%#${cleanTag}%`);
+      }
+    }
+    if (edited === 'edited') whereClauses.push('manual_edited_at IS NOT NULL');
+    else if (edited === 'unedited') whereClauses.push('manual_edited_at IS NULL');
+
+    let orderSql = 'ORDER BY created_at DESC';
+    if (sort === 'created_asc') orderSql = 'ORDER BY created_at ASC';
+    else if (sort === 'edited_desc') orderSql = 'ORDER BY COALESCE(manual_edited_at, 0) DESC, created_at DESC';
+    else if (sort === 'title_asc') orderSql = 'ORDER BY LOWER(COALESCE(title, url)) ASC';
+
+    const whereSql = `WHERE ${whereClauses.join(' AND ')}`;
+    const countRow = await env.DB.prepare(`SELECT COUNT(*) AS total FROM links ${whereSql}`).bind(...params).first();
+    const total = Number(countRow?.total || 0);
+    const { results } = await env.DB.prepare(`SELECT * FROM links ${whereSql} ${orderSql} LIMIT ${effectiveLimit}`).bind(...params).all();
+    return Response.json(
+      { success: true, query: '', scope, links: results || [], total, enrichment_pending: false },
+      { headers: corsHeaders }
+    );
+  }
+
   const accelerated = await meiliSearchScope(env, 'community', communityId, q, { limit: effectiveLimit });
   const rows = accelerated?.rows?.length ? accelerated.rows : await searchAllLinks(env, 'community', communityId, q, effectiveLimit);
   let links = rankLinks(dedupeLinkRows(rows), q, effectiveLimit);
@@ -4089,6 +4266,30 @@ async function handleSearchLinks(url, user, env, corsHeaders) {
     const one = await resolveSavedLink(env, 'community', communityId, q).catch(() => null);
     if (one) links = [one];
   }
+
+  if (cleanTag) {
+    if (cleanTag === 'notags') {
+      links = links.filter(l => !l.tags || (Array.isArray(l.tags) && l.tags.length === 0) || l.tags === '[]' || l.tags === 'null' || l.tags === '""');
+    } else {
+      links = links.filter(l => {
+        const tStr = Array.isArray(l.tags) ? l.tags.join(' ').toLowerCase() : String(l.tags || '').toLowerCase();
+        return tStr.includes(cleanTag);
+      });
+    }
+  }
+  if (edited === 'edited') {
+    links = links.filter(l => Boolean(l.manual_edited_at || l.manualEditedAt));
+  } else if (edited === 'unedited') {
+    links = links.filter(l => !l.manual_edited_at && !l.manualEditedAt);
+  }
+  if (sort === 'created_asc') {
+    links.sort((a, b) => Number(a.created_at || a.createdAt || 0) - Number(b.created_at || b.createdAt || 0));
+  } else if (sort === 'edited_desc') {
+    links.sort((a, b) => Number(b.manual_edited_at || b.manualEditedAt || 0) - Number(a.manual_edited_at || a.manualEditedAt || 0));
+  } else if (sort === 'title_asc') {
+    links.sort((a, b) => String(a.title || a.url || '').localeCompare(String(b.title || b.url || '')));
+  }
+
   const enrichmentPending = queueMissingLinkEnrichment(env, 'community', communityId, links);
   const total = await countScopeLinks(env, 'community', communityId);
   return Response.json(
@@ -18636,4 +18837,5 @@ export {
   STATS_TOPICS_PAGE_MAX,
   USERBOT_ACCOUNTS,
   handleAdminGetLinks,
+  handleGetTags,
 };

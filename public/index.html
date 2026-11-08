@@ -29,8 +29,8 @@
       }
     })();
   </script>
-<link rel="stylesheet" href="./src/style.css?v=1.0.55">
-<link rel="stylesheet" href="./src/themes.css?v=1.0.55">
+<link rel="stylesheet" href="./src/style.css?v=1.0.56">
+<link rel="stylesheet" href="./src/themes.css?v=1.0.56">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -133,6 +133,57 @@
           <button type="button" class="mode-pill" data-mode="dump">Dump</button>
           <button type="button" class="mode-pill" data-mode="ai" id="aiModePill">AI</button>
           <button type="button" class="mode-pill mode-pill-delete" data-mode="delete">Delete</button>
+        </div>
+
+        <!-- Main Database & Filter Controls Panel -->
+        <div class="main-db-panel" id="mainDbPanel">
+          <div class="main-db-controls">
+            <div class="main-ctrl-group">
+              <label for="mainScopeSelect">Scope</label>
+              <select id="mainScopeSelect" class="input input-sm">
+                <option value="community">Community</option>
+                <option value="personal">Personal (GOD)</option>
+              </select>
+            </div>
+            <div class="main-ctrl-group" id="mainCommunityWrap">
+              <label for="mainCommunitySelect">Community</label>
+              <select id="mainCommunitySelect" class="input input-sm"></select>
+            </div>
+            <div class="main-ctrl-group">
+              <label for="mainStatusSelect">Status</label>
+              <select id="mainStatusSelect" class="input input-sm">
+                <option value="all">All links</option>
+                <option value="edited">Edited only</option>
+                <option value="unedited">Unedited</option>
+              </select>
+            </div>
+            <div class="main-ctrl-group">
+              <label for="mainSortSelect">Sort</label>
+              <select id="mainSortSelect" class="input input-sm">
+                <option value="created_desc">Newest added</option>
+                <option value="edited_desc">Recently edited</option>
+                <option value="created_asc">Oldest added</option>
+                <option value="title_asc">Title (A–Z)</option>
+              </select>
+            </div>
+            <button type="button" id="mainTagsToggleBtn" class="btn btn-secondary btn-sm main-tag-toggle-btn" title="Toggle tag cloud">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg>
+              <span>Tags</span>
+            </button>
+          </div>
+
+          <!-- Tag Cloud Card -->
+          <div class="main-tags-card" id="mainTagsCard">
+            <div class="main-tags-card-header">
+              <div class="main-tags-title">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg>
+                <span>Filter by tag</span>
+                <span class="main-tags-summary" id="mainTagsSummary">Loading tags…</span>
+              </div>
+              <button type="button" id="mainTagClearBtn" class="btn-text-sm hidden">Clear tag filter</button>
+            </div>
+            <div id="mainTagsCloud" class="main-tags-cloud"></div>
+          </div>
         </div>
 
         <div id="notifPanel" class="notif-panel hidden">
@@ -464,9 +515,9 @@
     </div>
   </aside>
 
-  <script src="./src/lib/dedupe.js?v=1.0.55"></script>
-  <script src="./src/lib/search.js?v=1.0.55"></script>
-  <script src="./src/lib/ai.js?v=1.0.55"></script>
-  <script src="./src/main.js?v=1.0.55"></script>
+  <script src="./src/lib/dedupe.js?v=1.0.56"></script>
+  <script src="./src/lib/search.js?v=1.0.56"></script>
+  <script src="./src/lib/ai.js?v=1.0.56"></script>
+  <script src="./src/main.js?v=1.0.56"></script>
 </body>
 </html>
