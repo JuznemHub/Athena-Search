@@ -109,6 +109,9 @@ CREATE TABLE IF NOT EXISTS links (
     metadata_version INTEGER NOT NULL DEFAULT 0,
     manual_edited_at INTEGER,
     search_blob TEXT,
+    source_chat_id TEXT,
+    source_message_id TEXT,
+    transfer_id TEXT,
     FOREIGN KEY(community_id) REFERENCES communities(id)
 );
 
@@ -159,7 +162,10 @@ CREATE TABLE IF NOT EXISTS personal_links (
     site_name TEXT,
     metadata_version INTEGER NOT NULL DEFAULT 0,
     manual_edited_at INTEGER,
-    search_blob TEXT
+    search_blob TEXT,
+    source_chat_id TEXT,
+    source_message_id TEXT,
+    transfer_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_personal_user ON personal_links(user_id);

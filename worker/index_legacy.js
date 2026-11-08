@@ -6179,6 +6179,9 @@ async function getTelegramSearchPage(env, session) {
   const html = hits.length
     ? `${header}\n<p><i>${escHtml(session.query)}</i></p>\n<ol>${hits.map(r => richSearchRowHtml(r, botUsername)).join('')}</ol>`
     : `${header}\n<p>${escHtml(session.query ? 'No matching saved items.' : 'Enter a search query.')}</p>`;
+  // Thin cloned rows upgrade in the background, same as website search —
+  // bot-found links get their descriptions and AI tags too.
+  try { queueMissingLinkEnrichment(env, session.scope, session.scope_key, hits); } catch (_) {}
   return { html, keyboard: null, page, total };
 }
 
@@ -11286,6 +11289,8 @@ async function saveBackfillLink(env, job, sink, message, url) {
   const table = personal ? 'personal_links' : 'links';
   const key = personal ? job.user_id : job.community_id;
   const column = personal ? 'user_id' : 'community_id';
+  await ensureLinkMetaColumns(env).catch(() => {});
+  await ensureTransferColumns(env).catch(() => {});
   const existing = await findExistingLink(env, table, column, key, url);
   if (existing) return { duplicate: true, id: existing.id };
   const id = 'ix_' + randomToken().slice(0, 20);
@@ -11301,10 +11306,16 @@ async function saveBackfillLink(env, job, sink, message, url) {
     return { duplicate: true, id: duplicate.id };
   }
   // Deterministic tags now; metadata_version stays 0 so a later search can
-  // upgrade the row with the model. No `telegram`/`backfill` stamps.
+  // upgrade the row with the model. Caption hashtags are kept as curated
+  // tags (cleaned, never stamped) — a post that already describes itself
+  // with #topics needs no generated replacements for those words.
   try {
     const tagged = await describeAndTagLink(env, url, { title: titleFromUrl(url), notes: noteText }, { config: null, maxTags: 8 });
-    await env.DB.prepare(`UPDATE ${table} SET tags = ? WHERE id = ?`).bind(JSON.stringify(tagged.tags), id).run();
+    const finalTags = mergePipelineTags({
+      manual: normalizeTagList(extractHashtags(noteText)),
+      generated: tagged.tags, facts: tagged.facts, rawUrl: url, title: titleFromUrl(url),
+    });
+    await env.DB.prepare(`UPDATE ${table} SET tags = ? WHERE id = ?`).bind(JSON.stringify(finalTags), id).run();
   } catch (_) {}
   markMeiliScopeDirty(env, sink, key);
   return { saved: id };
@@ -16700,12 +16711,18 @@ async function enrichLinksInBackground(env, scope, key, links) {
         const notes = (!isDetailedNotes(oldNotes) && tagged.description)
           ? String(tagged.description).slice(0, 600)
           : oldNotes;
+        // Already-curated tags survive (junk stamps still drop out); the fresh
+        // pipeline only fills the gaps instead of replacing the row's tags.
+        const mergedTags = mergePipelineTags({
+          manual: existingTags, generated: tagged.tags,
+          facts: tagged.facts, rawUrl: link.url, title: tagged.title || title,
+        });
         const update = {
           title: tagged.title || title,
           notes,
           image_url: meta.image || '',
           site_name: meta.siteName || '',
-          tags: tagged.tags,
+          tags: mergedTags,
         };
         const metadataVersion = tagged.usedAi && tagged.description ? AI_METADATA_VERSION : 2;
         if (scope === 'personal') {
@@ -16718,9 +16735,6 @@ async function enrichLinksInBackground(env, scope, key, links) {
           ).bind(update.title, update.notes, update.image_url, update.site_name, JSON.stringify(update.tags), link.id).run();
         }
         markMeiliScopeDirty(env, scope, key);
-        // existingTags is retained only when a human already curated the row;
-        // automatic passes are normalized by the shared validator above.
-        void existingTags;
       } catch (_) { /* one bad link must not stall the rest */ }
     }
   };
@@ -17887,6 +17901,7 @@ export {
   structureDatabase,
   cleanTagsForStructure,
   mergePipelineTags,
+  saveBackfillLink,
   searchAllLinks,
   telegramSearchRowHtml,
   handleSearchLinks,

@@ -41,6 +41,7 @@ import {
   structureDatabase,
   cleanTagsForStructure,
   mergePipelineTags,
+  saveBackfillLink,
   searchAllLinks,
   parseStoredTags,
   normalizeTagList,
@@ -936,6 +937,51 @@ const tagTaxonomy = await import('../worker/tag-taxonomy.js');
     });
     assert.ok(junky.includes('my-project') && !junky.includes('cool') && !junky.includes('backfill'), 'junk manual tags die, curation survives');
   }
+}
+
+{
+  // Clone/backfill saves carry the post's own description (caption) and its
+  // hashtags as curated tags — never ingest stamps, never junk.
+  const sqlite = new DatabaseSync(':memory:');
+  sqlite.exec(fs.readFileSync(new URL('../worker/schema.sql', import.meta.url), 'utf8')
+    .replace(/^CREATE EXTENSION[^;]*;/gm, '').replace(/^CREATE INDEX[^;]*USING gin[^;]*;/gm, ''));
+  const DB = {
+    prepare(sql) {
+      const statement = (params = []) => ({
+        bind(...values) { return statement(values.map(value => value ?? null)); },
+        async run() { const result = sqlite.prepare(sql).run(...params); return { success: true, meta: { changes: Number(result.changes) } }; },
+        async first(column) { const row = sqlite.prepare(sql).get(...params); return row ? (column ? row[column] : row) : null; },
+        async all() { return { results: sqlite.prepare(sql).all(...params) }; }
+      });
+      return statement();
+    }
+  };
+  const env = { DB };
+  sqlite.prepare('INSERT INTO users (id,username,created_at) VALUES (?,?,?)').run('u9', 'u9', 1);
+  const job = { id: 'job_test', user_id: 'u9', chat_id: '-1001' };
+  const first = await saveBackfillLink(env, job, 'personal', { message: 'Handy tool #mytool #cool #backfill', id: 5 }, 'https://example.com/backfill-test');
+  assert.ok(first.saved, 'clone saves the link');
+  const row = sqlite.prepare('SELECT notes, tags, metadata_version FROM personal_links WHERE id = ?').get(first.saved);
+  assert.ok(String(row.notes).includes('Handy tool'), 'caption kept as description');
+  const tags = JSON.parse(row.tags);
+  assert.ok(tags.includes('mytool'), 'caption hashtag kept as curated tag');
+  assert.ok(!tags.includes('cool') && !tags.includes('backfill') && !tags.includes('telegram'), 'junk and stamps never stored');
+  assert.equal(row.metadata_version, 0, 'left for the search-time upgrade pass');
+  const dupe = await saveBackfillLink(env, job, 'personal', { message: 'again', id: 6 }, 'https://example.com/backfill-test');
+  assert.ok(dupe.duplicate, 'same URL is not saved twice');
+}
+
+{
+  // Enrichment fills gaps but keeps curated tags: junk drops out, curated
+  // survive, generated tags append — never a blind overwrite.
+  const kept = mergePipelineTags({
+    manual: ['my-project', 'telegram', 'backfill', 'cool'],
+    generated: ['software', 'github'],
+    facts: { brands: [], software: true, platforms: [] },
+    rawUrl: 'https://example.com/x', title: 'X',
+  });
+  assert.ok(kept.includes('my-project') && kept.includes('software') && kept.includes('github'), 'curated kept, generated appended');
+  assert.ok(!kept.includes('telegram') && !kept.includes('backfill') && !kept.includes('cool'), 'junk dropped even from existing tags');
 }
 
 console.log('retrieval tests passed');
