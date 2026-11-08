@@ -1026,6 +1026,12 @@ console.log('clone attribution tests passed');
   assert.match(btnHtml, /search:edit:ts_abc123:0/, 'edit callback wired');
   assert.match(btnHtml, /search:del:ts_abc123:0/, 'delete callback wired');
   assert.ok('search:del:ts_abc123:0'.length <= 64, 'callback data fits Telegram limit');
+
+  // No command may auto-add ingest stamps: backfill never survives, and
+  // telegram survives only with page evidence (facts empty here).
+  const kept = mergePipelineTags({ manual: ['backfill', 'telegram', 'ai'], generated: ['backfill', 'website'], facts: { platforms: [], software: false, brands: [] }, rawUrl: 'https://example.com/x', title: 'X' });
+  assert.ok(!kept.includes('backfill'), 'backfill never auto-added');
+  assert.ok(!kept.includes('telegram'), 'telegram dropped without page evidence');
 }
 
 console.log('section layout tests passed');

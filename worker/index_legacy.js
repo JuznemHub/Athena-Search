@@ -6193,13 +6193,13 @@ async function handlePatchCommunityLink(request, user, env, corsHeaders) {
   }
   const gate = await requireActiveMember(env, existing.community_id, user, corsHeaders);
   if (gate) return gate;
-  // author or staff can edit. Links dumped by the bot before the sender was linked to
-  // an Athena account have added_by_user_id = NULL — those are staff-only, not open
-  // season for every member.
+  // Owner/admin only. The author exception is gone on purpose: edits and
+  // deletes are rank-gated everywhere (bot commands, search buttons, admin
+  // DB and website cards all share this gate).
   const isGod = await isInstanceOwnerUserAsync(user, env);
   const staff = isGod || (await ensureOwnerOrAdmin(existing.community_id, user.id, env));
-  if (!staff && existing.added_by_user_id !== user.id) {
-    return Response.json({ success: false, error: 'Only author or admin can edit' }, { status: 403, headers: corsHeaders });
+  if (!staff) {
+    return Response.json({ success: false, error: 'Only owner/admins can edit or delete' }, { status: 403, headers: corsHeaders });
   }
 
   let url = existing.url;
@@ -7215,7 +7215,9 @@ function extractHashtags(text) {
   for (const h of raw) {
     const tag = h.slice(1).toLowerCase().replace(/\s+/g, '-').slice(0,40).trim();
     if (!tag) continue;
-    if (['telegram','community','personal','dump'].includes(tag)) continue;
+    // Provenance/ingest stamps are never topics, even when written as
+    // hashtags in a caption — no command may auto-add them.
+    if (['telegram','community','personal','dump','backfill'].includes(tag)) continue;
     if (!out.includes(tag)) out.push(tag);
     if (out.length >= 10) break;
   }
@@ -7518,7 +7520,7 @@ function heuristicGroupTags(g, fullPost) {
   const out = [];
   const push = (t) => {
     const tag = String(t || '').replace(/^#/, '').trim().toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{N}-]/gu, '').slice(0, 40);
-    if (tag && tag.length >= 2 && !['telegram', 'community', 'personal', 'dump', 'links', 'link'].includes(tag) && !out.includes(tag)) out.push(tag);
+    if (tag && tag.length >= 2 && !['telegram', 'community', 'personal', 'dump', 'backfill', 'links', 'link'].includes(tag) && !out.includes(tag)) out.push(tag);
   };
   for (const h of extractHashtags(String(fullPost || ''))) push(h);
   if (g.heading) for (const w of g.heading.toLowerCase().replace(/#[\w-]+/g, ' ').replace(/[^\p{L}\p{N} ]/gu, ' ').split(/\s+/).filter(Boolean)) push(w);
@@ -8339,7 +8341,7 @@ function helpTextForSection(section, isGod = false) {
       spacer,
       richParagraph('<b>Tagging & structure</b>'),
       cmd(3, `${codeHtml('/forcetags [community_id]')} ${codeHtml('[all]')}`, 'Run a retag review of one brain. Defaults to this chat\u2019s current brain (see /mode); pass an id to review a different one, add all to sweep in the background. Then pick community or personal brain. One batch is 150 links. Writes the tags column only from the controlled vocabulary, and skips links you edited by hand (/edit or the website).'),
-      cmd(5, `${codeHtml('/structure')} ${codeHtml('[all]')}`, 'One-pass cleanup of this chat\u2019s brain (see /mode): canonicalizes URLs, merges near-duplicates, structures every row into Title/URL/Description/Tags, moves inline #tags from descriptions into tags, fills empty descriptions via scrape (AI when configured) and drops junk tags without touching curated ones. Add all for every brain. Runs in the background with live progress.'),
+      cmd(5, `${codeHtml('/structure')} ${codeHtml('[all]')}`, 'One-pass cleanup of this chat\u2019s brain (see /mode): canonicalizes URLs, merges near-duplicates, structures every row into Title/URL/Description/Tags, moves inline #tags from descriptions into tags, fills empty descriptions via scrape (AI when configured) and drops junk tags without touching curated ones. Rows you edited by hand (/edit or the website) are never touched. Add all for every brain. Runs in the background with live progress.'),
       spacer,
       richParagraph('<b>Backup & import</b>'),
       cmd(6, codeHtml('/backup'), 'Full database backup (SQL, gzipped) sent to this chat.'),
@@ -12374,7 +12376,7 @@ function canonicalStoredUrl(urlStr) {
 }
 
 async function structureDatabase(env, { onProgress = null, scope = null, scopeId = null } = {}) {
-  const stats = { scanned: 0, urlNormalized: 0, merged: 0, notesCleaned: 0, titlesCleaned: 0, tagsCleaned: 0, descFilled: 0, errors: 0 };
+  const stats = { scanned: 0, urlNormalized: 0, merged: 0, notesCleaned: 0, titlesCleaned: 0, tagsCleaned: 0, descFilled: 0, manualSkipped: 0, errors: 0 };
   const dirtyScopes = new Set();
   const markScopeDirty = (table, rowScopeId) => {
     if (rowScopeId != null && rowScopeId !== '') dirtyScopes.add(`${table === 'links' ? 'community' : 'personal'}:${rowScopeId}`);
@@ -12382,8 +12384,8 @@ async function structureDatabase(env, { onProgress = null, scope = null, scopeId
   const nameRe = await loadLinkNamePattern(env);
   const aiCfg = await getInstanceAiConfig(env).catch(() => null);
   const tables = [
-    { name: 'links', scopeCol: 'community_id', cols: 'url, url_hash, title, notes, tags, created_at, upvotes, downvotes', want: !scope || scope === 'community' },
-    { name: 'personal_links', scopeCol: 'user_id', cols: 'url, url_hash, title, notes, tags, created_at, 0 AS upvotes, 0 AS downvotes', want: !scope || scope === 'personal' }
+    { name: 'links', scopeCol: 'community_id', cols: 'url, url_hash, title, notes, tags, created_at, upvotes, downvotes, manual_edited_at', want: !scope || scope === 'community' },
+    { name: 'personal_links', scopeCol: 'user_id', cols: 'url, url_hash, title, notes, tags, created_at, 0 AS upvotes, 0 AS downvotes, manual_edited_at', want: !scope || scope === 'personal' }
   ];
   for (const t of tables) {
     if (!t.want) continue;
@@ -12401,6 +12403,10 @@ async function structureDatabase(env, { onProgress = null, scope = null, scopeId
       cursor = rows[rows.length - 1].id;
       for (let row of rows) {
         stats.scanned++;
+        // Hand-edited rows (/edit, website editor, admin DB) are never
+        // restructured — same lock as /forcetags. URL, title, notes and
+        // tags all stay exactly as the owner/admin left them.
+        if (row.manual_edited_at) { stats.manualSkipped++; continue; }
         try {
           const originalUrl = row.url;
           const normUrl = canonicalStoredUrl(row.url);
@@ -12412,9 +12418,25 @@ async function structureDatabase(env, { onProgress = null, scope = null, scopeId
             // the merge math below stays uniform across both tables.
             const voteCols = t.name === 'links' ? 'upvotes, downvotes' : '0 AS upvotes, 0 AS downvotes';
             const dup = await env.DB.prepare(
-              `SELECT id, url, title, notes, tags, ${voteCols}, created_at FROM ${t.name} WHERE ${t.scopeCol} = ? AND id != ? AND (url_hash = ? OR url_hash = ? OR url = ?) LIMIT 1`
+              `SELECT id, url, title, notes, tags, ${voteCols}, created_at, manual_edited_at FROM ${t.name} WHERE ${t.scopeCol} = ? AND id != ? AND (url_hash = ? OR url_hash = ? OR url = ?) LIMIT 1`
             ).bind(row.scope_id, row.id, normHash, legacy, normUrl).first();
             if (dup) {
+              // A hand-edited row always survives a merge untouched: the
+              // other row is deleted, its votes folded in, fields kept.
+              if (dup.manual_edited_at || row.manual_edited_at) {
+                const keep = row.manual_edited_at ? row : dup;
+                const drop = keep.id === row.id ? dup : row;
+                if (t.name === 'links' && (drop.upvotes || drop.downvotes)) {
+                  await env.DB.prepare(
+                    `UPDATE ${t.name} SET upvotes = COALESCE(upvotes,0) + COALESCE(?,0), downvotes = COALESCE(downvotes,0) + COALESCE(?,0) WHERE id = ?`
+                  ).bind(Number(drop.upvotes || 0), Number(drop.downvotes || 0), keep.id).run().catch(() => {});
+                }
+                await env.DB.prepare(`DELETE FROM ${t.name} WHERE id = ?`).bind(drop.id).run();
+                stats.merged++;
+                markScopeDirty(t.name, row.scope_id);
+                row = { ...keep, url: keep.url, url_hash: keep.url_hash || generateUrlHash(keep.url) };
+                continue;
+              }
               // Merge into the older row; the survivor is cleaned below like
               // every other row, so merges never reintroduce junk tags and the
               // survivor's own title/notes get cleaned too.
@@ -15509,7 +15531,8 @@ Rules:
             `Notes cleaned: <b>${stats.notesCleaned}</b><br>` +
             `Titles cleaned: <b>${stats.titlesCleaned}</b><br>` +
             `Tags cleaned: <b>${stats.tagsCleaned}</b><br>` +
-            `Descriptions filled: <b>${stats.descFilled || 0}</b>` +
+            `Descriptions filled: <b>${stats.descFilled || 0}</b><br>` +
+            `Hand-edited rows left untouched: <b>${stats.manualSkipped || 0}</b>` +
             (stats.errors ? `<br><i>errors: ${stats.errors}</i>` : '')),
           '',
           richParagraph(`<i>Changed scopes are marked for search-index refresh; AI reads the cleaned rows on the next query. Run ${codeHtml('/structure all')} for every brain.</i>`),
@@ -17369,7 +17392,7 @@ async function recentTagsForScope(env, scope, key, limit = 200) {
       try { arr = JSON.parse(r.tags || '[]'); } catch (_) {}
       for (const t of Array.isArray(arr) ? arr : []) {
         const s = String(t).replace(/^#/, '').trim().toLowerCase();
-        if (s && !['telegram', 'community', 'personal', 'dump'].includes(s) && !out.includes(s)) out.push(s);
+        if (s && !['telegram', 'community', 'personal', 'dump', 'backfill'].includes(s) && !out.includes(s)) out.push(s);
       }
       if (out.length >= limit) break;
     }
@@ -17462,6 +17485,7 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, config = undefined, revi
     'Pick the type tag that fits: app, software, tool, service, website, library, framework, api, bot, extension, plugin, cli, game, documentation, driver, theme.',
     'Use platform tags only when the page says the software runs there. Do not return multiplatform; it is computed from the platform facts.',
     'Use a brand tag only when the brand is named in the facts. Never tag a site, project, person or domain name.',
+    'Never emit ingest stamps (backfill, dump, untagged, duplicate). Use telegram only when the facts name a Telegram entity (bot, client, channel, group); a passing "shared via Telegram" line is not enough.',
     'Prefer specific topics over broad ones. Returning 3 accurate tags is better than 6 vague ones.',
     reviewing ? 'Keep current tags only when they still fit; drop ingest stamps, names and vague words.' : '',
     'Reply with ONLY one JSON object: {"title": "...", "description": "...", "tags": ["a", "b", "c"]}'

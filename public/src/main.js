@@ -1571,6 +1571,9 @@ document.addEventListener('DOMContentLoaded', () => {
     resultsMeta.textContent = `About ${items.length} result${items.length === 1 ? '' : 's'}${query ? ` for “${query}”` : ''}${corpusTotal != null ? ` · ${corpusTotal} saved items searched` : ''}`;
 
     const isCommunity = state.scope === 'community';
+    // Owner/admin only: everyone else sees no edit/delete affordance, and the
+    // server rejects the call with "Only owner/admins can edit or delete".
+    const canModerate = state.scope === 'personal' || isCommunityStaff();
 
     items.forEach(item => {
       const card = document.createElement('article');
@@ -1642,12 +1645,12 @@ document.addEventListener('DOMContentLoaded', () => {
         <p class="g-snippet">${highlight(desc, query)}</p>
         ${voteRow}
         ${editAuditHtml}
-        <button type="button" class="edit-link-btn" data-id="${escapeHtml(item.id)}" title="Edit" aria-label="Edit">
+        ${canModerate ? `<button type="button" class="edit-link-btn" data-id="${escapeHtml(item.id)}" title="Edit" aria-label="Edit">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
         </button>
         <button type="button" class="del-link-btn" data-id="${escapeHtml(item.id)}" title="Delete from database" aria-label="Delete">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
-        </button>
+        </button>` : ''}
         <div class="edit-panel hidden" data-edit-for="${escapeHtml(item.id)}">
           <label>Title</label>
           <input type="text" class="edit-title" value="${escapeHtml(item.title || '')}" />
