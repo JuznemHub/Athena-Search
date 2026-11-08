@@ -14272,6 +14272,31 @@ async function startCloneTargetAsk(env, ctx) {
   // attaches one of your communities (by id/name, or your primary one).
   if (cmd === '/personal' || cmd === '/community' || cmd === '/mode') {
     if (!binding?.id) {
+      const isDmChat = !String(chatId).startsWith('-');
+      if (isDmChat && isGod && athenaUser) {
+        // First DM use: provision the personal binding so this chat has a
+        // mode to switch. No bot token is stored — replies use the instance
+        // token, and dumps/search/ai read the scope from this row.
+        try {
+          await ensureBotBindingColumns(env);
+          let botUsername = '';
+          try {
+            const me = await telegramApi(token, 'getMe');
+            if (me?.ok && me.result?.username) botUsername = String(me.result.username);
+          } catch (_) {}
+          const bid = 'bot_' + Date.now().toString(36);
+          await env.DB.prepare(
+            `INSERT INTO community_bots (id, platform, bot_username, group_id, group_name, created_by, created_at, scope, user_id, bot_token)
+             VALUES (?, 'telegram', ?, ?, ?, ?, ?, 'personal', ?, NULL)
+             ON CONFLICT DO NOTHING`
+          ).bind(bid, botUsername, String(chatId), senderName || 'DM', athenaUser.id, Date.now(), athenaUser.id).run();
+          binding = await env.DB.prepare(
+            `SELECT * FROM community_bots WHERE platform = 'telegram' AND group_id = ?`
+          ).bind(String(chatId)).first().catch(() => null);
+        } catch (_) { binding = null; }
+      }
+    }
+    if (!binding?.id) {
       await sendTelegramMessage(token, chatId, 'Chat not linked. Settings → Bot: token + chat ID. Groups: /community_verify first.', forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
