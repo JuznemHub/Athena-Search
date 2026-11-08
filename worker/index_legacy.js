@@ -2753,14 +2753,28 @@ function telegramApiBaseFor(env) {
 }
 
 
-async function telegramApi(token, method, payload = null) {
+async function telegramApi(token, method, payload = null, timeoutMs = 25000) {
   const url = `${TG_API_BASE}/bot${token}/${method}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs) || 25000));
   const opts = payload
-    ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }
-    : { method: 'GET' };
-  const res = await fetch(url, opts);
-  const data = await res.json().catch(() => ({}));
-  return data;
+    ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: controller.signal }
+    : { method: 'GET', signal: controller.signal };
+  try {
+    const res = await fetch(url, opts);
+    const data = await res.json().catch(() => ({}));
+    return data;
+  } catch (err) {
+    // A stalled Bot API call used to wedge the webhook handler forever with
+    // no log and no reply; abort instead so the fallback path still answers.
+    if (String(err?.name || '').includes('Abort')) {
+      console.error(`telegramApi timeout: ${method}`);
+      return { ok: false, description: 'Telegram API timeout' };
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function verifyTelegramBotToken(token, expectedUsername) {
@@ -6197,7 +6211,9 @@ async function startTelegramSearch(env, token, chatId, tgUserId, scope, scopeKey
     ackId = ack?.message_id || null;
   } catch (_) {}
   try {
+    const tSearch = Date.now();
     const view = await getTelegramSearchPage(env, session);
+    try { console.log(`[search] page built in ${Date.now() - tSearch}ms scope=${scope} total=${view.total}`); } catch (_) {}
     const buttons = searchRichButtonRow(session.id, view.page, view.total);
     if (ackId) await editTelegramRichMessage(token, chatId, ackId, view.html, threadId, buttons);
     else await sendTelegramRichMessage(token, chatId, view.html, threadId, buttons);
