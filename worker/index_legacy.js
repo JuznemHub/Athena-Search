@@ -8000,8 +8000,8 @@ function helpTextForSection(section, isGod = false) {
       cmd(2, `${codeHtml('/dumpall on|off')}`, 'One dump-mode setting: on saves every URL, off keeps the primary link only (smart, the default). Channel cloning lives in 📡 Channels.'),
       spacer,
       richParagraph('<b>Tagging & structure</b>'),
-      cmd(3, `${codeHtml('/forcetags <community_id>')} ${codeHtml('[all]')}`, 'Run a retag review of one brain. The community id is required, then pick the community brain or your personal brain. One batch of 150 links per run; add all to sweep that whole brain in the background — no retyping. Scrapes a real description, writes tags from the controlled vocabulary, and skips links you edited by hand (/edit or the website).'),
-      cmd(5, codeHtml('/structure'), 'One-pass DB cleanup: strips tracking URLs, merges near-duplicate links, cleans titles and notes, trims multi-link notes to each link’s own section. Runs in the background with live progress.'),
+      cmd(3, `${codeHtml('/forcetags [community_id]')} ${codeHtml('[all]')}`, 'Run a retag review of one brain. Defaults to this chat\u2019s current brain (see /mode); pass an id to review a different one, add all to sweep in the background. Then pick community or personal brain. One batch is 150 links. Scrapes a real description, writes tags from the controlled vocabulary, and skips links you edited by hand (/edit or the website).'),
+      cmd(5, `${codeHtml('/structure')} ${codeHtml('[all]')}`, 'One-pass cleanup of this chat\u2019s brain (see /mode): canonicalizes URLs, merges near-duplicates, cleans titles/notes/tags and drops junk tags without touching curated ones. Add all for every brain. Runs in the background with live progress.'),
       spacer,
       richParagraph('<b>Backup & import</b>'),
       cmd(6, codeHtml('/backup'), 'Full database backup (SQL, gzipped) sent to this chat.'),
@@ -11781,25 +11781,28 @@ function canonicalStoredUrl(urlStr) {
   try { return canonicalUrlForHash(s); } catch (_) { return s; }
 }
 
-async function structureDatabase(env, { onProgress = null } = {}) {
+async function structureDatabase(env, { onProgress = null, scope = null, scopeId = null } = {}) {
   const stats = { scanned: 0, urlNormalized: 0, merged: 0, notesCleaned: 0, titlesCleaned: 0, tagsCleaned: 0, errors: 0 };
   const dirtyScopes = new Set();
-  const markScopeDirty = (table, scopeId) => {
-    if (scopeId != null && scopeId !== '') dirtyScopes.add(`${table === 'links' ? 'community' : 'personal'}:${scopeId}`);
+  const markScopeDirty = (table, rowScopeId) => {
+    if (rowScopeId != null && rowScopeId !== '') dirtyScopes.add(`${table === 'links' ? 'community' : 'personal'}:${rowScopeId}`);
   };
   const nameRe = await loadLinkNamePattern(env);
   const tables = [
-    { name: 'links', scopeCol: 'community_id', cols: 'url, url_hash, title, notes, tags, created_at, upvotes, downvotes' },
-    { name: 'personal_links', scopeCol: 'user_id', cols: 'url, url_hash, title, notes, tags, created_at, 0 AS upvotes, 0 AS downvotes' }
+    { name: 'links', scopeCol: 'community_id', cols: 'url, url_hash, title, notes, tags, created_at, upvotes, downvotes', want: !scope || scope === 'community' },
+    { name: 'personal_links', scopeCol: 'user_id', cols: 'url, url_hash, title, notes, tags, created_at, 0 AS upvotes, 0 AS downvotes', want: !scope || scope === 'personal' }
   ];
   for (const t of tables) {
+    if (!t.want) continue;
+    const scopeFilter = scope ? ` AND ${t.scopeCol} = ?` : '';
+    const scopeParams = scope ? [scopeId] : [];
     let cursor = null;
     for (;;) {
       let rows;
       try {
         rows = cursor
-          ? (await env.DB.prepare(`SELECT id, ${t.scopeCol} AS scope_id, ${t.cols} FROM ${t.name} WHERE id > ? ORDER BY id LIMIT 400`).bind(cursor).all())?.results || []
-          : (await env.DB.prepare(`SELECT id, ${t.scopeCol} AS scope_id, ${t.cols} FROM ${t.name} ORDER BY id LIMIT 400`).all())?.results || [];
+          ? (await env.DB.prepare(`SELECT id, ${t.scopeCol} AS scope_id, ${t.cols} FROM ${t.name} WHERE id > ?${scopeFilter} ORDER BY id LIMIT 400`).bind(cursor, ...scopeParams).all())?.results || []
+          : (await env.DB.prepare(`SELECT id, ${t.scopeCol} AS scope_id, ${t.cols} FROM ${t.name} WHERE 1 = 1${scopeFilter} ORDER BY id LIMIT 400`).bind(...scopeParams).all())?.results || [];
       } catch { stats.errors++; break; }
       if (!rows.length) break;
       cursor = rows[rows.length - 1].id;
@@ -11812,8 +11815,11 @@ async function structureDatabase(env, { onProgress = null } = {}) {
           if (normUrl && normUrl !== row.url) {
             const normHash = generateUrlHash(normUrl);
             const legacy = legacyUrlHash(normUrl);
+            // personal_links has no vote columns — select neutral zeroes so
+            // the merge math below stays uniform across both tables.
+            const voteCols = t.name === 'links' ? 'upvotes, downvotes' : '0 AS upvotes, 0 AS downvotes';
             const dup = await env.DB.prepare(
-              `SELECT id, url, title, notes, tags, upvotes, downvotes, created_at FROM ${t.name} WHERE ${t.scopeCol} = ? AND id != ? AND (url_hash = ? OR url_hash = ? OR url = ?) LIMIT 1`
+              `SELECT id, url, title, notes, tags, ${voteCols}, created_at FROM ${t.name} WHERE ${t.scopeCol} = ? AND id != ? AND (url_hash = ? OR url_hash = ? OR url = ?) LIMIT 1`
             ).bind(row.scope_id, row.id, normHash, legacy, normUrl).first();
             if (dup) {
               // Merge into the older row; the survivor is cleaned below like
@@ -11833,12 +11839,18 @@ async function structureDatabase(env, { onProgress = null } = {}) {
               // Delete first: the keeper takes the normalized hash, which the
               // drop row still holds (unique index would reject the update).
               await env.DB.prepare(`DELETE FROM ${t.name} WHERE id = ?`).bind(drop.id).run();
-              await env.DB.prepare(
-                `UPDATE ${t.name} SET tags = ?, upvotes = COALESCE(upvotes,0) + COALESCE(?,0), downvotes = COALESCE(downvotes,0) + COALESCE(?,0), notes = ?, title = ?, url = ?, url_hash = ?, search_blob = NULL WHERE id = ?`
-              ).bind(JSON.stringify(mergedTags),
-                Number(rowOlder ? (dup.upvotes || 0) : (row.upvotes || 0)),
-                Number(rowOlder ? (dup.downvotes || 0) : (row.downvotes || 0)),
-                keepNotes, keepTitle, keepUrl, generateUrlHash(keepUrl), keep.id).run();
+              if (t.name === 'links') {
+                await env.DB.prepare(
+                  `UPDATE ${t.name} SET tags = ?, upvotes = COALESCE(upvotes,0) + COALESCE(?,0), downvotes = COALESCE(downvotes,0) + COALESCE(?,0), notes = ?, title = ?, url = ?, url_hash = ?, search_blob = NULL WHERE id = ?`
+                ).bind(JSON.stringify(mergedTags),
+                  Number(rowOlder ? (dup.upvotes || 0) : (row.upvotes || 0)),
+                  Number(rowOlder ? (dup.downvotes || 0) : (row.downvotes || 0)),
+                  keepNotes, keepTitle, keepUrl, generateUrlHash(keepUrl), keep.id).run();
+              } else {
+                await env.DB.prepare(
+                  `UPDATE ${t.name} SET tags = ?, notes = ?, title = ?, url = ?, url_hash = ?, search_blob = NULL WHERE id = ?`
+                ).bind(JSON.stringify(mergedTags), keepNotes, keepTitle, keepUrl, generateUrlHash(keepUrl), keep.id).run();
+              }
               stats.merged++;
               if (keepNotes !== String(keep.notes || '')) stats.notesCleaned++;
               if (keepTitle !== String(keep.title || '').trim()) stats.titlesCleaned++;
@@ -13304,13 +13316,21 @@ async function startCloneTargetAsk(env, ctx) {
      if (!isGod) { await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} GOD rank only.`, forumThreadId); return new Response('OK', { status: 200, headers: corsHeaders }); }
      const ftArgs = parts.slice(1).map((a) => a.trim()).filter(Boolean);
      const ftAll = ftArgs.some((a) => a.toLowerCase() === 'all');
-     const ftCommunity = ftArgs.find((a) => /^c_/.test(a)) || '';
+     // The chat's mode names the default brain: an explicit id wins, else the
+     // linked community, else (personal mode, no community linked) the
+     // personal brain runs directly — the mode already chose the scope.
+     let ftCommunity = ftArgs.find((a) => /^c_/.test(a)) || binding?.community_id || '';
      if (!ftCommunity) {
+       const personalEligible = isGod && athenaUser;
+       const modeScope = binding?.scope || 'personal';
+       if (personalEligible && modeScope === 'personal') {
+         await runForcetagsReview(env, { token, chatId, forumThreadId, tgUserId, scope: 'personal', communityId: '', wantAll: ftAll });
+         return new Response('OK', { status: 200, headers: corsHeaders });
+       }
        await sendTelegramFormatted(token, chatId, [
          `${boldHtml('🏷 Retag review')}`,
-         `Needs a community id: ${codeHtml('/forcetags <community_id>')} reviews one batch of 150.`,
+         `No community on this chat — ${codeHtml('/mode community')} to attach one, or pass an id: ${codeHtml('/forcetags <community_id>')}.`,
          `${codeHtml('/forcetags <community_id> all')} sweeps that brain in the background.`,
-         `${italicHtml('You then pick community or personal brain.')}`,
        ].join('\n'), forumThreadId);
        return new Response('OK', { status: 200, headers: corsHeaders });
      }
@@ -14839,15 +14859,33 @@ Rules:
   // ---- /structure (GOD): clean titles/notes/URLs across the whole DB ----
   if (cmd === '/structure' || cmd === '/structuredb' || cmd === '/structured') {
     if (!isGod) {
-      await sendTelegramFormatted(token, chatId, `${boldHtml('🔒 GOD rank only')}\n/structure cleans titles, notes and URLs across the whole database.`, forumThreadId);
+      await sendTelegramFormatted(token, chatId, `${boldHtml('🔒 GOD rank only')}\n/structure cleans titles, notes and URLs in this chat's brain (${codeHtml('/mode')} to inspect). Add ${codeHtml('all')} to clean every brain at once.`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    const statusMsg = await telegramApi(token, 'sendMessage', { chat_id: chatId, text: `${boldHtml('🧹 Structuring…')} scanning community + personal links.`, parse_mode: 'HTML' }).catch(() => null);
+    // Scope follows the chat's mode: personal brain or the linked community.
+    // `all` keeps the old whole-database sweep.
+    const structAll = rest.trim().split(/\s+/).filter(Boolean).some((a) => a.toLowerCase() === 'all');
+    let structScope = null;
+    let structScopeId = null;
+    let structLabel = 'every brain';
+    if (!structAll) {
+      const modeScope = binding?.scope || (binding?.community_id ? 'community' : 'personal');
+      if (modeScope === 'community' && binding?.community_id) {
+        structScope = 'community';
+        structScopeId = binding.community_id;
+        structLabel = `community brain (${binding.group_name || binding.community_id})`;
+      } else if (modeScope === 'personal' && athenaUser) {
+        structScope = 'personal';
+        structScopeId = athenaUser.id;
+        structLabel = 'your personal brain';
+      }
+    }
+    const statusMsg = await telegramApi(token, 'sendMessage', { chat_id: chatId, text: `${boldHtml('🧹 Structuring…')} ${structAll ? 'every brain' : escHtml(structLabel)}.`, parse_mode: 'HTML' }).catch(() => null);
     const statusId = statusMsg?.result?.message_id || null;
     runInBackground(env, (async () => {
       try {
         let lastEdit = 0;
-        const stats = await structureDatabase(env, { onProgress: async (st) => {
+        const stats = await structureDatabase(env, { scope: structScope, scopeId: structScopeId, onProgress: async (st) => {
           const now = Date.now();
           if (statusId && now - lastEdit > 2500) {
             lastEdit = now;
@@ -14857,7 +14895,8 @@ Rules:
         const lines = [
           richHeading(3, '🧹 Structure pass complete'),
           '',
-          richParagraph(`Scanned: <b>${stats.scanned}</b> rows<br>` +
+          richParagraph(`Scope: <b>${escHtml(structLabel)}</b><br>` +
+            `Scanned: <b>${stats.scanned}</b> rows<br>` +
             `URLs normalized: <b>${stats.urlNormalized}</b><br>` +
             `Near-dupes merged: <b>${stats.merged}</b><br>` +
             `Notes cleaned: <b>${stats.notesCleaned}</b><br>` +
@@ -14865,7 +14904,7 @@ Rules:
             `Tags cleaned: <b>${stats.tagsCleaned}</b>` +
             (stats.errors ? `<br><i>errors: ${stats.errors}</i>` : '')),
           '',
-          richParagraph(`<i>Changed scopes are marked for search-index refresh; AI reads the cleaned rows on the next query.</i>`),
+          richParagraph(`<i>Changed scopes are marked for search-index refresh; AI reads the cleaned rows on the next query. Run ${codeHtml('/structure all')} for every brain.</i>`),
         ].join('\n');
         if (statusId) await telegramApi(token, 'deleteMessage', { chat_id: chatId, message_id: statusId }).catch(() => {});
         await sendTelegramRichMessage(token, chatId, lines, forumThreadId);

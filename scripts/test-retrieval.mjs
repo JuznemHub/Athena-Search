@@ -860,5 +860,39 @@ const tagTaxonomy = await import('../worker/tag-taxonomy.js');
     ['opendesk', 'my-topic'],
     'junk/fluff/name dropped, curated kept');
 }
+{
+  // /structure scoped runs only touch the requested brain.
+  const sqlite = new DatabaseSync(':memory:');
+  sqlite.exec(fs.readFileSync(new URL('../worker/schema.sql', import.meta.url), 'utf8')
+    .replace(/^CREATE EXTENSION[^;]*;/gm, '').replace(/^CREATE INDEX[^;]*USING gin[^;]*;/gm, ''));
+  const DB = {
+    prepare(sql) {
+      const statement = (params = []) => ({
+        bind(...values) { return statement(values.map(value => value ?? null)); },
+        async run() { const result = sqlite.prepare(sql).run(...params); return { success: true, meta: { changes: Number(result.changes) } }; },
+        async first(column) { const row = sqlite.prepare(sql).get(...params); return row ? (column ? row[column] : row) : null; },
+        async all() { return { results: sqlite.prepare(sql).all(...params) }; }
+      });
+      return statement();
+    }
+  };
+  const env = { DB };
+  sqlite.prepare('INSERT INTO users (id,username,created_at) VALUES (?,?,?)').run('u9', 'u9', 1);
+  sqlite.prepare('INSERT INTO users (id,username,created_at) VALUES (?,?,?)').run('u10', 'u10', 2);
+  sqlite.prepare('INSERT INTO communities (id,name,creator_id,created_at) VALUES (?,?,?,?)').run('c_struct', 'Struct', 'u9', 1);
+  sqlite.prepare('INSERT INTO communities (id,name,creator_id,created_at) VALUES (?,?,?,?)').run('c_other', 'Other', 'u9', 2);
+  const ins2 = sqlite.prepare(`INSERT INTO links (id,community_id,url,url_hash,title,notes,tags,added_by,created_at) VALUES (?,?,?,?,?,?,?,?,?)`);
+  ins2.run('s_keep', 'c_struct', 'https://keep.example/', generateUrlHash('https://keep.example/'), 'Keep', 'keep note', '["guide"]', 'u9', 1);
+  ins2.run('s_other', 'c_other', 'https://other.example/?utm_source=x', generateUrlHash('https://other.example/?utm_source=x'), 'Other', '#junk', '["backfill"]', 'u9', 5);
+  sqlite.prepare(`INSERT INTO personal_links (id,user_id,url,url_hash,title,notes,tags,created_at) VALUES (?,?,?,?,?,?,?,?)`)
+    .run('p_other', 'u10', 'https://personal.example/?utm_source=x', generateUrlHash('https://personal.example/?utm_source=x'), 'Mine', '#junk', '["backfill"]', 5);
+  const scoped = await structureDatabase(env, { scope: 'community', scopeId: 'c_struct' });
+  assert.equal(scoped.scanned, 1, 'community scope sees one row');
+  assert.equal(sqlite.prepare(`SELECT url FROM links WHERE id = 's_other'`).get().url, 'https://other.example/?utm_source=x', 'other community untouched');
+  assert.equal(sqlite.prepare(`SELECT url FROM personal_links WHERE id = 'p_other'`).get().url, 'https://personal.example/?utm_source=x', 'personal brain untouched');
+  const scopedPersonal = await structureDatabase(env, { scope: 'personal', scopeId: 'u10' });
+  assert.equal(scopedPersonal.scanned, 1, 'personal scope sees one row');
+  assert.equal(sqlite.prepare(`SELECT url FROM personal_links WHERE id = 'p_other'`).get().url, 'https://personal.example/', 'personal row canonicalized');
+}
 
 console.log('retrieval tests passed');
