@@ -6452,7 +6452,7 @@ async function deleteCommunityFully(env, communityId) {
   return { ok: true, name: c.name, id: c.id };
 }
 
-async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, athenaUser, chatId, userNotes = '', titleHint = '', threadId = null, fullPost = '', forcedTags = null, forcedTitle = null) {
+async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, athenaUser, chatId, userNotes = '', titleHint = '', threadId = null, fullPost = '', forcedTags = null, forcedTitle = null, suggestedTags = null) {
   const communityId = binding.community_id;
   if (!communityId) {
     await sendTelegramMessage(token, chatId, 'Group not linked as community. Owner: /community_verify', threadId);
@@ -6488,7 +6488,9 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
     return;
   }
   const meta = await enrichLinkFields(env, rawUrl, { title: titleHint || '', notes: userNotes || '' });
-  if (forcedTitle && forcedTitle.length && forcedTitle.length <= 160) meta.title = forcedTitle;
+  // A group card title only fills in when the page itself has no usable
+  // title — a strong scraped title always describes its own link best.
+  if (forcedTitle && forcedTitle.length && forcedTitle.length <= 160 && isWeakTitle(meta.title, rawUrl)) meta.title = forcedTitle;
   else if (titleHint && isWeakTitle(meta.title, rawUrl)) meta.title = titleHint;
   const id = 'tg_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   await ensureLinkMetaColumns(env);
@@ -6517,25 +6519,24 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
       'INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
     ).bind(id, communityId, rawUrl, urlHash, meta.title, meta.notes || '', '[]', senderName, Date.now()).run();
   }
-  // Tags come from the shared pipeline: manual #hashtags win, otherwise the
-  // model (when configured) or the deterministic classifier writes them.
+  // Tags come from the shared pipeline: the link's own facts first, then the
+  // model (when configured) or the deterministic classifier. Author-written
+  // #hashtags win outright; batch group tags only hint at shared context.
   const fromPost = fullPost || userNotes + ' ' + (titleHint||'');
   const userTags = forcedTags && forcedTags.length
     ? normalizeTagList(forcedTags)
     : normalizeTagList(extractHashtags(fromPost + ' ' + userNotes + ' ' + (titleHint||'')));
+  // Group-shared tags hint at the batch topic; they never override what the
+  // link itself is. Manual #hashtags first, then the link's own generated
+  // tags, then group hints (validated without name bans — a batch is shared
+  // context, so a project name may legitimately repeat across its links).
   let reply;
   try {
     const generated = await describeAndTagLink(env, rawUrl, meta, { maxTags: 8 });
-    let tags = generated.tags;
-    if (userTags.length) {
-      tags = validateTags([...userTags, ...generated.tags], {
-        banned: nameBansFor(rawUrl, generated.title || meta.title),
-        allowedBrands: generated.facts?.brands || [],
-        max: 10,
-      }).tags;
-      if (!tags.length) tags = userTags;
-      tags = finalizeTags(tags, generated.facts, 10);
-    }
+    let tags = mergePipelineTags({
+      manual: userTags, generated: generated.tags, suggested: suggestedTags,
+      facts: generated.facts, rawUrl, title: generated.title || meta.title, notes: meta.notes,
+    });
     const savedTitle = generated.title || meta.title;
     const savedNotes = (!isDetailedNotes(meta.notes) && generated.description)
       ? generated.description
@@ -6921,6 +6922,29 @@ function finalizeTags(tags, facts, max = 8) {
   const platforms = facts?.software ? (facts.platforms || []) : [];
   if (platforms.length >= 2 && !out.includes('multiplatform')) out.push('multiplatform');
   return [...new Set(out)].slice(0, Math.max(1, Math.min(Number(max) || 8, 10)));
+}
+
+/**
+ * One merge for every save path. Author-written #hashtags are curation, so
+ * they survive everything except junk stamps, generic fluff and bare names;
+ * the link's own generated tags stay strict vocabulary; batch group hints
+ * (already validated without name bans) fill what is left. Nothing is ever
+ * copied blindly — every layer is screened.
+ */
+function mergePipelineTags({ manual = [], generated = [], suggested = [], facts = null, rawUrl = '', title = '', notes = '' } = {}) {
+  const cleanManual = cleanTagsForStructure(manual || [], rawUrl, title, notes);
+  const cleanSuggested = validateTags(suggested || [], { max: 10 }).tags;
+  const genTags = validateTags(generated || [], {
+    banned: nameBansFor(rawUrl, title),
+    allowedBrands: facts?.brands || [],
+    max: 10,
+  }).tags;
+  let tags = [...cleanManual];
+  for (const t of genTags) if (!tags.includes(t)) tags.push(t);
+  for (const t of cleanSuggested) if (!tags.includes(t)) tags.push(t);
+  tags = finalizeTags(tags, facts, 10);
+  if (!tags.length) tags = [...cleanManual, ...cleanSuggested].slice(0, 10);
+  return tags;
 }
 
 function normalizeTagList(tags) {
@@ -7764,23 +7788,19 @@ function isAiContextError(error) {
 
 /** Tag + reply for one personal save (called by the dump loop). When
  *  forcedTags are present (batch grouping) they win and no AI call is made. */
-async function finalizePersonalSave(env, token, chatId, forumThreadId, athenaUser, r, rawUrl, fullPost, forcedTags) {
+async function finalizePersonalSave(env, token, chatId, forumThreadId, athenaUser, r, rawUrl, fullPost, forcedTags, suggestedTags = null) {
+  // Manual #hashtags first, then the link's own generated tags, then group
+  // hints (see saveCommunityUrlDirect — same priority, no literal smearing).
   const userTagsPersonal = forcedTags && forcedTags.length
     ? normalizeTagList(forcedTags)
     : normalizeTagList(extractHashtags(fullPost));
   let reply;
   try {
     const generated = await describeAndTagLink(env, rawUrl, { title: r.title, notes: r.notes, content: r.content }, { maxTags: 8 });
-    let tags = generated.tags;
-    if (userTagsPersonal.length) {
-      tags = validateTags([...userTagsPersonal, ...generated.tags], {
-        banned: nameBansFor(rawUrl, generated.title || r.title),
-        allowedBrands: generated.facts?.brands || [],
-        max: 10,
-      }).tags;
-      if (!tags.length) tags = userTagsPersonal;
-      tags = finalizeTags(tags, generated.facts, 10);
-    }
+    const tags = mergePipelineTags({
+      manual: userTagsPersonal, generated: generated.tags, suggested: suggestedTags,
+      facts: generated.facts, rawUrl, title: generated.title || r.title,
+    });
     const savedTitle = generated.title || r.title;
     const savedNotes = (!isDetailedNotes(r.notes) && generated.description)
       ? generated.description
@@ -7809,8 +7829,9 @@ async function savePersonalUrl(env, userId, rawUrl, senderName, userNotes = '', 
     title: titleHint || '',
     notes: userNotes || ''
   });
-  // Group heading wins, then caption title when it's a short project name
-  if (forcedTitle && forcedTitle.length >= 2 && forcedTitle.length <= 160) {
+  // Group heading fills in only when the page itself has no usable title —
+  // a strong scraped title always describes its own link best.
+  if (forcedTitle && forcedTitle.length >= 2 && forcedTitle.length <= 160 && isWeakTitle(meta.title, rawUrl)) {
     meta.title = forcedTitle;
   } else if (titleHint && titleHint.length >= 2 && titleHint.length <= 80 && isWeakTitle(meta.title, rawUrl)) {
     meta.title = titleHint;
@@ -11592,8 +11613,10 @@ if (useGrouping) {
   for (const g of groupPlan.groups) {
     for (const rawUrl of g.urls) {
       const cardTitle = groupCardTitle(g, rawUrl);
+      // Author-written hashtags stay manual (priority); the group's shared
+      // tags travel as suggestions so they can never override per-link facts.
       if (scope === 'community') {
-        await saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, athenaUser, chatId, notesForSave, titleHint, forumThreadId, fullPost, g.tags || [], cardTitle);
+        await saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, athenaUser, chatId, notesForSave, titleHint, forumThreadId, fullPost, null, cardTitle, g.tags || []);
       } else {
         if (!athenaUser) {
           await sendTelegramMessage(token, chatId, 'Personal dump needs Telegram login on the website once.', forumThreadId);
@@ -11610,7 +11633,7 @@ if (useGrouping) {
         } else if (r.error) {
           await sendTelegramMessage(token, chatId, 'Could not save link: ' + r.error, forumThreadId);
         } else {
-          await finalizePersonalSave(env, token, chatId, forumThreadId, athenaUser, r, rawUrl, fullPost, g.tags || []);
+          await finalizePersonalSave(env, token, chatId, forumThreadId, athenaUser, r, rawUrl, fullPost, null, g.tags || []);
         }
       }
     }
@@ -17856,6 +17879,7 @@ export {
   retrieveAiRows,
   structureDatabase,
   cleanTagsForStructure,
+  mergePipelineTags,
   searchAllLinks,
   telegramSearchRowHtml,
   handleSearchLinks,

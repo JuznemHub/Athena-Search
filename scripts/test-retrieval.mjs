@@ -40,6 +40,7 @@ import {
   resultLimitClause,
   structureDatabase,
   cleanTagsForStructure,
+  mergePipelineTags,
   searchAllLinks,
   parseStoredTags,
   normalizeTagList,
@@ -893,6 +894,48 @@ const tagTaxonomy = await import('../worker/tag-taxonomy.js');
   const scopedPersonal = await structureDatabase(env, { scope: 'personal', scopeId: 'u10' });
   assert.equal(scopedPersonal.scanned, 1, 'personal scope sees one row');
   assert.equal(sqlite.prepare(`SELECT url FROM personal_links WHERE id = 'p_other'`).get().url, 'https://personal.example/', 'personal row canonicalized');
+}
+
+{
+  // mergePipelineTags: manual first, per-link facts second, group hints last.
+  // Group tags must never smear literally: a shared 'spotify' survives on a
+  // github link (shared batch context), junk/invented words die everywhere.
+  const factsOf = (url, meta) => tagTaxonomy.extractFacts(url, meta);
+  {
+    const facts = factsOf('https://github.com/u/r', { title: 'Tool', notes: 'A downloader tool', content: '' });
+    const tags = mergePipelineTags({
+      manual: [], generated: ['software', 'github', 'tool'], suggested: ['spotify', 'github', 'music', 'cool', 'madeupword'],
+      facts, rawUrl: 'https://github.com/u/r', title: 'Tool',
+    });
+    assert.ok(tags.indexOf('software') < tags.indexOf('spotify'), 'per-link tags outrank group hints');
+    assert.ok(tags.includes('spotify') && tags.includes('music'), 'shared batch context kept');
+    assert.ok(!tags.includes('cool') && !tags.includes('madeupword'), 'junk and invented words die');
+  }
+  {
+    // The old inversion: a group tag equal to the link's own brand used to
+    // be stripped by name bans. Now it survives — the page IS about it.
+    const facts = factsOf('https://spotify.com/x', { title: 'Spotify client', notes: 'Spotify music client', content: '' });
+    const tags = mergePipelineTags({
+      manual: [], generated: ['spotify', 'app'], suggested: ['github', 'spotify'],
+      facts, rawUrl: 'https://spotify.com/x', title: 'Spotify client',
+    });
+    assert.ok(tags.includes('spotify'), 'own brand survives group hints');
+    assert.ok(tags.includes('github'), 'ecosystem hint kept once');
+    assert.equal(tags.filter((t) => t === 'spotify').length, 1, 'no duplicates');
+  }
+  {
+    const facts = factsOf('https://example.com/x', { title: 'X', notes: '', content: '' });
+    const tags = mergePipelineTags({
+      manual: ['my-project'], generated: ['website'], suggested: [],
+      facts, rawUrl: 'https://example.com/x', title: 'X',
+    });
+    assert.equal(tags[0], 'my-project', 'manual tags keep first place');
+    const junky = mergePipelineTags({
+      manual: ['cool', 'backfill', 'my-project'], generated: ['website'], suggested: [],
+      facts, rawUrl: 'https://example.com/x', title: 'X', notes: '',
+    });
+    assert.ok(junky.includes('my-project') && !junky.includes('cool') && !junky.includes('backfill'), 'junk manual tags die, curation survives');
+  }
 }
 
 console.log('retrieval tests passed');
