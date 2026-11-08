@@ -732,10 +732,16 @@ const tagTaxonomy = await import('../worker/tag-taxonomy.js');
   assert.deepEqual(v.tags, ['my-curated-tag'], 'scope vocabulary survives, invented words do not');
 }
 {
-  // Telegram is a brand, not an ingest stamp: allowed only when the page is
-  // actually about Telegram, and never added to unrelated saves.
-  const bot = tagTaxonomy.classifyTags('https://t.me/somechannel/12', { title: 'Post', notes: 'Telegram channel about music', content: '' });
-  assert.ok(bot.tags.includes('telegram'), 't.me links are telegram');
+  // Telegram is a subject test, not a mention test: t.me hosts, titles and
+  // bot usernames keep it; a lone "shared via Telegram" line does not.
+  const provenance = tagTaxonomy.classifyTags('https://www.youtube.com/watch?v=dQw4w9WgXcQ', {
+    title: 'Some Video', notes: 'Shared from Telegram channel @movies.', content: '',
+  });
+  assert.ok(!provenance.tags.includes('telegram'), 'provenance mention is not a topic');
+  assert.ok(provenance.tags.includes('youtube') && provenance.tags.includes('movie'), 'host brand and topic survive');
+  assert.deepEqual(tagTaxonomy.classifyTags('https://t.me/somechannel/12', { title: 'Post', notes: '', content: '' }).facts.telegram, true, 't.me host is Telegram content');
+  const titled = tagTaxonomy.classifyTags('https://example.com/x', { title: 'My Telegram Bot', notes: 'Does things.', content: '' });
+  assert.ok(titled.tags.includes('telegram') && titled.tags.includes('bot'), 'title subject keeps telegram');
   const plain = tagTaxonomy.classifyTags('https://example.com/article', { title: 'A guide to backups', notes: 'How to back up your files.', content: '' });
   assert.ok(!plain.tags.includes('telegram'), 'unrelated pages never get telegram');
   assert.ok(plain.tags.includes('website'), 'plain articles get a type tag');

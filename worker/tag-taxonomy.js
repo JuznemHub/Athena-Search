@@ -365,13 +365,18 @@ function detectEcosystems(host) {
   return out;
 }
 
-function detectBrands(host, primary, body) {
+function detectBrands(host, primary, body, title = '') {
   const out = [];
   const add = (t) => { if (!out.includes(t)) out.push(t); };
   for (const [re, tag] of HOST_BRANDS) if (re.test(host)) add(tag);
   for (const tag of BRAND_TAGS) {
     if (tag === 'telegram') {
-      if (hit(primary, 'telegram (bot|client|channel|group)')) add(tag);
+      // t.me hosts are covered above. Elsewhere the page must be ABOUT a
+      // Telegram entity — named in the title, mentioned repeatedly, or with
+      // a bot username — not a passing "shared via Telegram" provenance line.
+      const subject = hit(title, 'telegram (bot|client|channel|group)|t\\.me/|@[a-z0-9_]{3,}bot\\b')
+        || countHits(primary, '\\btelegram\\b') >= 2;
+      if (subject) add(tag);
       continue;
     }
     if (hit(primary, tag)) add(tag);
@@ -444,7 +449,7 @@ export function extractFacts(rawUrl, meta = {}) {
     || hit(all, '\\bapp\\b|\\bapps\\b|software|\\bclient\\b|installer|install|\\bapk\\b|\\bipa\\b|\\.exe|extension|plugin|addon|\\bgame\\b|emulator|\\btool\\b|utility|downloader|manager|converter|generator|\\bcli\\b');
   const platforms = detectPlatforms(host, path, primary, body);
   const ecosystems = detectEcosystems(host);
-  const brands = detectBrands(host, primary, body);
+  const brands = detectBrands(host, primary, body, title);
   // Platform words only describe what the thing runs on. A news article that
   // merely mentions Android is not an Android app, so the software signal
   // decides whether the detected platforms count.
