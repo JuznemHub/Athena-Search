@@ -60,6 +60,9 @@ document.addEventListener('DOMContentLoaded', () => {
   function isGod() {
     return !!state.currentUser?.is_god;
   }
+  function isStaffRank() {
+    return Boolean(state.currentUser?.is_god || state.currentUser?.['is_e' + 'levated']);
+  }
   // ai.js only sends per-request AI credentials for GOD — the server rejects
   // them for anyone else.
   window.athenaIsGod = isGod;
@@ -299,7 +302,10 @@ document.addEventListener('DOMContentLoaded', () => {
       addedByUserId: row.added_by_user_id || '',
       upvotes: row.upvotes || 0,
       downvotes: row.downvotes || 0,
-      myVote: row.my_vote || 0
+      myVote: row.my_vote || 0,
+      manualEditedAt: row.manual_edited_at || row.manualEditedAt || null,
+      lastEditedBy: row.last_edited_by || row.lastEditedBy || null,
+      lastEditedByName: row.last_edited_by_name || row.lastEditedByName || ''
     };
   }
 
@@ -637,8 +643,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function applyRoleUI() {
     const god = isGod();
+    const isStaff = isStaffRank();
     const aiOk = canUseAi();
     const aiCfg = canEditAiConfig();
+
+    const adminNavBtn = $('adminDbNavBtn');
+    if (adminNavBtn) adminNavBtn.classList.toggle('hidden', !isStaff);
+    const adminDrawer = $('adminDrawerSection');
+    if (adminDrawer) adminDrawer.classList.toggle('hidden', !isStaff);
+
     const wipeWrap = $('wipePersonalWrap');
     const wipeBtn = $('wipePersonalBtn');
     if (wipeWrap) {
@@ -736,6 +749,9 @@ document.addEventListener('DOMContentLoaded', () => {
       updateScopeUI();
       renderHome();
       startLiveSync();
+      if (window.location.hash === '#db' || window.location.hash === '#admin') {
+        if (isStaffRank()) openAdminDb();
+      }
     } catch (err) {
       console.error('[athena] render failed:', err);
     }
@@ -1609,6 +1625,10 @@ document.addEventListener('DOMContentLoaded', () => {
           </div>`
         : `<div class="g-meta">${escapeHtml(when)}${(item.tags || []).length ? ' · ' + item.tags.map(t => '#' + escapeHtml(t)).join(' ') : ''}</div>`;
 
+      const editAuditHtml = item.manualEditedAt
+        ? `<div class="g-edit-audit">✏️ Last edited by <strong class="g-editor-name">${escapeHtml(item.lastEditedByName || 'Admin')}</strong> · ${escapeHtml(formatDateTime(item.manualEditedAt))}</div>`
+        : '';
+
       card.innerHTML = `
         ${authorLine}
         <div class="g-url-row">
@@ -1621,6 +1641,7 @@ document.addEventListener('DOMContentLoaded', () => {
         <a class="g-title" href="${safeHref(href)}" ${item.url ? 'target="_blank" rel="noopener noreferrer"' : ''}>${highlight(item.title || 'Untitled', query)}</a>
         <p class="g-snippet">${highlight(desc, query)}</p>
         ${voteRow}
+        ${editAuditHtml}
         <button type="button" class="edit-link-btn" data-id="${escapeHtml(item.id)}" title="Edit" aria-label="Edit">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
         </button>
@@ -1631,6 +1652,8 @@ document.addEventListener('DOMContentLoaded', () => {
           <input type="url" class="edit-url" value="${escapeHtml(item.url || '')}" />
           <label>Description</label>
           <textarea class="edit-notes" rows="3">${escapeHtml(item.notes || '')}</textarea>
+          <label>Tags (space or comma-separated)</label>
+          <input type="text" class="edit-tags" value="${escapeHtml((item.tags || []).map(t => '#' + t).join(' '))}" placeholder="e.g. #ai #tools #docs" />
           <div class="edit-panel-actions">
             <button type="button" class="btn btn-primary btn-sm edit-save">Save</button>
             <button type="button" class="btn btn-secondary btn-sm edit-cancel">Cancel</button>
@@ -1679,6 +1702,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const title = panel.querySelector('.edit-title')?.value?.trim() || '';
         const url = panel.querySelector('.edit-url')?.value?.trim() || '';
         const notes = panel.querySelector('.edit-notes')?.value?.trim() || '';
+        const tagsVal = panel.querySelector('.edit-tags')?.value?.trim() || '';
+        const tags = tagsVal.split(/[\s,]+/).map(t => t.replace(/^#+/, '').trim()).filter(Boolean);
         if (!url && !title && !notes) {
           showToast('Nothing to save', true);
           return;
@@ -1688,7 +1713,7 @@ document.addEventListener('DOMContentLoaded', () => {
           const path = state.scope === 'community' ? '/api/links' : '/api/personal-links';
           const { res, data } = await api(path, {
             method: 'PATCH',
-            body: JSON.stringify({ id, title, url, notes })
+            body: JSON.stringify({ id, title, url, notes, tags })
           });
           if (!res.ok || !data.success) {
             showToast(data.error || 'Edit failed', true);
@@ -1702,8 +1727,12 @@ document.addEventListener('DOMContentLoaded', () => {
               title: data.title != null ? data.title : title,
               url: data.url || url,
               notes: data.notes != null ? data.notes : notes,
+              tags: Array.isArray(data.tags) ? data.tags : tags,
               imageUrl: data.image_url || list[idx].imageUrl,
-              siteName: data.site_name || list[idx].siteName
+              siteName: data.site_name || list[idx].siteName,
+              manualEditedAt: data.manual_edited_at || Date.now(),
+              lastEditedBy: data.last_edited_by || state.currentUser?.id,
+              lastEditedByName: data.last_edited_by_name || state.currentUser?.displayName || state.currentUser?.username || 'Admin'
             };
           }
           showToast('Link updated');
@@ -2516,12 +2545,530 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // ---- Admin & Owner Database Explorer ----
+
+  const adminDbState = {
+    scope: 'community',
+    communityId: '',
+    status: 'all',
+    sort: 'created_desc',
+    tag: '',
+    q: '',
+    page: 1,
+    limit: 25,
+    totalPages: 1,
+    total: 0,
+    links: [],
+    tags: [],
+    communities: [],
+    loading: false
+  };
+
+  function openAdminDb() {
+    if (!isStaffRank()) {
+      showToast('Admin or Owner rank required', true);
+      return;
+    }
+    const adminView = $('adminDbView');
+    const searchWrap = $('searchWrapper');
+    const scopeSwitch = document.querySelector('.scope-switch-container');
+    if (!adminView || !searchWrap) return;
+
+    searchWrap.classList.add('hidden');
+    if (scopeSwitch) scopeSwitch.classList.add('hidden');
+    adminView.classList.remove('hidden');
+
+    const badge = $('modeBadgeText');
+    if (badge) badge.textContent = 'Database';
+
+    if (adminDbState.scope === 'personal' && !isGod()) {
+      adminDbState.scope = 'community';
+      const scopeSel = $('adminDbScope');
+      if (scopeSel) scopeSel.value = 'community';
+    }
+
+    if (!adminDbState.communityId && state.activeCommunity) {
+      adminDbState.communityId = state.activeCommunity;
+    }
+
+    if (window.location.hash !== '#db') {
+      window.history.pushState(null, '', '#db');
+    }
+
+    loadAdminDbLinks();
+  }
+
+  function closeAdminDb() {
+    const adminView = $('adminDbView');
+    const searchWrap = $('searchWrapper');
+    const scopeSwitch = document.querySelector('.scope-switch-container');
+    if (!adminView || !searchWrap) return;
+
+    adminView.classList.add('hidden');
+    searchWrap.classList.remove('hidden');
+    if (scopeSwitch) scopeSwitch.classList.remove('hidden');
+
+    const badge = $('modeBadgeText');
+    if (badge) badge.textContent = state.mode ? state.mode.charAt(0).toUpperCase() + state.mode.slice(1) : 'Search';
+
+    if (window.location.hash === '#db' || window.location.hash === '#admin') {
+      window.history.pushState(null, '', window.location.pathname);
+    }
+  }
+
+  async function loadAdminDbLinks() {
+    if (adminDbState.loading) return;
+    adminDbState.loading = true;
+    const listEl = $('adminDbList');
+    const countBadge = $('adminDbCountBadge');
+    if (countBadge) countBadge.textContent = 'Fetching links…';
+    if (listEl && !adminDbState.links.length) {
+      listEl.innerHTML = '<div class="empty-state"><p>Loading database links…</p></div>';
+    }
+
+    try {
+      const qParams = new URLSearchParams({
+        scope: adminDbState.scope,
+        edited: adminDbState.status,
+        sort: adminDbState.sort,
+        page: String(adminDbState.page),
+        limit: String(adminDbState.limit)
+      });
+      if (adminDbState.scope === 'community' && adminDbState.communityId) {
+        qParams.set('community_id', adminDbState.communityId);
+      }
+      if (adminDbState.tag) qParams.set('tag', adminDbState.tag);
+      if (adminDbState.q) qParams.set('q', adminDbState.q);
+
+      const { res, data } = await api(`/api/admin/links?${qParams.toString()}`);
+      if (!res.ok || !data.success) {
+        showToast(data.error || 'Failed to load database links', true);
+        if (listEl) listEl.innerHTML = `<div class="empty-state"><p>${escapeHtml(data.error || 'Access denied or failed to load.')}</p></div>`;
+        return;
+      }
+
+      adminDbState.links = data.links || [];
+      adminDbState.total = data.total || 0;
+      adminDbState.page = data.page || 1;
+      adminDbState.totalPages = data.totalPages || 1;
+      adminDbState.tags = data.tags || [];
+      adminDbState.communities = data.communities || [];
+
+      const commSel = $('adminDbCommunity');
+      if (commSel && adminDbState.communities.length) {
+        commSel.innerHTML = adminDbState.communities.map(c =>
+          `<option value="${escapeHtml(c.id)}" ${c.id === (adminDbState.communityId || data.community_id) ? 'selected' : ''}>${escapeHtml(c.name || c.id)}</option>`
+        ).join('');
+        if (!adminDbState.communityId && data.community_id) {
+          adminDbState.communityId = data.community_id;
+        }
+      }
+
+      renderAdminDbTags();
+      renderAdminDbLinks();
+      renderAdminDbSummary();
+      renderAdminDbPagination();
+    } catch (err) {
+      showToast(err.message || 'Error fetching database records', true);
+      if (listEl) listEl.innerHTML = `<div class="empty-state"><p>${escapeHtml(err.message || 'Failed to load.')}</p></div>`;
+    } finally {
+      adminDbState.loading = false;
+    }
+  }
+
+  function renderAdminDbSummary() {
+    const badge = $('adminDbCountBadge');
+    if (!badge) return;
+    const start = adminDbState.total === 0 ? 0 : (adminDbState.page - 1) * adminDbState.limit + 1;
+    const end = Math.min(adminDbState.page * adminDbState.limit, adminDbState.total);
+    badge.textContent = adminDbState.total > 0
+      ? `Showing ${start}–${end} of ${adminDbState.total} links`
+      : '0 links found in this scope';
+
+    const activeFilter = $('adminDbActiveFilter');
+    if (activeFilter) {
+      if (adminDbState.tag) {
+        activeFilter.classList.remove('hidden');
+        activeFilter.innerHTML = `Tag: #${escapeHtml(adminDbState.tag)} <span style="cursor:pointer;margin-left:4px;" title="Clear tag filter">&times;</span>`;
+        activeFilter.onclick = () => {
+          adminDbState.tag = '';
+          adminDbState.page = 1;
+          loadAdminDbLinks();
+        };
+      } else {
+        activeFilter.classList.add('hidden');
+      }
+    }
+  }
+
+  function renderAdminDbTags() {
+    const cloud = $('adminTagsCloud');
+    const clearBtn = $('adminTagClearBtn');
+    if (!cloud) return;
+    if (clearBtn) clearBtn.classList.toggle('hidden', !adminDbState.tag);
+
+    if (!adminDbState.tags || !adminDbState.tags.length) {
+      cloud.innerHTML = '<span style="font-size:0.75rem;color:var(--text-muted)">No tags detected in this scope</span>';
+      return;
+    }
+
+    cloud.innerHTML = adminDbState.tags.map(t => {
+      const active = adminDbState.tag.toLowerCase() === t.name.toLowerCase();
+      return `<button type="button" class="admin-tag-chip ${active ? 'active' : ''}" data-tag="${escapeHtml(t.name)}">
+        <span>#${escapeHtml(t.name)}</span>
+        <span class="admin-tag-count">(${t.count})</span>
+      </button>`;
+    }).join('');
+
+    cloud.querySelectorAll('.admin-tag-chip').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const selected = btn.dataset.tag;
+        if (adminDbState.tag.toLowerCase() === selected.toLowerCase()) {
+          adminDbState.tag = '';
+        } else {
+          adminDbState.tag = selected;
+        }
+        adminDbState.page = 1;
+        loadAdminDbLinks();
+      });
+    });
+  }
+
+  function renderAdminDbPagination() {
+    const pager = $('adminDbPagination');
+    const prevBtn = $('adminDbPrevBtn');
+    const nextBtn = $('adminDbNextBtn');
+    const pageInfo = $('adminDbPageInfo');
+    if (!pager || !prevBtn || !nextBtn || !pageInfo) return;
+
+    if (adminDbState.totalPages <= 1) {
+      pager.classList.add('hidden');
+      return;
+    }
+    pager.classList.remove('hidden');
+    pageInfo.textContent = `Page ${adminDbState.page} of ${adminDbState.totalPages}`;
+    prevBtn.disabled = adminDbState.page <= 1;
+    nextBtn.disabled = adminDbState.page >= adminDbState.totalPages;
+  }
+
+  function renderAdminDbLinks() {
+    const listEl = $('adminDbList');
+    if (!listEl) return;
+    if (!adminDbState.links.length) {
+      listEl.innerHTML = `<div class="empty-state">
+        <p>No links matched your query or filters.</p>
+      </div>`;
+      return;
+    }
+
+    listEl.innerHTML = '';
+    adminDbState.links.forEach(item => {
+      const card = document.createElement('article');
+      card.className = 'admin-card';
+      card.dataset.id = item.id;
+
+      const displayUrl = item.url
+        ? item.url.replace(/^https?:\/\//, '').replace(/\/$/, '')
+        : 'note · local';
+      const href = item.url || '#';
+      const site = item.site_name || '';
+      const when = formatDateTime(item.created_at);
+
+      let favicon = '';
+      try {
+        if (item.url && item.url.startsWith('http')) {
+          const u = new URL(item.url);
+          favicon = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(u.hostname)}&sz=32`;
+        }
+      } catch (_) {}
+
+      const auditHtml = item.manual_edited_at
+        ? `<span class="admin-edit-badge" title="Manually edited">
+            ✏️ Last edited by <strong>${escapeHtml(item.last_edited_by_name || 'Admin')}</strong> · ${escapeHtml(formatDateTime(item.manual_edited_at))}
+           </span>`
+        : `<span style="color:var(--text-muted)">Unedited · Original version</span>`;
+
+      const tagsHtml = (item.tags || []).length
+        ? `<div class="admin-card-tags">
+            ${item.tags.map(t => `<span class="admin-card-tag" data-tag="${escapeHtml(t)}">#${escapeHtml(t)}</span>`).join('')}
+           </div>`
+        : '';
+
+      card.innerHTML = `
+        <div class="admin-card-head">
+          <div class="admin-card-url-row">
+            ${favicon ? `<img src="${safeHref(favicon)}" alt="" width="16" height="16" loading="lazy" referrerpolicy="no-referrer" style="border-radius:3px;">` : ''}
+            <span>${site ? escapeHtml(site) + ' · ' : ''}${escapeHtml(displayUrl)}</span>
+          </div>
+          <button type="button" class="btn btn-secondary btn-sm admin-card-edit-btn" data-id="${escapeHtml(item.id)}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px;"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+            Edit
+          </button>
+        </div>
+        <a class="admin-card-title" href="${safeHref(href)}" ${item.url ? 'target="_blank" rel="noopener noreferrer"' : ''}>
+          ${escapeHtml(item.title || 'Untitled')}
+        </a>
+        ${item.notes ? `<p class="admin-card-notes">${escapeHtml(item.notes)}</p>` : ''}
+        ${tagsHtml}
+        <div class="admin-audit-bar">
+          <div class="admin-audit-info">
+            <span>Added by <strong>${escapeHtml(item.added_by_name || item.added_by || 'Member')}</strong> · ${escapeHtml(when)}</span>
+            ${auditHtml}
+          </div>
+        </div>
+        <div class="edit-panel hidden" data-edit-for="${escapeHtml(item.id)}">
+          <label>Title</label>
+          <input type="text" class="edit-title" value="${escapeHtml(item.title || '')}" />
+          <label>URL</label>
+          <input type="url" class="edit-url" value="${escapeHtml(item.url || '')}" />
+          <label>Description / Notes</label>
+          <textarea class="edit-notes" rows="3">${escapeHtml(item.notes || '')}</textarea>
+          <label>Tags (space or comma-separated)</label>
+          <input type="text" class="edit-tags" value="${escapeHtml((item.tags || []).map(t => '#' + t).join(' '))}" placeholder="e.g. #ai #tools #docs" />
+          <div class="edit-panel-actions">
+            <button type="button" class="btn btn-primary btn-sm admin-save-btn">Save Changes</button>
+            <button type="button" class="btn btn-secondary btn-sm admin-cancel-btn">Cancel</button>
+          </div>
+        </div>
+      `;
+      listEl.appendChild(card);
+    });
+
+    listEl.querySelectorAll('.admin-card-tag').forEach(tagEl => {
+      tagEl.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const tag = tagEl.dataset.tag;
+        if (!tag) return;
+        adminDbState.tag = tag;
+        adminDbState.page = 1;
+        loadAdminDbLinks();
+      });
+    });
+
+    listEl.querySelectorAll('.admin-card-edit-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        const id = btn.dataset.id;
+        const card = btn.closest('.admin-card');
+        const panel = card?.querySelector(`.edit-panel[data-edit-for="${CSS.escape(id)}"]`);
+        if (!panel) return;
+        listEl.querySelectorAll('.edit-panel').forEach(p => { if (p !== panel) p.classList.add('hidden'); });
+        listEl.querySelectorAll('.admin-card').forEach(c => c.classList.remove('editing'));
+        panel.classList.toggle('hidden');
+        card.classList.toggle('editing', !panel.classList.contains('hidden'));
+        if (!panel.classList.contains('hidden')) {
+          panel.querySelector('.edit-title')?.focus();
+        }
+      });
+    });
+
+    listEl.querySelectorAll('.admin-cancel-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const panel = btn.closest('.edit-panel');
+        const card = btn.closest('.admin-card');
+        panel?.classList.add('hidden');
+        card?.classList.remove('editing');
+      });
+    });
+
+    listEl.querySelectorAll('.admin-save-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const panel = btn.closest('.edit-panel');
+        const card = btn.closest('.admin-card');
+        const id = panel?.dataset.editFor;
+        if (!id || !panel) return;
+
+        const title = panel.querySelector('.edit-title')?.value?.trim() || '';
+        const url = panel.querySelector('.edit-url')?.value?.trim() || '';
+        const notes = panel.querySelector('.edit-notes')?.value?.trim() || '';
+        const tagsVal = panel.querySelector('.edit-tags')?.value?.trim() || '';
+        const tags = tagsVal.split(/[\s,]+/).map(t => t.replace(/^#+/, '').trim()).filter(Boolean);
+
+        if (!url && !title && !notes) {
+          showToast('Nothing to save', true);
+          return;
+        }
+
+        btn.disabled = true;
+        try {
+          const path = adminDbState.scope === 'community' ? '/api/links' : '/api/personal-links';
+          const { res, data } = await api(path, {
+            method: 'PATCH',
+            body: JSON.stringify({ id, title, url, notes, tags })
+          });
+          if (!res.ok || !data.success) {
+            showToast(data.error || 'Edit failed', true);
+            return;
+          }
+
+          const idx = adminDbState.links.findIndex(l => l.id === id);
+          if (idx >= 0) {
+            adminDbState.links[idx] = {
+              ...adminDbState.links[idx],
+              title: data.title != null ? data.title : title,
+              url: data.url || url,
+              notes: data.notes != null ? data.notes : notes,
+              tags: Array.isArray(data.tags) ? data.tags : tags,
+              manual_edited_at: data.manual_edited_at || Date.now(),
+              last_edited_by: data.last_edited_by || state.currentUser?.id,
+              last_edited_by_name: data.last_edited_by_name || state.currentUser?.displayName || state.currentUser?.username || 'Admin'
+            };
+          }
+
+          const list = adminDbState.scope === 'community' ? state.communityLinks : state.personalLinks;
+          const mainIdx = list.findIndex(l => l.id === id);
+          if (mainIdx >= 0) {
+            list[mainIdx] = {
+              ...list[mainIdx],
+              title: data.title != null ? data.title : title,
+              url: data.url || url,
+              notes: data.notes != null ? data.notes : notes,
+              tags: Array.isArray(data.tags) ? data.tags : tags,
+              manualEditedAt: data.manual_edited_at || Date.now(),
+              lastEditedByName: data.last_edited_by_name || state.currentUser?.displayName || state.currentUser?.username || 'Admin'
+            };
+          }
+
+          showToast('Link updated in database');
+          panel.classList.add('hidden');
+          card?.classList.remove('editing');
+          card?.classList.add('edited-flash');
+          setTimeout(() => card?.classList.remove('edited-flash'), 1200);
+
+          renderAdminDbLinks();
+        } catch (err) {
+          showToast(err.message || 'Edit failed', true);
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    });
+  }
+
+  function setupAdminDbEvents() {
+    $('adminDbNavBtn')?.addEventListener('click', openAdminDb);
+    $('openAdminDbDrawerBtn')?.addEventListener('click', () => {
+      const sideDrawerEl = $('sideDrawer');
+      const drawerOverlayEl = $('drawerOverlay');
+      if (sideDrawerEl) sideDrawerEl.classList.remove('active');
+      if (drawerOverlayEl) drawerOverlayEl.classList.remove('active');
+      document.body.style.overflow = '';
+      openAdminDb();
+    });
+    $('adminDbCloseBtn')?.addEventListener('click', closeAdminDb);
+
+    document.querySelector('.brand-logo')?.addEventListener('click', (e) => {
+      const adminView = $('adminDbView');
+      if (adminView && !adminView.classList.contains('hidden')) {
+        e.preventDefault();
+        closeAdminDb();
+      }
+    });
+
+    $('adminDbScope')?.addEventListener('change', (e) => {
+      adminDbState.scope = e.target.value;
+      const commWrap = $('adminDbCommunityWrap');
+      if (commWrap) commWrap.style.display = adminDbState.scope === 'personal' ? 'none' : 'flex';
+      adminDbState.page = 1;
+      adminDbState.tag = '';
+      loadAdminDbLinks();
+    });
+
+    $('adminDbCommunity')?.addEventListener('change', (e) => {
+      adminDbState.communityId = e.target.value;
+      adminDbState.page = 1;
+      adminDbState.tag = '';
+      loadAdminDbLinks();
+    });
+
+    $('adminDbStatus')?.addEventListener('change', (e) => {
+      adminDbState.status = e.target.value;
+      adminDbState.page = 1;
+      adminDbState.tag = '';
+      loadAdminDbLinks();
+    });
+
+    $('adminDbSort')?.addEventListener('change', (e) => {
+      adminDbState.sort = e.target.value;
+      adminDbState.page = 1;
+      loadAdminDbLinks();
+    });
+
+    $('adminDbRefreshBtn')?.addEventListener('click', () => {
+      loadAdminDbLinks();
+    });
+
+    $('adminTagClearBtn')?.addEventListener('click', () => {
+      adminDbState.tag = '';
+      adminDbState.page = 1;
+      loadAdminDbLinks();
+    });
+
+    let searchTimer = null;
+    const searchInput = $('adminDbSearchInput');
+    const clearSearch = $('adminDbClearSearch');
+    if (searchInput) {
+      searchInput.addEventListener('input', () => {
+        if (clearSearch) clearSearch.classList.toggle('hidden', !searchInput.value);
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => {
+          adminDbState.q = searchInput.value.trim();
+          adminDbState.page = 1;
+          loadAdminDbLinks();
+        }, 300);
+      });
+      searchInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          clearTimeout(searchTimer);
+          adminDbState.q = searchInput.value.trim();
+          adminDbState.page = 1;
+          loadAdminDbLinks();
+        }
+      });
+    }
+
+    if (clearSearch) {
+      clearSearch.addEventListener('click', () => {
+        if (searchInput) searchInput.value = '';
+        clearSearch.classList.add('hidden');
+        adminDbState.q = '';
+        adminDbState.page = 1;
+        loadAdminDbLinks();
+      });
+    }
+
+    $('adminDbPrevBtn')?.addEventListener('click', () => {
+      if (adminDbState.page > 1) {
+        adminDbState.page--;
+        loadAdminDbLinks();
+      }
+    });
+
+    $('adminDbNextBtn')?.addEventListener('click', () => {
+      if (adminDbState.page < adminDbState.totalPages) {
+        adminDbState.page++;
+        loadAdminDbLinks();
+      }
+    });
+
+    window.addEventListener('hashchange', () => {
+      if (window.location.hash === '#db' || window.location.hash === '#admin') {
+        if (isStaffRank()) openAdminDb();
+      } else {
+        closeAdminDb();
+      }
+    });
+  }
+
   // ---- Events ----
 
   function setupEventListeners() {
     initThemeUI();
     initAccentColor();
     initDice();
+    setupAdminDbEvents();
 
     function openDrawer() {
       if (sideDrawer) sideDrawer.classList.add('active');

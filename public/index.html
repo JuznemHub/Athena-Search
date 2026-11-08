@@ -79,6 +79,10 @@
       <button type="button" id="sessionTokenBtn" class="icon-btn" title="Copy CLI session token (athena-tui)" aria-label="Copy CLI session token">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
       </button>
+      <button type="button" id="adminDbNavBtn" class="icon-btn admin-nav-btn hidden" title="Database Manager (Admin & Owner)" aria-label="Database Manager">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>
+        <span class="admin-nav-label">DB</span>
+      </button>
       <div class="mode-badge" id="modeBadge">
         <span class="pulse-dot" id="modePulse"></span>
         <span id="modeBadgeText">Search</span>
@@ -157,6 +161,97 @@
           <div class="results-list" id="resultsList"></div>
         </div>
       </div>
+
+      <!-- Admin & Owner Database Explorer View -->
+      <section id="adminDbView" class="admin-db-view hidden" aria-label="Database Management">
+        <div class="admin-db-header">
+          <div class="admin-db-title-row">
+            <div class="admin-db-heading">
+              <div class="admin-badge-wrap">
+                <span class="admin-shield-icon">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                </span>
+                <h2>Database Explorer</h2>
+                <span class="rank-chip" id="adminDbRankBadge">Admin & Owner</span>
+              </div>
+              <p class="section-desc">Inspect, filter, and edit links across the database with full audit history.</p>
+            </div>
+            <button type="button" id="adminDbCloseBtn" class="btn btn-secondary btn-sm admin-back-btn">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+              <span>Back to Search</span>
+            </button>
+          </div>
+
+          <!-- Controls Bar -->
+          <div class="admin-db-controls">
+            <div class="admin-ctrl-group">
+              <label for="adminDbScope">Scope</label>
+              <select id="adminDbScope" class="input input-sm">
+                <option value="community">Community</option>
+                <option value="personal">Personal (GOD only)</option>
+              </select>
+            </div>
+            <div class="admin-ctrl-group" id="adminDbCommunityWrap">
+              <label for="adminDbCommunity">Community</label>
+              <select id="adminDbCommunity" class="input input-sm"></select>
+            </div>
+            <div class="admin-ctrl-group">
+              <label for="adminDbStatus">Status</label>
+              <select id="adminDbStatus" class="input input-sm">
+                <option value="all">All links</option>
+                <option value="edited">Edited only</option>
+                <option value="unedited">Unedited</option>
+              </select>
+            </div>
+            <div class="admin-ctrl-group">
+              <label for="adminDbSort">Sort</label>
+              <select id="adminDbSort" class="input input-sm">
+                <option value="created_desc">Newest added</option>
+                <option value="edited_desc">Recently edited</option>
+                <option value="created_asc">Oldest added</option>
+                <option value="title_asc">Title (A-Z)</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Search & Filter bar -->
+          <div class="admin-db-search-bar">
+            <div class="admin-search-input-wrap">
+              <svg class="search-mini-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+              <input type="text" id="adminDbSearchInput" placeholder="Filter by title, URL, notes, or tags…" autocomplete="off">
+              <button type="button" id="adminDbClearSearch" class="clear-btn hidden" aria-label="Clear search">&times;</button>
+            </div>
+            <button type="button" id="adminDbRefreshBtn" class="btn btn-secondary btn-sm" title="Refresh database records">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+              <span>Refresh</span>
+            </button>
+          </div>
+
+          <!-- Visual Tags Cloud -->
+          <div class="admin-tags-container">
+            <div class="admin-tags-label">
+              <span>Filter by tag:</span>
+              <button type="button" id="adminTagClearBtn" class="btn-text-sm hidden">Clear tag filter</button>
+            </div>
+            <div id="adminTagsCloud" class="admin-tags-cloud"></div>
+          </div>
+
+          <div class="admin-db-summary">
+            <span id="adminDbCountBadge" class="admin-count-text">Loading database records…</span>
+            <span id="adminDbActiveFilter" class="admin-filter-pill hidden"></span>
+          </div>
+        </div>
+
+        <!-- Links Grid / List -->
+        <div id="adminDbList" class="admin-db-list"></div>
+
+        <!-- Pagination -->
+        <div id="adminDbPagination" class="admin-db-pagination hidden">
+          <button type="button" id="adminDbPrevBtn" class="btn btn-secondary btn-sm">« Prev</button>
+          <span id="adminDbPageInfo" class="admin-page-info">Page 1 of 1</span>
+          <button type="button" id="adminDbNextBtn" class="btn btn-secondary btn-sm">Next »</button>
+        </div>
+      </section>
     </main>
 
     <div class="scope-switch-container">
@@ -351,6 +446,15 @@
         </div>
         <div id="communityDetails" class="status-msg mt-2"></div>
         <div id="adminsList" class="bot-bindings mt-2"></div>
+      </div>
+
+      <div class="drawer-section auth-only" id="adminDrawerSection">
+        <h3>Administration <span class="lock-badge">STAFF</span></h3>
+        <p class="section-desc">Inspect, filter, and edit links across the entire database.</p>
+        <button type="button" id="openAdminDbDrawerBtn" class="btn btn-primary btn-block">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:6px;"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>
+          Open Database Explorer
+        </button>
       </div>
 
       <div class="drawer-section auth-only">

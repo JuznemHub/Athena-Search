@@ -347,6 +347,10 @@ export default {
         }
       }
 
+      if (pathname === '/api/admin/links' && request.method === 'GET') {
+        return await handleAdminGetLinks(url, user, env, corsHeaders);
+      }
+
       // Community links — members only (join required before dump)
       if (pathname === '/api/links') {
         if (request.method === 'GET') {
@@ -3359,7 +3363,8 @@ async function handleDeleteCommunityLink(request, user, env, corsHeaders) {
   if (gate) return gate;
 
   // Community delete mode: owner/admin only
-  const isStaff = await ensureOwnerOrAdmin(link.community_id, user.id, env);
+  const isGod = await isInstanceOwnerUserAsync(user, env);
+  const isStaff = isGod || (await ensureOwnerOrAdmin(link.community_id, user.id, env));
   if (!isStaff) {
     return Response.json(
       { success: false, error: 'Only community owner or admins can delete links' },
@@ -3371,6 +3376,181 @@ async function handleDeleteCommunityLink(request, user, env, corsHeaders) {
   await env.DB.prepare('DELETE FROM link_votes WHERE link_id = ?').bind(link.id).run();
   markMeiliScopeDirty(env, 'community', link.community_id);
   return Response.json({ success: true, deleted: link.id }, { headers: corsHeaders });
+}
+
+async function handleAdminGetLinks(url, user, env, corsHeaders) {
+  const isOwner = await isInstanceOwnerUserAsync(user, env);
+  const isStaff = isOwner || (!ownerListsConfigured(env)) || (await isCommunityAdminUser(user, env));
+  if (!isStaff) {
+    return deny(corsHeaders, 'Admin or Owner rank required to access database management', 'ADMIN_ONLY', 403);
+  }
+
+  await ensureLinkMetaColumns(env);
+
+  const scope = (url.searchParams.get('scope') || 'community').toLowerCase();
+  const rawCommId = (url.searchParams.get('community_id') || '').trim();
+  const tag = (url.searchParams.get('tag') || '').trim();
+  const q = (url.searchParams.get('q') || '').trim();
+  const edited = (url.searchParams.get('edited') || 'all').toLowerCase();
+  const sort = (url.searchParams.get('sort') || 'created_desc').toLowerCase();
+  const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '25', 10) || 25));
+  const offset = (page - 1) * limit;
+
+  // Find all communities this user has staff access to
+  let adminCommunities;
+  if (isOwner) {
+    const commRows = await env.DB.prepare('SELECT id, name FROM communities ORDER BY created_at DESC').all();
+    adminCommunities = (commRows?.results || []).map(c => ({ id: c.id, name: c.name || c.id }));
+  } else {
+    const commRows = await env.DB.prepare(`
+      SELECT c.id, c.name FROM communities c
+      LEFT JOIN community_members cm ON cm.community_id = c.id AND cm.user_id = ?
+      WHERE c.creator_id = ? OR cm.role IN ('owner', 'admin')
+      ORDER BY c.created_at DESC
+    `).bind(user.id, user.id).all();
+    adminCommunities = (commRows?.results || []).map(c => ({ id: c.id, name: c.name || c.id }));
+  }
+
+  let table = 'links';
+  const whereClauses = [];
+  const params = [];
+  let effectiveCommunityId = null;
+
+  if (scope === 'personal') {
+    if (!isOwner) {
+      return deny(corsHeaders, 'Personal database is instance host (GOD) only', 'GOD_ONLY', 403);
+    }
+    table = 'personal_links';
+    whereClauses.push('user_id = ?');
+    params.push(user.id);
+  } else {
+    // Community scope
+    if (!adminCommunities.length) {
+      return Response.json({
+        success: true,
+        links: [],
+        total: 0,
+        page: 1,
+        totalPages: 0,
+        limit,
+        tags: [],
+        scope: 'community',
+        community_id: null,
+        communities: []
+      }, { headers: corsHeaders });
+    }
+
+    effectiveCommunityId = rawCommId;
+    if (!effectiveCommunityId || !adminCommunities.some(c => c.id === effectiveCommunityId)) {
+      effectiveCommunityId = adminCommunities[0].id;
+    }
+
+    whereClauses.push('community_id = ?');
+    params.push(effectiveCommunityId);
+  }
+
+  if (tag) {
+    const cleanTag = tag.replace(/^#+/, '').toLowerCase();
+    whereClauses.push('(LOWER(tags) LIKE ? OR LOWER(tags) LIKE ?)');
+    params.push(`%"${cleanTag}"%`, `%#${cleanTag}%`);
+  }
+
+  if (q) {
+    const qWild = `%${q.toLowerCase()}%`;
+    whereClauses.push('(LOWER(title) LIKE ? OR LOWER(url) LIKE ? OR LOWER(notes) LIKE ? OR LOWER(tags) LIKE ?)');
+    params.push(qWild, qWild, qWild, qWild);
+  }
+
+  if (edited === 'edited') {
+    whereClauses.push('manual_edited_at IS NOT NULL');
+  } else if (edited === 'unedited') {
+    whereClauses.push('manual_edited_at IS NULL');
+  }
+
+  const whereSql = whereClauses.length ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+  let orderSql = 'ORDER BY created_at DESC';
+  if (sort === 'created_asc') orderSql = 'ORDER BY created_at ASC';
+  else if (sort === 'edited_desc') orderSql = 'ORDER BY COALESCE(manual_edited_at, 0) DESC, created_at DESC';
+  else if (sort === 'title_asc') orderSql = 'ORDER BY LOWER(COALESCE(title, url)) ASC';
+
+  // Count query
+  const countStmt = `SELECT COUNT(*) AS total FROM ${table} ${whereSql}`;
+  const countRow = await env.DB.prepare(countStmt).bind(...params).first();
+  const total = Number(countRow?.total || 0);
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+
+  // Query records
+  const dataStmt = `SELECT * FROM ${table} ${whereSql} ${orderSql} LIMIT ? OFFSET ?`;
+  const { results } = await env.DB.prepare(dataStmt).bind(...params, limit, offset).all();
+
+  // Aggregate top tags in this scope
+  const topTags = [];
+  try {
+    const scopeWhereOnly = scope === 'personal' ? 'WHERE user_id = ?' : 'WHERE community_id = ?';
+    const tagRows = await env.DB.prepare(`SELECT tags FROM ${table} ${scopeWhereOnly} AND tags IS NOT NULL LIMIT 400`).bind(params[0]).all();
+    const tagCount = new Map();
+    for (const r of (tagRows?.results || [])) {
+      let tArr = [];
+      if (typeof r.tags === 'string') {
+        try { tArr = JSON.parse(r.tags); } catch (_) { tArr = r.tags.split(/[\s,]+/); }
+      } else if (Array.isArray(r.tags)) {
+        tArr = r.tags;
+      }
+      for (let t of tArr) {
+        if (!t) continue;
+        t = String(t).trim().replace(/^#+/, '').toLowerCase();
+        if (t && t.length < 35) {
+          tagCount.set(t, (tagCount.get(t) || 0) + 1);
+        }
+      }
+    }
+    const sorted = Array.from(tagCount.entries()).sort((a, b) => b[1] - a[1]).slice(0, 30);
+    for (const [name, count] of sorted) {
+      topTags.push({ name, count });
+    }
+  } catch (_) {}
+
+  const links = (results || []).map(r => {
+    let parsedTags = [];
+    if (typeof r.tags === 'string') {
+      try { parsedTags = JSON.parse(r.tags); } catch (_) { parsedTags = r.tags.split(/[\s,]+/).map(s => s.trim().replace(/^#+/, '')); }
+    } else if (Array.isArray(r.tags)) {
+      parsedTags = r.tags;
+    }
+    return {
+      id: r.id,
+      url: r.url,
+      title: r.title || r.url || 'Untitled',
+      notes: r.notes || '',
+      tags: parsedTags.filter(Boolean),
+      image_url: r.image_url || '',
+      site_name: r.site_name || '',
+      added_by: r.added_by || '',
+      added_by_name: r.added_by_name || r.added_by || '',
+      created_at: r.created_at,
+      manual_edited_at: r.manual_edited_at || null,
+      last_edited_by: r.last_edited_by || null,
+      last_edited_by_name: r.last_edited_by_name || null,
+      upvotes: r.upvotes || 0,
+      downvotes: r.downvotes || 0,
+      community_id: r.community_id || null
+    };
+  });
+
+  return Response.json({
+    success: true,
+    links,
+    total,
+    page,
+    totalPages,
+    limit,
+    tags: topTags,
+    scope,
+    community_id: effectiveCommunityId,
+    communities: adminCommunities
+  }, { headers: corsHeaders });
 }
 
 /**
@@ -5908,25 +6088,52 @@ async function handlePatchPersonalLink(request, userId, env, corsHeaders) {
   }
   if (body.title != null) title = String(body.title).trim().slice(0, 300);
   if (body.notes != null) notes = String(body.notes).trim().slice(0, 2500);
-  if (body.tags != null) tags = JSON.stringify(Array.isArray(body.tags) ? body.tags : body.tags);
+  if (body.tags != null) {
+    let t = body.tags;
+    if (typeof t === 'string') {
+      try {
+        t = JSON.parse(t);
+      } catch (_) {
+        t = t.split(/[\s,]+/).map(x => x.trim().replace(/^#+/, '')).filter(Boolean);
+      }
+    }
+    if (Array.isArray(t)) {
+      tags = JSON.stringify(t.map(x => String(x).trim().replace(/^#+/, '')).filter(Boolean));
+    } else {
+      tags = JSON.stringify([]);
+    }
+  }
   if (body.image_url != null) imageUrl = String(body.image_url).trim().slice(0, 500);
   if (body.site_name != null) siteName = String(body.site_name).trim().slice(0, 120);
 
   await ensureLinkMetaColumns(env);
   const editedAt = Date.now();
+  const editorId = userId;
+  const editorRow = await env.DB.prepare('SELECT display_name, username FROM users WHERE id = ?').bind(userId).first();
+  const editorName = editorRow?.display_name || editorRow?.username || 'Owner';
   try {
     await env.DB.prepare(
-      `UPDATE personal_links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, image_url = ?, site_name = ?, manual_edited_at = ?
+      `UPDATE personal_links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, image_url = ?, site_name = ?, manual_edited_at = ?, last_edited_by = ?, last_edited_by_name = ?, search_blob = NULL
        WHERE id = ? AND user_id = ?`
-    ).bind(url, urlHash, title, notes, tags, imageUrl || null, siteName || null, editedAt, id, userId).run();
+    ).bind(url, urlHash, title, notes, tags, imageUrl || null, siteName || null, editedAt, editorId, editorName, id, userId).run();
   } catch (_) {
-    await env.DB.prepare(
-      `UPDATE personal_links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?
-       WHERE id = ? AND user_id = ?`
-    ).bind(url, urlHash, title, notes, tags, id, userId).run();
+    try {
+      await env.DB.prepare(
+        `UPDATE personal_links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, image_url = ?, site_name = ?, manual_edited_at = ?
+         WHERE id = ? AND user_id = ?`
+      ).bind(url, urlHash, title, notes, tags, imageUrl || null, siteName || null, editedAt, id, userId).run();
+    } catch (_) {
+      await env.DB.prepare(
+        `UPDATE personal_links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?
+         WHERE id = ? AND user_id = ?`
+      ).bind(url, urlHash, title, notes, tags, id, userId).run();
+    }
   }
 
   markMeiliScopeDirty(env, 'personal', userId);
+
+  let parsedPersonalTags;
+  try { parsedPersonalTags = JSON.parse(tags); } catch (_) { parsedPersonalTags = []; }
 
   return Response.json({
     success: true,
@@ -5934,8 +6141,12 @@ async function handlePatchPersonalLink(request, userId, env, corsHeaders) {
     url,
     title,
     notes,
+    tags: parsedPersonalTags,
     image_url: imageUrl || '',
-    site_name: siteName || ''
+    site_name: siteName || '',
+    manual_edited_at: editedAt,
+    last_edited_by: editorId,
+    last_edited_by_name: editorName
   }, { headers: corsHeaders });
 }
 
@@ -5954,7 +6165,8 @@ async function handlePatchCommunityLink(request, user, env, corsHeaders) {
   // author or staff can edit. Links dumped by the bot before the sender was linked to
   // an Athena account have added_by_user_id = NULL — those are staff-only, not open
   // season for every member.
-  const staff = await ensureOwnerOrAdmin(existing.community_id, user.id, env);
+  const isGod = await isInstanceOwnerUserAsync(user, env);
+  const staff = isGod || (await ensureOwnerOrAdmin(existing.community_id, user.id, env));
   if (!staff && existing.added_by_user_id !== user.id) {
     return Response.json({ success: false, error: 'Only author or admin can edit' }, { status: 403, headers: corsHeaders });
   }
@@ -5977,24 +6189,50 @@ async function handlePatchCommunityLink(request, user, env, corsHeaders) {
   }
   if (body.title != null) title = String(body.title).trim().slice(0, 300);
   if (body.notes != null) notes = String(body.notes).trim().slice(0, 2500);
-  if (body.tags != null) tags = JSON.stringify(Array.isArray(body.tags) ? body.tags : body.tags);
+  if (body.tags != null) {
+    let t = body.tags;
+    if (typeof t === 'string') {
+      try {
+        t = JSON.parse(t);
+      } catch (_) {
+        t = t.split(/[\s,]+/).map(x => x.trim().replace(/^#+/, '')).filter(Boolean);
+      }
+    }
+    if (Array.isArray(t)) {
+      tags = JSON.stringify(t.map(x => String(x).trim().replace(/^#+/, '')).filter(Boolean));
+    } else {
+      tags = JSON.stringify([]);
+    }
+  }
   if (body.image_url != null) imageUrl = String(body.image_url).trim().slice(0, 500);
   if (body.site_name != null) siteName = String(body.site_name).trim().slice(0, 120);
 
   await ensureLinkMetaColumns(env);
   const editedAt = Date.now();
+  const editorId = user.id;
+  const editorName = user.display_name || user.username || 'Admin';
   try {
     await env.DB.prepare(
-      `UPDATE links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, image_url = ?, site_name = ?, manual_edited_at = ?
+      `UPDATE links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, image_url = ?, site_name = ?, manual_edited_at = ?, last_edited_by = ?, last_edited_by_name = ?, search_blob = NULL
        WHERE id = ?`
-    ).bind(url, urlHash, title, notes, tags, imageUrl || null, siteName || null, editedAt, id).run();
+    ).bind(url, urlHash, title, notes, tags, imageUrl || null, siteName || null, editedAt, editorId, editorName, id).run();
   } catch (_) {
-    await env.DB.prepare(
-      `UPDATE links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ? WHERE id = ?`
-    ).bind(url, urlHash, title, notes, tags, id).run();
+    try {
+      await env.DB.prepare(
+        `UPDATE links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, image_url = ?, site_name = ?, manual_edited_at = ?
+         WHERE id = ?`
+      ).bind(url, urlHash, title, notes, tags, imageUrl || null, siteName || null, editedAt, id).run();
+    } catch (_) {
+      await env.DB.prepare(
+        `UPDATE links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ? WHERE id = ?`
+      ).bind(url, urlHash, title, notes, tags, id).run();
+    }
   }
 
   markMeiliScopeDirty(env, 'community', existing.community_id);
+
+  let parsedCommunityTags;
+  try { parsedCommunityTags = JSON.parse(tags); } catch (_) { parsedCommunityTags = []; }
 
   return Response.json({
     success: true,
@@ -6002,8 +6240,12 @@ async function handlePatchCommunityLink(request, user, env, corsHeaders) {
     url,
     title,
     notes,
+    tags: parsedCommunityTags,
     image_url: imageUrl || '',
-    site_name: siteName || ''
+    site_name: siteName || '',
+    manual_edited_at: editedAt,
+    last_edited_by: editorId,
+    last_edited_by_name: editorName
   }, { headers: corsHeaders });
 }
 
@@ -16594,12 +16836,16 @@ async function ensureLinkMetaColumns(env) {
     `ALTER TABLE personal_links ADD COLUMN site_name TEXT`,
     `ALTER TABLE personal_links ADD COLUMN metadata_version INTEGER DEFAULT 0`,
     `ALTER TABLE personal_links ADD COLUMN manual_edited_at INTEGER`,
+    `ALTER TABLE personal_links ADD COLUMN last_edited_by TEXT`,
+    `ALTER TABLE personal_links ADD COLUMN last_edited_by_name TEXT`,
     `ALTER TABLE personal_links ADD COLUMN source_chat_id TEXT`,
     `ALTER TABLE personal_links ADD COLUMN source_message_id TEXT`,
     `ALTER TABLE links ADD COLUMN image_url TEXT`,
     `ALTER TABLE links ADD COLUMN site_name TEXT`,
     `ALTER TABLE links ADD COLUMN metadata_version INTEGER DEFAULT 0`,
     `ALTER TABLE links ADD COLUMN manual_edited_at INTEGER`,
+    `ALTER TABLE links ADD COLUMN last_edited_by TEXT`,
+    `ALTER TABLE links ADD COLUMN last_edited_by_name TEXT`,
     `ALTER TABLE links ADD COLUMN source_chat_id TEXT`,
     `ALTER TABLE links ADD COLUMN source_message_id TEXT`,
     `ALTER TABLE links ADD COLUMN transfer_id TEXT`
@@ -18210,4 +18456,5 @@ export {
   resolveJobLabel,
   STATS_TOPICS_PAGE_MAX,
   USERBOT_ACCOUNTS,
+  handleAdminGetLinks,
 };
