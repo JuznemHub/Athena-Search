@@ -678,6 +678,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   border: 1px solid var(--accent-border); font-weight: 500; font-size: 0.74rem;
 }
 .admin-card-actions { display: flex; align-items: center; gap: 8px; }
+.admin-card-del-btn { padding: 4px 8px; color: var(--danger, #ef4444); border-color: rgba(239, 68, 68, 0.25); }
+.admin-card-del-btn:hover { background: rgba(239, 68, 68, 0.15); border-color: var(--danger, #ef4444); color: #ff6b6b; }
+.admin-card-notag { border: 1px dashed rgba(255, 255, 255, 0.2); }
 
 .admin-db-pagination { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 12px; }
 .admin-page-info { font-size: 0.85rem; color: var(--text-muted); font-weight: 500; }

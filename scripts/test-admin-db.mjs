@@ -113,6 +113,11 @@ async function runTests() {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind('link_2', 'comm_1', 'https://example.com/two', 'h2', 'Beta Docs', 'Documentation site', JSON.stringify(['docs', 'tool']), 'admin_user_456', 'Alice', 2000, 2500, 'admin_user_456', 'Alice Admin').run();
 
+  await db.prepare(`
+    INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by, added_by_name, created_at, manual_edited_at, last_edited_by, last_edited_by_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind('link_3', 'comm_1', 'https://example.com/three', 'h3', 'Gamma Untagged', 'No tags link', null, 'admin_user_456', 'Alice', 3000, null, null, null).run();
+
   // Test 1: Non-admin rejected
   const regUser = { id: 'regular_user_789', username: 'regular' };
   const resNonAdmin = await handleAdminGetLinks(new URL('https://athena.test/api/admin/links?community_id=comm_1'), regUser, env, corsHeaders);
@@ -126,15 +131,23 @@ async function runTests() {
   const dataAdmin = await resAdmin.json();
   assert.equal(resAdmin.status, 200, 'Admin must receive 200');
   assert.equal(dataAdmin.success, true);
-  assert.equal(dataAdmin.total, 2);
-  assert.equal(dataAdmin.links.length, 2);
-  assert.equal(dataAdmin.tags.length, 3);
+  assert.equal(dataAdmin.total, 3);
+  assert.equal(dataAdmin.links.length, 3);
+  const notagsEntry = dataAdmin.tags.find(t => t.name === 'notags');
+  assert.ok(notagsEntry, 'notags tag should exist in top tags');
+  assert.equal(notagsEntry.count, 1, 'notags count should be 1');
 
   // Test 3: Filter by tag
   const resTag = await handleAdminGetLinks(new URL('https://athena.test/api/admin/links?community_id=comm_1&tag=ai'), adminUser, env, corsHeaders);
   const dataTag = await resTag.json();
   assert.equal(dataTag.total, 1);
   assert.equal(dataTag.links[0].id, 'link_1');
+
+  // Test 3b: Filter by notags
+  const resNoTags = await handleAdminGetLinks(new URL('https://athena.test/api/admin/links?community_id=comm_1&tag=notags'), adminUser, env, corsHeaders);
+  const dataNoTags = await resNoTags.json();
+  assert.equal(dataNoTags.total, 1);
+  assert.equal(dataNoTags.links[0].id, 'link_3');
 
   // Test 4: Filter by edited status
   const resEdited = await handleAdminGetLinks(new URL('https://athena.test/api/admin/links?community_id=comm_1&edited=edited'), adminUser, env, corsHeaders);

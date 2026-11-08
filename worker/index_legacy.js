@@ -3450,10 +3450,14 @@ async function handleAdminGetLinks(url, user, env, corsHeaders) {
     params.push(effectiveCommunityId);
   }
 
-  if (tag) {
-    const cleanTag = tag.replace(/^#+/, '').toLowerCase();
-    whereClauses.push('(LOWER(tags) LIKE ? OR LOWER(tags) LIKE ?)');
-    params.push(`%"${cleanTag}"%`, `%#${cleanTag}%`);
+  const cleanTag = tag ? tag.replace(/^#+/, '').toLowerCase() : '';
+  if (cleanTag) {
+    if (cleanTag === 'notags') {
+      whereClauses.push("(tags IS NULL OR TRIM(tags) = '' OR tags = '[]' OR tags = 'null' OR tags = '[\"\"]')");
+    } else {
+      whereClauses.push('(LOWER(tags) LIKE ? OR LOWER(tags) LIKE ?)');
+      params.push(`%"${cleanTag}"%`, `%#${cleanTag}%`);
+    }
   }
 
   if (q) {
@@ -3485,28 +3489,55 @@ async function handleAdminGetLinks(url, user, env, corsHeaders) {
   const dataStmt = `SELECT * FROM ${table} ${whereSql} ${orderSql} LIMIT ? OFFSET ?`;
   const { results } = await env.DB.prepare(dataStmt).bind(...params, limit, offset).all();
 
-  // Aggregate top tags in this scope
+  // Aggregate top tags across the entire scoped database
   const topTags = [];
   try {
     const scopeWhereOnly = scope === 'personal' ? 'WHERE user_id = ?' : 'WHERE community_id = ?';
-    const tagRows = await env.DB.prepare(`SELECT tags FROM ${table} ${scopeWhereOnly} AND tags IS NOT NULL LIMIT 400`).bind(params[0]).all();
+    const tagRows = await env.DB.prepare(
+      `SELECT tags, COUNT(*) AS cnt FROM ${table} ${scopeWhereOnly} GROUP BY tags`
+    ).bind(params[0]).all();
+
+    let notagsCount = 0;
     const tagCount = new Map();
     for (const r of (tagRows?.results || [])) {
-      let tArr = [];
-      if (typeof r.tags === 'string') {
-        try { tArr = JSON.parse(r.tags); } catch (_) { tArr = r.tags.split(/[\s,]+/); }
-      } else if (Array.isArray(r.tags)) {
-        tArr = r.tags;
+      const rowCount = Number(r.cnt ?? 1) || 1;
+      const rawTags = r.tags;
+      if (!rawTags || (typeof rawTags === 'string' && (rawTags.trim() === '' || rawTags === '[]' || rawTags === 'null' || rawTags === '[""]'))) {
+        notagsCount += rowCount;
+        continue;
       }
+      let tArr = [];
+      if (typeof rawTags === 'string') {
+        try {
+          tArr = JSON.parse(rawTags);
+        } catch (_) {
+          tArr = rawTags.split(/[\s,]+/);
+        }
+      } else if (Array.isArray(rawTags)) {
+        tArr = rawTags;
+      }
+
+      if (!Array.isArray(tArr) || tArr.length === 0) {
+        notagsCount += rowCount;
+        continue;
+      }
+
+      let validTagFound = false;
       for (let t of tArr) {
         if (!t) continue;
         t = String(t).trim().replace(/^#+/, '').toLowerCase();
         if (t && t.length < 35) {
-          tagCount.set(t, (tagCount.get(t) || 0) + 1);
+          tagCount.set(t, (tagCount.get(t) || 0) + rowCount);
+          validTagFound = true;
         }
       }
+      if (!validTagFound) {
+        notagsCount += rowCount;
+      }
     }
-    const sorted = Array.from(tagCount.entries()).sort((a, b) => b[1] - a[1]).slice(0, 30);
+
+    topTags.push({ name: 'notags', count: notagsCount });
+    const sorted = Array.from(tagCount.entries()).sort((a, b) => b[1] - a[1]).slice(0, 45);
     for (const [name, count] of sorted) {
       topTags.push({ name, count });
     }
