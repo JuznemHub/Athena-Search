@@ -12214,8 +12214,12 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   const rest = cmd.startsWith('/') ? text.slice(parts[0].length).trim() : text;
   if (cmd.startsWith('/')) { try { console.log(`[webhook] cmd ${cmd} chat=${chatId} from=${tgUserId || '?'} mid=${msg.message_id}`); } catch (_) {} }
 
+  const _dbgT0 = Date.now();
+  const _dbg = (stage) => { try { console.log(`[dbg] mid=${msg.message_id} ${stage} +${Date.now() - _dbgT0}ms`); } catch (_) {} };
   let binding = await findTelegramBinding(env, chatId, tgUserId);
+  _dbg('binding');
   let token = (await tokenForBindingAsync(binding, env)) || env.TELEGRAM_BOT_TOKEN;
+  _dbg('token');
   // Channel posts have no sender identity: real-time indexing only, and only
   // for channels linked to a community via /channel_link. Bots cannot reply
   // in channels, so this path is silent by necessity.
@@ -12361,7 +12365,9 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
 
   // Rank context for this chat. Must precede document handling, which reads isGod.
   const communityIdForRank = binding?.community_id || null;
+  _dbg('pre-rank');
   const userRankInfo = await resolveUserRank(env, athenaUser, tgUserId, communityIdForRank);
+  _dbg('rank');
   const userRank = userRankInfo.rank;
   const isGod = userRank === 'god';
   const isCommOwner = userRank === 'owner' || isGod;
@@ -14378,7 +14384,9 @@ async function startCloneTargetAsk(env, ctx) {
       // Ack BEFORE the slow retrieval so the chat responds instantly; the
       // answer (or a failure) edits this message later — never silence.
       const t0 = Date.now();
+      _dbg('pre-think');
       const thinkMsg = await sendTelegramFormatted(token, chatId, `${boldHtml('🧠')} Thinking with your${scope === 'personal' ? ' personal' : ''} brain…`, forumThreadId);
+      _dbg('think-sent');
       const thinkMsgId = thinkMsg.message_id;
       let retrieval;
       try {
