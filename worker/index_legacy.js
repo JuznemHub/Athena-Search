@@ -5,8 +5,8 @@ import { dokployConfigured, dokployApps, dokployStatus, dokployLogSnapshot, dokp
 import { handleLogApi } from './log-api.js';
 import { runtimeLogs, redactLog, writeRuntimeLog } from './runtime-logs.js';
 import {
-  tagsFromFacts, validateTags, extractFacts, properNounBans,
-  JUNK_TAGS, CANONICAL_TAGS, TYPE_SET, TAG_VOCAB_TEXT,
+  tagsFromFacts, validateTags, extractFacts, properNounBans, normalizeTag,
+  JUNK_TAGS, GENERIC_REJECTS, CANONICAL_TAGS, TYPE_SET, TAG_VOCAB_TEXT,
 } from './tag-taxonomy.js';
 
 function cloneDisplayName(chatTitle, chatType, flowThread, topicTitle) {
@@ -2829,8 +2829,7 @@ const TELEGRAM_COMMAND_MENU = [
 const TELEGRAM_GOD_COMMAND_MENU = [
   { command: 'personal', description: 'Dump to personal brain (GOD)' },
   { command: 'community', description: 'Active community + link target' },
-  { command: 'dumpsmart', description: 'Multi-link dump mode (default: smart)' },
-  { command: 'dumpall', description: 'Multi-link dump on/off' },
+  { command: 'dumpall', description: 'Multi-link dump on/off (off = smart)' },
   { command: 'community_verify', description: 'Link this group (creates community)' },
   { command: 'topic', description: 'Lock bot replies to a topic' },
   { command: 'kick', description: 'Remove a member (rejoin allowed)' },
@@ -7926,7 +7925,7 @@ function helpTextForSection(section, isGod = false) {
       cmd(3, codeHtml('/export'), 'Export guide: Bot API export by default, session history backfill optional.'),
       cmd(4, `${codeHtml('/delete')} ${codeHtml('<url>')}`, 'Delete one saved link. Works as a reply too.'),
       cmd(5, `${codeHtml('/edit')} ${codeHtml('<url>')} | title: … | notes: …`, "Rewrite a link's title and notes by hand."),
-      cmd(6, `${codeHtml('/dumpsmart')} · ${codeHtml('/dumpall on')} · ${codeHtml('/dumpall off')}`, 'One dump-mode setting for multi-link posts: smart keeps the primary link only (default), on saves every URL separately, off goes back to smart.'),
+      cmd(6, `${codeHtml('/dumpall on')} · ${codeHtml('/dumpall off')}`, 'One dump-mode setting for multi-link posts: on saves every URL separately, off keeps the primary link only (smart, the default).'),
       spacer,
       richParagraph(`<i>Where dumps land is per chat: ${codeHtml('/mode')} shows it, ${codeHtml('/personal')} keeps them private, ${codeHtml('/community')} sends them to the linked community. Setup: website Settings → Bot — GOD pastes the bot token + ${codeHtml('/id')} from this chat.</i>`)
     ].join('\n');
@@ -7998,7 +7997,7 @@ function helpTextForSection(section, isGod = false) {
       spacer,
       richParagraph('<b>Brains & targets</b>'),
       cmd(1, `${codeHtml('/personal')} · ${codeHtml('/community')} · ${codeHtml('/mode')}`, 'Where YOUR dumps land: private brain or the linked community. Same switch as in 👥 Community — repeated here because only GOD has a personal brain.'),
-      cmd(2, `${codeHtml('/dumpsmart')} · ${codeHtml('/dumpall on|off')}`, 'One dump-mode setting: smart keeps the primary link only (default), on saves every URL. Channel cloning lives in 📡 Channels.'),
+      cmd(2, `${codeHtml('/dumpall on|off')}`, 'One dump-mode setting: on saves every URL, off keeps the primary link only (smart, the default). Channel cloning lives in 📡 Channels.'),
       spacer,
       richParagraph('<b>Tagging & structure</b>'),
       cmd(3, `${codeHtml('/forcetags <community_id>')} ${codeHtml('[all]')}`, 'Run a retag review of one brain. The community id is required, then pick the community brain or your personal brain. One batch of 150 links per run; add all to sweep that whole brain in the background — no retyping. Scrapes a real description, writes tags from the controlled vocabulary, and skips links you edited by hand (/edit or the website).'),
@@ -11707,8 +11706,85 @@ function cleanTitleText(title) {
   return s;
 }
 
+/** Raw tag strings from a stored JSON tags column (no normalization). */
+function rawTagList(v) {
+  try {
+    const x = typeof v === 'string' ? JSON.parse(v || '[]') : v;
+    return Array.isArray(x) ? x.map((t) => String(t ?? '')) : [];
+  } catch (_) { return []; }
+}
+
+/** Notes that carry no prose — only #hashtags, @mentions, bare URLs and
+ *  punctuation. Their words belong in tags, not in AI context. */
+function isHashtagOnlyNotes(notes) {
+  const s = String(notes || '').trim();
+  if (!s) return false;
+  const rest = s
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/@[\w.-]+/g, ' ')
+    .replace(/#[\w-]{1,40}/g, ' ')
+    .replace(/[^a-z0-9]+/gi, ' ')
+    .trim();
+  return rest.length === 0;
+}
+
+/** Tag candidates for one row: stored tags plus hashtag-only-note words. */
+function rowTagCandidates(row) {
+  const out = rawTagList(row.tags);
+  try {
+    if (row.notes && isHashtagOnlyNotes(row.notes)) {
+      for (const h of extractHashtags(row.notes)) out.push(h);
+    }
+  } catch (_) {}
+  return out;
+}
+
+/**
+ * Structure-time tag cleaning. Unlike the strict validator, this PRESERVES
+ * curated tags (they may be scope vocabulary, not canonical) and only drops
+ * what is never a topic: ingest stamps, generic fluff, the link's own names,
+ * and `telegram` when the page is not about Telegram.
+ */
+function cleanTagsForStructure(rawTags, rawUrl, title, notes) {
+  const bans = new Set();
+  try {
+    for (const b of nameBansFor(rawUrl, title)) bans.add(b);
+  } catch (_) {}
+  let telegram = false;
+  try { telegram = !!extractFacts(rawUrl, { title, notes }).telegram; } catch (_) {}
+  const out = [];
+  for (const raw of Array.isArray(rawTags) ? rawTags : []) {
+    const tag = normalizeTag(raw);
+    if (!tag || tag.length < 2 || out.includes(tag)) continue;
+    if (JUNK_TAGS.has(tag) || GENERIC_REJECTS.has(tag) || bans.has(tag)) continue;
+    if (tag === 'telegram' && !telegram) continue;
+    out.push(tag);
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+
+/** Shared notes cleaning for structure: hashtag-only captions collapse to
+ *  '' (their words move to tags), cross-link contamination is repaired. */
+function cleanAllNotes(notes, url, title, nameRe) {
+  if (!String(notes || '').trim()) return '';
+  if (isHashtagOnlyNotes(notes)) return '';
+  return cleanNotesText(repairContaminatedNotes(notes, url, title, nameRe));
+}
+
+/** Canonical stored-URL spelling: tracking params gone, www/host casing
+ *  folded — the same identity generateUrlHash already dedupes on. */
+function canonicalStoredUrl(urlStr) {
+  const s = stripTrackingParams(urlStr);
+  try { return canonicalUrlForHash(s); } catch (_) { return s; }
+}
+
 async function structureDatabase(env, { onProgress = null } = {}) {
-  const stats = { scanned: 0, urlNormalized: 0, merged: 0, notesCleaned: 0, titlesCleaned: 0, errors: 0 };
+  const stats = { scanned: 0, urlNormalized: 0, merged: 0, notesCleaned: 0, titlesCleaned: 0, tagsCleaned: 0, errors: 0 };
+  const dirtyScopes = new Set();
+  const markScopeDirty = (table, scopeId) => {
+    if (scopeId != null && scopeId !== '') dirtyScopes.add(`${table === 'links' ? 'community' : 'personal'}:${scopeId}`);
+  };
   const nameRe = await loadLinkNamePattern(env);
   const tables = [
     { name: 'links', scopeCol: 'community_id', cols: 'url, url_hash, title, notes, tags, created_at, upvotes, downvotes' },
@@ -11725,10 +11801,11 @@ async function structureDatabase(env, { onProgress = null } = {}) {
       } catch { stats.errors++; break; }
       if (!rows.length) break;
       cursor = rows[rows.length - 1].id;
-      for (const row of rows) {
+      for (let row of rows) {
         stats.scanned++;
         try {
-          const normUrl = stripTrackingParams(row.url);
+          const originalUrl = row.url;
+          const normUrl = canonicalStoredUrl(row.url);
           // Collision check on the normalized identity (unless this row already has it)
           if (normUrl && normUrl !== row.url) {
             const normHash = generateUrlHash(normUrl);
@@ -11737,45 +11814,53 @@ async function structureDatabase(env, { onProgress = null } = {}) {
               `SELECT id, url, title, notes, tags, upvotes, downvotes, created_at FROM ${t.name} WHERE ${t.scopeCol} = ? AND id != ? AND (url_hash = ? OR url_hash = ? OR url = ?) LIMIT 1`
             ).bind(row.scope_id, row.id, normHash, legacy, normUrl).first();
             if (dup) {
-              // Merge the newer row into the older one, delete the newer.
+              // Merge into the older row; the survivor is cleaned below like
+              // every other row, so merges never reintroduce junk tags and the
+              // survivor's own title/notes get cleaned too.
               const rowOlder = Number(row.created_at || 0) <= Number(dup.created_at || 0);
               const keep = rowOlder ? row : dup;
               const drop = rowOlder ? dup : row;
-              const newTags = mergeTagLists(dup.tags, row.tags);
-              await env.DB.prepare(
-                `UPDATE ${t.name} SET tags = ?, upvotes = COALESCE(upvotes,0) + COALESCE(?,0), downvotes = COALESCE(downvotes,0) + COALESCE(?,0), notes = CASE WHEN COALESCE(notes,'') = '' THEN ? ELSE notes END, title = CASE WHEN COALESCE(title,'') = '' THEN ? ELSE title END, url = ?, url_hash = ?, search_blob = NULL WHERE id = ?`
-              ).bind(JSON.stringify(newTags), rowOlder ? (dup.upvotes || 0) : (row.upvotes || 0), rowOlder ? (dup.downvotes || 0) : (row.downvotes || 0), cleanNotesText(rowOlder ? dup.notes : row.notes), cleanTitleText(rowOlder ? dup.title : row.title), stripTrackingParams(keep.url) || keep.url, generateUrlHash(stripTrackingParams(keep.url) || keep.url), keep.id).run();
+              const mergedTags = cleanTagsForStructure(
+                [...rowTagCandidates(dup), ...rowTagCandidates(row)],
+                keep.url, keep.title, keep.notes);
+              const keepUrl = canonicalStoredUrl(keep.url) || keep.url;
+              const keepTitle = cleanTitleText(keep.title)
+                || cleanTitleText(rowOlder ? dup.title : row.title);
+              const keepNotes = cleanAllNotes(keep.notes, keepUrl, keep.title, nameRe)
+                || cleanAllNotes(rowOlder ? dup.notes : row.notes, keepUrl, keep.title, nameRe);
+              // Delete first: the keeper takes the normalized hash, which the
+              // drop row still holds (unique index would reject the update).
               await env.DB.prepare(`DELETE FROM ${t.name} WHERE id = ?`).bind(drop.id).run();
+              await env.DB.prepare(
+                `UPDATE ${t.name} SET tags = ?, upvotes = COALESCE(upvotes,0) + COALESCE(?,0), downvotes = COALESCE(downvotes,0) + COALESCE(?,0), notes = ?, title = ?, url = ?, url_hash = ?, search_blob = NULL WHERE id = ?`
+              ).bind(JSON.stringify(mergedTags),
+                Number(rowOlder ? (dup.upvotes || 0) : (row.upvotes || 0)),
+                Number(rowOlder ? (dup.downvotes || 0) : (row.downvotes || 0)),
+                keepNotes, keepTitle, keepUrl, generateUrlHash(keepUrl), keep.id).run();
               stats.merged++;
-              if (rowOlder) {
-                // this row survived and absorbed the duplicate — fall through
-                // to normal cleaning with the merged values
-                row.url = stripTrackingParams(row.url) || row.url;
-                row.url_hash = generateUrlHash(row.url);
-                row.tags = JSON.stringify(newTags);
-              } else {
-                continue;
-              }
+              if (keepNotes !== String(keep.notes || '')) stats.notesCleaned++;
+              if (keepTitle !== String(keep.title || '').trim()) stats.titlesCleaned++;
+              markScopeDirty(t.name, row.scope_id);
+              row = { ...keep, url: keepUrl, url_hash: generateUrlHash(keepUrl), tags: JSON.stringify(mergedTags), notes: keepNotes, title: keepTitle };
+            } else {
+              row = { ...row, url: normUrl, url_hash: normHash };
+              stats.urlNormalized++;
             }
-            const upd = {
-              url: normUrl, url_hash: normHash,
-              title: cleanTitleText(row.title), notes: cleanNotesText(repairContaminatedNotes(row.notes, row.url, row.title, nameRe))
-            };
-            if (upd.title !== row.title) stats.titlesCleaned++;
-            if (upd.notes !== row.notes) stats.notesCleaned++;
-            await env.DB.prepare(`UPDATE ${t.name} SET url = ?, url_hash = ?, title = ?, notes = ?, search_blob = NULL WHERE id = ?`)
-              .bind(upd.url, upd.url_hash, upd.title, upd.notes, row.id).run();
-            stats.urlNormalized++;
-            continue;
           }
-          // Same URL: still clean notes/title
+          // Shared cleaning for survivors and untouched rows alike: titles,
+          // notes AND tags. search_blob resets so AI/search re-read the row;
+          // scopes are marked dirty so the index cannot serve stale rows.
           const updTitle = cleanTitleText(row.title);
-          const updNotes = cleanNotesText(repairContaminatedNotes(row.notes, row.url, row.title, nameRe));
-          if (updTitle !== row.title || updNotes !== row.notes) {
-            await env.DB.prepare(`UPDATE ${t.name} SET title = ?, notes = ?, search_blob = NULL WHERE id = ?`)
-              .bind(updTitle, updNotes, row.id).run();
+          const updNotes = cleanAllNotes(row.notes, row.url, row.title, nameRe);
+          const updTags = cleanTagsForStructure(rowTagCandidates(row), row.url, row.title, row.notes);
+          const tagsChanged = JSON.stringify(updTags) !== JSON.stringify(rawTagList(row.tags));
+          if (updTitle !== row.title || updNotes !== row.notes || tagsChanged || row.url !== originalUrl || row.url_hash !== generateUrlHash(row.url)) {
+            await env.DB.prepare(`UPDATE ${t.name} SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, search_blob = NULL WHERE id = ?`)
+              .bind(row.url, generateUrlHash(row.url), updTitle, updNotes, JSON.stringify(updTags), row.id).run();
             if (updTitle !== row.title) stats.titlesCleaned++;
             if (updNotes !== row.notes) stats.notesCleaned++;
+            if (tagsChanged) stats.tagsCleaned++;
+            markScopeDirty(t.name, row.scope_id);
           }
         } catch (e) { stats.errors++; logError('structure', 'row failed', e?.message || e); }
       }
@@ -11783,18 +11868,17 @@ async function structureDatabase(env, { onProgress = null } = {}) {
       if (onProgress) await onProgress(stats);
     }
   }
+  // Every changed scope is marked dirty so Meilisearch cannot keep serving
+  // merged-away rows or pre-cleanup text to /search and /ai.
+  for (const key of dirtyScopes) {
+    try {
+      const cut = key.indexOf(':');
+      markMeiliScopeDirty(env, key.slice(0, cut), key.slice(cut + 1));
+    } catch (_) {}
+  }
   return stats;
 }
 
-function mergeTagLists(a, b) {
-  const parse = (v) => { try { const x = typeof v === 'string' ? JSON.parse(v || '[]') : v; return Array.isArray(x) ? x : []; } catch (_) { return []; } };
-  const out = [];
-  for (const t of [...parse(a), ...parse(b)]) {
-    const tag = String(t || '').replace(/^#/, '').trim().toLowerCase().replace(/\s+/g, '-').slice(0, 40);
-    if (tag && !out.includes(tag)) out.push(tag);
-  }
-  return out;
-}
 
 /** Split SQL text into top-level statements (respects '...' literals with ''
  *  doubling and \x escapes; strips -- comments). */
@@ -12560,7 +12644,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   const dumpLinkMode = (binding?.dump_link_mode || 'smart').toLowerCase();
 
   const STAFF_OR_ABOVE = new Set([
-    '/delete', '/edit', '/topic', '/dumpall', '/dumpsmart', '/admin', '/demote', '/kick',
+    '/delete', '/edit', '/topic', '/dumpall', '/admin', '/demote', '/kick',
     '/personal', '/community', '/mode', '/community_verify', '/verify_community', '/communityverify',
     '/community_delete', '/delete_community', '/cdelete',
     // every /clear_db alias must be listed, or the alias skips this gate entirely
@@ -14133,8 +14217,8 @@ async function startCloneTargetAsk(env, ctx) {
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
-  // /dumpall on|off|status   /dumpsmart = off
-  if (cmd === '/dumpsmart' || cmd === '/dumpall') {
+  // /dumpall on|off|status (off = smart, the default)
+  if (cmd === '/dumpall') {
     if (!binding?.id) {
       await sendTelegramMessage(token, chatId, 'Link this chat first (Settings → Bot).', forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
@@ -14145,8 +14229,7 @@ async function startCloneTargetAsk(env, ctx) {
     }
     const arg = (rest.split(/\s+/)[0] || '').toLowerCase();
     let mode;
-    if (cmd === '/dumpsmart') mode = 'smart';
-    else if (['on', 'all', '1', 'true', 'yes'].includes(arg)) mode = 'all';
+    if (['on', 'all', '1', 'true', 'yes'].includes(arg)) mode = 'all';
     else if (['off', 'smart', '0', 'false', 'no'].includes(arg)) mode = 'smart';
     else if (!arg) {
       const cur = (binding.dump_link_mode || dumpLinkMode || 'smart').toLowerCase();
@@ -14183,63 +14266,93 @@ async function startCloneTargetAsk(env, ctx) {
   }
 
   // ---- mode switch: personal ↔ community (owner-controlled dual mode) ----
+  // ---- mode switch: personal ↔ community (per-chat dump/search/AI target) ----
+  // Dumps, /search and /ai all read binding.scope, so flipping the mode here
+  // moves everything at once. In a DM this needs no group: /mode community
+  // attaches one of your communities (by id/name, or your primary one).
   if (cmd === '/personal' || cmd === '/community' || cmd === '/mode') {
     if (!binding?.id) {
       await sendTelegramMessage(token, chatId, 'Chat not linked. Settings → Bot: token + chat ID. Groups: /community_verify first.', forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    if (cmd === '/personal') {
+    const modeArgs = rest.trim().split(/\s+/).filter(Boolean);
+    const showMode = async () => {
+      const scope = binding.scope || (binding.community_id ? 'community' : 'personal');
+      await sendTelegramFormatted(token, chatId,
+        `${boldHtml('Current mode:')} ${codeHtml(scope.toUpperCase())}` +
+        (binding.community_id ? `<br>${boldHtml('Community:')} ${escHtml(binding.group_name || binding.community_id)} ${codeHtml(binding.community_id)}` : '') +
+        `<br>Dumps, ${codeHtml('/search')} and ${codeHtml('/ai')} all use this brain here.` +
+        `<br>${codeHtml('/mode personal')} · ${codeHtml('/mode community [id or name]')}`, forumThreadId);
+    };
+    if (cmd === '/mode' && !modeArgs.length) {
+      await showMode();
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    // Attach (or confirm) a community for this chat: explicit id/name wins,
+    // else the already linked one, else the user's primary community.
+    const attachCommunity = async (query) => {
+      if (query && athenaUser) {
+        const c = await resolveCommunityByIdOrName(env, athenaUser.id, query);
+        if (!c) return { error: `Community not found: ${query}` };
+        if (binding.community_id !== c.id) {
+          await env.DB.prepare(
+            `UPDATE community_bots SET community_id = ?, group_name = COALESCE(?, group_name, ?) WHERE id = ?`
+          ).bind(c.id, c.name || null, c.id, binding.id).run();
+          binding.community_id = c.id;
+          if (c.name) binding.group_name = c.name;
+        }
+        return { communityId: c.id, name: c.name || c.id };
+      }
+      if (query && !athenaUser) return { error: 'Login with Telegram on the website first, then pick a community.' };
+      if (binding.community_id) return { communityId: binding.community_id, name: binding.group_name || binding.community_id };
+      if (athenaUser) {
+        const owned = await env.DB.prepare(
+          `SELECT id, name FROM communities WHERE creator_id = ? ORDER BY created_at DESC LIMIT 1`
+        ).bind(athenaUser.id).first().catch(() => null);
+        const member = owned || await env.DB.prepare(
+          `SELECT c.id, c.name FROM communities c INNER JOIN community_members m ON m.community_id = c.id
+           WHERE m.user_id = ? ORDER BY c.created_at DESC LIMIT 1`
+        ).bind(athenaUser.id).first().catch(() => null);
+        if (member) {
+          await env.DB.prepare(
+            `UPDATE community_bots SET community_id = ?, group_name = COALESCE(group_name, ?) WHERE id = ?`
+          ).bind(member.id, member.name || member.id, binding.id).run();
+          binding.community_id = member.id;
+          if (member.name) binding.group_name = member.name;
+          return { communityId: member.id, name: member.name || member.id };
+        }
+      }
+      return { error: 'No community on this chat yet.\nIn a group: bot owner runs /community_verify\nIn a DM: join a community on the website first, then /mode community.' };
+    };
+    let scope;
+    if (cmd === '/personal' || (cmd === '/mode' && (modeArgs[0] || '').toLowerCase() === 'personal')) {
       if (!isGod) {
         await sendTelegramMessage(token, chatId,
           'Personal mode is GOD rank only (instance host).\n/community_join <id> for community dumps.', forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
-    }
-    let scope = binding.scope || (binding.community_id ? 'community' : 'personal');
-    if (cmd === '/personal') scope = 'personal';
-    else if (cmd === '/community') {
-      if (!binding.community_id) {
-        // try first community of user (website-linked or previously verified)
-        if (athenaUser) {
-          const c = await env.DB.prepare(
-            `SELECT c.id, c.name FROM communities c
-             INNER JOIN community_members m ON m.community_id = c.id
-             WHERE m.user_id = ? ORDER BY c.created_at DESC LIMIT 1`
-          ).bind(athenaUser.id).first();
-          if (c) {
-            await env.DB.prepare(
-              `UPDATE community_bots SET community_id = ?, group_name = COALESCE(group_name, ?) WHERE id = ?`
-            ).bind(c.id, c.name, binding.id).run();
-            binding.community_id = c.id;
-          }
-        }
-        if (!binding.community_id) {
-          await sendTelegramMessage(token, chatId,
-            'No community on this chat yet.\nIn a group: bot owner runs /community_verify\nThen /community to dump into it.', forumThreadId);
-          return new Response('OK', { status: 200, headers: corsHeaders });
-        }
-      }
-      scope = 'community';
-    } else if (cmd === '/mode') {
-      const arg = (rest.split(/\s+/)[0] || '').toLowerCase();
-      if (arg === 'personal' || arg === 'community') {
-        if (arg === 'community' && !binding.community_id) {
-          await sendTelegramMessage(token, chatId, 'No community linked. /community_verify in a group first.', forumThreadId);
-          return new Response('OK', { status: 200, headers: corsHeaders });
-        }
-        scope = arg;
-      } else {
-        await sendTelegramFormatted(token, chatId,
-          `${boldHtml('Current dump mode:')} ${codeHtml(scope)}${binding.community_id ? `<br>${boldHtml('Community:')} ${escHtml(binding.group_name || binding.community_id)}` : ''}<br>${codeHtml('/personal')} or ${codeHtml('/community')} to switch.`, forumThreadId);
+      scope = 'personal';
+    } else if (cmd === '/community' || (cmd === '/mode' && (modeArgs[0] || '').toLowerCase() === 'community')) {
+      const query = (cmd === '/community' ? modeArgs : modeArgs.slice(1)).join(' ');
+      const attached = await attachCommunity(query);
+      if (attached.error) {
+        await sendTelegramMessage(token, chatId, attached.error, forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
+      scope = 'community';
+    } else {
+      await showMode();
+      return new Response('OK', { status: 200, headers: corsHeaders });
     }
     await env.DB.prepare(`UPDATE community_bots SET scope = ? WHERE id = ?`).bind(scope, binding.id).run();
     binding.scope = scope;
+    const brainName = scope === 'personal'
+      ? 'your personal brain'
+      : `the community brain${binding.group_name ? ` (${binding.group_name})` : ''} ${binding.community_id || ''}`.trim();
     await sendTelegramFormatted(token, chatId,
-      scope === 'personal'
-        ? `${boldHtml('Mode: PERSONAL 🧠')} Links you paste save to your personal brain. ${codeHtml('/search')} → personal.`
-        : `${boldHtml('Mode: COMMUNITY 👥')} Links save to the community brain${binding.group_name ? ` (${escHtml(binding.group_name)})` : ''}. Members can paste links. ${codeHtml('/search')} → community.`, forumThreadId);
+      `${boldHtml(scope === 'personal' ? 'Mode: PERSONAL 🧠' : 'Mode: COMMUNITY 👥')}` +
+      `<br>Links you paste save to ${escHtml(brainName)}. ${codeHtml('/search')} and ${codeHtml('/ai')} use the same brain here.` +
+      `<br>${codeHtml('/mode')} to inspect, ${codeHtml('/mode personal')} · ${codeHtml('/mode community [id or name]')} to switch.`, forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
@@ -14702,7 +14815,7 @@ Rules:
       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒 GOD rank only')}\n/structure cleans titles, notes and URLs across the whole database.`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    const statusMsg = await telegramApi(token, 'sendMessage', { chat_id: chatId, text: `${boldHtml('🧹 Structuring…')} scanning links, personal links and documents.`, parse_mode: 'HTML' }).catch(() => null);
+    const statusMsg = await telegramApi(token, 'sendMessage', { chat_id: chatId, text: `${boldHtml('🧹 Structuring…')} scanning community + personal links.`, parse_mode: 'HTML' }).catch(() => null);
     const statusId = statusMsg?.result?.message_id || null;
     runInBackground(env, (async () => {
       try {
@@ -14711,20 +14824,21 @@ Rules:
           const now = Date.now();
           if (statusId && now - lastEdit > 2500) {
             lastEdit = now;
-            await editJobProgress(token, chatId, statusId, `${boldHtml('🧹 Structuring…')} scanned ${st.scanned}, merged ${st.merged}, cleaned ${st.notesCleaned + st.titlesCleaned}`);
+            await editJobProgress(token, chatId, statusId, `${boldHtml('🧹 Structuring…')} scanned ${st.scanned}, merged ${st.merged}, cleaned notes ${st.notesCleaned} · titles ${st.titlesCleaned} · tags ${st.tagsCleaned}`);
           }
         }});
         const lines = [
           richHeading(3, '🧹 Structure pass complete'),
           '',
           richParagraph(`Scanned: <b>${stats.scanned}</b> rows<br>` +
-            `URLs normalized (tracking params stripped): <b>${stats.urlNormalized}</b><br>` +
+            `URLs normalized: <b>${stats.urlNormalized}</b><br>` +
             `Near-dupes merged: <b>${stats.merged}</b><br>` +
             `Notes cleaned: <b>${stats.notesCleaned}</b><br>` +
-            `Titles cleaned: <b>${stats.titlesCleaned}</b>` +
+            `Titles cleaned: <b>${stats.titlesCleaned}</b><br>` +
+            `Tags cleaned: <b>${stats.tagsCleaned}</b>` +
             (stats.errors ? `<br><i>errors: ${stats.errors}</i>` : '')),
           '',
-          richParagraph(`<i>Search index refreshes lazily on the next /search.</i>`),
+          richParagraph(`<i>Changed scopes are marked for search-index refresh; AI reads the cleaned rows on the next query.</i>`),
         ].join('\n');
         if (statusId) await telegramApi(token, 'deleteMessage', { chat_id: chatId, message_id: statusId }).catch(() => {});
         await sendTelegramRichMessage(token, chatId, lines, forumThreadId);
@@ -17665,6 +17779,8 @@ export {
   ECOSYSTEM_HOSTS,
   resolveSavedLink,
   retrieveAiRows,
+  structureDatabase,
+  cleanTagsForStructure,
   searchAllLinks,
   telegramSearchRowHtml,
   handleSearchLinks,

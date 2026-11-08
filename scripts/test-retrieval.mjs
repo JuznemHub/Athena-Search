@@ -38,6 +38,8 @@ import {
   resolveChatEndpoint,
   resolveSavedLink,
   resultLimitClause,
+  structureDatabase,
+  cleanTagsForStructure,
   searchAllLinks,
   parseStoredTags,
   normalizeTagList,
@@ -64,7 +66,9 @@ assert.equal(resolveChatEndpoint('https://api.anthropic.com', 'anthropic', 'clau
 assert.match(helpTextForSection('personal'), /<code>\/search<\/code>\s*<code>&lt;query&gt;<\/code>/);
 assert.match(helpTextForSection('community'), /<code>\/clear_db &lt;id&gt;<\/code>/);
 // Docs hygiene: same-purpose commands share one entry instead of two cryptic ones.
-assert.match(helpTextForSection('personal'), /dumpsmart[\s\S]*?dumpall on/);
+assert.match(helpTextForSection('personal'), /dumpall on[\s\S]*?dumpall off/);
+assert.doesNotMatch(helpTextForSection('personal'), /dumpsmart/, 'removed /dumpsmart stays out of help');
+assert.doesNotMatch(helpTextForSection('community'), /dumpsmart/, 'removed /dumpsmart stays out of the community panel');
 assert.match(helpTextForSection('community'), /<p><b>9\.[\s\S]*?\/kick[\s\S]*?<\/p>/);
 assert.doesNotMatch(helpTextForSection('community'), /<code>\/clear<\/code>/, 'removed /clear dupe stays out of help');
 assert.doesNotMatch(helpTextForSection('channels'), /<code>\/follow<\/code>|<code>\/backfill<\/code>/, 'removed legacy spellings stay out of help');
@@ -800,6 +804,61 @@ const tagTaxonomy = await import('../worker/tag-taxonomy.js');
   assert.equal(await resolveSavedLink(env, 'community', 'c_domain', 'something entirely different'), null, 'unrelated query resolves to nothing');
   assert.equal(await resolveSavedLink(env, 'community', 'c_other', 'namashkarbharat.com'), null, 'other brains never leak');
   assert.equal(await resolveSavedLink(env, 'community', 'c_domain', ''), null, 'empty query resolves to nothing');
+}
+
+{
+  // /structure: merges tracking-param dupes, drops junk tags, folds
+  // hashtag-only notes into tags, keeps curated tags, resets search blobs.
+  const sqlite = new DatabaseSync(':memory:');
+  sqlite.exec(fs.readFileSync(new URL('../worker/schema.sql', import.meta.url), 'utf8')
+    .replace(/^CREATE EXTENSION[^;]*;/gm, '').replace(/^CREATE INDEX[^;]*USING gin[^;]*;/gm, ''));
+  const DB = {
+    prepare(sql) {
+      const statement = (params = []) => ({
+        bind(...values) { return statement(values.map(value => value ?? null)); },
+        async run() { const result = sqlite.prepare(sql).run(...params); return { success: true, meta: { changes: Number(result.changes) } }; },
+        async first(column) { const row = sqlite.prepare(sql).get(...params); return row ? (column ? row[column] : row) : null; },
+        async all() { return { results: sqlite.prepare(sql).all(...params) }; }
+      });
+      return statement();
+    }
+  };
+  const env = { DB };
+  sqlite.prepare('INSERT INTO users (id,username,created_at) VALUES (?,?,?)').run('u9', 'u9', 1);
+  sqlite.prepare('INSERT INTO communities (id,name,creator_id,created_at) VALUES (?,?,?,?)').run('c_struct', 'Struct', 'u9', 1);
+  const ins = sqlite.prepare(`INSERT INTO links (id,community_id,url,url_hash,title,notes,tags,added_by,created_at)
+    VALUES (?,?,?,?,?,?,?,?,?)`);
+  ins.run('s_a', 'c_struct', 'https://www.example.com/page?utm_source=x&gclid=y', generateUrlHash('https://www.example.com/page?utm_source=x&gclid=y'),
+    'Example Page', '#gov #news', '["backfill","telegram","cool","my-topic"]', 'u9', 10);
+  ins.run('s_b', 'c_struct', 'https://example.com/page', generateUrlHash('https://example.com/page'),
+    'Example Page', 'A useful guide.', '["guide"]', 'u9', 20);
+  ins.run('s_c', 'c_struct', 'https://example.org/other', generateUrlHash('https://example.org/other'),
+    'Other', 'plain note', '["website","free"]', 'u9', 30);
+  ins.run('s_d', 'c_struct', 'https://www.example.net/a?utm_source=x&fbclid=y', generateUrlHash('https://www.example.net/a?utm_source=x&fbclid=y'),
+    'Net Page', 'net notes', '["tool"]', 'u9', 40);
+  const stats = await structureDatabase(env, {});
+  assert.ok(stats.merged >= 1, 'tracking-param dupe merged');
+  assert.ok(stats.tagsCleaned >= 1, 'junk tags cleaned');
+  assert.ok(stats.notesCleaned >= 1, 'hashtag-only notes blanked');
+  assert.ok(stats.urlNormalized >= 1, 'urls canonicalized');
+  const left = sqlite.prepare('SELECT id, url, title, notes, tags, search_blob FROM links ORDER BY id').all();
+  assert.equal(left.length, 3, 'dupe deleted, rest kept');
+  const canon = left.find((r) => r.id === 's_d');
+  assert.equal(canon.url, 'https://example.net/a', 'tracking params + www folded to canonical spelling');
+  const kept = left.find((r) => r.url === 'https://example.com/page');
+  assert.ok(kept, 'canonical url kept');
+  assert.equal(kept.search_blob, null, 'search blob reset for AI/search re-read');
+  const tags = JSON.parse(kept.tags);
+  for (const junk of ['backfill', 'telegram', 'cool']) assert.ok(!tags.includes(junk), `junk tag dropped: ${junk}`);
+  for (const good of ['guide', 'my-topic', 'gov', 'news']) assert.ok(tags.includes(good), `signal kept: ${good}`);
+  assert.equal(kept.notes, 'A useful guide.', 'survivor notes preserved, hashtag noise gone');
+  const other = left.find((r) => r.id === 's_c');
+  assert.deepEqual(JSON.parse(other.tags), ['website'], 'generic fluff dropped, type tag kept');
+  // Unit checks on the cleaner itself.
+  assert.deepEqual(
+    cleanTagsForStructure(['Telegram', 'BACKFILL', 'Cool', 'opendesk', 'my-topic'], 'https://example.com/x', 'Example Tool', ''),
+    ['opendesk', 'my-topic'],
+    'junk/fluff/name dropped, curated kept');
 }
 
 console.log('retrieval tests passed');
