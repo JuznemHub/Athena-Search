@@ -50,7 +50,9 @@ import {
   telegramEntityMarkdown,
   telegramRichMarkdown,
   telegramRichNotesForSave,
-  telegramSearchRowHtml
+  telegramSearchRowHtml,
+  searchRowButtons,
+  stripInlineHashtags
 } from '../worker/index.js';
 
 assert.equal(resultLimitClause(null), '');
@@ -1007,3 +1009,23 @@ console.log('retrieval tests passed');
 }
 
 console.log('clone attribution tests passed');
+
+{
+  // Section-wise structure: inline #tags leave prose (word kept, # dropped),
+  // search rows render the 4 website sections, buttons stay Esquema-small.
+  assert.equal(stripInlineHashtags('A great tool #ai #open-source!'), 'A great tool ai open-source!', 'inline tags stripped to words');
+  assert.equal(stripInlineHashtags('plain prose, no tags'), 'plain prose, no tags', 'tagless prose untouched');
+  const html = telegramSearchRowHtml({ title: 'Demo', url: 'https://example.com/x', notes: 'A great tool', tags: JSON.stringify(['ai']) }, '');
+  assert.match(html, /URL:/, 'search row has URL section');
+  assert.match(html, /Description:/, 'search row has Description section');
+  assert.match(html, /Tags:/, 'search row has Tags section');
+  const empty = telegramSearchRowHtml({ title: '', url: 'https://example.com/y', notes: '', tags: '[]' }, '');
+  assert.match(empty, /no description/, 'empty description hint shown');
+  assert.match(empty, /untagged/, 'untagged hint shown');
+  const btnHtml = searchRowButtons('ts_abc123', 0);
+  assert.match(btnHtml, /search:edit:ts_abc123:0/, 'edit callback wired');
+  assert.match(btnHtml, /search:del:ts_abc123:0/, 'delete callback wired');
+  assert.ok('search:del:ts_abc123:0'.length <= 64, 'callback data fits Telegram limit');
+}
+
+console.log('section layout tests passed');

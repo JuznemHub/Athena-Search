@@ -6314,6 +6314,26 @@ async function ensureTelegramSearchTable(env) {
   ).run();
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_tg_search_sessions_expiry ON telegram_search_sessions(expires_at)').run().catch(() => {});
   await env.DB.prepare('DELETE FROM telegram_search_sessions WHERE expires_at < ?').bind(Date.now()).run().catch(() => {});
+  await env.DB.prepare('ALTER TABLE telegram_search_sessions ADD COLUMN hit_ids TEXT').run().catch(() => {});
+}
+
+/** Resolve one search page hit for Edit/Delete callbacks (by stored id,
+ *  falling back to the URL). Returns the live DB row or null. */
+async function resolveSearchHit(env, session, idx) {
+  let ids;
+  try { ids = JSON.parse(session.hit_ids || '[]') || []; } catch (_) { ids = []; }
+  const ref = ids[Number(idx)];
+  if (!ref) return null;
+  const table = session.scope === 'personal' ? 'personal_links' : 'links';
+  const col = session.scope === 'personal' ? 'user_id' : 'community_id';
+  try {
+    if (ref.id) {
+      const row = await env.DB.prepare(`SELECT * FROM ${table} WHERE id = ? AND ${col} = ?`).bind(ref.id, session.scope_key).first();
+      if (row) return row;
+    }
+    if (ref.url) return await findExistingLink(env, table, col, session.scope_key, ref.url);
+  } catch (_) {}
+  return null;
 }
 
 function searchRichButtonRow(sessionId, page, total) {
@@ -6325,12 +6345,22 @@ function searchRichButtonRow(sessionId, page, total) {
   return richButtonRow(nav);
 }
 
-function richSearchRowHtml(row, botUsername = '') {
+function richSearchRowHtml(row, botUsername = '', buttonsHtml = '') {
   const inner = telegramSearchRowHtml(row, botUsername).replace(/\n/g, '<br>');
-  return '<li>' + inner + '</li>';
+  return '<li>' + inner + (buttonsHtml ? '<br>' + buttonsHtml : '') + '</li>';
+}
+
+/** Per-result Edit/Delete buttons (in-body, like the website card actions).
+ *  Callback data stays under the 64-byte limit: search:{edit,del}:id:idx. */
+function searchRowButtons(sessionId, idx) {
+  return richButtonRow([
+    { label: '✏️ Edit', data: `search:edit:${sessionId}:${idx}` },
+    { label: '🗑 Delete', data: `search:del:${sessionId}:${idx}` },
+  ]);
 }
 
 function telegramSearchRowHtml(row, botUsername = '') {
+  // Website card layout: Title / URL / Description / Tags — same 4 sections.
   const title = (row.title && !/^link from telegram/i.test(row.title))
     ? row.title
     : titleFromUrl(row.url || row.filename || '');
@@ -6338,13 +6368,18 @@ function telegramSearchRowHtml(row, botUsername = '') {
   const bits = [`${prefix} <b>${linkifyHashtagsHtml(escHtml(title || 'Untitled'), botUsername)}</b>`];
   if (row.url) {
     const displayUrl = String(row.url).length > 220 ? `${String(row.url).slice(0, 220)}…` : row.url;
-    bits.push(linkHtml(row.url, displayUrl));
+    bits.push(boldHtml('URL:') + ' ' + linkHtml(row.url, displayUrl));
   }
-  else bits.push(italicHtml(`(${row.filename || 'document'})`));
+  else bits.push(boldHtml('URL:') + ' ' + italicHtml(`(${row.filename || 'document'})`));
+  const descRaw = String(row.notes || row.content || '').trim();
+  const desc = descRaw ? linkifyHashtagsHtml(escHtml(descRaw.slice(0, 600)), botUsername) : italicHtml('(no description — /structure fills this)');
+  bits.push(boldHtml('Description:') + ' ' + desc);
   let tags = row.tags;
   try { tags = typeof tags === 'string' ? JSON.parse(tags || '[]') : (tags || []); } catch (_) { tags = []; }
   if (Array.isArray(tags) && tags.length) {
     bits.push(boldHtml('Tags:') + ' ' + tags.slice(0, 8).map(t => tagLinkHtmlSync(String(t).toLowerCase(), botUsername)).filter(Boolean).join(' '));
+  } else {
+    bits.push(boldHtml('Tags:') + ' ' + italicHtml('(untagged — /forcetags adds these)'));
   }
   if (row.source_posts?.length) {
     for (const post of row.source_posts) {
@@ -6352,9 +6387,6 @@ function telegramSearchRowHtml(row, botUsername = '') {
       bits.push(post.source_url ? linkHtml(post.source_url, origin) : escHtml(origin));
       bits.push(telegramSourcePostHtml(post));
     }
-  } else {
-    const notes = String(row.notes || row.content || '');
-    if (notes) bits.push(linkifyHashtagsHtml(escHtml(notes), botUsername));
   }
   return bits.join('\n');
 }
@@ -6449,8 +6481,17 @@ async function getTelegramSearchPage(env, session) {
   const label = session.scope === 'personal' ? 'Personal' : 'Community';
   const header = richHeading(3, `🔍 ${label} Search · ${start}–${end} of ${total}`);
   const botUsername = await tagDeeplinkBotUsername(env);
+  // Remember this page's hit ids so Edit/Delete callbacks resolve the exact
+  // row even if the ranking shifts between taps.
+  try {
+    await env.DB.prepare('ALTER TABLE telegram_search_sessions ADD COLUMN hit_ids TEXT').run().catch(() => {});
+  } catch (_) {}
+  const hitIds = (hits || []).map((h) => ({ id: h.id || null, url: h.url || null }));
+  try {
+    await env.DB.prepare('UPDATE telegram_search_sessions SET hit_ids = ? WHERE id = ?').bind(JSON.stringify(hitIds), session.id).run().catch(() => {});
+  } catch (_) {}
   const html = hits.length
-    ? `${header}\n<p><i>${escHtml(session.query)}</i></p>\n<ol>${hits.map(r => richSearchRowHtml(r, botUsername)).join('')}</ol>`
+    ? `${header}\n<p><i>${escHtml(session.query)}</i></p>\n<ol>${hits.map((r, i) => richSearchRowHtml(r, botUsername, searchRowButtons(session.id, i))).join('')}</ol>`
     : `${header}\n<p>${escHtml(session.query ? 'No matching saved items.' : 'Enter a search query.')}</p>`;
   // Thin cloned rows upgrade in the background, same as website search —
   // bot-found links get their descriptions and AI tags too.
@@ -8297,8 +8338,8 @@ function helpTextForSection(section, isGod = false) {
       cmd(2, `${codeHtml('/dumpall on|off')}`, 'One dump-mode setting: on saves every URL, off keeps the primary link only (smart, the default). Channel cloning lives in 📡 Channels.'),
       spacer,
       richParagraph('<b>Tagging & structure</b>'),
-      cmd(3, `${codeHtml('/forcetags [community_id]')} ${codeHtml('[all]')}`, 'Run a retag review of one brain. Defaults to this chat\u2019s current brain (see /mode); pass an id to review a different one, add all to sweep in the background. Then pick community or personal brain. One batch is 150 links. Scrapes a real description, writes tags from the controlled vocabulary, and skips links you edited by hand (/edit or the website).'),
-      cmd(5, `${codeHtml('/structure')} ${codeHtml('[all]')}`, 'One-pass cleanup of this chat\u2019s brain (see /mode): canonicalizes URLs, merges near-duplicates, cleans titles/notes/tags and drops junk tags without touching curated ones. Add all for every brain. Runs in the background with live progress.'),
+      cmd(3, `${codeHtml('/forcetags [community_id]')} ${codeHtml('[all]')}`, 'Run a retag review of one brain. Defaults to this chat\u2019s current brain (see /mode); pass an id to review a different one, add all to sweep in the background. Then pick community or personal brain. One batch is 150 links. Writes the tags column only from the controlled vocabulary, and skips links you edited by hand (/edit or the website).'),
+      cmd(5, `${codeHtml('/structure')} ${codeHtml('[all]')}`, 'One-pass cleanup of this chat\u2019s brain (see /mode): canonicalizes URLs, merges near-duplicates, structures every row into Title/URL/Description/Tags, moves inline #tags from descriptions into tags, fills empty descriptions via scrape (AI when configured) and drops junk tags without touching curated ones. Add all for every brain. Runs in the background with live progress.'),
       spacer,
       richParagraph('<b>Backup & import</b>'),
       cmd(6, codeHtml('/backup'), 'Full database backup (SQL, gzipped) sent to this chat.'),
@@ -8642,7 +8683,7 @@ async function runForcetagsReview(env, { token, chatId, forumThreadId = null, tg
   };
 
   const st = {
-    done: 0, changed: 0, failed: 0, aiHits: 0, ruleHits: 0, descAdded: 0,
+    done: 0, changed: 0, failed: 0, aiHits: 0, ruleHits: 0,
     addedCounts: {}, removedCounts: {}, rejectCounts: {}, changeLines: [], failLines: [],
   };
   const editProgress = async (total) => {
@@ -8652,7 +8693,7 @@ async function runForcetagsReview(env, { token, chatId, forumThreadId = null, tg
       : codeHtml(`${st.done} reviewed`);
     await telegramApi(token, 'editMessageText', {
       chat_id: chatId, message_id: thinkId, parse_mode: 'HTML',
-      text: `${boldHtml('🏷 Force tags')}${wantAll ? ' (sweeping all)' : ''}\n${bar}\nchanged ${st.changed} · AI ${st.aiHits} · rules ${st.ruleHits} · desc ${st.descAdded}`
+      text: `${boldHtml('🏷 Force tags')}${wantAll ? ' (sweeping all)' : ''}\n${bar}\nchanged ${st.changed} · AI ${st.aiHits} · rules ${st.ruleHits} · tags-only`
     }).catch(() => {});
   };
 
@@ -8680,7 +8721,7 @@ async function runForcetagsReview(env, { token, chatId, forumThreadId = null, tg
         // survive the same whitelist: junk stamps, fluff, names and invented
         // words all fall away here.
         const verdict = validateTags([...result.tags, ...current], {
-          banned: nameBansFor(r.url, result.title || oldTitle),
+          banned: nameBansFor(r.url, oldTitle),
           allowedBrands: result.facts?.brands || [],
           max: 8,
         });
@@ -8700,29 +8741,21 @@ async function runForcetagsReview(env, { token, chatId, forumThreadId = null, tg
         newTags = [...new Set(newTags)].slice(0, 8);
         if (!newTags.length) newTags = ['website'];
 
-        const title = String(result.title || oldTitle || '').slice(0, 300);
-        // Only fill a weak/empty caption; real post text is never clobbered.
-        const notes = (!isDetailedNotes(oldNotes) && result.description)
-          ? String(result.description).slice(0, 600)
-          : oldNotes;
-        const descAdded = !isDetailedNotes(oldNotes) && notes && notes !== oldNotes;
-
+        // Tags-column only: title/notes stay exactly as the user left them.
         const added = newTags.filter((x) => !current.includes(x));
         const removed = current.filter((x) => !newTags.includes(x));
-        const metaRescued = title !== oldTitle || notes !== oldNotes;
-        if (added.length || removed.length || metaRescued) {
+        if (added.length || removed.length) {
           await env.DB.prepare(
-            `UPDATE ${t.table} SET tags = ?, title = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
-          ).bind(JSON.stringify(newTags), title, notes, r.id).run();
+            `UPDATE ${t.table} SET tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
+          ).bind(JSON.stringify(newTags), r.id).run();
           markMeiliScopeDirty(env, personal ? 'personal' : 'community', t.col);
           st.changed++;
-          if (descAdded) st.descAdded++;
           for (const a of added) st.addedCounts[a] = (st.addedCounts[a] || 0) + 1;
           for (const x of removed) st.removedCounts[x] = (st.removedCounts[x] || 0) + 1;
           if (st.changeLines.length < 40) {
+            const label = String(oldTitle || r.url || 'link').slice(0, 70);
             const bits = [...added.map((a) => `+${a}`), ...removed.map((x) => `−${x}`)].join(' ');
-            const tail = descAdded && !added.length && !removed.length ? ' (description added)' : '';
-            st.changeLines.push(`<li><b>${escHtml((title || r.url || 'link').slice(0, 70))}</b> ${escHtml(bits)}${tail}</li>`);
+            st.changeLines.push(`<li><b>${escHtml(label)}</b> ${escHtml(bits)}</li>`);
           }
         }
       } catch (e) {
@@ -8743,7 +8776,7 @@ async function runForcetagsReview(env, { token, chatId, forumThreadId = null, tg
       richHeading(3, '🏷 Force tags — report'),
       `<p>Mode: ${aiMode ? 'AI + facts' : 'rules (no AI key)'} · Scope: ${scopeLabel}${scopeSuffix}</p>`,
       `<p>Reviewed ${st.done} · Changed ${st.changed} · Unchanged ${st.done - st.changed}</p>`,
-      `<p>AI ${st.aiHits} · rules ${st.ruleHits} · descriptions added ${st.descAdded} · manual edits skipped ${manualSkipped}</p>`,
+      `<p>AI ${st.aiHits} · rules ${st.ruleHits} · tags column only · manual edits skipped ${manualSkipped}</p>`,
       `<p>Tags added: ${totalAdded}${top(st.addedCounts) ? ` (${top(st.addedCounts)})` : ''} · Removed: ${totalRemoved}${top(st.removedCounts) ? ` (${top(st.removedCounts)})` : ''}</p>`,
       rejected.length ? `<p>Rejected ${rejected.reduce((a, [, n]) => a + n, 0)}: ${rejected.map(([reason, n]) => `${escHtml(reason)} ${n}`).join(' · ')}</p>` : '',
       st.changeLines.length ? `<ul>${st.changeLines.join('')}</ul>` : '<p>No tag changes needed — everything already fits.</p>',
@@ -8870,6 +8903,62 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
         await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Join the community to continue searching', show_alert: true }).catch(() => {});
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
+    }
+    // ---- Per-result Edit / Delete (same DB rows the website edits) ----
+    if (action === 'edit' || action === 'del') {
+      const parts = data.split(':');
+      const idx = Number(parts[3]);
+      const hit = await resolveSearchHit(env, session, idx);
+      if (!hit) {
+        await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'That result is gone — refresh the search', show_alert: true }).catch(() => {});
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      if (session.scope === 'personal') {
+        if (!isGodTgId(tgUserId, env)) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Personal edit is GOD-only', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+      } else {
+        const staff = callbackUser && ((await isElevatedUser(callbackUser, env)) || isInstanceOwnerTgId(tgUserId, env) || await isTgUserCommunityStaff(env, session.scope_key, tgUserId, callbackUser));
+        if (!staff) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Only owner/admins can edit or delete', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+      }
+      if (action === 'del') {
+        try {
+          if (session.scope === 'personal') {
+            await env.DB.prepare('DELETE FROM personal_links WHERE id = ?').bind(hit.id).run();
+          } else {
+            await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(hit.id).run().catch(() => {});
+            await env.DB.prepare('DELETE FROM link_votes WHERE link_id = ?').bind(hit.id).run().catch(() => {});
+          }
+          markMeiliScopeDirty(env, session.scope, session.scope_key);
+        } catch (_) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Delete failed', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Deleted from the database' }).catch(() => {});
+        try { session.hit_ids = null; } catch (_) {}
+        const view = await getTelegramSearchPage(env, session);
+        await editTelegramRichMessage(token, chatId, msgId, view.html, threadId, searchRichButtonRow(session.id, view.page, view.total));
+        await env.DB.prepare('UPDATE telegram_search_sessions SET page = ? WHERE id = ?').bind(view.page, session.id).run().catch(() => {});
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      // Edit: send the 4 website sections prefilled; reply to that message
+      // with `/edit | title: … | notes: …` to write back to the same DB row.
+      await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
+      let tags = hit.tags;
+      try { tags = typeof tags === 'string' ? JSON.parse(tags || '[]') : (tags || []); } catch (_) { tags = []; }
+      const editHelp = [
+        richHeading(3, '✏️ Edit link'),
+        richParagraph(`<b>${escHtml(hit.title || hit.url || 'Untitled')}</b>`),
+        richParagraph(`${boldHtml('Title:')} ${escHtml(hit.title || '(empty)')}<br>${boldHtml('URL:')} ${escHtml(hit.url || '(none)')}<br>${boldHtml('Description:')} ${escHtml(String(hit.notes || '(empty)').slice(0, 500))}<br>${boldHtml('Tags:')} ${escHtml(Array.isArray(tags) && tags.length ? tags.map((t) => '#' + t).join(' ') : '(untagged)')}`),
+        richParagraph(`Reply to THIS message with:<br>${codeHtml(`/edit | title: New Title | notes: New description`)}<br><i>It edits the same database row the website shows — /structure will not touch it afterwards (manual lock).</i>`),
+        richParagraph(`${boldHtml('Link:')} ${escHtml(hit.url || hit.id)}`),
+      ].join('\n');
+      await sendTelegramRichMessage(token, chatId, editHelp, threadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
     }
     const currentPage = Number(session.page || 0);
     session.page = action === 'prev' ? Math.max(0, currentPage - 1) : currentPage + 1;
@@ -11745,17 +11834,24 @@ async function saveBackfillLink(env, job, sink, message, url) {
     if (!duplicate) throw error;
     return { duplicate: true, id: duplicate.id };
   }
-  // Deterministic tags now; metadata_version stays 0 so a later search can
-  // upgrade the row with the model. Caption hashtags are kept as curated
-  // tags (cleaned, never stamped) — a post that already describes itself
-  // with #topics needs no generated replacements for those words.
+  // Section-wise save: Title / URL / Description(notes) / Tags.
+  // The post text is the description; when it is empty or a hashtag stub,
+  // scrape the page (AI when configured) so no cloned row stays untitled
+  // or undescribed. Caption hashtags are kept as curated tags.
   try {
-    const tagged = await describeAndTagLink(env, url, { title: titleFromUrl(url), notes: noteText }, { config: null, maxTags: 8 });
+    const seedTitle = titleFromUrl(url);
+    const seedNotes = cleanAllNotes(noteText, url, seedTitle, await loadLinkNamePattern(env).catch(() => null));
+    const tagged = await describeAndTagLink(env, url, { title: seedTitle, notes: seedNotes || noteText }, { config: null, maxTags: 8, scrape: true });
     const finalTags = mergePipelineTags({
       manual: normalizeTagList(extractHashtags(noteText)),
-      generated: tagged.tags, facts: tagged.facts, rawUrl: url, title: titleFromUrl(url),
+      generated: tagged.tags, facts: tagged.facts, rawUrl: url, title: seedTitle,
     });
-    await env.DB.prepare(`UPDATE ${table} SET tags = ? WHERE id = ?`).bind(JSON.stringify(finalTags), id).run();
+    let finalTitle = seedTitle;
+    if (isWeakTitle(finalTitle, url) && tagged.title && !isWeakTitle(tagged.title, url)) finalTitle = String(tagged.title).slice(0, 200);
+    let finalNotes = seedNotes || noteText;
+    if ((!finalNotes || !isDetailedNotes(finalNotes)) && tagged.description) finalNotes = String(tagged.description).slice(0, 600);
+    finalNotes = String(finalNotes || '').replace(/\s+/g, ' ').trim().slice(0, 600);
+    await env.DB.prepare(`UPDATE ${table} SET title = ?, notes = ?, tags = ? WHERE id = ?`).bind(finalTitle, finalNotes, JSON.stringify(finalTags), id).run();
   } catch (_) {}
   markMeiliScopeDirty(env, sink, key);
   return { saved: id };
@@ -12217,15 +12313,22 @@ function isHashtagOnlyNotes(notes) {
   return rest.length === 0;
 }
 
-/** Tag candidates for one row: stored tags plus hashtag-only-note words. */
+/** Tag candidates for one row: stored tags plus any #hashtags written inside
+ *  notes. Inline tags belong in the tags column, not in prose. */
 function rowTagCandidates(row) {
   const out = rawTagList(row.tags);
   try {
-    if (row.notes && isHashtagOnlyNotes(row.notes)) {
-      for (const h of extractHashtags(row.notes)) out.push(h);
-    }
+    for (const h of extractHashtags(row.notes)) if (!out.includes(h)) out.push(h);
   } catch (_) {}
   return out;
+}
+
+/** Strip inline #tags from prose (keep the word, drop the #) so the
+ *  description reads clean and the tag lives in the tags column only. */
+function stripInlineHashtags(notes) {
+  const s = String(notes || '');
+  if (!s.includes('#')) return s;
+  return s.replace(/#([\w-]{1,40})/g, '$1');
 }
 
 /**
@@ -12254,11 +12357,13 @@ function cleanTagsForStructure(rawTags, rawUrl, title, notes) {
 }
 
 /** Shared notes cleaning for structure: hashtag-only captions collapse to
- *  '' (their words move to tags), cross-link contamination is repaired. */
+ *  '' (their words move to tags), inline #tags are stripped to plain words,
+ *  cross-link contamination is repaired. */
 function cleanAllNotes(notes, url, title, nameRe) {
   if (!String(notes || '').trim()) return '';
   if (isHashtagOnlyNotes(notes)) return '';
-  return cleanNotesText(repairContaminatedNotes(notes, url, title, nameRe));
+  const stripped = stripInlineHashtags(notes);
+  return cleanNotesText(repairContaminatedNotes(stripped, url, title, nameRe));
 }
 
 /** Canonical stored-URL spelling: tracking params gone, www/host casing
@@ -12269,12 +12374,13 @@ function canonicalStoredUrl(urlStr) {
 }
 
 async function structureDatabase(env, { onProgress = null, scope = null, scopeId = null } = {}) {
-  const stats = { scanned: 0, urlNormalized: 0, merged: 0, notesCleaned: 0, titlesCleaned: 0, tagsCleaned: 0, errors: 0 };
+  const stats = { scanned: 0, urlNormalized: 0, merged: 0, notesCleaned: 0, titlesCleaned: 0, tagsCleaned: 0, descFilled: 0, errors: 0 };
   const dirtyScopes = new Set();
   const markScopeDirty = (table, rowScopeId) => {
     if (rowScopeId != null && rowScopeId !== '') dirtyScopes.add(`${table === 'links' ? 'community' : 'personal'}:${rowScopeId}`);
   };
   const nameRe = await loadLinkNamePattern(env);
+  const aiCfg = await getInstanceAiConfig(env).catch(() => null);
   const tables = [
     { name: 'links', scopeCol: 'community_id', cols: 'url, url_hash, title, notes, tags, created_at, upvotes, downvotes', want: !scope || scope === 'community' },
     { name: 'personal_links', scopeCol: 'user_id', cols: 'url, url_hash, title, notes, tags, created_at, 0 AS upvotes, 0 AS downvotes', want: !scope || scope === 'personal' }
@@ -12349,12 +12455,26 @@ async function structureDatabase(env, { onProgress = null, scope = null, scopeId
             }
           }
           // Shared cleaning for survivors and untouched rows alike: titles,
-          // notes AND tags. search_blob resets so AI/search re-read the row;
-          // scopes are marked dirty so the index cannot serve stale rows.
+          // notes AND tags. Empty descriptions are filled by scraping the
+          // link (AI polishes when a key is configured). search_blob resets
+          // so AI/search re-read the row; scopes are marked dirty so the
+          // index cannot serve stale rows.
           const updTitle = cleanTitleText(row.title);
-          const updNotes = cleanAllNotes(row.notes, row.url, row.title, nameRe);
+          let updNotes = cleanAllNotes(row.notes, row.url, row.title, nameRe);
           const updTags = cleanTagsForStructure(rowTagCandidates(row), row.url, row.title, row.notes);
           const tagsChanged = JSON.stringify(updTags) !== JSON.stringify(rawTagList(row.tags));
+          if (!updNotes) {
+            try {
+              const filled = await describeAndTagLink(env, row.url,
+                { title: updTitle || row.title || '', notes: '', content: '' },
+                { config: aiCfg, maxTags: 8, scrape: true });
+              const desc = String(filled?.description || '').replace(/\s+/g, ' ').trim().slice(0, 600);
+              if (desc) {
+                updNotes = cleanAllNotes(desc, row.url, updTitle || row.title, nameRe) || desc.slice(0, 600);
+                if (updNotes && updNotes !== row.notes) stats.descFilled++;
+              }
+            } catch (_) {}
+          }
           if (updTitle !== row.title || updNotes !== row.notes || tagsChanged || row.url !== originalUrl || row.url_hash !== generateUrlHash(row.url)) {
             await env.DB.prepare(`UPDATE ${t.name} SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, search_blob = NULL WHERE id = ?`)
               .bind(row.url, generateUrlHash(row.url), updTitle, updNotes, JSON.stringify(updTags), row.id).run();
@@ -15376,7 +15496,7 @@ Rules:
           const now = Date.now();
           if (statusId && now - lastEdit > 2500) {
             lastEdit = now;
-            await editJobProgress(token, chatId, statusId, `${boldHtml('🧹 Structuring…')} scanned ${st.scanned}, merged ${st.merged}, cleaned notes ${st.notesCleaned} · titles ${st.titlesCleaned} · tags ${st.tagsCleaned}`);
+            await editJobProgress(token, chatId, statusId, `${boldHtml('🧹 Structuring…')} scanned ${st.scanned}, merged ${st.merged}, cleaned notes ${st.notesCleaned} · titles ${st.titlesCleaned} · tags ${st.tagsCleaned} · filled ${st.descFilled || 0}`);
           }
         }});
         const lines = [
@@ -15388,7 +15508,8 @@ Rules:
             `Near-dupes merged: <b>${stats.merged}</b><br>` +
             `Notes cleaned: <b>${stats.notesCleaned}</b><br>` +
             `Titles cleaned: <b>${stats.titlesCleaned}</b><br>` +
-            `Tags cleaned: <b>${stats.tagsCleaned}</b>` +
+            `Tags cleaned: <b>${stats.tagsCleaned}</b><br>` +
+            `Descriptions filled: <b>${stats.descFilled || 0}</b>` +
             (stats.errors ? `<br><i>errors: ${stats.errors}</i>` : '')),
           '',
           richParagraph(`<i>Changed scopes are marked for search-index refresh; AI reads the cleaned rows on the next query. Run ${codeHtml('/structure all')} for every brain.</i>`),
@@ -18440,6 +18561,9 @@ export {
   classifyCloneMessage,
   searchAllLinks,
   telegramSearchRowHtml,
+  searchRowButtons,
+  resolveSearchHit,
+  stripInlineHashtags,
   handleSearchLinks,
   generateUrlHash,
   ensureUcloneTables,

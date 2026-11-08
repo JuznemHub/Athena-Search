@@ -1645,6 +1645,9 @@ document.addEventListener('DOMContentLoaded', () => {
         <button type="button" class="edit-link-btn" data-id="${escapeHtml(item.id)}" title="Edit" aria-label="Edit">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
         </button>
+        <button type="button" class="del-link-btn" data-id="${escapeHtml(item.id)}" title="Delete from database" aria-label="Delete">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+        </button>
         <div class="edit-panel hidden" data-edit-for="${escapeHtml(item.id)}">
           <label>Title</label>
           <input type="text" class="edit-title" value="${escapeHtml(item.title || '')}" />
@@ -1657,6 +1660,7 @@ document.addEventListener('DOMContentLoaded', () => {
           <div class="edit-panel-actions">
             <button type="button" class="btn btn-primary btn-sm edit-save">Save</button>
             <button type="button" class="btn btn-secondary btn-sm edit-cancel">Cancel</button>
+            <button type="button" class="btn btn-sm edit-delete">Delete</button>
           </div>
         </div>
       `;
@@ -1749,6 +1753,50 @@ document.addEventListener('DOMContentLoaded', () => {
         } finally {
           btn.disabled = false;
         }
+      });
+    });
+
+    // Delete from the same DB row the card shows (website + bot stay in sync).
+    const deleteLinkById = async (id, btn) => {
+      const item = (state.scope === 'community' ? state.communityLinks : state.personalLinks).find(l => l.id === id);
+      const label = item?.title || item?.url || 'this link';
+      if (!window.confirm(`Delete "${String(label).slice(0, 80)}" from the database? This cannot be undone.`)) return;
+      if (btn) btn.disabled = true;
+      try {
+        const path = state.scope === 'community' ? '/api/links' : '/api/personal-links';
+        const body = state.scope === 'community'
+          ? JSON.stringify({ id, community_id: state.currentCommunityId })
+          : JSON.stringify({ id });
+        const { res, data } = await api(path, { method: 'DELETE', body });
+        if (!res.ok || !data.success) {
+          showToast(data.error || 'Delete failed', true);
+          return;
+        }
+        const list = state.scope === 'community' ? state.communityLinks : state.personalLinks;
+        const idx = list.findIndex(l => l.id === id);
+        if (idx >= 0) list.splice(idx, 1);
+        showToast('Link deleted');
+        renderGoogleResults(
+          filterLinks(corpus(), searchInput.value.trim() || query || ''),
+          searchInput.value.trim() || query || ''
+        );
+      } catch (err) {
+        showToast(err.message || 'Delete failed', true);
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    };
+    resultsList.querySelectorAll('.del-link-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        deleteLinkById(btn.dataset.id, btn);
+      });
+    });
+    resultsList.querySelectorAll('.edit-delete').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const panel = btn.closest('.edit-panel');
+        deleteLinkById(panel?.dataset.editFor, btn);
       });
     });
 

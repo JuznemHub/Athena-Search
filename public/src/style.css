@@ -179,13 +179,23 @@ body {
   display: flex; align-items: center; justify-content: center;
   cursor: pointer; opacity: 0; transition: opacity var(--dur-1) var(--ease), color var(--dur-1) var(--ease); z-index: 2;
 }
-.g-result:hover .edit-link-btn { opacity: 0.7; }
-.g-result.editing .edit-link-btn, .edit-link-btn:hover, .edit-link-btn:focus-visible { opacity: 1; }
+.del-link-btn {
+  position: absolute; right: 44px; bottom: 6px; width: 32px; height: 32px;
+  border-radius: 50%; border: 1px solid var(--border-color, rgba(255,255,255,0.1));
+  background: rgba(18,20,29,0.85); color: var(--text-muted, #8e95b0);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; opacity: 0; transition: opacity var(--dur-1) var(--ease), color var(--dur-1) var(--ease); z-index: 2;
+}
+.g-result:hover .edit-link-btn, .g-result:hover .del-link-btn { opacity: 0.7; }
+.g-result.editing .edit-link-btn, .edit-link-btn:hover, .edit-link-btn:focus-visible,
+.g-result.editing .del-link-btn, .del-link-btn:hover, .del-link-btn:focus-visible { opacity: 1; }
 /* No hover on touch — keep the affordance visible. */
 @media (hover: none) {
-  .edit-link-btn { opacity: 0.6; }
+  .edit-link-btn, .del-link-btn { opacity: 0.6; }
 }
 .edit-link-btn:hover { color: var(--accent); border-color: var(--accent-border); background: var(--accent-surface); }
+.del-link-btn:hover { color: #ff5c7c; border-color: rgba(255,92,124,0.5); background: rgba(255,92,124,0.12); }
+.edit-delete { color: #ff5c7c !important; border-color: rgba(255,92,124,0.4) !important; }
 
 .edit-panel {
   margin-top: 10px; padding: 12px; border-radius: var(--radius-sm, 10px);
