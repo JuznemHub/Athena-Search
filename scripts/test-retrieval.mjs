@@ -710,7 +710,8 @@ const tagTaxonomy = await import('../worker/tag-taxonomy.js');
   for (const t of ['spotify', 'app', 'android', 'windows', 'linux', 'multiplatform']) assert.ok(tags.includes(t), `classifier adds ${t}`);
   assert.ok(facts.software && facts.telegram === false);
   assert.ok(!tags.includes('spotiflac') && !tags.includes('zarz'), 'classifier never emits site names');
-  assert.ok(!tags.includes('digital') && !tags.includes('technology') && !tags.includes('music'), 'no fluff and no redundant brand category');
+  assert.ok(!tags.includes('digital') && !tags.includes('technology'), 'no fluff');
+  assert.ok(tags.includes('music'), 'brand topic kept alongside the brand');
   assert.deepEqual(tagTaxonomy.classifyTags('https://spotiflac.zarz.moe/extension', meta).tags, tags, 'classification is deterministic');
 }
 {
