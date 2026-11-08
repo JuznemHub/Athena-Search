@@ -8391,8 +8391,11 @@ async function runForcetagsReview(env, { token, chatId, forumThreadId = null, tg
 
         // Scrape facts, then tag. `describeAndTagLink` prefers the model when a
         // key exists and always derives type/platform from the page itself.
+        // Content starts empty on purpose: search_blob is an index artifact
+        // built from title+url+notes+TAGS, and feeding a row's own tags back
+        // as page text would let old tags confirm themselves forever.
         const result = await describeAndTagLink(env, r.url, {
-          title: oldTitle, notes: oldNotes, content: r.search_blob || '',
+          title: oldTitle, notes: oldNotes, content: '',
         }, { config: cfgFt, maxTags: 8, scrape: true });
         if (result.usedAi) st.aiHits++; else st.ruleHits++;
         for (const rej of result.rejected || []) st.rejectCounts[rej.reason] = (st.rejectCounts[rej.reason] || 0) + 1;
