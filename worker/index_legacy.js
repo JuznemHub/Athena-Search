@@ -7465,6 +7465,62 @@ function takeResults(rows, limit) {
   return limit == null ? rows : rows.slice(0, Math.max(0, Number(limit)));
 }
 
+
+/** Shared single-record resolver used by /search, /ai and /forcetags.
+ *  Tries exact URL hash, canonical host/domain, then broad LIKE, so a saved
+ *  link is found even when the user types a bare domain or a partial title. */
+async function resolveSavedLink(env, scope, key, query) {
+  const q = String(query || '').toLowerCase().trim().slice(0, 240);
+  if (!q) return null;
+  const table = scope === 'personal' ? 'personal_links' : 'links';
+  const col = scope === 'personal' ? 'user_id' : 'community_id';
+  await backfillSearchBlobs(env, table, col, key).catch(() => {});
+  const seen = new Map();
+  const add = (rows) => { for (const r of rows || []) if (r?.id && !seen.has(r.id)) seen.set(r.id, r); };
+  try {
+    // 1. Exact URL / hash match.
+    const candidates = [q];
+    if (!/^https?:\/\//i.test(q)) candidates.push(`https://${q}`, `http://${q}`);
+    const urls = [];
+    for (const c of candidates) { try { urls.push(...extractUrls(c)); } catch (_) {} }
+    if (!urls.length && q.includes('.')) urls.push(q);
+    const hashes = [...new Set(urls.map((u) => { try { return generateUrlHash(u); } catch (_) { return null; } }).filter(Boolean))].slice(0, 10);
+    if (hashes.length) {
+      const { results } = await env.DB.prepare(
+        `SELECT * FROM ${table} WHERE ${col} = ? AND url_hash IN (${hashes.map(() => '?').join(',')}) ORDER BY created_at DESC`
+      ).bind(key, ...hashes).all();
+      add(results);
+    }
+    // 2. Domain / host contains the query (bare domain typed by the user).
+    if (!seen.size) {
+      const hostTerm = q.replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/+$/, '');
+      if (hostTerm.length >= 3) {
+        const { results } = await env.DB.prepare(
+          `SELECT * FROM ${table} WHERE ${col} = ? AND (lower(url) LIKE ? OR lower(title) LIKE ?) ORDER BY created_at DESC LIMIT 20`
+        ).bind(key, `%${hostTerm}%`, `%${hostTerm}%`).all();
+        add(results);
+      }
+    }
+    // 3. Broad text match.
+    if (!seen.size) {
+      const term = q.replace(/[^a-z0-9]/g, '');
+      if (term.length >= 2) {
+        const { results } = await env.DB.prepare(
+          `SELECT * FROM ${table} WHERE ${col} = ? AND (
+            lower(COALESCE(title,'')) LIKE ? OR lower(COALESCE(url,'')) LIKE ? OR
+            lower(COALESCE(notes,'')) LIKE ? OR COALESCE(search_blob,'') LIKE ?
+          ) ORDER BY created_at DESC LIMIT 20`
+        ).bind(key, `%${q}%`, `%${q}%`, `%${q}%`, `%${term}%`).all();
+        add(results);
+      }
+    }
+  } catch (_) {}
+  const rows = [...seen.values()];
+  if (!rows.length) return null;
+  rows.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+  return rows[0];
+}
+
 async function searchAllLinks(env, scope, key, query, limit = null) {
   const q = String(query || '').toLowerCase().trim().slice(0, 240);
   if (!q) return [];
@@ -14240,9 +14296,16 @@ async function startCloneTargetAsk(env, ctx) {
         await editTelegramMessage(token, chatId, thinkMsgId, `${boldHtml('❌ Search failed:')} ${escHtml(String(err?.message || err).slice(0, 200))}`, null, forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
-      const rows = retrieval.rows;
-      const docs = rows;
+      let rows = retrieval.rows;
+      let docs = rows;
       queueMissingLinkEnrichment(env, scope, scopeKey, rows);
+      if (!docs.length) {
+        const resolved = await resolveSavedLink(env, scope, scopeKey, q);
+        if (resolved) {
+          rows = [resolved];
+          docs = rows;
+        }
+      }
       if (!docs.length) {
         await editTelegramMessage(token, chatId, thinkMsgId, 'You have no saved link on this in your brain', null, forumThreadId);
         try { console.log(`[ai] done in ${Date.now() - t0}ms scope=${scope} docs=0`); } catch (_) {}
@@ -17500,6 +17563,7 @@ export {
   normalizeTagList,
   domainNameBans,
   ECOSYSTEM_HOSTS,
+  resolveSavedLink,
   searchAllLinks,
   telegramSearchRowHtml,
   handleSearchLinks,
