@@ -38,7 +38,6 @@ import {
   resolveChatEndpoint,
   resultLimitClause,
   searchAllLinks,
-  smartFallbackTags,
   parseStoredTags,
   normalizeTagList,
   domainNameBans,
@@ -684,57 +683,19 @@ assert.equal(
   true,
 );
 
-// /forcetags rule fallback: junk dropped, platform + topic added.
+// Stored tags normalize without inventing entries.
 assert.deepEqual(parseStoredTags('["backfill", "Telegram"]'), ['backfill', 'telegram']);
 assert.deepEqual(parseStoredTags(''), []);
 assert.deepEqual(normalizeTagList(['Music', 'music', '#Pop']), ['music', 'pop']);
-{
-  const r = smartFallbackTags('https://example.com/super-music.apk', { title: 'Super Music Player', notes: 'Best android music app, free apk download', content: '' }, ['backfill', 'telegram', 'music']);
-  assert.ok(r.removed.includes('backfill') && r.removed.includes('telegram'), 'junk drops when content is not about it');
-  assert.ok(r.kept.includes('music'), 'fitting tag kept');
-  assert.ok(r.tags.includes('android'), 'platform detected');
-  assert.ok(r.tags.includes('app'), 'app type detected');
-}
-{
-  const r = smartFallbackTags('https://t.me/mybot', { title: 'Telegram bot client', notes: '', content: '' }, ['backfill', 'telegram']);
-  assert.ok(!r.removed.includes('telegram'), 'telegram kept for Telegram content');
-  assert.ok(r.removed.includes('backfill'), 'backfill always junk');
-  assert.ok(r.tags.includes('bot'), 'bot topic detected');
-}
-{
-  const r = smartFallbackTags('https://example.com/x', { title: '', notes: '', content: '' }, ['backfill', 'dump']);
-  assert.equal(r.removed.length, 2, 'content-free rows lose all junk');
-}
-{
-  // Title words must not coin junk tags ("Junk 5" is not about junk).
-  const r = smartFallbackTags('https://junk5.example.org/f', { title: 'Junk 5', notes: 'random file dump post', content: '' }, ['backfill', 'telegram', 'dump']);
-  assert.ok(!r.tags.includes('junk') && !r.tags.includes('dump'), 'title words never become junk tags');
-  assert.ok(r.removed.includes('backfill') && r.removed.includes('telegram'), 'provenance junk removed');
-}
 // Names are never tags: domains and usernames banned, ecosystems allowed.
 {
   const bans = domainNameBans('https://spotiflac.zarz.moe/extension');
   assert.ok(bans.has('spotiflac') && bans.has('zarz'), 'domain labels banned');
   assert.ok(domainNameBans('https://github.com/user/repo').has('user'), 'path username banned');
   assert.ok(!domainNameBans('https://github.com/user/repo').has('github'), 'ecosystem host never banned');
-  const r = smartFallbackTags('https://spotiflac.zarz.moe/extension', { title: 'SpotiFlac Extension', notes: 'music downloader', content: '' }, []);
-  assert.ok(!r.tags.includes('spotiflac') && !r.tags.includes('zarz'), 'rule fallback never emits site names');
-  assert.ok(r.tags.includes('music'), 'topic still detected');
-  const g = smartFallbackTags('https://github.com/u/r', { title: 'Cool tool', notes: 'a downloader tool', content: '' }, []);
-  assert.ok(g.tags.includes('github'), 'ecosystem host kept as tag');
 }
 // Import residue and bookmark-folder names are never topics.
 assert.deepEqual(normalizeTagList(['a', 'B', 'ai', '#Pop']), ['ai', 'pop']);
-{
-  const r = smartFallbackTags('https://example.com/x', { title: 'X', notes: '', content: '' }, ['bookmarks-toolbar', 'trash', 'a', 'telegram']);
-  assert.ok(r.removed.includes('bookmarks-toolbar') && r.removed.includes('trash'), 'bookmark-folder names drop as junk');
-  assert.ok(r.removed.includes('telegram'), 'telegram drops when nothing is about Telegram');
-}
-{
-  const r = smartFallbackTags('https://t.me/somechannel/12', { title: 'Post', notes: '', content: '' }, ['telegram', 'backfill']);
-  assert.ok(r.tags.includes('telegram'), 't.me links keep telegram without the word in the page');
-  assert.ok(r.removed.includes('backfill'), 'backfill still drops');
-}
 
 // Controlled taxonomy: rules classify, the model may not invent tags.
 const tagTaxonomy = await import('../worker/tag-taxonomy.js');
@@ -762,6 +723,30 @@ const tagTaxonomy = await import('../worker/tag-taxonomy.js');
   const vocab = ['my-curated-tag'];
   const v = tagTaxonomy.validateTags(['my-curated-tag', 'made-up-tag'], { vocabulary: vocab });
   assert.deepEqual(v.tags, ['my-curated-tag'], 'scope vocabulary survives, invented words do not');
+}
+{
+  // Telegram is a brand, not an ingest stamp: allowed only when the page is
+  // actually about Telegram, and never added to unrelated saves.
+  const bot = tagTaxonomy.classifyTags('https://t.me/somechannel/12', { title: 'Post', notes: 'Telegram channel about music', content: '' });
+  assert.ok(bot.tags.includes('telegram'), 't.me links are telegram');
+  const plain = tagTaxonomy.classifyTags('https://example.com/article', { title: 'A guide to backups', notes: 'How to back up your files.', content: '' });
+  assert.ok(!plain.tags.includes('telegram'), 'unrelated pages never get telegram');
+  assert.ok(plain.tags.includes('website'), 'plain articles get a type tag');
+  assert.ok(!plain.tags.includes('technology') && !plain.tags.includes('online') && !plain.tags.includes('digital'), 'no fluff');
+}
+{
+  // Descriptions come from the page text as proper sentences.
+  const facts = tagTaxonomy.extractFacts('https://example.com/x', {
+    title: 'Thing', notes: 'Thing is a tool that renames files in bulk. It runs on Windows and Linux.', content: '',
+  });
+  assert.ok(facts.description.includes('renames files'), 'description keeps the page sentence');
+  assert.ok(facts.description.endsWith('.'), 'description is a sentence');
+}
+{
+  // AI cannot smuggle a brand the page never mentioned.
+  const v = tagTaxonomy.validateTags(['spotify', 'app'], { allowedBrands: [], max: 8 });
+  assert.deepEqual(v.tags, ['app']);
+  assert.ok(v.rejected.some((r) => r.tag === 'spotify' && r.reason === 'brand'));
 }
 
 console.log('retrieval tests passed');

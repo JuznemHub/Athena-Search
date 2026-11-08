@@ -4,7 +4,10 @@ import { renderCloneProgress } from './clone-ui.js';
 import { dokployConfigured, dokployApps, dokployStatus, dokployLogSnapshot, dokployDeploy, dokploySimple } from './dokploy.js';
 import { handleLogApi } from './log-api.js';
 import { runtimeLogs, redactLog, writeRuntimeLog } from './runtime-logs.js';
-import { classifyTags, validateTags, JUNK_TAGS, PLATFORM_SET, CANONICAL_TAGS } from './tag-taxonomy.js';
+import {
+  tagsFromFacts, validateTags, extractFacts, properNounBans,
+  JUNK_TAGS, CANONICAL_TAGS, TYPE_SET, TAG_VOCAB_TEXT,
+} from './tag-taxonomy.js';
 
 function cloneDisplayName(chatTitle, chatType, flowThread, topicTitle) {
   const base = String(chatTitle || '');
@@ -3305,6 +3308,12 @@ async function handlePostCommunityLink(request, user, env, corsHeaders) {
     ).run();
   }
 
+  // Explicit tags from the website editor are user curation: protect them from
+  // /forcetags and background enrichment.
+  if (Array.isArray(body.tags) && body.tags.length) {
+    await env.DB.prepare('UPDATE links SET manual_edited_at = ? WHERE id = ?').bind(now, id).run().catch(() => {});
+  }
+
   markMeiliScopeDirty(env, 'community', communityId);
   return Response.json({
     success: true,
@@ -5803,6 +5812,11 @@ async function handlePostPersonalLink(request, userId, env, corsHeaders) {
     ).bind(id, userId, rawUrl, urlHash, meta.title, meta.notes, JSON.stringify(body.tags || []), now).run();
   }
 
+  // Explicit tags from the website editor are user curation: protect them.
+  if (Array.isArray(body.tags) && body.tags.length) {
+    await env.DB.prepare('UPDATE personal_links SET manual_edited_at = ? WHERE id = ?').bind(now, id).run().catch(() => {});
+  }
+
   markMeiliScopeDirty(env, 'personal', userId);
 
   return Response.json({
@@ -5861,11 +5875,12 @@ async function handlePatchPersonalLink(request, userId, env, corsHeaders) {
   if (body.site_name != null) siteName = String(body.site_name).trim().slice(0, 120);
 
   await ensureLinkMetaColumns(env);
+  const editedAt = Date.now();
   try {
     await env.DB.prepare(
-      `UPDATE personal_links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, image_url = ?, site_name = ?
+      `UPDATE personal_links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, image_url = ?, site_name = ?, manual_edited_at = ?
        WHERE id = ? AND user_id = ?`
-    ).bind(url, urlHash, title, notes, tags, imageUrl || null, siteName || null, id, userId).run();
+    ).bind(url, urlHash, title, notes, tags, imageUrl || null, siteName || null, editedAt, id, userId).run();
   } catch (_) {
     await env.DB.prepare(
       `UPDATE personal_links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?
@@ -5929,11 +5944,12 @@ async function handlePatchCommunityLink(request, user, env, corsHeaders) {
   if (body.site_name != null) siteName = String(body.site_name).trim().slice(0, 120);
 
   await ensureLinkMetaColumns(env);
+  const editedAt = Date.now();
   try {
     await env.DB.prepare(
-      `UPDATE links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, image_url = ?, site_name = ?
+      `UPDATE links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, image_url = ?, site_name = ?, manual_edited_at = ?
        WHERE id = ?`
-    ).bind(url, urlHash, title, notes, tags, imageUrl || null, siteName || null, id).run();
+    ).bind(url, urlHash, title, notes, tags, imageUrl || null, siteName || null, editedAt, id).run();
   } catch (_) {
     await env.DB.prepare(
       `UPDATE links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ? WHERE id = ?`
@@ -6436,7 +6452,7 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'telegram', ?, 0, 0, ?, ?, ?)`
     ).bind(
       id, communityId, rawUrl, urlHash, meta.title, meta.notes || '',
-      JSON.stringify(['telegram', 'community']),
+      '[]',
       senderName, athenaUser?.id || null, senderName,
       Date.now(), meta.image_url || null, meta.site_name || null
     ).run();
@@ -6451,48 +6467,37 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
     }
     await env.DB.prepare(
       'INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    ).bind(id, communityId, rawUrl, urlHash, meta.title, meta.notes || '', JSON.stringify(['telegram']), senderName, Date.now()).run();
+    ).bind(id, communityId, rawUrl, urlHash, meta.title, meta.notes || '', '[]', senderName, Date.now()).run();
   }
-  // tagging: user #hashtags win, else karakeep AI (skip AI if tags already present)
+  // Tags come from the shared pipeline: manual #hashtags win, otherwise the
+  // model (when configured) or the deterministic classifier writes them.
   const fromPost = fullPost || userNotes + ' ' + (titleHint||'');
-  let userTags = forcedTags && forcedTags.length
+  const userTags = forcedTags && forcedTags.length
     ? normalizeTagList(forcedTags)
     : normalizeTagList(extractHashtags(fromPost + ' ' + userNotes + ' ' + (titleHint||'')));
   let reply;
   try {
+    const generated = await describeAndTagLink(env, rawUrl, meta, { maxTags: 8 });
+    let tags = generated.tags;
     if (userTags.length) {
-      const merged = [...new Set([...['telegram','community'], ...userTags])];
-      await ensureSearchColumns(env);
-      try {
-        await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
-          .bind(meta.title, JSON.stringify(merged), meta.notes || '', id).run();
-        reply = await formatSavedLinkReply(env, 'community', meta.title, rawUrl, { title: meta.title, description: meta.notes || '', tags: userTags });
-      } catch (_) { reply = await formatSavedLinkReply(env, 'community', meta.title, rawUrl, { title: meta.title, description: meta.notes || '', tags: userTags }); }
-    } else {
-      const vocab = await recentTagsForScope(env, 'community', communityId);
-      const ai = await aiDescribeAndTag(env, rawUrl, meta, vocab);
-      if (ai) {
-        const savedTitle = ai.title || meta.title;
-        const merged = ai.tags?.length
-          ? [...new Set([...['telegram', 'community'], ...ai.tags])]
-          : ['telegram', 'community'];
-        await ensureSearchColumns(env);
-        try {
-          await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
-            .bind(savedTitle, JSON.stringify(merged), ai.description || meta.notes || '', id).run();
-        } catch (_) {}
-        reply = await formatSavedLinkReply(env, 'community', savedTitle, rawUrl, ai);
-      } else {
-        const fb=fallbackTagsFromMeta(rawUrl, meta);
-        if(fb.length){
-          const mergedFb=[...new Set([...['telegram','community'], ...fb])];
-          try{ await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`).bind(meta.title, JSON.stringify(mergedFb), meta.notes||'', id).run(); }catch(_){}
-          reply = await formatSavedLinkReply(env, 'community', meta.title, rawUrl, {title: meta.title, description: meta.notes||'', tags: fb}, meta.notes);
-        } else {
-          reply = await formatSavedLinkReply(env, 'community', meta.title, rawUrl, null, meta.notes);
-        }
-      }
+      tags = validateTags([...userTags, ...generated.tags], {
+        banned: nameBansFor(rawUrl, generated.title || meta.title),
+        allowedBrands: generated.facts?.brands || [],
+        max: 10,
+      }).tags;
+      if (!tags.length) tags = userTags;
+      tags = finalizeTags(tags, generated.facts, 10);
     }
+    const savedTitle = generated.title || meta.title;
+    const savedNotes = (!isDetailedNotes(meta.notes) && generated.description)
+      ? generated.description
+      : (meta.notes || generated.description || '');
+    await ensureSearchColumns(env);
+    try {
+      await env.DB.prepare(`UPDATE links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
+        .bind(savedTitle, JSON.stringify(tags), savedNotes, id).run();
+    } catch (_) {}
+    reply = await formatSavedLinkReply(env, 'community', savedTitle, rawUrl, { title: savedTitle, description: savedNotes, tags }, savedNotes);
   } catch (_) {
     reply = await formatSavedLinkReply(env, 'community', meta.title, rawUrl, null, meta.notes);
   }
@@ -6851,25 +6856,23 @@ function extractHashtags(text) {
   return out;
 }
 
-function fallbackTagsFromMeta(rawUrl, meta) {
-  const tags=[];
-  try {
-    const u=new URL(rawUrl.startsWith('http')?rawUrl:`https://${rawUrl}`);
-    const host=u.hostname.replace(/^www\./,'').toLowerCase();
-    const base=host.replace(/\.(com|net|org|io|so|app|dev|me|co|ai)$/i,'').split('.').pop()||'';
-    if(base && !['github','t','telegram'].includes(base) && !tags.includes(base)) tags.push(base);
-    if(host.includes('github') && !tags.includes('github')) tags.push('github');
-    if(host.includes('youtube')||host.includes('youtu.be')) tags.push('video');
-  } catch(_){}
-  const text=`${meta?.title||''} ${meta?.notes||''} ${meta?.content||''}`.replace(/#[\w-]+/g,' ').toLowerCase();
-  const keywords=['dns','adblock','ublock','block','privacy','vpn','tool','client','proxy','security','network','filter','easylist','tracker'];
-  for(const k of keywords){ if(text.includes(k) && !tags.includes(k)) tags.push(k); if(tags.length>=5) break; }
-  // title words fallback
-  if(tags.length<3){
-    const words=String(meta?.title||'').replace(/#[\w-]+/g,' ').toLowerCase().match(/[a-z]{3,15}/g)||[];
-    for(const w of words){ if(!['the','and','with','from','this','that','client','project','independent','not','for','are','was','were','have','has','had','you','your','all','any','can','how','why','who','its','get','use','using','best','top','new','one','two','free','online','official','download','website'].includes(w) && !tags.includes(w)) tags.push(w); if(tags.length>=4) break; }
-  }
-  return tags.slice(0,6).map(t=>t.replace(/^#/,'').toLowerCase().replace(/\s+/g,'-').slice(0,40)).filter(Boolean);
+/**
+ * Every word a generated tag may not use: the link's own domain/path names
+ * plus capitalised title words that are not canonical tags. Shared by rules,
+ * review and model output so a project name cannot enter on one path only.
+ */
+function nameBansFor(rawUrl, title = '') {
+  const bans = new Set(domainNameBans(rawUrl));
+  for (const b of properNounBans(title)) bans.add(b);
+  return [...bans];
+}
+
+/** `multiplatform` is always recomputed from the detected platform set. */
+function finalizeTags(tags, facts, max = 8) {
+  const out = (Array.isArray(tags) ? tags : []).filter((t) => t !== 'multiplatform');
+  const platforms = facts?.software ? (facts.platforms || []) : [];
+  if (platforms.length >= 2 && !out.includes('multiplatform')) out.push('multiplatform');
+  return [...new Set(out)].slice(0, Math.max(1, Math.min(Number(max) || 8, 10)));
 }
 
 function normalizeTagList(tags) {
@@ -6920,115 +6923,12 @@ function domainNameBans(rawUrl) {
     const suffix = new Set(['com', 'net', 'org', 'io', 'dev', 'app', 'so', 'me', 'co', 'in', 'ai', 'xyz', 'top', 'fun', 'site', 'online']);
     for (const l of labels) {
       const clean = l.replace(/[^a-z0-9]/g, '');
-      if (clean.length >= 3 && !suffix.has(clean) && !ECOSYSTEM_HOSTS.has(clean)) bans.add(clean);
+      if (clean.length >= 3 && !suffix.has(clean) && !ECOSYSTEM_HOSTS.has(clean) && !CANONICAL_TAGS.has(clean)) bans.add(clean);
     }
     const seg = (u.pathname.split('/').filter(Boolean)[0] || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-    if (seg.length >= 4 && !ECOSYSTEM_HOSTS.has(seg)) bans.add(seg);
+    if (seg.length >= 4 && !ECOSYSTEM_HOSTS.has(seg) && !CANONICAL_TAGS.has(seg)) bans.add(seg);
   } catch (_) {}
   return bans;
-}
-
-/** No-AI retag: drop junk tags the content never mentions, keep the rest,
- *  add platform + topic tags from keyword rules. Returns { tags, kept,
- *  added, removed }. */
-function smartFallbackTags(rawUrl, meta, currentTags) {
-  const bag = `${meta?.title || ''} ${meta?.notes || ''} ${meta?.content || ''} ${rawUrl || ''}`.toLowerCase();
-  const word = (w) => new RegExp(`(^|[^a-z0-9])${w}([^a-z0-9]|$)`).test(bag);
-  const kept = [];
-  const removed = [];
-  // Junk provenance tags drop unconditionally — except telegram, which is a
-  // real topic when the content is actually about Telegram.
-  // t.me and telegram.me links are Telegram content without the word in them.
-  const aboutTelegram = word('telegram') || bag.includes('telegram') || bag.includes('telegram.me') || /(^|[^a-z0-9])t\.me\//.test(bag);
-  const junkRescued = (t) => t === 'telegram' && aboutTelegram;
-  for (const t of normalizeTagList(currentTags)) {
-    if (RETAG_JUNK_TAGS.has(t) && !junkRescued(t)) { if (!removed.includes(t)) removed.push(t); continue; }
-    if (!kept.includes(t)) kept.push(t);
-  }
-  const tags = [...kept];
-  const added = [];
-  const add = (t) => { if (t && !tags.includes(t)) { tags.push(t); added.push(t); } };
-  // Platform — only for software (app/client/apk/download), never for articles.
-  const isSoftware = word('app') || word('apk') || word('appstore') || bag.includes('play store') || word('software') || word('client') || word('download') || word('mobile') || /\.apk(\b|\/)/.test(bag) || /\.ipa(\b|\/)/.test(bag);
-  if (isSoftware) {
-    const android = word('android') || bag.includes('play store') || bag.includes('.apk');
-    const ios = word('ios') || word('iphone') || word('ipad') || bag.includes('app store') || bag.includes('.ipa');
-    const desktop = word('windows') || word('macos') || word('linux') || word('ubuntu');
-    if ((android && ios) || ((android || ios) && desktop) || /multiplatform|cross-platform|all platforms/.test(bag)) add('multiplatform');
-    else if (android) add('android');
-    else if (ios) add('ios');
-  }
-  const TOPIC_RULES = [
-    ['music', ['music', 'song', 'songs', 'mp3', 'spotify', 'album', 'playlist']],
-    ['video', ['video', 'videos', 'youtube', 'mp4', 'streaming']],
-    ['movie', ['movie', 'movies', 'film', 'films', 'cinema', 'bollywood', 'web-series', 'tv-show']],
-    ['game', ['game', 'games', 'gaming', 'mod', 'mods', 'emulator', 'rom']],
-    ['anime', ['anime', 'manga', 'manhwa']],
-    ['book', ['book', 'books', 'ebook', 'novel', 'pdf']],
-    ['ai', ['artificial intelligence', 'llm', 'chatgpt', 'machine learning', 'stable diffusion', 'midjourney']],
-    ['bot', ['telegram bot', 'bot api', 'discord bot', 'chatbot']],
-    ['telegram', ['telegram']],
-    ['privacy', ['privacy', 'adblock', 'ublock', 'tracker', 'fingerprint']],
-    ['vpn', ['vpn', 'proxy', 'proxies']],
-    ['security', ['security', 'malware', 'exploit', 'vulnerability']],
-    ['crypto', ['crypto', 'bitcoin', 'blockchain', 'web3']],
-    ['coding', ['github', 'programming', 'developer', 'api', 'sdk', 'library', 'framework', 'python', 'javascript']],
-    ['tool', ['tool', 'tools', 'utility', 'converter', 'downloader', 'generator']],
-    ['app', ['app']],
-    ['website', ['website', 'homepage', 'landing']],
-    ['news', ['news', 'breaking']],
-    ['tutorial', ['tutorial', 'guide', 'how-to', 'howto', 'course']],
-    ['wallpaper', ['wallpaper', 'wallpapers']],
-    ['sticker', ['sticker', 'stickers']],
-    ['font', ['font', 'fonts', 'typeface']],
-    ['photo', ['photo', 'photos', 'photography', 'camera']],
-    ['design', ['design', 'ui', 'ux', 'figma']],
-  ];
-  if (word('ai')) add('ai');
-  for (const [tag, keys] of TOPIC_RULES) {
-    if (keys.some((k) => bag.includes(k))) add(tag);
-  }
-  // Host identity counts only for ecosystems (github, arxiv…) — any other
-  // domain is a name, never a tag.
-  try {
-    const u = new URL(String(rawUrl || '').startsWith('http') ? rawUrl : `https://${rawUrl}`);
-    const host = u.hostname.replace(/^www\./, '').toLowerCase();
-    const labels = host.split('.');
-    for (const l of labels) {
-      const clean = l.replace(/[^a-z0-9]/g, '');
-      if (ECOSYSTEM_HOSTS.has(clean)) { add(clean); break; }
-    }
-  } catch (_) {}
-  // Title words for the long tail (same stopword discipline as before).
-  // Domain-derived names are stripped after this, so titles like
-  // "SpotiFlac Extension" contribute "extension", never "spotiflac".
-  if (tags.length < 5) {
-    const words = String(meta?.title || '').toLowerCase().match(/[a-z]{4,15}/g) || [];
-    const stop = new Set(['the', 'and', 'with', 'from', 'this', 'that', 'client', 'project', 'independent', 'for', 'are', 'was', 'were', 'have', 'has', 'with', 'your', 'free', 'best', 'download', 'official', 'ultimate', 'guide', 'using', 'user', 'users']);
-    for (const w of words) { if (!stop.has(w)) add(w); if (tags.length >= 8) break; }
-  }
-  // Never emit the link's own names, even if rules above added them.
-  // Same for freshly coined junk: a title word like "Junk" or "Personal"
-  // must not become a tag unless the content is actually about it.
-  {
-    const bans = domainNameBans(rawUrl);
-    const dropBanned = (arr) => {
-      for (let i = arr.length - 1; i >= 0; i--) {
-        if (bans.has(arr[i])) { arr.splice(i, 1); continue; }
-        if (RETAG_JUNK_TAGS.has(arr[i]) && arr[i] !== 'telegram') arr.splice(i, 1);
-      }
-    };
-    dropBanned(tags); dropBanned(added);
-  }
-  const finalTags = tags.slice(0, 8);
-  const finalSet = new Set(finalTags);
-  const normCurrent = normalizeTagList(currentTags);
-  return {
-    tags: finalTags,
-    kept: normCurrent.filter((t) => finalSet.has(t)),
-    added: added.filter((t) => finalSet.has(t)).slice(0, 8),
-    removed: normCurrent.filter((t) => !finalSet.has(t)),
-  };
 }
 
 /**
@@ -7724,37 +7624,29 @@ async function finalizePersonalSave(env, token, chatId, forumThreadId, athenaUse
     : normalizeTagList(extractHashtags(fullPost));
   let reply;
   try {
-    if (userTagsPersonal.length && r.id) {
-      const merged = [...new Set([...['telegram','personal'], ...userTagsPersonal])];
+    const generated = await describeAndTagLink(env, rawUrl, { title: r.title, notes: r.notes, content: r.content }, { maxTags: 8 });
+    let tags = generated.tags;
+    if (userTagsPersonal.length) {
+      tags = validateTags([...userTagsPersonal, ...generated.tags], {
+        banned: nameBansFor(rawUrl, generated.title || r.title),
+        allowedBrands: generated.facts?.brands || [],
+        max: 10,
+      }).tags;
+      if (!tags.length) tags = userTagsPersonal;
+      tags = finalizeTags(tags, generated.facts, 10);
+    }
+    const savedTitle = generated.title || r.title;
+    const savedNotes = (!isDetailedNotes(r.notes) && generated.description)
+      ? generated.description
+      : (r.notes || generated.description || '');
+    if (r.id) {
       await ensureSearchColumns(env);
       try {
         await env.DB.prepare('UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ' + AI_METADATA_VERSION + ', search_blob = NULL WHERE id = ?')
-          .bind(r.title, JSON.stringify(merged), r.notes || '', r.id).run();
+          .bind(savedTitle, JSON.stringify(tags), savedNotes, r.id).run();
       } catch (_) {}
-      reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: userTagsPersonal }, r.notes);
-    } else {
-      const vocab = await recentTagsForScope(env, 'personal', athenaUser.id);
-      const ai = await aiDescribeAndTag(env, rawUrl, { title: r.title, notes: r.notes, content: r.content }, vocab);
-      if (ai && r.id) {
-        const savedTitle = ai.title || r.title;
-        const merged = ai.tags?.length ? [...new Set([...['telegram','personal'], ...ai.tags])] : ['telegram','personal'];
-        await ensureSearchColumns(env);
-        try {
-          await env.DB.prepare('UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ' + AI_METADATA_VERSION + ', search_blob = NULL WHERE id = ?')
-            .bind(savedTitle, JSON.stringify(merged), ai.description || r.notes || '', r.id).run();
-        } catch (_) {}
-        reply = await formatSavedLinkReply(env, 'personal', savedTitle, rawUrl, ai, r.notes);
-      } else {
-        const fb = fallbackTagsFromMeta(rawUrl, { title: r.title, notes: r.notes, content: r.content });
-        if (fb.length && r.id) {
-          const mergedFb = [...new Set([...['telegram','personal'], ...fb])];
-          try { await env.DB.prepare('UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ' + AI_METADATA_VERSION + ', search_blob = NULL WHERE id = ?').bind(r.title, JSON.stringify(mergedFb), r.notes || '', r.id).run(); } catch (_) {}
-          reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: fb }, r.notes);
-        } else {
-          reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, null, r.notes);
-        }
-      }
     }
+    reply = await formatSavedLinkReply(env, 'personal', savedTitle, rawUrl, { title: savedTitle, description: savedNotes, tags }, savedNotes);
   } catch (_) {
     reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, null, r.notes);
   }
@@ -7784,14 +7676,14 @@ async function savePersonalUrl(env, userId, rawUrl, senderName, userNotes = '', 
     await env.DB.prepare(
       `INSERT INTO personal_links (id, user_id, url, url_hash, title, notes, tags, created_at, image_url, site_name)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(id, userId, rawUrl, urlHash, meta.title, meta.notes, JSON.stringify(['telegram', 'dump']), Date.now(), meta.image_url || null, meta.site_name || null).run();
+    ).bind(id, userId, rawUrl, urlHash, meta.title, meta.notes, '[]', Date.now(), meta.image_url || null, meta.site_name || null).run();
   } catch (error) {
     if (isUniqueConstraintError(error)) return { duplicate: true, existing: { url: rawUrl } };
     if (!isMissingLinkMetaColumnError(error)) return { duplicate: false, error: `Database write failed: ${error.message || 'insert failed'}` };
     await env.DB.prepare(
       `INSERT INTO personal_links (id, user_id, url, url_hash, title, notes, tags, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(id, userId, rawUrl, urlHash, meta.title, meta.notes, JSON.stringify(['telegram', 'dump']), Date.now()).run();
+    ).bind(id, userId, rawUrl, urlHash, meta.title, meta.notes, '[]', Date.now()).run();
   }
   markMeiliScopeDirty(env, 'personal', userId);
   return {
@@ -7962,7 +7854,7 @@ function helpTextForSection(section, isGod = false) {
       cmd(2, `${codeHtml('/dumpsmart')} · ${codeHtml('/dumpall on|off')}`, 'One dump-mode setting: smart keeps the primary link only (default), on saves every URL. Channel cloning lives in 📡 Channels.'),
       spacer,
       richParagraph('<b>Tagging & structure</b>'),
-      cmd(3, `${codeHtml('/forcetags <community_id>')} ${codeHtml('[all]')}`, 'Run a retag review of one brain. The community id is required, then pick the community brain or your personal brain. One batch of 150 links per run; add all to sweep that whole brain in the background — no retyping. Drops junk tags, fixes wrong ones, scrapes thin links, then reports every change.'),
+      cmd(3, `${codeHtml('/forcetags <community_id>')} ${codeHtml('[all]')}`, 'Run a retag review of one brain. The community id is required, then pick the community brain or your personal brain. One batch of 150 links per run; add all to sweep that whole brain in the background — no retyping. Scrapes a real description, writes tags from the controlled vocabulary, and skips links you edited by hand (/edit or the website).'),
       cmd(5, codeHtml('/structure'), 'One-pass DB cleanup: strips tracking URLs, merges near-duplicate links, cleans titles and notes, trims multi-link notes to each link’s own section. Runs in the background with live progress.'),
       spacer,
       richParagraph('<b>Backup & import</b>'),
@@ -8239,11 +8131,17 @@ async function editTelegramRichMessage(token, chatId, messageId, richHtml, threa
  * Retag review engine for one brain. /forcetags and its scope buttons both
  * call this, so the two paths cannot drift. Community and personal brains are
  * separate scopes and the caller always names exactly one.
+ *
+ * Links touched by /edit or the website editor carry `manual_edited_at`; they
+ * are never selected, so a human edit can never be overwritten by a review or
+ * a background enrichment pass.
  */
 async function runForcetagsReview(env, { token, chatId, forumThreadId = null, tgUserId = null, scope = 'community', communityId = '', wantAll = false }) {
   const personal = scope === 'personal';
   const scopeLabel = personal ? 'personal' : 'community';
   await ensureAiConfigTable(env);
+  await ensureLinkMetaColumns(env);
+  await ensureSearchColumns(env);
   const cfgFt = await getInstanceAiConfig(env);
   const aiMode = !!cfgFt?.api_key;
   const BATCH = 150;
@@ -8261,30 +8159,47 @@ async function runForcetagsReview(env, { token, chatId, forumThreadId = null, tg
     }
   }
   const scopeSuffix = personal ? '' : ` · ${codeHtml(escHtml(scopeKey))}`;
-  const think = await sendTelegramFormatted(token, chatId, `${boldHtml('🏷')} Retag review (${wantAll ? 'all · ' : ''}${scopeLabel}${scopeSuffix})… ${aiMode ? 'AI on' : 'no AI key → rule fallback'}`, forumThreadId);
+  const think = await sendTelegramFormatted(token, chatId, `${boldHtml('🏷')} Retag review (${wantAll ? 'all · ' : ''}${scopeLabel}${scopeSuffix})… ${aiMode ? 'AI on' : 'no AI key → rules'}`, forumThreadId);
   const thinkId = think?.message_id;
   const junkLike = [...RETAG_JUNK_TAGS].map((j) => `tags LIKE '%${j}%'`).join(' OR ');
+  const table = personal ? 'personal_links' : 'links';
+  const scopeWhere = personal ? 'user_id = ?' : 'community_id = ?';
+  const scopeBind = personal ? [scopeKey] : [scopeKey];
+  const manualWhere = 'manual_edited_at IS NULL';
+
+  // Count what review must leave alone, for the report.
+  let manualSkipped = 0;
+  try {
+    const row = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM ${table} WHERE ${scopeWhere} AND manual_edited_at IS NOT NULL`
+    ).bind(...scopeBind).first();
+    manualSkipped = Number(row?.n || 0);
+  } catch (_) {}
+
   // All-mode pages one scope by stable id order with its own offset: in-place
   // tag edits never move a row, so every row is visited once and the sweep
-  // terminates. Single-batch mode keeps the junk-first order with no offset.
+  // terminates. Single-batch mode keeps junk-first, then least-reviewed.
   const sweepOffsets = new Map();
-  const table = personal ? 'personal_links' : 'links';
   const pickTargets = async () => {
-    await ensureSearchColumns(env);
     const off = wantAll ? (sweepOffsets.get(table) || 0) : 0;
-    const order = wantAll ? 'id ASC' : `CASE WHEN COALESCE(tags,'') IN ('', '[]', 'null', '["untagged"]') THEN 0 WHEN ${junkLike} THEN 1 ELSE 2 END, created_at DESC`;
+    const order = wantAll
+      ? 'id ASC'
+      : `CASE WHEN COALESCE(tags,'') IN ('', '[]', 'null', '["untagged"]') THEN 0 WHEN ${junkLike} THEN 1 ELSE 2 END, COALESCE(metadata_version,0) ASC, created_at DESC`;
     const page = wantAll ? `LIMIT ${BATCH} OFFSET ${off}` : `LIMIT ${BATCH}`;
-    const where = personal ? ' AND user_id = ?' : ` AND community_id = '${scopeKey.replace(/'/g, '')}'`;
     const stmt = env.DB.prepare(
-      `SELECT id, url, title, notes, tags, search_blob FROM ${table}
-       WHERE 1=1${where}
+      `SELECT id, url, title, notes, tags, search_blob, manual_edited_at FROM ${table}
+       WHERE ${scopeWhere} AND ${manualWhere}
        ORDER BY ${order} ${page}`
     );
-    const { results } = await (personal ? stmt.bind(scopeKey) : stmt).all();
+    const { results } = await stmt.bind(...scopeBind).all();
     if (wantAll && (results || []).length) sweepOffsets.set(table, off + results.length);
     return (results || []).map((row) => ({ table, col: scopeKey, row }));
   };
-  const st = { done: 0, changed: 0, failed: 0, aiHits: 0, ruleHits: 0, addedCounts: {}, removedCounts: {}, rejectCounts: {}, changeLines: [], failLines: [] };
+
+  const st = {
+    done: 0, changed: 0, failed: 0, aiHits: 0, ruleHits: 0, descAdded: 0,
+    addedCounts: {}, removedCounts: {}, rejectCounts: {}, changeLines: [], failLines: [],
+  };
   const editProgress = async (total) => {
     if (!thinkId) return;
     const bar = total
@@ -8292,80 +8207,77 @@ async function runForcetagsReview(env, { token, chatId, forumThreadId = null, tg
       : codeHtml(`${st.done} reviewed`);
     await telegramApi(token, 'editMessageText', {
       chat_id: chatId, message_id: thinkId, parse_mode: 'HTML',
-      text: `${boldHtml('🏷 Force tags')}${wantAll ? ' (sweeping all)' : ''}\n${bar}\nchanged ${st.changed} · AI ${st.aiHits} · rules ${st.ruleHits}`
+      text: `${boldHtml('🏷 Force tags')}${wantAll ? ' (sweeping all)' : ''}\n${bar}\nchanged ${st.changed} · AI ${st.aiHits} · rules ${st.ruleHits} · desc ${st.descAdded}`
     }).catch(() => {});
   };
+
   const processTargets = async (targets) => {
     for (const t of targets) {
       try {
         const r = t.row;
+        if (r.manual_edited_at) continue;
         const current = parseStoredTags(r.tags);
-        let title = r.title || ''; let notes = r.notes || '';
-        let meta = { title, notes, content: r.search_blob || '' };
-        // Thin link: scrape the page so the review (AI or rules) reads facts.
-        // Title alone is not enough — names without a description are what
-        // produced name-plated tags, so scrape whenever notes+content are empty.
-        if (!meta.notes && !meta.content && /^https?:\/\//i.test(r.url || '')) {
-          try {
-            const sc = await scrapeLinkMetadata(r.url, env);
-            if (sc) {
-              if (!title && sc.title) title = String(sc.title).slice(0, 200);
-              if (!notes && sc.description) notes = String(sc.description).slice(0, 600);
-              meta = { title, notes, content: String(sc.content || '').slice(0, 4000) };
-            }
-          } catch (_) {}
-        }
-        const nameBans = [...domainNameBans(r.url)];
-        // Deterministic facts first: what the page plainly is drives the
-        // tags, so the same link always lands on the same words.
-        const rule = classifyTags(r.url, meta);
-        const vocab = await recentTagsForScope(env, personal ? 'personal' : 'community', t.col);
-        // Provenance stamps survive only when the content is about them.
-        const curated = current.filter((x) => !RETAG_JUNK_TAGS.has(x) || (x === 'telegram' && rule.facts.telegram));
-        st.rejectCounts.junk = (st.rejectCounts.junk || 0) + (current.length - curated.length);
-        let candidate = [...curated, ...rule.tags];
-        let usedAi = false;
-        // The model only fills gaps. When the rules already named a type and
-        // a topic there is nothing left to ask, which keeps the sweep cheap
-        // and repeatable.
-        const ruleTopics = rule.tags.filter((x) => !PLATFORM_SET.has(x)).length;
-        if (aiMode && ruleTopics < 2) {
-          try {
-            const ai = await aiDescribeAndTag(env, r.url, meta, vocab, cfgFt, curated, nameBans);
-            if (ai?.tags?.length) {
-              candidate = [...candidate, ...ai.tags];
-              usedAi = true; st.aiHits++;
-              if (ai.title && !title) title = String(ai.title).slice(0, 200);
-              if (ai.description && !notes) notes = String(ai.description).slice(0, 600);
-            }
-          } catch (_) {}
-        }
-        if (!usedAi) st.ruleHits++;
-        // Nothing reaches storage unless it is canonical or already in use in
-        // this scope. This is what stops model-invented tags.
-        const verdict = validateTags(candidate, { vocabulary: vocab, banned: nameBans, max: 8 });
+        const oldTitle = r.title || '';
+        const oldNotes = r.notes || '';
+
+        // Scrape facts, then tag. `describeAndTagLink` prefers the model when a
+        // key exists and always derives type/platform from the page itself.
+        const result = await describeAndTagLink(env, r.url, {
+          title: oldTitle, notes: oldNotes, content: r.search_blob || '',
+        }, { config: cfgFt, maxTags: 8, scrape: true });
+        if (result.usedAi) st.aiHits++; else st.ruleHits++;
+        for (const rej of result.rejected || []) st.rejectCounts[rej.reason] = (st.rejectCounts[rej.reason] || 0) + 1;
+
+        // Keep tags a human or an earlier pass already chose only when they
+        // survive the same whitelist: junk stamps, fluff, names and invented
+        // words all fall away here.
+        const verdict = validateTags([...result.tags, ...current], {
+          banned: nameBansFor(r.url, result.title || oldTitle),
+          allowedBrands: result.facts?.brands || [],
+          max: 8,
+        });
         for (const rej of verdict.rejected) st.rejectCounts[rej.reason] = (st.rejectCounts[rej.reason] || 0) + 1;
-        const newTags = verdict.tags;
+        let newTags = [];
+        let typeTaken = false;
+        for (const tag of verdict.tags) {
+          if (tag === 'multiplatform') continue;
+          if (TYPE_SET.has(tag)) {
+            if (typeTaken) continue;
+            typeTaken = true;
+          }
+          newTags.push(tag);
+        }
+        const platforms = result.facts?.software ? (result.facts.platforms || []) : [];
+        if (platforms.length >= 2 && !newTags.includes('multiplatform')) newTags.push('multiplatform');
+        newTags = [...new Set(newTags)].slice(0, 8);
+        if (!newTags.length) newTags = ['website'];
+
+        const title = String(result.title || oldTitle || '').slice(0, 300);
+        // Only fill a weak/empty caption; real post text is never clobbered.
+        const notes = (!isDetailedNotes(oldNotes) && result.description)
+          ? String(result.description).slice(0, 600)
+          : oldNotes;
+        const descAdded = !isDetailedNotes(oldNotes) && notes && notes !== oldNotes;
+
         const added = newTags.filter((x) => !current.includes(x));
         const removed = current.filter((x) => !newTags.includes(x));
-        const metaRescued = title !== (r.title || '') || notes !== (r.notes || '');
+        const metaRescued = title !== oldTitle || notes !== oldNotes;
         if (added.length || removed.length || metaRescued) {
           await env.DB.prepare(
             `UPDATE ${t.table} SET tags = ?, title = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
-          ).bind(JSON.stringify(newTags || []), title, notes, r.id).run();
+          ).bind(JSON.stringify(newTags), title, notes, r.id).run();
           markMeiliScopeDirty(env, personal ? 'personal' : 'community', t.col);
           st.changed++;
+          if (descAdded) st.descAdded++;
           for (const a of added) st.addedCounts[a] = (st.addedCounts[a] || 0) + 1;
           for (const x of removed) st.removedCounts[x] = (st.removedCounts[x] || 0) + 1;
           if (st.changeLines.length < 40) {
             const bits = [...added.map((a) => `+${a}`), ...removed.map((x) => `−${x}`)].join(' ');
-            st.changeLines.push(`<li><b>${escHtml((title || r.url || 'link').slice(0, 70))}</b> ${escHtml(bits)}${metaRescued && !added.length && !removed.length ? ' (title/notes rescued)' : ''}</li>`);
+            const tail = descAdded && !added.length && !removed.length ? ' (description added)' : '';
+            st.changeLines.push(`<li><b>${escHtml((title || r.url || 'link').slice(0, 70))}</b> ${escHtml(bits)}${tail}</li>`);
           }
         }
       } catch (e) {
-        // A rejected write (missing column, bad JSON, DB hiccup) used to count
-        // as reviewed with no trace — the report then claimed work that never
-        // landed. Count it and say so.
         st.failed++;
         if (st.failLines.length < 5) st.failLines.push(`${escHtml(String(t.row?.url || t.row?.id || 'row').slice(0, 60))}: ${escHtml(String(e?.message || e).slice(0, 120))}`);
       }
@@ -8373,6 +8285,7 @@ async function runForcetagsReview(env, { token, chatId, forumThreadId = null, tg
       if (st.done % 10 === 0) await editProgress(wantAll ? null : targets.length);
     }
   };
+
   const buildReport = (moreRemain) => {
     const top = (m) => Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([tag, c]) => `${escHtml(tag)}×${c}`).join(', ');
     const totalAdded = Object.values(st.addedCounts).reduce((a, b) => a + b, 0);
@@ -8380,8 +8293,9 @@ async function runForcetagsReview(env, { token, chatId, forumThreadId = null, tg
     const rejected = Object.entries(st.rejectCounts).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
     return [
       richHeading(3, '🏷 Force tags — report'),
-      `<p>Mode: ${aiMode ? 'AI review' : 'rule fallback (no AI key)'} · Scope: ${scopeLabel}${scopeSuffix}</p>`,
-      `<p>Reviewed ${st.done} · Changed ${st.changed} · Unchanged ${st.done - st.changed} (AI ${st.aiHits} · rules ${st.ruleHits})</p>`,
+      `<p>Mode: ${aiMode ? 'AI + facts' : 'rules (no AI key)'} · Scope: ${scopeLabel}${scopeSuffix}</p>`,
+      `<p>Reviewed ${st.done} · Changed ${st.changed} · Unchanged ${st.done - st.changed}</p>`,
+      `<p>AI ${st.aiHits} · rules ${st.ruleHits} · descriptions added ${st.descAdded} · manual edits skipped ${manualSkipped}</p>`,
       `<p>Tags added: ${totalAdded}${top(st.addedCounts) ? ` (${top(st.addedCounts)})` : ''} · Removed: ${totalRemoved}${top(st.removedCounts) ? ` (${top(st.removedCounts)})` : ''}</p>`,
       rejected.length ? `<p>Rejected ${rejected.reduce((a, [, n]) => a + n, 0)}: ${rejected.map(([reason, n]) => `${escHtml(reason)} ${n}`).join(' · ')}</p>` : '',
       st.changeLines.length ? `<ul>${st.changeLines.join('')}</ul>` : '<p>No tag changes needed — everything already fits.</p>',
@@ -8389,16 +8303,16 @@ async function runForcetagsReview(env, { token, chatId, forumThreadId = null, tg
       moreRemain ? '<p><i>More remain — run /forcetags again to continue.</i></p>' : (st.changed ? '' : '<p>All caught up.</p>'),
     ].join('\n');
   };
+
   if (!wantAll) {
     const targets = await pickTargets();
     if (!targets.length) {
-      if (thinkId) await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: thinkId, text: `${boldHtml('✅')} Nothing to review — that brain has no links.`, parse_mode: 'HTML' }).catch(() => {});
+      if (thinkId) await telegramApi(token, 'editMessageText', { chat_id: chatId, message_id: thinkId, text: `${boldHtml('✅')} Nothing to review${manualSkipped ? ` (${manualSkipped} manually edited link(s) protected)` : ''}.`, parse_mode: 'HTML' }).catch(() => {});
       return;
     }
-    // Review in the background. A full batch scrapes thin links and calls the
-    // model per row, which outlives Telegram's webhook timeout — the retry
-    // then re-ran the same batch and the ACK never arrived. Reply now, report
-    // when the batch is done.
+    // Review in the background: a batch scrapes thin links and may call the
+    // model per row, which outlives Telegram's webhook timeout. Reply now,
+    // report when the batch is done.
     runInBackground(env, (async () => {
       try {
         await processTargets(targets);
@@ -11203,7 +11117,8 @@ async function saveBackfillLink(env, job, sink, message, url) {
   const existing = await findExistingLink(env, table, column, key, url);
   if (existing) return { duplicate: true, id: existing.id };
   const id = 'ix_' + randomToken().slice(0, 20);
-  const common = [id, key, url, generateUrlHash(url), titleFromUrl(url), String(message.message || message.text || message.caption || ''), JSON.stringify(['telegram', job.id.startsWith('live:') ? 'channel' : 'backfill']), Date.now(), job.chat_id, String(message.id ?? message.message_id), job.id];
+  const noteText = String(message.message || message.text || message.caption || '');
+  const common = [id, key, url, generateUrlHash(url), titleFromUrl(url), noteText, '[]', Date.now(), job.chat_id, String(message.id ?? message.message_id), job.id];
   try {
     if (personal) await env.DB.prepare("INSERT INTO personal_links (id,user_id,url,url_hash,title,notes,tags,created_at,source_chat_id,source_message_id,transfer_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)").bind(...common).run();
     else await env.DB.prepare("INSERT INTO links (id,community_id,url,url_hash,title,notes,tags,created_at,source_chat_id,source_message_id,transfer_id,added_by,added_by_user_id,added_by_provider) VALUES (?,?,?,?,?,?,?,?,?,?,?,'history backfill',?,'telegram')").bind(...common, job.user_id).run();
@@ -11213,6 +11128,12 @@ async function saveBackfillLink(env, job, sink, message, url) {
     if (!duplicate) throw error;
     return { duplicate: true, id: duplicate.id };
   }
+  // Deterministic tags now; metadata_version stays 0 so a later search can
+  // upgrade the row with the model. No `telegram`/`backfill` stamps.
+  try {
+    const tagged = await describeAndTagLink(env, url, { title: titleFromUrl(url), notes: noteText }, { config: null, maxTags: 8 });
+    await env.DB.prepare(`UPDATE ${table} SET tags = ? WHERE id = ?`).bind(JSON.stringify(tagged.tags), id).run();
+  } catch (_) {}
   markMeiliScopeDirty(env, sink, key);
   return { saved: id };
 }
@@ -11585,50 +11506,7 @@ for (const rawUrl of toSave) {
     if (r.duplicate) {
       await sendTelegramMessage(token, chatId, `Website is already added: ${rawUrl}`, forumThreadId);
     } else {
-      const userTagsPersonal = normalizeTagList(extractHashtags(fullPost));
-      let reply;
-      try {
-        if (userTagsPersonal.length && r.id) {
-          const merged = [...new Set([...['telegram','personal'], ...userTagsPersonal])];
-          await ensureSearchColumns(env);
-          try {
-            await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
-              .bind(r.title, JSON.stringify(merged), r.notes || '', r.id).run();
-          } catch (_) {}
-          reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, { title: r.title, description: r.notes || '', tags: userTagsPersonal }, r.notes);
-        } else {
-          const vocab = await recentTagsForScope(env, 'personal', athenaUser.id);
-          const ai = await aiDescribeAndTag(env, rawUrl, {
-            title: r.title,
-            notes: r.notes,
-            content: r.content
-          }, vocab);
-          if (ai && r.id) {
-            const savedTitle = ai.title || r.title;
-            const merged = ai.tags?.length
-              ? [...new Set([...['telegram', 'personal'], ...ai.tags])]
-              : ['telegram', 'personal'];
-            await ensureSearchColumns(env);
-            try {
-              await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`)
-                .bind(savedTitle, JSON.stringify(merged), ai.description || r.notes || '', r.id).run();
-            } catch (_) {}
-          } else {
-            const fb=fallbackTagsFromMeta(rawUrl, {title: r.title, notes: r.notes, content: r.content});
-            if(fb.length && r.id){
-              const mergedFb=[...new Set([...['telegram','personal'], ...fb])];
-              try{ await env.DB.prepare(`UPDATE personal_links SET title = ?, tags = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`).bind(r.title, JSON.stringify(mergedFb), r.notes||'', r.id).run(); }catch(_){}
-              reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, {title: r.title, description: r.notes||'', tags: fb}, r.notes);
-            } else {
-              reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, null, r.notes);
-            }
-          }
-          if(!reply) reply = await formatSavedLinkReply(env, 'personal', ai?.title || r.title, rawUrl, ai, r.notes);
-        }
-      } catch (_) {
-        reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, null, r.notes);
-      }
-      await sendTelegramRichMessage(token, chatId, reply, forumThreadId);
+      await finalizePersonalSave(env, token, chatId, forumThreadId, athenaUser, r, rawUrl, fullPost);
     }
   }
 }
@@ -12195,7 +12073,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   // for channels linked to a community via /channel_link. Bots cannot reply
   // in channels, so this path is silent by necessity.
   if (String(msg.chat?.type || '') === 'channel') {
-    // A Kage/static scrape or a Telegram file download can exceed Telegram's
+    // A static scrape or a Telegram file download can exceed Telegram's
     // webhook response window. ACK first; the adapter's waitUntil keeps this
     // work alive on Cloudflare and the Node shim handles it in the background.
     runInBackground(env, indexChannelPost(msg, binding, token, env));
@@ -14953,17 +14831,18 @@ Rules:
 
     const title = newTitle != null ? newTitle : hit.title;
     const notes = newNotes != null ? newNotes : hit.notes;
+    const editedAt = Date.now();
     await ensureLinkMetaColumns(env);
     await ensureSearchColumns(env);
     try {
       if (scope === 'personal') {
         await env.DB.prepare(
-          `UPDATE personal_links SET title = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ? AND user_id = ?`
-        ).bind(title, notes, hit.id, athenaUser.id).run();
+          `UPDATE personal_links SET title = ?, notes = ?, manual_edited_at = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ? AND user_id = ?`
+        ).bind(title, notes, editedAt, hit.id, athenaUser.id).run();
       } else {
         await env.DB.prepare(
-          `UPDATE links SET title = ?, notes = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
-        ).bind(title, notes, hit.id).run();
+          `UPDATE links SET title = ?, notes = ?, manual_edited_at = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
+        ).bind(title, notes, editedAt, hit.id).run();
       }
     } catch (_) {
       if (scope === 'personal') {
@@ -15048,19 +14927,20 @@ Rules:
           if (add.duplicate) await sendTelegramMessage(token, chatId, `Website is already added: ${rawUrl}`, forumThreadId);
           else {
             try {
-              const vocab = await recentTagsForScope(env, 'personal', athenaUser.id);
-              const ai = await aiDescribeAndTag(env, rawUrl, {
+              const generated = await describeAndTagLink(env, rawUrl, {
                 title: add.title,
                 notes: add.notes,
-                content: add.content
-              }, vocab);
-              if (ai && add.id) {
-                const savedTitle = ai.title || add.title;
-                const tags = [...new Set([...(ai.tags || []), 'telegram', 'dump'])];
+                content: add.content,
+              }, { maxTags: 8 });
+              if (add.id) {
+                const savedTitle = generated.title || add.title;
+                const savedNotes = (!isDetailedNotes(add.notes) && generated.description)
+                  ? generated.description
+                  : (add.notes || generated.description || '');
                 await ensureSearchColumns(env);
                 await env.DB.prepare(
                   `UPDATE personal_links SET title = ?, notes = ?, tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
-                ).bind(savedTitle, ai.description || add.notes || '', JSON.stringify(tags), add.id).run();
+                ).bind(savedTitle, savedNotes, JSON.stringify(generated.tags), add.id).run();
               }
             } catch (_) {}
             await sendTelegramMessage(token, chatId, `Was not in DB — added to personal: ${rawUrl}`, forumThreadId);
@@ -15091,40 +14971,34 @@ Rules:
               `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
                 added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at, image_url, site_name)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'telegram', ?, 0, 0, ?, ?, ?)`
-            ).bind(id, binding.community_id, rawUrl, urlHash, meta.title, meta.notes, JSON.stringify(['telegram']), senderName, athenaUser?.id || null, senderName, Date.now(), meta.image_url || null, meta.site_name || null).run();
+            ).bind(id, binding.community_id, rawUrl, urlHash, meta.title, meta.notes, '[]', senderName, athenaUser?.id || null, senderName, Date.now(), meta.image_url || null, meta.site_name || null).run();
           } catch (_) {
             await env.DB.prepare(
               'INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-            ).bind(id, binding.community_id, rawUrl, urlHash, meta.title, meta.notes, JSON.stringify(['telegram']), senderName, Date.now()).run();
+            ).bind(id, binding.community_id, rawUrl, urlHash, meta.title, meta.notes, '[]', senderName, Date.now()).run();
           }
           try {
             const tagText = [telegramFullPostText(msg.reply_to_message), telegramFullPostText(msg)].filter(Boolean).join(' ');
             const userTags2 = normalizeTagList(extractHashtags(tagText || meta.notes || ''));
+            const generated = await describeAndTagLink(env, rawUrl, meta, { maxTags: 8 });
+            let tags = generated.tags;
             if (userTags2.length) {
-              const tags = [...new Set([...['telegram'], ...userTags2])];
-              await ensureSearchColumns(env);
-              await env.DB.prepare(
-                `UPDATE links SET title = ?, notes = ?, tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
-              ).bind(meta.title, meta.notes || '', JSON.stringify(tags), id).run();
-            } else {
-              const vocab = await recentTagsForScope(env, 'community', binding.community_id);
-              const ai = await aiDescribeAndTag(env, rawUrl, meta, vocab);
-              if (ai) {
-                const savedTitle = ai.title || meta.title;
-                const tags = [...new Set([...(ai.tags || []), 'telegram'])];
-                await ensureSearchColumns(env);
-                await env.DB.prepare(
-                  `UPDATE links SET title = ?, notes = ?, tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
-                ).bind(savedTitle, ai.description || meta.notes || '', JSON.stringify(tags), id).run();
-              } else {
-                const fb = fallbackTagsFromMeta(rawUrl, meta);
-                if (fb.length) {
-                  const tagsFb = [...new Set([...['telegram'], ...fb])];
-                  await ensureSearchColumns(env);
-                  await env.DB.prepare(`UPDATE links SET title = ?, notes = ?, tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`).bind(meta.title, meta.notes||'', JSON.stringify(tagsFb), id).run();
-                }
-              }
+              tags = validateTags([...userTags2, ...generated.tags], {
+                banned: nameBansFor(rawUrl, generated.title || meta.title),
+                allowedBrands: generated.facts?.brands || [],
+                max: 10,
+              }).tags;
+              if (!tags.length) tags = userTags2;
+              tags = finalizeTags(tags, generated.facts, 10);
             }
+            const savedTitle = generated.title || meta.title;
+            const savedNotes = (!isDetailedNotes(meta.notes) && generated.description)
+              ? generated.description
+              : (meta.notes || generated.description || '');
+            await ensureSearchColumns(env);
+            await env.DB.prepare(
+              `UPDATE links SET title = ?, notes = ?, tags = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
+            ).bind(savedTitle, savedNotes, JSON.stringify(tags), id).run();
           } catch (_) {}
           markMeiliScopeDirty(env, 'community', binding.community_id);
           await sendTelegramMessage(token, chatId, `Was not in DB — added to community: ${rawUrl}`, forumThreadId);
@@ -15943,78 +15817,60 @@ async function scrapeGistMetadata(rawUrl, env) {
 /**
  * Scrape: forge APIs first; else prefer clean meta description over noisy body.
  */
-// --- kage fallback scraper (self-host only) --------------------------------
-// kage (github.com/tamnd/kage) mirrors a page with headless Chrome and every
-// script stripped — exactly what JS-rendered SPAs need. Enabled by setting
-// KAGE_BIN to the kage binary on a self-hosted server. A missing binary is
-// remembered for 10 minutes so each scrape does not pay a spawn cost.
-let _kageUnavailableUntil = 0;
+// --- headless Chromium fallback scraper (self-host only) -------------------
+// Some pages render their content client-side; fetching the raw HTML yields an
+// empty shell. When Chromium is installed (CHROME_BIN or a distro binary) we
+// dump the rendered DOM and read it with the same extractors as a normal
+// fetch. A missing binary is remembered for 10 minutes so saves stay fast.
+let _chromeUnavailableUntil = 0;
 
-async function scrapeViaKage(rawUrl, env) {
+function chromiumBinary(env) {
+  const configured = String(env.CHROME_BIN || '').trim();
+  if (configured) return configured;
+  return ['chromium', 'chromium-browser', 'google-chrome', 'google-chrome-stable'].join('\n');
+}
+
+async function scrapeViaChromium(rawUrl, env) {
   if (!isSelfHosted(env)) return null;
-  if (Date.now() < _kageUnavailableUntil) return null;
-  const bin = String(env.KAGE_BIN || 'kage').trim();
-  if (!bin) return null;
-  let dir = null;
-  try {
-    const cpSpec = 'node:child_process';
-    const fsSpec = 'node:fs/promises';
-    const osSpec = 'node:os';
-    const pathSpec = 'node:path';
-    const { execFile } = await import(cpSpec);
-    const { mkdtemp, readFile, readdir } = await import(fsSpec);
-    const { tmpdir } = await import(osSpec);
-    const { join } = await import(pathSpec);
-    dir = await mkdtemp(join(tmpdir(), 'athena-kage-'));
-    const childEnv = typeof process !== 'undefined' ? { ...process.env } : undefined;
-    if (childEnv && env.KAGE_CHROME) childEnv.KAGE_CHROME = String(env.KAGE_CHROME);
-    await new Promise((resolve, reject) => {
-      execFile(bin, ['clone', rawUrl, '--max-pages', '1', '--workers', '1', '-o', dir], {
-        timeout: 90_000,
-        env: childEnv,
-        windowsHide: true
-      }, (err) => (err ? reject(err) : resolve()));
-    });
-    // The mirror lands in <dir>/<host>/…; pick the largest HTML file that is
-    // not a localized asset under _kage/.
-    const htmlFiles = [];
-    const walk = async (d) => {
-      for (const entry of await readdir(d, { withFileTypes: true })) {
-        const p = join(d, entry.name);
-        if (entry.isDirectory()) {
-          if (entry.name === '_kage') continue;
-          await walk(p);
-        } else if (/\.html?$/i.test(entry.name)) {
-          const buf = await readFile(p);
-          htmlFiles.push({ p, size: buf.length, buf });
-        }
+  if (Date.now() < _chromeUnavailableUntil) return null;
+  const candidates = chromiumBinary(env).split(/\n+/).map((s) => s.trim()).filter(Boolean);
+  if (!candidates.length) return null;
+  const { execFile } = await import('node:child_process');
+  const args = [
+    '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
+    '--hide-scrollbars', '--virtual-time-budget=8000', '--dump-dom', rawUrl,
+  ];
+  for (const bin of candidates) {
+    try {
+      const html = await new Promise((resolve, reject) => {
+        execFile(bin, args, { timeout: 45_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (err, stdout) => {
+          if (err) reject(err); else resolve(String(stdout || ''));
+        });
+      });
+      if (!html || html.length < 500) continue;
+      const doc = html.slice(0, 400_000);
+      const title = cleanSiteTitle(
+        metaContent(doc, ['og:title', 'twitter:title']) || (() => {
+          const m = doc.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+          return m ? decodeHtmlEntities(m[1]) : '';
+        })(), '', '');
+      const description = cleanGenericSummary(metaContent(doc, ['description', 'og:description', 'twitter:description']) || '');
+      let image = metaContent(doc, ['og:image', 'twitter:image']) || '';
+      try { if (image && !/^https?:\/\//i.test(image)) image = new URL(image, rawUrl).href; } catch (_) { image = ''; }
+      const content = extractReadableContent(doc);
+      if (!content && !description) continue;
+      let siteName = '';
+      try { siteName = new URL(rawUrl).hostname.replace(/^www\./, ''); } catch (_) {}
+      return { title, description, content, image, siteName };
+    } catch (e) {
+      // ENOENT = this binary is not installed; try the next candidate.
+      if (!/ENOENT|not found|not executable/i.test(String(e?.message || e))) {
+        console.warn('chromium scrape failed', e?.message || e);
       }
-    };
-    await walk(dir);
-    if (!htmlFiles.length) return null;
-    htmlFiles.sort((a, b) => b.size - a.size);
-    const html = htmlFiles[0].buf.toString('utf8').slice(0, 400_000);
-    const title = cleanSiteTitle(
-      metaContent(html, ['og:title', 'twitter:title']) || (() => {
-        const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-        return m ? decodeHtmlEntities(m[1]) : '';
-      })(), '', '');
-    const description = cleanGenericSummary(metaContent(html, ['description', 'og:description', 'twitter:description']) || '');
-    let image = metaContent(html, ['og:image', 'twitter:image']) || '';
-    try { if (image && !/^https?:\/\//i.test(image)) image = new URL(image, rawUrl).href; } catch (_) { image = ''; }
-    const content = extractReadableContent(html);
-    if (!content && !description) return null;
-    let siteName = '';
-    try { siteName = new URL(rawUrl).hostname.replace(/^www\./, ''); } catch (_) {}
-    return { title, description, content, image, siteName };
-  } catch (e) {
-    // ENOENT = kage not installed; back off so saves stay fast without it.
-    if (/ENOENT|not found|not executable/i.test(String(e?.message || e))) _kageUnavailableUntil = Date.now() + 10 * 60_000;
-    else console.warn('kage scrape failed', e?.message || e);
-    return null;
-  } finally {
-    if (dir) await import('node:fs/promises').then((m) => m.rm(dir, { recursive: true, force: true })).catch(() => {});
+    }
   }
+  _chromeUnavailableUntil = Date.now() + 10 * 60_000;
+  return null;
 }
 
 async function scrapeLinkMetadata(rawUrl, env) {
@@ -16045,7 +15901,7 @@ async function scrapeLinkMetadata(rawUrl, env) {
       };
     }
 
-    let kageFallbackUsed = false;
+    let chromeFallbackUsed = false;
     const res = await fetchWithTimeout(rawUrl, {
       method: 'GET',
       redirect: 'follow',
@@ -16058,15 +15914,15 @@ async function scrapeLinkMetadata(rawUrl, env) {
       }
     });
     if (!res.ok) {
-      const kage = await scrapeViaKage(rawUrl, env);
-      if (kage) {
+      const chromePage = await scrapeViaChromium(rawUrl, env);
+      if (chromePage) {
         return {
-          title: kage.title || fallback.title,
-          description: kage.description || '',
-          content: kage.content || '',
-          image: kage.image || '',
-          siteName: kage.siteName || '',
-          viaKage: true
+          title: chromePage.title || fallback.title,
+          description: chromePage.description || '',
+          content: chromePage.content || '',
+          image: chromePage.image || '',
+          siteName: chromePage.siteName || '',
+          viaChromium: true
         };
       }
       return fallback;
@@ -16140,16 +15996,16 @@ async function scrapeLinkMetadata(rawUrl, env) {
     description = cleanGenericSummary(description).slice(0, 2500);
 
     // JS-rendered SPA fallback: when static HTML yielded almost nothing, the
-    // page likely renders client-side. If kage (headless-Chrome mirror) is
-    // configured on this server, render it for real and re-extract.
+    // page likely renders client-side. If Chromium is installed on this
+    // server, render it for real and re-extract.
     if ((!content || content.length < 400) && (!description || description.length < 80)) {
-      const kage = await scrapeViaKage(rawUrl, env);
-      if (kage) {
-        kageFallbackUsed = true;
-        if (kage.content && kage.content.length > content.length) content = kage.content;
-        if (kage.description && scoreDescriptionCandidate(kage.description) >= 40) description = kage.description;
-        if (!title || isWeakTitle(title, rawUrl)) title = kage.title || title;
-        if (!image && kage.image) image = kage.image;
+      const chromePage = await scrapeViaChromium(rawUrl, env);
+      if (chromePage) {
+        chromeFallbackUsed = true;
+        if (chromePage.content && chromePage.content.length > content.length) content = chromePage.content;
+        if (chromePage.description && scoreDescriptionCandidate(chromePage.description) >= 40) description = chromePage.description;
+        if (!title || isWeakTitle(title, rawUrl)) title = chromePage.title || title;
+        if (!image && chromePage.image) image = chromePage.image;
       }
     }
 
@@ -16159,7 +16015,7 @@ async function scrapeLinkMetadata(rawUrl, env) {
       content,
       image: image.slice(0, 500),
       siteName: (siteName || host || '').slice(0, 120),
-      viaKage: kageFallbackUsed || undefined
+      viaChromium: chromeFallbackUsed || undefined
     };
   } catch (_) {
     return fallback;
@@ -16171,11 +16027,13 @@ async function ensureLinkMetaColumns(env) {
     `ALTER TABLE personal_links ADD COLUMN image_url TEXT`,
     `ALTER TABLE personal_links ADD COLUMN site_name TEXT`,
     `ALTER TABLE personal_links ADD COLUMN metadata_version INTEGER DEFAULT 0`,
+    `ALTER TABLE personal_links ADD COLUMN manual_edited_at INTEGER`,
     `ALTER TABLE personal_links ADD COLUMN source_chat_id TEXT`,
     `ALTER TABLE personal_links ADD COLUMN source_message_id TEXT`,
     `ALTER TABLE links ADD COLUMN image_url TEXT`,
     `ALTER TABLE links ADD COLUMN site_name TEXT`,
     `ALTER TABLE links ADD COLUMN metadata_version INTEGER DEFAULT 0`,
+    `ALTER TABLE links ADD COLUMN manual_edited_at INTEGER`,
     `ALTER TABLE links ADD COLUMN source_chat_id TEXT`,
     `ALTER TABLE links ADD COLUMN source_message_id TEXT`,
     `ALTER TABLE links ADD COLUMN transfer_id TEXT`
@@ -16437,7 +16295,7 @@ async function isFreeTierModel(modelId, baseUrl, env, apiKey) {
 
 async function enrichLinksInBackground(env, scope, key, links) {
   await ensureSearchColumns(env);
-  const vocab = await recentTagsForScope(env, scope, key);
+  await ensureLinkMetaColumns(env);
   let aiConfig = null;
   try { aiConfig = await getInstanceAiConfig(env); } catch (_) {}
   const steroid = await getSteroidMode(env);
@@ -16451,50 +16309,40 @@ async function enrichLinksInBackground(env, scope, key, links) {
       try {
         const meta = await scrapeLinkMetadata(link.url, env);
         const title = (isWeakTitle(link.title, link.url) && meta.title) ? meta.title : link.title;
-        const update = {
+        let existingTags = [];
+        try { existingTags = Array.isArray(link.tags) ? link.tags : JSON.parse(link.tags || '[]'); } catch (_) {}
+        const tagged = await describeAndTagLink(env, link.url, {
           title,
-          notes: meta.description || '',
+          notes: meta.description || link.notes || '',
+          content: meta.content || '',
+        }, { config: aiConfig, maxTags: 8 });
+        if (!steroid) await new Promise(r => setTimeout(r, 900));
+
+        const oldNotes = String(link.notes || '');
+        const notes = (!isDetailedNotes(oldNotes) && tagged.description)
+          ? String(tagged.description).slice(0, 600)
+          : oldNotes;
+        const update = {
+          title: tagged.title || title,
+          notes,
           image_url: meta.image || '',
           site_name: meta.siteName || '',
+          tags: tagged.tags,
         };
-        // AI describe + tag (karakeep-style); stable tags because the prompt
-        // is seeded with the vocabulary already in use for this scope.
-        const ai = await aiDescribeAndTag(env, link.url, {
-          title,
-          notes: meta.description,
-          content: meta.content
-        }, vocab, aiConfig);
-        if (!steroid) await new Promise(r => setTimeout(r, 900));
-        if (ai) {
-          if (ai.title) update.title = ai.title;
-          if (ai.description) update.notes = ai.description;
-          if (ai.tags?.length) {
-            let existingTags = [];
-            try { existingTags = Array.isArray(link.tags) ? link.tags : JSON.parse(link.tags || '[]'); } catch (_) {}
-            update.tags = [...new Set([...ai.tags, ...existingTags])];
-          }
-        } else {
-          // AI down → context tags from the URL/caption, same as the synchronous
-          // save path — clones stay tagged even during a model rate-limit storm.
-          const fb = fallbackTagsFromMeta(link.url, { title: update.title, notes: update.notes, content: meta.content || '' });
-          if (fb.length) {
-            let existingTags = [];
-            try { existingTags = Array.isArray(link.tags) ? link.tags : JSON.parse(link.tags || '[]'); } catch (_) {}
-            update.tags = [...new Set([...fb, ...existingTags])];
-          }
-        }
-        if (!update.notes && !update.image_url && !update.site_name && !update.tags) continue;
-        const metadataVersion = ai?.tags?.length && ai.description ? AI_METADATA_VERSION : 2;
+        const metadataVersion = tagged.usedAi && tagged.description ? AI_METADATA_VERSION : 2;
         if (scope === 'personal') {
           await env.DB.prepare(
-            `UPDATE personal_links SET title = ?, notes = ?, image_url = ?, site_name = ?, metadata_version = ${metadataVersion}, search_blob = NULL` + (update.tags ? ', tags = ?' : '') + ' WHERE id = ?'
-          ).bind(update.title, update.notes, update.image_url, update.site_name, ...(update.tags ? [JSON.stringify(update.tags)] : []), link.id).run();
+            `UPDATE personal_links SET title = ?, notes = ?, image_url = ?, site_name = ?, tags = ?, metadata_version = ${metadataVersion}, search_blob = NULL WHERE id = ? AND manual_edited_at IS NULL`
+          ).bind(update.title, update.notes, update.image_url, update.site_name, JSON.stringify(update.tags), link.id).run();
         } else {
           await env.DB.prepare(
-            `UPDATE links SET title = ?, notes = ?, image_url = ?, site_name = ?, metadata_version = ${metadataVersion}, search_blob = NULL` + (update.tags ? ', tags = ?' : '') + ' WHERE id = ?'
-          ).bind(update.title, update.notes, update.image_url, update.site_name, ...(update.tags ? [JSON.stringify(update.tags)] : []), link.id).run();
+            `UPDATE links SET title = ?, notes = ?, image_url = ?, site_name = ?, tags = ?, metadata_version = ${metadataVersion}, search_blob = NULL WHERE id = ? AND manual_edited_at IS NULL`
+          ).bind(update.title, update.notes, update.image_url, update.site_name, JSON.stringify(update.tags), link.id).run();
         }
         markMeiliScopeDirty(env, scope, key);
+        // existingTags is retained only when a human already curated the row;
+        // automatic passes are normalized by the shared validator above.
+        void existingTags;
       } catch (_) { /* one bad link must not stall the rest */ }
     }
   };
@@ -16503,14 +16351,15 @@ async function enrichLinksInBackground(env, scope, key, links) {
 
 function queueMissingLinkEnrichment(env, scope, key, rows) {
   const missing = (rows || [])
-    .filter(row => row?.url && Number(row.metadata_version || 0) < AI_METADATA_VERSION)
+    .filter(row => row?.url && !row.manual_edited_at && Number(row.metadata_version || 0) < AI_METADATA_VERSION)
     .slice(0, 10)
     .map(row => ({
       id: row.id,
       url: row.url,
       title: row.title || '',
       notes: row.notes || '',
-      tags: row.tags || []
+      tags: row.tags || [],
+      manual_edited_at: row.manual_edited_at || null,
     }));
   if (missing.length) runInBackground(env, enrichLinksInBackground(env, scope, key, missing));
   return missing.length;
@@ -16598,7 +16447,7 @@ let AI_DOWN_UNTIL = 0;
 const AI_DOWN_COOLDOWN_MS = 60_000;
 function aiTrip() { AI_DOWN_UNTIL = Date.now() + AI_DOWN_COOLDOWN_MS; }
 
-async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], config = undefined, reviewTags = null, bannedTags = null) {
+async function aiDescribeAndTag(env, rawUrl, meta = {}, config = undefined, reviewTags = null, bannedTags = null, facts = null) {
   if (Date.now() < AI_DOWN_UNTIL) return null;
   let cfg;
   if (config === undefined) {
@@ -16622,43 +16471,48 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
     .map(value => String(value || '').trim())
     .filter(Boolean)
     .join('\n\n')
-    .replace(/\s+/g, ' ');
-  const vocab = (existingTags || [])
-    .map(tag => String(tag).replace(/^#/, '').trim().toLowerCase())
-    .filter(tag => tag && !['telegram', 'community', 'personal', 'dump'].includes(tag))
-    .filter((tag, index, all) => all.indexOf(tag) === index);
-  const canonical = [...CANONICAL_TAGS].sort();
+    .replace(/\s+/g, ' ')
+    .slice(0, 3000);
   const mode = (cfg.mode || 'openai').toLowerCase();
-
+  const bookmarkFacts = facts || extractFacts(rawUrl, meta);
+  const allowedBrands = bookmarkFacts.brands || [];
   const reviewing = Array.isArray(reviewTags);
+  const factLines = [
+    bookmarkFacts.type ? `Type: ${bookmarkFacts.type}` : '',
+    bookmarkFacts.software && bookmarkFacts.platforms?.length ? `Platforms: ${bookmarkFacts.platforms.join(', ')}` : '',
+    bookmarkFacts.software ? 'Software: yes' : '',
+    bookmarkFacts.repo ? 'Source repository: yes' : '',
+    bookmarkFacts.brands?.length ? `Brands on the page: ${bookmarkFacts.brands.join(', ')}` : '',
+    bookmarkFacts.ecosystems?.length ? `Host ecosystem: ${bookmarkFacts.ecosystems.join(', ')}` : '',
+    bookmarkFacts.categories?.length ? `Topic signals: ${bookmarkFacts.categories.join(', ')}` : '',
+  ].filter(Boolean).join('\n');
+
   const system = [
-    'You are a bookmarking assistant for a link archive.',
-    'Translate the title, summary, and tags to English before returning them, even when the source page is in another language.',
-    'Return a useful context summary in 1-2 factual English sentences: preserve the question, problem, subject, or decision the page is about, not just the site name.',
+    'You classify saved bookmarks for a link archive.',
+    'Write 1-2 factual English sentences describing what the page is and what it does. Preserve the concrete subject; do not open with "This page" and do not merely repeat the site name.',
     'Return an English title when the source title is not English.',
-    'Choose 3-7 short lowercase English tags (no #, no spaces) that describe WHAT the page is and does — its topic, type, and platform.',
-    'Tags must be common nouns for the subject matter (music, video, vpn, coding, tutorial, app, bot, game). NEVER use proper nouns as tags: no site names, project names, person names, usernames, or domain words — even if they appear in the title or URL. The one exception is a brand from the canonical list, and only when the page is about that brand.',
-    'Reuse an existing tag exactly whenever it fits; do not invent a synonym for an existing tag.',
-    'Choose tags only from the canonical list and the existing vocabulary given below. Never invent a word; returning fewer tags is correct when nothing fits.',
-    reviewing
-      ? 'REVIEW the current tags: DROP ingest junk (backfill, dump, untagged, duplicate, saved, link, file, community, personal, post, channel, feed, archive, auto, import, share, forward, media, attachment, document, upload, rss) and anything unrelated to the content; KEEP every current tag that truly describes it (e.g. keep telegram only for Telegram-related links); ADD missing topic and platform tags. For apps include the platform: android, ios, or multiplatform when it runs on several OSes.'
-      : '',
+    'Choose 3-6 lowercase tags (no #, no spaces), ONLY from the vocabulary below. Never invent a word.',
+    'Pick the type tag that fits: app, software, tool, service, website, library, framework, api, bot, extension, plugin, cli, game, documentation, driver, theme.',
+    'Use platform tags only when the page says the software runs there. Do not return multiplatform; it is computed from the platform facts.',
+    'Use a brand tag only when the brand is named in the facts. Never tag a site, project, person or domain name.',
+    'Prefer specific topics over broad ones. Returning 3 accurate tags is better than 6 vague ones.',
+    reviewing ? 'Keep current tags only when they still fit; drop ingest stamps, names and vague words.' : '',
     'Reply with ONLY one JSON object: {"title": "...", "description": "...", "tags": ["a", "b", "c"]}'
   ].filter(Boolean).join(' ');
 
   const user = [
     `Title: ${title || '(unknown)'}`,
     `URL: ${rawUrl}`,
+    factLines ? `Facts:\n${factLines}` : '',
     snippet ? `Page content: ${snippet}` : '',
-    vocab.length ? `Existing tags: ${vocab.join(', ')}` : '',
-    `Canonical tags: ${canonical.join(', ')}`,
-    reviewing ? `Current tags on this bookmark: ${reviewTags.join(', ') || '(none)'}` : '',
-    Array.isArray(bannedTags) && bannedTags.length ? `NEVER use as tags (site/project names): ${bannedTags.join(', ')}` : '',
+    reviewing ? `Current tags: ${reviewTags.join(', ') || '(none)'}` : '',
+    Array.isArray(bannedTags) && bannedTags.length ? `Never use these names as tags: ${bannedTags.join(', ')}` : '',
+    `Vocabulary:\n${TAG_VOCAB_TEXT}`,
     '',
     'JSON:'
   ].filter(Boolean).join('\n');
 
-  const maxTok = 300;
+  const maxTok = 400;
   const tryModels = [model, ...(await getFallbackChain(baseUrl, env, cfg.api_key, model))];
   let lastError = null;
   for (let mi=0; mi<tryModels.length; mi++) {
@@ -16675,7 +16529,7 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
       payload = { model: curModel, max_tokens: maxTok, messages: [
         { role: 'system', content: system },
         { role: 'user', content: user }
-      ], stream: false, temperature: 0.1 };
+      ], stream: false, temperature: 0 };
     }
     let text = '';
     try {
@@ -16732,8 +16586,15 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
       const parsed = parseAiDescribeResponse(text);
       if (parsed) {
         // Enforce the vocabulary once, here, so no model output reaches storage
-        // unvalidated on any path (save, backfill, review).
-        parsed.tags = validateTags(parsed.tags, { vocabulary: vocab }).tags;
+        // unvalidated on any path (save, backfill, review). A brand must be
+        // named in the facts; "multiplatform" is recomputed by the caller.
+        parsed.tags = parsed.tags.filter((tag) => tag !== 'multiplatform');
+        parsed.tags = validateTags(parsed.tags, {
+          banned: Array.isArray(bannedTags) ? bannedTags : [],
+          allowedBrands,
+          max: 6,
+        }).tags;
+        parsed.description = String(parsed.description || '').slice(0, 600);
       }
       return parsed;
     } catch (err) {
@@ -16747,6 +16608,86 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, existingTags = [], confi
   console.error('AI all fallbacks failed', lastError?.message||'');
   aiTrip();
   return null;
+}
+
+/**
+ * The one tagging pipeline used by every save path and by /forcetags.
+ *
+ * Scrape facts first, then let the model choose words when a key is configured;
+ * otherwise the deterministic classifier does it. Platform tags and
+ * `multiplatform` always come from the facts, never from the model, and the
+ * final list is validated against the controlled vocabulary. Returns
+ * `{ tags, description, title, facts, usedAi }` and never throws.
+ */
+async function describeAndTagLink(env, rawUrl, meta = {}, { config, maxTags = 8, scrape = false } = {}) {
+  let title = String(meta.title || '').trim();
+  let notes = String(meta.notes || '').trim();
+  let content = String(meta.content || '').trim();
+  let description = String(meta.description || '').trim();
+
+  // Review passes scrape:true to fetch a real description; save paths already
+  // scraped in enrichLinkFields, so they do not hit the network twice.
+  if (scrape && /^https?:\/\//i.test(String(rawUrl || ''))) {
+    try {
+      const sc = await scrapeLinkMetadata(rawUrl, env);
+      if (sc) {
+        if (!title || isWeakTitle(title, rawUrl)) title = String(sc.title || title).slice(0, 200);
+        const scraped = String(sc.description || '').trim();
+        if (scraped && (!isDetailedNotes(notes) || scraped.length > notes.length)) description = scraped.slice(0, 600);
+        if (!notes || !isDetailedNotes(notes)) notes = scraped || notes;
+        content = String(sc.content || content).slice(0, 8000);
+      }
+    } catch (_) {}
+  }
+
+  const facts = extractFacts(rawUrl, { title, notes, content, description });
+
+  let cfg = config;
+  if (cfg === undefined) {
+    try { cfg = await getInstanceAiConfig(env); } catch (_) { cfg = null; }
+  }
+
+  let ai = null;
+  if (cfg?.api_key) {
+    try {
+      ai = await aiDescribeAndTag(env, rawUrl, { title, notes, content }, cfg, null, nameBansFor(rawUrl, title), facts);
+    } catch (_) { ai = null; }
+  }
+
+  // Model choice first; the deterministic tags fill gaps it left and carry the
+  // facts it must not decide (type, host ecosystem, platform set).
+  const candidate = [...(ai?.tags || []), ...tagsFromFacts(facts)];
+  const verdict = validateTags(candidate, {
+    banned: nameBansFor(rawUrl, title),
+    allowedBrands: facts.brands,
+    max: Math.max(1, Math.min(Number(maxTags) || 8, 10)),
+  });
+
+  // One type wins (the model's choice first, else the rule's), so a link never
+  // carries contradictory labels like app + website.
+  const deduped = [];
+  let typeTaken = false;
+  for (const tag of verdict.tags) {
+    if (TYPE_SET.has(tag)) {
+      if (typeTaken) continue;
+      typeTaken = true;
+    }
+    deduped.push(tag);
+  }
+
+  // `multiplatform` is derived from the platform set, never from a model.
+  const tags = finalizeTags(deduped, facts, Math.max(1, Math.min(Number(maxTags) || 8, 10)));
+  const safeTags = tags.length ? tags : ['website'];
+
+  const finalDescription = String(ai?.description || description || '').replace(/\s+/g, ' ').trim().slice(0, 600);
+  return {
+    tags: safeTags,
+    description: finalDescription,
+    title: ai?.title ? String(ai.title).slice(0, 200) : title,
+    facts,
+    usedAi: !!(ai?.tags?.length || ai?.description),
+    rejected: verdict.rejected,
+  };
 }
 
 /** Format the saved-link reply karakeep-style: what it is → link → #tags. */
@@ -17557,7 +17498,6 @@ export {
   hydrateMeiliRows,
   parseStoredTags,
   normalizeTagList,
-  smartFallbackTags,
   domainNameBans,
   ECOSYSTEM_HOSTS,
   searchAllLinks,
@@ -17567,7 +17507,7 @@ export {
   ensureUcloneTables,
   cloneFailure,
   withCloneAccount,
-  scrapeViaKage,
+  scrapeViaChromium,
   detectBackupCommunityId,
   followLiveness,
   formatBackfillDone,

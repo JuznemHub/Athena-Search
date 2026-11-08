@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS links (
     image_url TEXT,
     site_name TEXT,
     metadata_version INTEGER NOT NULL DEFAULT 0,
+    manual_edited_at INTEGER,
     search_blob TEXT,
     FOREIGN KEY(community_id) REFERENCES communities(id)
 );
@@ -157,6 +158,7 @@ CREATE TABLE IF NOT EXISTS personal_links (
     image_url TEXT,
     site_name TEXT,
     metadata_version INTEGER NOT NULL DEFAULT 0,
+    manual_edited_at INTEGER,
     search_blob TEXT
 );
 

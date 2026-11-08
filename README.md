@@ -97,7 +97,7 @@ Text uploads work in the Worker runtime. Binary conversion needs the self-hosted
 | Telegram login | `TELEGRAM_CLIENT_ID`, `TELEGRAM_CLIENT_SECRET` | OAuth/Mini App login. |
 | Session history | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `STORAGE_KEY` | Optional self-hosted GramJS backfill; never expose these to the browser. |
 | Search index | `MEILI_URL`, `MEILI_MASTER_KEY`, `MEILI_INDEX` | Optional Meilisearch accelerator; defaults to index `athena`. |
-| JS scraping | `KAGE_BIN`, `KAGE_CHROME` | Optional [Kage](https://github.com/tamnd/kage) + Chrome/Chromium fallback. |
+| JS scraping | `CHROME_BIN` | Optional headless Chromium fallback for JavaScript-rendered pages. |
 | Local Bot API | `TELEGRAM_API_BASE` | Optional self-hosted telegram-bot-api; lifts file cap 20 MB → 2 GB. |
 | AI | `OPENROUTER_API_KEY` or settings UI | Credentials are stored server-side and never returned to normal users. |
 
@@ -293,20 +293,19 @@ Every save path — website, bot DM, group, channel, topic, TUI batch — shares
 
 ## Scraping
 
-Every saved URL is first handled by Athena’s normal safe fetch and extractor. GitHub, GitLab, Reddit, and common forge pages have dedicated metadata paths. If a page is JavaScript-rendered and the static result is too thin, self-hosted Athena can invoke Kage with a real Chrome/Chromium browser:
+Every saved URL is first handled by Athena’s normal safe fetch and extractor. GitHub, GitLab, Reddit, and common forge pages have dedicated metadata paths. If a page is JavaScript-rendered and the static result is too thin, self-hosted Athena can render it with a real headless Chromium and read the DOM:
 
 ```bash
-kage clone https://example.com --max-pages 1 --workers 1 -o /tmp/athena-kage-check
+chromium --headless=new --no-sandbox --disable-gpu --dump-dom https://example.com
 ```
 
-Configure the binary explicitly when needed:
+Configure the binary explicitly when needed (otherwise Athena tries `chromium`, `chromium-browser`, `google-chrome`, then `google-chrome-stable`):
 
 ```dotenv
-KAGE_BIN=/usr/local/bin/kage
-KAGE_CHROME=/usr/bin/chromium
+CHROME_BIN=/usr/bin/chromium
 ```
 
-Kage is optional. If it is missing, disabled, or fails, Athena keeps the safe static metadata fallback. The browser-rendered output is read from Kage’s host directory under the selected output root; scripts are not stored as page content.
+Chromium is optional. If it is missing, disabled, or fails, Athena keeps the safe static metadata fallback. The `railpack.json` in the repository installs `chromium` for Railpack deployments.
 
 ## Terminal UI
 
@@ -381,7 +380,6 @@ You will see a **Discord login** option in the UI. It is **not tested and not su
 Athena stands on the shoulders of these projects — their code and ideas are part of this codebase:
 
 - [OpenCode](https://github.com/anomalyco/opencode) — the CLI agent harness; Athena's MCP integration and TUI advanced mode build on its patterns.
-- [Kage](https://github.com/tamnd/kage) — headless-Chrome site cloner powering JS-rendered page scraping.
 - [@firecrawl/anydoc](https://github.com/firecrawl/anydoc) — Rust document converter (pdf/docx/pptx/xlsx/odt/rtf/epub → Markdown).
 - [binthere](https://github.com/nxfu/binthere) — the TUI app whose wordmark, box menus, cursor, and spinner `athena-tui` is based on.
 - [gramjs](https://github.com/gram-js/gramjs) — Telegram user-session client for history backfill.
