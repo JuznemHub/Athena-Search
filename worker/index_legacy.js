@@ -8705,15 +8705,71 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       const display = cloneDisplayName(chatTitle2, chatType2, pend.thread_id || '', topicTitle);
       const target = isPersonal ? 'personal' : 'community';
       st.destinationName = isPersonal ? 'Personal' : (communityName || communityId);
-      st.sourceName = display; st.stage = 'queued';
+      // The parent row is what /stats renders: it must carry the account
+      // label, a running stage and a long expiry, or the finished clone
+      // shows up as a zombie "queued" shell next to an orphan silent job.
+      st.sourceName = display; st.stage = 'running'; st.label = label;
       if (pend.thread_id) st.topics = [{ id: String(pend.thread_id), name: topicTitle || undefined }];
-      await env.DB.prepare(`UPDATE pending_clones SET stats_json = ?, target = ?, community_id = ? WHERE id = ?`).bind(JSON.stringify(st), target, communityId || null, pendingId).run();
-      const res = await startBackfillJob(env, { token, chatId, forumThreadId: threadId, athenaUser: athenaUser2, communityIdArg: communityId, chatIdArg: pend.chat_id, threadArg: pend.thread_id || '', communityName, userbotLabel: label, target, topicName: topicTitle, silentProgress: true });
-      if (!res?.ok) {
-        await editTelegramMessage(token, chatId, msgId, `${boldHtml('❌')} Clone failed: ${escHtml(String(res?.reason || 'unknown'))}`, null, threadId);
+      // Same chat+thread+destination already cloning under another parent?
+      // startBackfillJob keys on parentId, so it would miss the duplicate.
+      const dupActive = await env.DB.prepare(
+        "SELECT id FROM index_jobs WHERE chat_id = ? AND COALESCE(thread_id,'') = COALESCE(?,'') AND target = ? AND community_id = ? AND user_id = ? AND status IN ('queued','running','stopping') LIMIT 1"
+      ).bind(normalizeTgChatId(pend.chat_id), pend.thread_id || null, target, communityId || '', athenaUser2.id).first().catch(() => null);
+      if (dupActive) {
+        st.stage = 'stopped';
+        await env.DB.prepare('UPDATE pending_clones SET stats_json = ?, target = ?, community_id = ? WHERE id = ?').bind(JSON.stringify(st), target, communityId || null, pendingId).run();
+        await editTelegramMessage(token, chatId, msgId, `${boldHtml('⏳ Already cloning')} ${escHtml(display)} — progress is live in ${codeHtml('/stats')}.`, null, threadId);
         return new Response('OK',{status:200, headers:corsHeaders});
       }
-      await editTelegramMessage(token, chatId, msgId, `${boldHtml('✅ Cloning')} ${escHtml(display)} → ${escHtml(st.destinationName)}. History first, then live — progress in ${codeHtml('/stats')}.`, null, threadId);
+      // Forum whole-chat without a thread: enumerate topics first so the run
+      // gets the same per-topic jobs, live card and drill-down as uclone.
+      let forumTopics = null;
+      if (!pend.thread_id) {
+        try {
+          try { await startUserbotAccount(env, label); } catch (_) {}
+          const _client = USERBOT_ACCOUNTS.get(label)?.client;
+          const _ent = _client ? await _client.getEntity(pend.chat_id).catch(() => null) : null;
+          if (_ent && _ent.forum) {
+            const listed = await listForumTopicIds(env, label, pend.chat_id);
+            if (listed && listed.length) forumTopics = listed;
+          }
+        } catch (_) {}
+      }
+      if (forumTopics) {
+        st.isForum = true;
+        st.chosen = forumTopics.map((t) => ({ id: t.id, name: t.name, counters: {} }));
+        st.topics = forumTopics.map((t) => ({ id: t.id, name: t.name }));
+      }
+      await env.DB.prepare('UPDATE pending_clones SET stats_json = ?, target = ?, community_id = ?, expires_at = ? WHERE id = ?').bind(JSON.stringify(st), target, communityId || null, Date.now() + 30 * 86400_000, pendingId).run();
+      if (forumTopics) {
+        // The prompt message becomes the live per-topic forum card.
+        runInBackground(env, (async () => {
+          try {
+            const r = await startForumCloneSequential(env, { token, chatId: normalizeTgChatId(pend.chat_id), chatName: display, progressChatId: chatId, forumThreadId: threadId, topicIds: forumTopics.map((t) => t.id), communityIdArg: communityId, targetArg: target, athenaUser: athenaUser2, label, communityName, parentId: pendingId, cardMsgId: msgId });
+            await syncBotcloneParentStage(env, pendingId, (r && r.failed) ? 'error' : 'done');
+          } catch (_) { try { await syncBotcloneParentStage(env, pendingId, 'error'); } catch (_) {} }
+        })().catch(() => {}));
+        return new Response('OK',{status:200, headers:corsHeaders});
+      }
+      // Single topic / group / channel: send the live progress card (the same
+      // renderer uclone uses) and let the job edit it in place — no more
+      // "go check /stats" dead-end.
+      const card0 = renderCloneProgress({ sourceName: display, chatId: normalizeTgChatId(pend.chat_id), destination: st.destinationName, target, status: 'cloning',
+        topicsTotal: 0, topicsDone: 0,
+        currentTopic: pend.thread_id ? { id: String(pend.thread_id), name: topicTitle || String(pend.thread_id) } : null,
+        processed: 0, total: null, counters: {} });
+      let cardMsg = null;
+      try {
+        const sent = await telegramApi(token, 'sendMessage', { chat_id: chatId, ...(threadId != null && threadId !== '' && !Number.isNaN(Number(threadId)) ? { message_thread_id: Number(threadId) } : {}), text: card0, parse_mode: 'HTML' });
+        if (sent?.ok && sent?.result?.message_id != null) cardMsg = sent.result.message_id;
+      } catch (_) {}
+      try { await telegramApi(token, 'deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {}); } catch (_) {}
+      const res = await startBackfillJob(env, { token, chatId, forumThreadId: threadId, athenaUser: athenaUser2, communityIdArg: communityId, chatIdArg: pend.chat_id, threadArg: pend.thread_id || '', communityName, userbotLabel: label, target, topicName: topicTitle, silentProgress: false, quietStart: true, parentId: pendingId, ...(cardMsg != null ? { progressMsgId: cardMsg } : {}) });
+      if (!res?.ok) {
+        await syncBotcloneParentStage(env, pendingId, 'error');
+        await sendTelegramFormatted(token, chatId, `Clone failed: ${escHtml(String(res?.reason || 'unknown'))}`, threadId);
+        return new Response('OK',{status:200, headers:corsHeaders});
+      }
       return new Response('OK',{status:200, headers:corsHeaders});
     }
     if(action==='yes'){
@@ -8797,8 +8853,26 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
           return new Response('OK', { status: 200, headers: corsHeaders });
         }
         await answered();
+        // 🔄 refresh doubles as a missed-posts check: catch up every visible
+        // source from its newest saved message, then rebuild so the fresh
+        // jobs show immediately.
+        let catchNote = '';
+        if (action === 'refresh' && !sel) {
+          try {
+            const scope2 = { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user ? String(user.id) : '') };
+            const cu = await refreshCloneCatchUp(env, { token, chatId, sources: report.sources, isGodCb, user });
+            if (cu.loginRequired) catchNote = richParagraph('🔄 Stats rebuilt. Log in on the website to also check for missed posts on refresh.');
+            else if (cu.checked > 0) {
+              catchNote = richParagraph(`🔄 Missed-posts check: ${cu.checked} source${cu.checked === 1 ? '' : 's'} · ${cu.started} catch-up${cu.started === 1 ? '' : 's'} started${cu.running ? ` · ${cu.running} already running` : ''}`);
+              if (cu.started > 0) {
+                const rebuilt = await buildStatsReport(env, token, scope2);
+                report.sources = rebuilt.sources; report.runs = rebuilt.runs;
+              }
+            }
+          } catch (e) { console.error('stats catch-up failed', e?.message || e); }
+        }
         const view = formatStatsRichReport(report, sel);
-        await editTelegramRichMessage(token, chatId, msgId, view.html, threadId, view.buttons);
+        await editTelegramRichMessage(token, chatId, msgId, (catchNote ? catchNote + '\n' : '') + view.html, threadId, view.buttons);
       } catch (e) {
         console.error('stats refresh failed', e?.message || e);
         await editTelegramMessage(token, chatId, msgId, boldHtml('❌') + ' Stats failed: ' + codeHtml(escHtml(String(e?.message || e).slice(0, 160))), null, threadId).catch(() => {});
@@ -10981,10 +11055,13 @@ async function startForumCloneCard(env, { token, chatId, chatName = '', progress
  *  never trips Telegram's flood limit (the "Sleeping for 14s on flood wait"
  *  stall from many concurrent topic jobs). Drives the ONE live card after each
  *  start/progress/done and honors stop requests (⏹ button on /stats). */
-async function startForumCloneSequential(env, { token, chatId, chatName = '', progressChatId, forumThreadId = null, topicIds = [], communityIdArg = '', targetArg = 'community', athenaUser, label, communityName = '' }) {
+async function startForumCloneSequential(env, { token, chatId, chatName = '', progressChatId, forumThreadId = null, topicIds = [], communityIdArg = '', targetArg = 'community', athenaUser, label, communityName = '', parentId = null, cardMsgId = null }) {
   const key = normalizeTgChatId(chatId) + '|' + String(progressChatId || '') + '|' + String(forumThreadId || '');
   if (!token || FORUM_CLONE_CARDS.has(key)) return { started: 0, failed: 0 };
-  const state = { msgId: null };
+  // cardMsgId: reuse the caller's prompt message as the live card (the /clone
+  // destination picker becomes the per-topic progress card) instead of
+  // sending a second card next to it.
+  const state = { msgId: cardMsgId != null ? Number(cardMsgId) : null };
   FORUM_CLONE_CARDS.set(key, state);
   const keyboard = cloneCardKeyboard(chatId);
   const richButtons = cloneCardButtonsRich(chatId);
@@ -11004,7 +11081,7 @@ async function startForumCloneSequential(env, { token, chatId, chatName = '', pr
       } catch (_) {}
       let jobId = '';
       try {
-        const jobRes = await startBackfillJob(env, { token, chatId: progressChatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatId, threadArg: thr, communityName, userbotLabel: label, silentProgress: true, target: targetArg || 'community' });
+        const jobRes = await startBackfillJob(env, { token, chatId: progressChatId, forumThreadId, athenaUser, communityIdArg, chatIdArg: chatId, threadArg: thr, communityName, userbotLabel: label, silentProgress: true, target: targetArg || 'community', parentId });
         // Already-running topics are still part of the clone: wait for the
         // existing job to drain rather than counting it a failure and moving on.
         if (jobRes && (jobRes.ok || jobRes.reason === 'already running')) jobId = jobRes.jobId || '';
@@ -11040,7 +11117,7 @@ function followLiveness(accountConnected, lastSeenAtMs, nowMs = Date.now()) {
   return { emoji: '⚪', label: 'Live idle — follow saved, resumes when the userbot connects' };
 }
 
-async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg = '', chatIdArg, threadArg = '', communityName = '', userbotLabel = '', minId = '', maxId = null, silentProgress = false, target = 'community', parentId = null, jobId = null, knownTotal = null, progressMsgId = null, topicName = '' }) {
+async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser, communityIdArg = '', chatIdArg, threadArg = '', communityName = '', userbotLabel = '', minId = '', maxId = null, silentProgress = false, quietStart = false, target = 'community', parentId = null, jobId = null, knownTotal = null, progressMsgId = null, topicName = '' }) {
   await ensureUserbotTables(env);
   await ensureIndexTables(env);
   const cid = normalizeTgChatId(chatIdArg);
@@ -11063,11 +11140,72 @@ async function startBackfillJob(env, { token, chatId, forumThreadId, athenaUser,
     await ensureChatFollow(env, { chatId: cid, threadId: threadArg || '', label: userbotLabel, communityId: target === 'personal' ? '' : communityIdArg || '', target, createdBy: athenaUser.id });
   } catch (_) {}
   runInBackground(env, runHistoryIndexJob(env, job, token));
-  if (!silentProgress) await sendTelegramFormatted(token, chatId, `Backfill started: ${codeHtml(cid)} → ${escHtml(communityName || communityIdArg || 'Personal brain')}. Stop anytime from the ⏹ button on its /stats row.`, forumThreadId);
+  // quietStart: the caller already showed its own progress card (the /clone
+  // prompt becomes the live card), so the generic notice would be a duplicate.
+  if (!silentProgress && !quietStart) await sendTelegramFormatted(token, chatId, `Backfill started: ${codeHtml(cid)} → ${escHtml(communityName || communityIdArg || 'Personal brain')}. Stop anytime from the ⏹ button on its /stats row.`, forumThreadId);
   return { ok: true, jobId };
 }
 
 const HISTORY_RUNS = new Map();
+/**
+ * Keep a classic-/clone parent row honest: it is created at stage 'choice',
+ * moved to 'running' when the destination is picked, and must reach a
+ * terminal stage when its backfill ends — otherwise /stats shows a zombie
+ * "queued" shell next to the finished job forever. Uclone parents are
+ * excluded: their stage is owned by the uclone manager's revision-guarded
+ * persist, and a child finishing must never overwrite it.
+ */
+async function syncBotcloneParentStage(env, parentId, stage) {
+  if (!parentId || !['running', 'done', 'error', 'stopped'].includes(String(stage))) return;
+  try {
+    const p = await env.DB.prepare('SELECT stats_json FROM pending_clones WHERE id = ?').bind(String(parentId)).first();
+    if (!p) return;
+    const st = JSON.parse(p.stats_json || '{}');
+    if (st?.manager !== 'botclone') return;
+    if (['done', 'error', 'stopped'].includes(String(st.stage))) return;
+    // A forum clone fans out to one child job per topic: the parent is done
+    // only when the LAST child lands. An earlier finisher just confirms the
+    // parent is still running.
+    if (String(stage) !== 'running') {
+      const sib = await env.DB.prepare(
+        "SELECT id FROM index_jobs WHERE parent_id = ? AND status IN ('queued','running','stopping') LIMIT 1"
+      ).bind(String(parentId)).first().catch(() => null);
+      if (sib) stage = 'running';
+    }
+    st.stage = String(stage);
+    await env.DB.prepare('UPDATE pending_clones SET stats_json = ? WHERE id = ?').bind(JSON.stringify(st), String(parentId)).run();
+  } catch (_) {}
+}
+/**
+ * Forum topic ids for a whole-chat /clone, so the parent row carries the same
+ * per-topic breakdown the uclone wizard shows. Best-effort: a chat the
+ * account cannot enumerate falls back to a single whole-chat job.
+ */
+async function listForumTopicIds(env, label, chatId) {
+  const client = USERBOT_ACCOUNTS.get(label)?.client;
+  if (!client) return null;
+  try {
+    const { Api } = await import('telegram');
+    const out = new Map();
+    let offsetDate = 0, offsetId = 0, offsetTopic = 0;
+    for (let page = 0; page < 25; page++) {
+      const res = await client.invoke(new Api.channels.GetForumTopics({ channel: chatId, offsetDate, offsetId, offsetTopic, limit: 100 }));
+      const items = (res?.topics || []).filter((t) => t.id != null && !/Deleted/.test(t.className || ''));
+      if (!items.length) break;
+      for (const t of items) out.set(String(t.id), String(t.title || `Topic ${t.id}`));
+      const last = items.at(-1);
+      const msg = res?.messages?.find((m) => Number(m.id) === Number(last.topMessage));
+      const date = res?.orderByCreateDate ? last.date : msg?.date;
+      if (date == null) break;
+      const next = [Number(date), Number(last.topMessage || 0), Number(last.id)];
+      if (next[0] === offsetDate && next[1] === offsetId && next[2] === offsetTopic) break;
+      [offsetDate, offsetId, offsetTopic] = next;
+      if (Number.isInteger(res.count) && out.size >= res.count) break;
+    }
+    if (!out.has('1')) out.set('1', 'General');
+    return [...out.entries()].map(([id, name]) => ({ id: String(id), name: String(name) }));
+  } catch (_) { return null; }
+}
 async function ensureCloneSources(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS clone_sources (
     destination TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT NOT NULL, message_id TEXT NOT NULL,
@@ -11482,11 +11620,17 @@ async function runHistoryIndexJob(env, initialJob, token, runtime = {}) {
           await wait(INDEX_BATCH_DELAY_MS);
         }
         await progress(true);
+        try {
+          const terminal = String(job.status) === 'stopped' || String(job.status) === 'stopping' ? 'stopped'
+            : String(job.status) === 'error' || incomplete ? 'error' : 'done';
+          await syncBotcloneParentStage(env, job.parent_id, terminal);
+        } catch (_) {}
       } catch (error) {
         const failure = cloneFailure(error);
         await patch({ status: error.name === 'AbortError' ? 'stopped' : 'error', error: error.name === 'AbortError' ? null : failure.message, errors: counters.failed, counters_json: JSON.stringify(counters) });
         await userbotLogError(env, job.userbot_label, job.chat_id, failure.message);
         await progress(true);
+        try { await syncBotcloneParentStage(env, job.parent_id, error.name === 'AbortError' ? 'stopped' : 'error'); } catch (_) {}
       }
     });
   })();
@@ -17582,6 +17726,66 @@ function statsRunHasContent(overall) {
   return ['savedLinks', 'savedLinkPosts', 'savedFiles', 'savedDocs', 'savedPdfs',
     'savedMarkdown', 'savedJson', 'savedHtml', 'savedImages', 'savedAudio', 'savedOther']
     .some((k) => Number(overall[k] || 0) > 0);
+}
+
+/**
+ * /stats 🔄 refresh also checks for missed posts: for every visible source the
+ * refresher may touch, take the newest saved message per thread and backfill
+ * anything newer from Telegram. Skips sources with a running job, a job that
+ * finished in the last 5 minutes, no saved baseline (a full first-time
+ * backfill is never a refresh side-effect) or no usable account. Catch-ups run
+ * in the background; the rebuilt dashboard shows them as fresh jobs.
+ */
+async function refreshCloneCatchUp(env, { token, chatId, sources, isGodCb, user }) {
+  const out = { checked: 0, started: 0, running: 0, skipped: 0, loginRequired: false };
+  if (!user?.id) { out.loginRequired = true; return out; }
+  for (const src of sources || []) {
+    let allowed = false;
+    try { allowed = await statsSourceAllowed(env, { isGodCb, user, src }); } catch (_) {}
+    if (!allowed) { out.skipped++; continue; }
+    const target = src.target || 'community';
+    const communityId = target === 'personal' ? '' : String(src.community || src.owner || '');
+    const owner = target === 'personal' ? String(src.owner || '') : communityId;
+    if (target !== 'personal' && !communityId) { out.skipped++; continue; }
+    const label = String(src.label || '') || await resolveJobLabel(env, user.id).catch(() => '');
+    if (!label) { out.skipped++; continue; }
+    out.checked++;
+    const destination = `${target}:${owner}`;
+    const normChat = normalizeTgChatId(src.chat_id);
+    let baselines = new Map();
+    try {
+      const r = await env.DB.prepare(
+        `SELECT topic_id, MAX(CAST(NULLIF(regexp_replace(message_id, '[^0-9]', '', 'g'), '') AS BIGINT)) AS m FROM clone_sources WHERE destination = ? AND chat_id = ? GROUP BY topic_id`
+      ).bind(destination, normChat).all().catch(() => ({ results: [] }));
+      for (const row of r.results || []) {
+        if (row.m != null) baselines.set(String(row.topic_id || ''), Number(row.m));
+      }
+    } catch (_) {}
+    const threads = new Set();
+    for (const t of src.topics || []) threads.add(String(t.threadId ?? ''));
+    for (const k of baselines.keys()) threads.add(k);
+    if (!threads.size) threads.add('');
+    for (const thr of threads) {
+      try {
+        const active = await env.DB.prepare(
+          "SELECT id FROM index_jobs WHERE chat_id = ? AND COALESCE(thread_id,'') = COALESCE(?,'') AND target = ? AND community_id = ? AND status IN ('queued','running','stopping') LIMIT 1"
+        ).bind(normChat, thr || null, target, communityId).first().catch(() => null);
+        if (active) { out.running++; continue; }
+        const latest = await env.DB.prepare(
+          "SELECT updated_at FROM index_jobs WHERE chat_id = ? AND COALESCE(thread_id,'') = COALESCE(?,'') AND target = ? AND community_id = ? ORDER BY updated_at DESC LIMIT 1"
+        ).bind(normChat, thr || null, target, communityId).first().catch(() => null);
+        if (latest && Date.now() - Number(latest.updated_at || 0) < 5 * 60_000) continue;
+        const minId = baselines.get(thr) || 0;
+        if (!minId) { out.skipped++; continue; }
+        const topicName = (src.topics || []).find((t) => String(t.threadId) === thr)?.title || '';
+        const res = await startBackfillJob(env, { token, chatId, forumThreadId: null, athenaUser: user, communityIdArg: communityId, chatIdArg: normChat, threadArg: thr, communityName: '', userbotLabel: label, minId: String(minId), silentProgress: true, target, topicName });
+        if (res?.ok) out.started++;
+        else if (res?.reason === 'already running') out.running++;
+        else out.skipped++;
+      } catch (_) { out.skipped++; }
+    }
+  }
+  return out;
 }
 
 export async function buildStatsReport(env, _token = null, scope = null) {
