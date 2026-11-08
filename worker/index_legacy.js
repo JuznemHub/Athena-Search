@@ -17029,17 +17029,21 @@ async function describeAndTagLink(env, rawUrl, meta = {}, { config, maxTags = 8,
     } catch (_) { ai = null; }
   }
 
-  // Model choice first; the deterministic tags fill gaps it left and carry the
-  // facts it must not decide (type, host ecosystem, platform set).
-  const candidate = [...(ai?.tags || []), ...tagsFromFacts(facts)];
+  // Rules first, model fills the tail: what the page plainly is always lands
+  // in the same slots, so the same link keeps the same core tags and the
+  // model can only add context it noticed — never rename the type or drop
+  // the deterministic base. This keeps /forcetags idempotent without losing
+  // the model's eye for topic nuance.
+  const ruleTags = tagsFromFacts(facts);
+  const candidate = [...ruleTags, ...(ai?.tags || [])];
   const verdict = validateTags(candidate, {
     banned: nameBansFor(rawUrl, title),
     allowedBrands: facts.brands,
     max: Math.max(1, Math.min(Number(maxTags) || 8, 10)),
   });
 
-  // One type wins (the model's choice first, else the rule's), so a link never
-  // carries contradictory labels like app + website.
+  // One type wins (the deterministic one first), so a link never carries
+  // contradictory labels like app + website.
   const deduped = [];
   let typeTaken = false;
   for (const tag of verdict.tags) {
