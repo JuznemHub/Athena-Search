@@ -425,11 +425,11 @@ body::before {
 }
 
 .search-bar-box {
-  border-radius: var(--radius-lg) !important;
+  border-radius: 20px !important;
 }
 .search-bar-box:focus-within {
   border-color: var(--accent) !important;
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent), 0 8px 30px -4px rgba(0,0,0,0.5) !important;
 }
 /* Material zeroes the border above; keep a transparent one so focus can paint it */
 [data-theme="material"] .search-bar-box {
@@ -459,20 +459,38 @@ body::before {
 }
 
 /* ========== Mode pills ========== */
+.mode-pills {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  background: var(--surface) !important;
+  border: 1px solid var(--hairline) !important;
+  border-radius: 999px !important;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
 .mode-pill {
   border-radius: 999px !important;
-  border: 1px solid var(--hairline) !important;
-  background: var(--surface) !important;
+  border: none !important;
+  background: transparent !important;
   color: var(--text-dim) !important;
   font-family: var(--font-sans) !important;
   font-size: var(--fs-sm) !important;
   font-weight: 500 !important;
-  min-height: 36px;
+  min-height: 32px;
+  padding: 5px 16px !important;
+  transition: all var(--dur-1) var(--ease);
+}
+.mode-pill:hover {
+  color: var(--text-main) !important;
+  background: var(--surface-2) !important;
 }
 .mode-pill.active {
   color: #fff !important;
-  background: var(--accent-gradient) !important;
+  background: var(--accent) !important;
   border-color: transparent !important;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.25) !important;
 }
 .mode-pill-delete.active {
   background: linear-gradient(135deg, #c03050, #701028) !important;
@@ -515,13 +533,20 @@ body::before {
 .g-cite { color: var(--text-mute) !important; font-family: var(--font-mono); font-size: var(--fs-xs); }
 
 .g-result {
-  border-radius: var(--radius-md);
-  padding: var(--s-3);
-  border: 1px solid transparent;
-  transition: background var(--dur-1) var(--ease);
+  border-radius: 14px;
+  padding: 16px 18px;
+  border: 1px solid var(--hairline);
+  background: var(--surface);
+  transition: all var(--dur-1) var(--ease);
 }
 .g-result:hover {
-  background: color-mix(in srgb, var(--text) 4%, transparent);
+  background: var(--surface-2);
+  border-color: var(--hairline-strong);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-main);
+}
+@media (prefers-reduced-motion: reduce) {
+  .g-result:hover { transform: none; }
 }
 /* Material renders each result as a filled card, so it needs its own hover
    step — the translucent default would replace the surface instead of tinting it. */
