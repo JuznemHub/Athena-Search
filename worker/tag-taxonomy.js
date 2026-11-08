@@ -344,15 +344,18 @@ function detectPlatforms(host, path, primary, body) {
   if (/\.(dmg|pkg)(\b|\/|$)/i.test(path) || /\.(dmg|pkg)(\b|\/|$)/i.test(primary)) set.add('macos');
   if (/\.(deb|rpm|appimage)(\b|\/|$)/i.test(path) || /\.(deb|rpm|appimage)(\b|\/|$)/i.test(primary)) set.add('linux');
 
-  const text = `${primary} ${body}`;
-  if (hit(text, 'android|apk|play store|f-droid')) set.add('android');
-  if (hit(text, 'ios|iphone|ipad|app store')) set.add('ios');
-  if (hit(text, 'windows|win32|win64')) set.add('windows');
-  if (hit(text, 'macos|mac os|osx')) set.add('macos');
-  if (hit(text, 'linux|ubuntu|debian|fedora|arch linux|flatpak|appimage')) set.add('linux');
-  if (hit(text, 'web app|webapp|pwa|browser extension|runs in (the )?browser|web version')) set.add('web');
-  if (hit(text, 'chrome extension')) set.add('chrome');
-  if (hit(text, 'firefox add-?on')) set.add('firefox');
+  // Body text is noisy: a single incidental word there must not plant a
+  // platform. One curated mention (title/notes) counts; otherwise it takes
+  // two mentions in the scraped body.
+  const sig = (src) => hit(primary, src) || countHits(body, src) >= 2;
+  if (sig('android|apk|play store|f-droid')) set.add('android');
+  if (sig('ios|iphone|ipad|app store')) set.add('ios');
+  if (sig('windows|win32|win64')) set.add('windows');
+  if (sig('macos|mac os|osx')) set.add('macos');
+  if (sig('linux|ubuntu|debian|fedora|arch linux|flatpak|appimage')) set.add('linux');
+  if (sig('web app|webapp|pwa|browser extension|runs in (the )?browser|web version')) set.add('web');
+  if (sig('chrome extension')) set.add('chrome');
+  if (sig('firefox add-?on')) set.add('firefox');
   return [...set];
 }
 
@@ -383,28 +386,38 @@ function detectBrands(host, primary, body) {
 }
 
 function detectType({ host, primary, body, repo, ecosystems, platforms }) {
-  const text = `${primary} ${body}`;
+  // Primary text (title + notes) is curated: one mention counts. Body text
+  // (scraped page) is noisy: a single incidental word there must not decide
+  // the type — it takes two mentions. This keeps one stray word in a long
+  // page from outranking the link's real subject (first match still wins
+  // among well-evidenced candidates).
+  const sig = (src) => hit(primary, src) || countHits(body, src) >= 2;
+  // On repository/forge pages the body is huge and noisy: sub-kinds there
+  // only count when the curated text names them, otherwise the repo itself
+  // says what the thing is (software). Specific kinds keep body evidence.
+  const curatedOnly = repo || ecosystems.length > 0;
+  const kind = (src) => curatedOnly ? hit(primary, src) : sig(src);
   const mobile = platforms.includes('android') || platforms.includes('ios');
-  if (hit(text, 'telegram bot|discord bot|chatbot|\\bbot\\b')) return 'bot';
-  if (hit(text, 'browser extension|chrome extension|firefox add-?on|addon')) return 'extension';
-  if (hit(text, '\\bplugin\\b|plug-in')) return 'plugin';
-  if (hit(text, '\\btheme\\b|icon pack')) return 'theme';
-  if (hit(text, '\\bgame\\b|gaming|emulator')) return 'game';
-  if (hit(text, '\\bcli\\b|command line|terminal app')) return 'cli';
-  if (hit(text, '\\bdriver(s)?\\b')) return 'driver';
-  if (hit(text, 'documentation|docs|manual|reference guide')) return 'documentation';
-  if (hit(text, '\\bframework\\b')) return 'framework';
-  if (hit(text, '\\blibrary\\b|\\bsdk\\b|\\bmodule\\b|\\bpackage\\b')) return 'library';
-  if (hit(text, '\\bapi\\b|graphql|rest api|webhook')) return 'api';
+  if (sig('telegram bot|discord bot|chatbot|\\bbot\\b')) return 'bot';
+  if (sig('browser extension|chrome extension|firefox add-?on|addon')) return 'extension';
+  if (sig('\\bplugin\\b|plug-in')) return 'plugin';
+  if (kind('\\btheme\\b|icon pack')) return 'theme';
+  if (sig('\\bgame\\b|gaming|emulator')) return 'game';
+  if (sig('\\bcli\\b|command line|terminal app')) return 'cli';
+  if (kind('\\bdriver(s)?\\b')) return 'driver';
+  if (kind('documentation|docs|manual|reference guide')) return 'documentation';
+  if (kind('\\bframework\\b')) return 'framework';
+  if (kind('\\blibrary\\b|\\bsdk\\b|\\bmodule\\b|\\bpackage\\b')) return 'library';
+  if (kind('\\bapi\\b|graphql|rest api|webhook')) return 'api';
   if (hit(primary, '\\bapp\\b') && (mobile || /apps\.(microsoft|apple)|play\.google/.test(host))) return 'app';
   if (mobile) return 'app';
-  if (hit(text, '\\btool\\b|\\butility\\b|downloader|manager|converter|generator|viewer|editor')) return 'tool';
-  if (hit(text, '\\bservice\\b|hosting|saas|cloud storage')) return 'service';
+  if (kind('\\btool\\b|\\butility\\b|downloader|manager|converter|generator|viewer|editor')) return 'tool';
+  if (kind('\\bservice\\b|hosting|saas|cloud storage')) return 'service';
   if (repo || ecosystems.length) {
-    if (hit(text, '\\bsoftware\\b|\\bapp\\b|\\bclient\\b|\\binstaller\\b')) return 'software';
+    if (sig('\\bsoftware\\b|\\bapp\\b|\\bclient\\b|\\binstaller\\b')) return 'software';
     return 'software';
   }
-  if (hit(text, '\\bsoftware\\b|\\bclient\\b|\\binstaller\\b|\\bapp\\b')) return mobile ? 'app' : 'software';
+  if (sig('\\bsoftware\\b|\\bclient\\b|\\binstaller\\b|\\bapp\\b')) return mobile ? 'app' : 'software';
   return 'website';
 }
 
@@ -438,14 +451,22 @@ export function extractFacts(rawUrl, meta = {}) {
   const software = softwareHint;
 
   const type = detectType({ host, primary, body, repo, ecosystems, platforms });
-  const categories = [];
-  for (const [tag, src] of CATEGORY_RULES) {
-    if (hit(primary, src) || countHits(body, src) >= 2) categories.push(tag);
-  }
-  const languages = [];
-  for (const [tag, src] of LANGUAGE_RULES) {
-    if (hit(primary, src) || countHits(body, src) >= 2) languages.push(tag);
-  }
+  // Topics need real evidence: one curated mention, or three in the body.
+  // Ranked by mention count so the most-discussed topics win the tag budget
+  // instead of rule order deciding. Keeps long pages from collecting every
+  // vaguely related word.
+  const scoreRules = (rules, cap) => {
+    const scored = [];
+    for (const [tag, src] of rules) {
+      if (hit(primary, src) || countHits(body, src) >= 3) {
+        scored.push([tag, countHits(`${primary} ${body}`, src)]);
+      }
+    }
+    scored.sort((a, b) => b[1] - a[1]);
+    return scored.slice(0, cap).map(([tag]) => tag);
+  };
+  const categories = scoreRules(CATEGORY_RULES, 4);
+  const languages = scoreRules(LANGUAGE_RULES, 3);
   const attributes = [];
   if (repo || hit(all, 'open[- ]source|gpl|mit licen[cs]e|apache licen[cs]e')) attributes.push('open-source');
   if (hit(all, 'self[- ]hosted|selfhosted|self hosted')) attributes.push('self-hosted');
