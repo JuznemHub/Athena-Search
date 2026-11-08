@@ -29,8 +29,8 @@
       }
     })();
   </script>
-<link rel="stylesheet" href="./src/style.css?v=1.0.56">
-<link rel="stylesheet" href="./src/themes.css?v=1.0.56">
+<link rel="stylesheet" href="./src/style.css?v=1.0.57">
+<link rel="stylesheet" href="./src/themes.css?v=1.0.57">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -82,6 +82,10 @@
       <button type="button" id="adminDbNavBtn" class="icon-btn admin-nav-btn hidden" title="Database Manager (Admin & Owner)" aria-label="Database Manager">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>
         <span class="admin-nav-label">DB</span>
+      </button>
+      <button type="button" id="wikiNavBtn" class="icon-btn wiki-nav-btn" title="FMHY Wiki Directory" aria-label="FMHY Wiki Directory">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+        <span class="wiki-nav-label">Wiki</span>
       </button>
       <div class="mode-badge" id="modeBadge">
         <span class="pulse-dot" id="modePulse"></span>
@@ -303,6 +307,94 @@
           <button type="button" id="adminDbNextBtn" class="btn btn-secondary btn-sm">Next »</button>
         </div>
       </section>
+
+      <!-- FMHY-style Wiki Section -->
+      <section id="wikiView" class="wiki-view hidden" aria-label="Athena FMHY Wiki">
+        <!-- Wiki Header Bar -->
+        <div class="wiki-header">
+          <div class="wiki-brand-row">
+            <div class="wiki-title-group">
+              <span class="wiki-icon-badge">📖</span>
+              <div>
+                <h2>Athena Wiki</h2>
+                <p class="wiki-tagline">FMHY-style curated knowledge base &amp; link directory · Live database sync</p>
+              </div>
+            </div>
+            <div class="wiki-header-actions">
+              <button type="button" id="wikiAiOrganizeBtn" class="btn btn-secondary btn-sm" title="Let AI organize &amp; refine categories based on database links">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                <span>AI Re-organize</span>
+              </button>
+              <button type="button" id="wikiCloseBtn" class="icon-btn" title="Return to Search" aria-label="Close Wiki">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+              </button>
+            </div>
+          </div>
+
+          <!-- Controls Bar: Scope, Community, and Search -->
+          <div class="wiki-controls-bar">
+            <div class="wiki-ctrl-group">
+              <label for="wikiScopeSelect">Scope</label>
+              <select id="wikiScopeSelect" class="input input-sm">
+                <option value="community">Community</option>
+                <option value="personal">Personal (GOD)</option>
+              </select>
+            </div>
+            <div class="wiki-ctrl-group" id="wikiCommunityWrap">
+              <label for="wikiCommunitySelect">Community</label>
+              <select id="wikiCommunitySelect" class="input input-sm"></select>
+            </div>
+            <div class="wiki-search-wrap">
+              <svg class="search-mini-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+              <input type="text" id="wikiSearchInput" placeholder="Filter wiki links, tags, descriptions, titles…" autocomplete="off">
+              <button type="button" id="wikiClearSearch" class="clear-btn hidden" aria-label="Clear search">&times;</button>
+            </div>
+            <button type="button" id="wikiSidebarToggle" class="btn btn-secondary btn-sm wiki-mobile-cat-btn" title="Toggle Categories">
+              <span>Categories</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 2-Column FMHY Layout -->
+        <div class="wiki-layout">
+          <!-- Sidebar -->
+          <aside class="wiki-sidebar" id="wikiSidebar">
+            <div class="wiki-sidebar-header">
+              <span class="wiki-sidebar-title">Categories</span>
+              <span id="wikiTotalCountBadge" class="wiki-total-badge">…</span>
+            </div>
+            <nav id="wikiCatList" class="wiki-cat-list" aria-label="Wiki Categories"></nav>
+          </aside>
+
+          <!-- Main Content Area -->
+          <div class="wiki-content" id="wikiContent">
+            <!-- Category Hero Card -->
+            <div class="wiki-cat-hero" id="wikiCatHero">
+              <div class="wiki-hero-title-row">
+                <span class="wiki-hero-icon" id="wikiHeroIcon">🎬</span>
+                <div class="wiki-hero-text">
+                  <h3 id="wikiHeroTitle">Video &amp; Streaming</h3>
+                  <p id="wikiHeroDesc">Free streaming sites, movies, TV series, anime, live TV, and video tools.</p>
+                </div>
+                <span class="wiki-hero-badge" id="wikiHeroCount">0 links</span>
+              </div>
+              <div class="wiki-sub-pills" id="wikiSubPills"></div>
+            </div>
+
+            <!-- Links Sections Container -->
+            <div id="wikiBlocks" class="wiki-blocks">
+              <div class="wiki-loading">Loading wiki links…</div>
+            </div>
+
+            <!-- Pagination -->
+            <div id="wikiPagination" class="wiki-pagination hidden">
+              <button type="button" id="wikiPrevBtn" class="btn btn-secondary btn-sm">« Prev</button>
+              <span id="wikiPageInfo" class="wiki-page-info">Page 1 of 1</span>
+              <button type="button" id="wikiNextBtn" class="btn btn-secondary btn-sm">Next »</button>
+            </div>
+          </div>
+        </div>
+      </section>
     </main>
 
     <div class="scope-switch-container">
@@ -499,6 +591,15 @@
         <div id="adminsList" class="bot-bindings mt-2"></div>
       </div>
 
+      <div class="drawer-section auth-only" id="wikiDrawerSection">
+        <h3>Knowledge Base</h3>
+        <p class="section-desc">Browse all database links in an FMHY-style categorized wiki.</p>
+        <button type="button" id="openWikiDrawerBtn" class="btn btn-secondary btn-block">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:6px;"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+          Open FMHY Wiki
+        </button>
+      </div>
+
       <div class="drawer-section auth-only" id="adminDrawerSection">
         <h3>Administration <span class="lock-badge">STAFF</span></h3>
         <p class="section-desc">Inspect, filter, and edit links across the entire database.</p>
@@ -515,9 +616,9 @@
     </div>
   </aside>
 
-  <script src="./src/lib/dedupe.js?v=1.0.56"></script>
-  <script src="./src/lib/search.js?v=1.0.56"></script>
-  <script src="./src/lib/ai.js?v=1.0.56"></script>
-  <script src="./src/main.js?v=1.0.56"></script>
+  <script src="./src/lib/dedupe.js?v=1.0.57"></script>
+  <script src="./src/lib/search.js?v=1.0.57"></script>
+  <script src="./src/lib/ai.js?v=1.0.57"></script>
+  <script src="./src/main.js?v=1.0.57"></script>
 </body>
 </html>

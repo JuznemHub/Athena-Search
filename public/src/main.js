@@ -765,6 +765,8 @@ document.addEventListener('DOMContentLoaded', () => {
       startLiveSync();
       if (window.location.hash === '#db' || window.location.hash === '#admin') {
         if (isStaffRank()) openAdminDb();
+      } else if (window.location.hash === '#wiki') {
+        openWiki();
       }
     } catch (err) {
       console.error('[athena] render failed:', err);
@@ -1849,6 +1851,10 @@ document.addEventListener('DOMContentLoaded', () => {
             };
           }
           showToast('Link updated in database');
+          wikiState.dirty = true;
+          if ($('wikiView') && !$('wikiView').classList.contains('hidden')) {
+            loadWikiData();
+          }
           panel.classList.add('hidden');
           card?.classList.remove('editing');
           card?.classList.add('edited-flash');
@@ -1885,6 +1891,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const idx = list.findIndex(l => l.id === id);
         if (idx >= 0) list.splice(idx, 1);
         showToast('Link deleted from database');
+        wikiState.dirty = true;
+        if ($('wikiView') && !$('wikiView').classList.contains('hidden')) {
+          loadWikiData();
+        }
         await loadMainTags();
         runSearch();
       } catch (err) {
@@ -3114,6 +3124,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
           }
           showToast('Link deleted from database');
+          wikiState.dirty = true;
           const list = isComm ? state.communityLinks : state.personalLinks;
           const mainIdx = list.findIndex(l => l.id === id);
           if (mainIdx >= 0) list.splice(mainIdx, 1);
@@ -3214,6 +3225,10 @@ document.addEventListener('DOMContentLoaded', () => {
           }
 
           showToast('Link updated in database');
+          wikiState.dirty = true;
+          if ($('wikiView') && !$('wikiView').classList.contains('hidden')) {
+            loadWikiData();
+          }
           panel.classList.add('hidden');
           card?.classList.remove('editing');
 
@@ -3247,9 +3262,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.querySelector('.brand-logo')?.addEventListener('click', (e) => {
       const adminView = $('adminDbView');
+      const wikiView = $('wikiView');
       if (adminView && !adminView.classList.contains('hidden')) {
         e.preventDefault();
         closeAdminDb();
+      } else if (wikiView && !wikiView.classList.contains('hidden')) {
+        e.preventDefault();
+        closeWiki();
       }
     });
 
@@ -3343,8 +3362,11 @@ document.addEventListener('DOMContentLoaded', () => {
     window.addEventListener('hashchange', () => {
       if (window.location.hash === '#db' || window.location.hash === '#admin') {
         if (isStaffRank()) openAdminDb();
+      } else if (window.location.hash === '#wiki') {
+        openWiki();
       } else {
         closeAdminDb();
+        closeWiki();
       }
     });
   }
@@ -3429,6 +3451,457 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  // ---- FMHY-Style Wiki View ----
+
+  const wikiState = {
+    scope: 'community',
+    communityId: '',
+    activeCategory: 'video',
+    activeSubheading: '',
+    q: '',
+    page: 1,
+    limit: 50,
+    totalPages: 1,
+    categories: [],
+    totalLinks: 0,
+    totalCategoryLinks: 0,
+    links: [],
+    loading: false,
+    dirty: false
+  };
+
+  function openWiki() {
+    const wikiView = $('wikiView');
+    const searchWrapper = $('searchWrapper');
+    const resultsContainer = $('resultsContainer');
+    const adminView = $('adminDbView');
+
+    if (!wikiView) return;
+    if (adminView) adminView.classList.add('hidden');
+    if (searchWrapper) searchWrapper.classList.add('hidden');
+    if (resultsContainer) resultsContainer.classList.add('hidden');
+    wikiView.classList.remove('hidden');
+
+    if (window.location.hash !== '#wiki') {
+      window.location.hash = '#wiki';
+    }
+
+    wikiState.scope = state.scope || 'community';
+    if (wikiState.scope === 'personal' && !isGod()) {
+      wikiState.scope = 'community';
+    }
+    wikiState.communityId = state.activeCommunity || '';
+
+    // Populate scope and community selects in Wiki
+    const scopeSel = $('wikiScopeSelect');
+    if (scopeSel) {
+      scopeSel.value = wikiState.scope;
+      const personalOpt = scopeSel.querySelector('option[value="personal"]');
+      if (personalOpt) personalOpt.disabled = !isGod();
+    }
+    const commWrap = $('wikiCommunityWrap');
+    if (commWrap) {
+      commWrap.style.display = wikiState.scope === 'personal' ? 'none' : 'flex';
+    }
+    const commSel = $('wikiCommunitySelect');
+    if (commSel && state.communities) {
+      commSel.innerHTML = state.communities.map(c =>
+        `<option value="${escapeHtml(c.id)}" ${c.id === wikiState.communityId ? 'selected' : ''}>${escapeHtml(c.name || c.id)}</option>`
+      ).join('');
+      if (!wikiState.communityId && state.communities[0]) {
+        wikiState.communityId = state.communities[0].id;
+      }
+    }
+
+    if (!wikiState.categories.length || wikiState.dirty) {
+      wikiState.dirty = false;
+      loadWikiData();
+    }
+  }
+
+  function closeWiki() {
+    const wikiView = $('wikiView');
+    const searchWrapper = $('searchWrapper');
+    const resultsContainer = $('resultsContainer');
+    if (!wikiView) return;
+    wikiView.classList.add('hidden');
+    if (searchWrapper) searchWrapper.classList.remove('hidden');
+    if (resultsContainer) resultsContainer.classList.remove('hidden');
+    if (window.location.hash === '#wiki') {
+      history.pushState('', document.title, window.location.pathname + window.location.search);
+    }
+  }
+
+  async function loadWikiData() {
+    await loadWikiCategories();
+    await loadWikiLinks();
+  }
+
+  async function loadWikiCategories() {
+    const listEl = $('wikiCatList');
+    const totalBadge = $('wikiTotalCountBadge');
+    if (listEl && !wikiState.categories.length) {
+      listEl.innerHTML = '<div style="padding:10px;color:var(--text-muted);font-size:0.75rem;">Loading categories…</div>';
+    }
+    try {
+      const qParams = new URLSearchParams({
+        scope: wikiState.scope
+      });
+      if (wikiState.scope === 'community' && wikiState.communityId) {
+        qParams.set('community_id', wikiState.communityId);
+      }
+      const { res, data } = await api(`/api/wiki/categories?${qParams.toString()}`);
+      if (res.ok && data.success && Array.isArray(data.categories)) {
+        wikiState.categories = data.categories;
+        wikiState.totalLinks = data.total || 0;
+        if (totalBadge) totalBadge.textContent = `${wikiState.totalLinks.toLocaleString()} links`;
+
+        // If current activeCategory not in list, pick the first
+        if (!wikiState.categories.find(c => c.id === wikiState.activeCategory)) {
+          wikiState.activeCategory = wikiState.categories[0]?.id || 'video';
+        }
+        renderWikiSidebar();
+      }
+    } catch (err) {
+      console.warn('[wiki] Failed to load categories:', err);
+    }
+  }
+
+  function renderWikiSidebar() {
+    const listEl = $('wikiCatList');
+    if (!listEl) return;
+    if (!wikiState.categories.length) {
+      listEl.innerHTML = '<div style="padding:10px;color:var(--text-muted);font-size:0.75rem;">No categories found.</div>';
+      return;
+    }
+
+    listEl.innerHTML = wikiState.categories.map(c => `
+      <button type="button" class="wiki-cat-item ${c.id === wikiState.activeCategory ? 'active' : ''}" data-cat="${escapeHtml(c.id)}" title="${escapeHtml(c.title)} (${c.count || 0})">
+        <div class="wiki-cat-item-main">
+          <span class="wiki-cat-item-icon">${escapeHtml(c.icon || '📁')}</span>
+          <span>${escapeHtml(c.title)}</span>
+        </div>
+        <span class="wiki-cat-count">${(c.count || 0).toLocaleString()}</span>
+      </button>
+    `).join('');
+
+    listEl.querySelectorAll('.wiki-cat-item').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const catId = btn.dataset.cat;
+        if (!catId) return;
+        wikiState.activeCategory = catId;
+        wikiState.activeSubheading = '';
+        wikiState.page = 1;
+        listEl.querySelectorAll('.wiki-cat-item').forEach(b => b.classList.toggle('active', b === btn));
+
+        // Close mobile sidebar if open
+        $('wikiSidebar')?.classList.remove('mobile-open');
+
+        loadWikiLinks();
+      });
+    });
+  }
+
+  async function loadWikiLinks() {
+    const blocksEl = $('wikiBlocks');
+    if (wikiState.loading) return;
+    wikiState.loading = true;
+
+    if (blocksEl) {
+      blocksEl.innerHTML = '<div class="wiki-loading">Loading links for category…</div>';
+    }
+
+    try {
+      const qParams = new URLSearchParams({
+        scope: wikiState.scope,
+        category: wikiState.activeCategory,
+        page: String(wikiState.page),
+        limit: String(wikiState.limit)
+      });
+      if (wikiState.scope === 'community' && wikiState.communityId) {
+        qParams.set('community_id', wikiState.communityId);
+      }
+      if (wikiState.activeSubheading) {
+        qParams.set('subheading', wikiState.activeSubheading);
+      }
+      if (wikiState.q) {
+        qParams.set('q', wikiState.q);
+      }
+
+      const { res, data } = await api(`/api/wiki/links?${qParams.toString()}`);
+      if (res.ok && data.success && Array.isArray(data.links)) {
+        wikiState.links = data.links;
+        wikiState.totalPages = data.totalPages || 1;
+        wikiState.totalCategoryLinks = data.total || 0;
+        renderWikiContent();
+      } else {
+        if (blocksEl) blocksEl.innerHTML = '<div class="wiki-empty">Could not load wiki links.</div>';
+      }
+    } catch (err) {
+      if (blocksEl) blocksEl.innerHTML = `<div class="wiki-empty">Error loading links: ${escapeHtml(err.message)}</div>`;
+    } finally {
+      wikiState.loading = false;
+    }
+  }
+
+  function renderWikiContent() {
+    const curCat = wikiState.categories.find(c => c.id === wikiState.activeCategory) || {
+      id: wikiState.activeCategory,
+      title: 'Links',
+      icon: '📁',
+      description: 'Browsing wiki links',
+      subheadings: []
+    };
+
+    // 1. Update Hero
+    const heroIcon = $('wikiHeroIcon');
+    const heroTitle = $('wikiHeroTitle');
+    const heroDesc = $('wikiHeroDesc');
+    const heroCount = $('wikiHeroCount');
+    if (heroIcon) heroIcon.textContent = curCat.icon || '📁';
+    if (heroTitle) heroTitle.textContent = curCat.title;
+    if (heroDesc) heroDesc.textContent = curCat.description || '';
+    if (heroCount) heroCount.textContent = `${(wikiState.totalCategoryLinks || curCat.count || 0).toLocaleString()} links`;
+
+    // 2. Subheading Jump Pills
+    const subPills = $('wikiSubPills');
+    if (subPills) {
+      const subs = curCat.subheadings || [];
+      if (!subs.length) {
+        subPills.innerHTML = '';
+      } else {
+        const allActive = !wikiState.activeSubheading;
+        let pillsHtml = `<button type="button" class="wiki-sub-pill ${allActive ? 'active' : ''}" data-sub="" title="Show all subheadings in this category">All Subheadings</button>`;
+        for (const s of subs) {
+          const isAct = wikiState.activeSubheading === s.id;
+          pillsHtml += `<button type="button" class="wiki-sub-pill ${isAct ? 'active' : ''}" data-sub="${escapeHtml(s.id)}">${escapeHtml(s.title)}${s.count ? ` (${s.count})` : ''}</button>`;
+        }
+        subPills.innerHTML = pillsHtml;
+
+        subPills.querySelectorAll('.wiki-sub-pill').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const subId = btn.dataset.sub;
+            wikiState.activeSubheading = subId;
+            wikiState.page = 1;
+            loadWikiLinks();
+          });
+        });
+      }
+    }
+
+    // 3. Render Link Blocks
+    const blocksEl = $('wikiBlocks');
+    if (!blocksEl) return;
+
+    if (!wikiState.links.length) {
+      blocksEl.innerHTML = `
+        <div class="wiki-empty">
+          <p>No links found matching your current filter.</p>
+        </div>`;
+      $('wikiPagination')?.classList.add('hidden');
+      return;
+    }
+
+    // Group links by subheading
+    const subMap = new Map();
+    for (const l of wikiState.links) {
+      const subKey = l.subheading || 'general';
+      if (!subMap.has(subKey)) subMap.set(subKey, []);
+      subMap.get(subKey).push(l);
+    }
+
+    const subMetaLookup = new Map((curCat.subheadings || []).map(s => [s.id, s]));
+
+    let blocksHtml = '';
+    for (const [subId, subLinks] of subMap.entries()) {
+      const meta = subMetaLookup.get(subId) || {
+        title: subId.replace(/^[a-z]+-/, '').replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+        description: ''
+      };
+
+      blocksHtml += `
+        <section class="wiki-sub-block" id="sub-${escapeHtml(subId)}">
+          <div class="wiki-sub-header">
+            <h4 class="wiki-sub-title">
+              <span>${escapeHtml(meta.title)}</span>
+              <a href="#sub-${escapeHtml(subId)}" class="wiki-sub-anchor" title="Direct link to this section">#</a>
+            </h4>
+            ${meta.description ? `<p class="wiki-sub-desc">${escapeHtml(meta.description)}</p>` : ''}
+          </div>
+          <div class="wiki-link-list">
+            ${subLinks.map(l => {
+              let host = '';
+              try { if (l.url && l.url.startsWith('http')) host = new URL(l.url).hostname; } catch (_) {}
+
+              const tagPills = (l.tags || []).map(t =>
+                `<button type="button" class="wiki-tag-pill" data-tag="${escapeHtml(t)}" title="Filter by #${escapeHtml(t)}">#${escapeHtml(t)}</button>`
+              ).join('');
+
+              const auditBadge = l.manual_edited_at
+                ? `<span class="admin-edit-badge" title="Manually edited">✏️ ${escapeHtml(l.last_edited_by_name || 'Admin')} · ${escapeHtml(formatDateTime(l.manual_edited_at))}</span>`
+                : '';
+
+              return `
+                <article class="wiki-link-card" data-id="${escapeHtml(l.id)}">
+                  <div class="wiki-card-head">
+                    <div class="wiki-card-title-row">
+                      <a class="wiki-card-title" href="${safeHref(l.url || '#')}" target="_blank" rel="noopener noreferrer">
+                        <span>${escapeHtml(l.title || l.url || 'Untitled')}</span>
+                        <span class="wiki-card-ext-icon">↗</span>
+                      </a>
+                      ${host ? `<span class="wiki-domain-chip">${escapeHtml(host)}</span>` : ''}
+                    </div>
+                  </div>
+                  ${l.notes ? `<p class="wiki-card-desc">${escapeHtml(l.notes)}</p>` : ''}
+                  <div class="wiki-card-footer">
+                    <div class="wiki-card-tags">
+                      ${tagPills}
+                    </div>
+                    <div class="wiki-card-meta">
+                      ${auditBadge}
+                      <span>Added ${escapeHtml(formatDateTime(l.created_at))}</span>
+                    </div>
+                  </div>
+                </article>
+              `;
+            }).join('')}
+          </div>
+        </section>
+      `;
+    }
+
+    blocksEl.innerHTML = blocksHtml;
+
+    // Wire tag clicks inside wiki link cards
+    blocksEl.querySelectorAll('.wiki-tag-pill').forEach(pill => {
+      pill.addEventListener('click', (e) => {
+        e.preventDefault();
+        const tag = pill.dataset.tag;
+        if (!tag) return;
+        const sInput = $('wikiSearchInput');
+        if (sInput) sInput.value = tag;
+        $('wikiClearSearch')?.classList.remove('hidden');
+        wikiState.q = tag;
+        wikiState.page = 1;
+        loadWikiLinks();
+      });
+    });
+
+    // 4. Pagination
+    const pager = $('wikiPagination');
+    const prevBtn = $('wikiPrevBtn');
+    const nextBtn = $('wikiNextBtn');
+    const pageInfo = $('wikiPageInfo');
+    if (pager && prevBtn && nextBtn && pageInfo) {
+      if (wikiState.totalPages <= 1) {
+        pager.classList.add('hidden');
+      } else {
+        pager.classList.remove('hidden');
+        pageInfo.textContent = `Page ${wikiState.page} of ${wikiState.totalPages}`;
+        prevBtn.disabled = wikiState.page <= 1;
+        nextBtn.disabled = wikiState.page >= wikiState.totalPages;
+      }
+    }
+  }
+
+  function setupWikiEvents() {
+    $('wikiNavBtn')?.addEventListener('click', openWiki);
+    $('openWikiDrawerBtn')?.addEventListener('click', () => {
+      const sideDrawerEl = $('sideDrawer');
+      const drawerOverlayEl = $('drawerOverlay');
+      if (sideDrawerEl) sideDrawerEl.classList.remove('active');
+      if (drawerOverlayEl) drawerOverlayEl.classList.remove('active');
+      document.body.style.overflow = '';
+      openWiki();
+    });
+    $('wikiCloseBtn')?.addEventListener('click', closeWiki);
+
+    $('wikiScopeSelect')?.addEventListener('change', (e) => {
+      wikiState.scope = e.target.value;
+      const commWrap = $('wikiCommunityWrap');
+      if (commWrap) commWrap.style.display = wikiState.scope === 'personal' ? 'none' : 'flex';
+      wikiState.page = 1;
+      wikiState.q = '';
+      loadWikiData();
+    });
+
+    $('wikiCommunitySelect')?.addEventListener('change', (e) => {
+      wikiState.communityId = e.target.value;
+      wikiState.page = 1;
+      wikiState.q = '';
+      loadWikiData();
+    });
+
+    const sInput = $('wikiSearchInput');
+    const clrSearch = $('wikiClearSearch');
+    if (sInput) {
+      let debounce = null;
+      sInput.addEventListener('input', () => {
+        if (clrSearch) clrSearch.classList.toggle('hidden', !sInput.value.trim());
+        clearTimeout(debounce);
+        debounce = setTimeout(() => {
+          wikiState.q = sInput.value.trim();
+          wikiState.page = 1;
+          loadWikiLinks();
+        }, 220);
+      });
+    }
+
+    if (clrSearch) {
+      clrSearch.addEventListener('click', () => {
+        if (sInput) sInput.value = '';
+        clrSearch.classList.add('hidden');
+        wikiState.q = '';
+        wikiState.page = 1;
+        loadWikiLinks();
+      });
+    }
+
+    $('wikiSidebarToggle')?.addEventListener('click', () => {
+      $('wikiSidebar')?.classList.toggle('mobile-open');
+    });
+
+    $('wikiPrevBtn')?.addEventListener('click', () => {
+      if (wikiState.page > 1) {
+        wikiState.page--;
+        loadWikiLinks();
+      }
+    });
+
+    $('wikiNextBtn')?.addEventListener('click', () => {
+      if (wikiState.page < wikiState.totalPages) {
+        wikiState.page++;
+        loadWikiLinks();
+      }
+    });
+
+    $('wikiAiOrganizeBtn')?.addEventListener('click', async () => {
+      const btn = $('wikiAiOrganizeBtn');
+      if (btn) btn.disabled = true;
+      showToast('AI is reviewing library links & tags to refine categories…');
+      try {
+        const { res, data } = await api('/api/wiki/ai-organize', {
+          method: 'POST',
+          body: JSON.stringify({
+            scope: wikiState.scope,
+            community_id: wikiState.communityId
+          })
+        });
+        if (res.ok && data.success) {
+          showToast(data.ai_generated ? 'AI taxonomy generated & applied!' : (data.message || 'Taxonomy updated'));
+          await loadWikiCategories();
+          await loadWikiLinks();
+        } else {
+          showToast(data.error || 'AI organization failed', true);
+        }
+      } catch (err) {
+        showToast(err.message || 'AI request failed', true);
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    });
+  }
+
   // ---- Events ----
 
   function setupEventListeners() {
@@ -3437,6 +3910,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initDice();
     setupAdminDbEvents();
     setupMainDbEvents();
+    setupWikiEvents();
 
     function openDrawer() {
       if (sideDrawer) sideDrawer.classList.add('active');

@@ -44,6 +44,7 @@ export const PRIMARY_KEYS = {
   index_jobs: ['id'],
   clone_sources: ['destination', 'chat_id', 'topic_id', 'message_id', 'content_key'],
   clone_job_items: ['job_id', 'message_id'],
+  wiki_taxonomy: ['id'],
 };
 
 /**

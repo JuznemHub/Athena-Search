@@ -8,6 +8,13 @@ import {
   tagsFromFacts, validateTags, extractFacts, properNounBans, normalizeTag,
   JUNK_TAGS, GENERIC_REJECTS, CANONICAL_TAGS, TYPE_SET, TAG_VOCAB_TEXT,
 } from './tag-taxonomy.js';
+import {
+  DEFAULT_FMHY_CATEGORIES,
+  classifyLink,
+  ensureWikiTaxonomyTable,
+  getWikiTaxonomy,
+  saveWikiTaxonomy,
+} from './wiki-taxonomy.js';
 
 function cloneDisplayName(chatTitle, chatType, flowThread, topicTitle) {
   const base = String(chatTitle || '');
@@ -181,7 +188,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.56',
+          version: '1.0.57',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -353,6 +360,22 @@ export default {
 
       if (pathname === '/api/tags' && request.method === 'GET') {
         return await handleGetTags(url, user, env, corsHeaders);
+      }
+
+      if (pathname === '/api/wiki/categories' && request.method === 'GET') {
+        return await handleGetWikiCategories(url, user, env, corsHeaders);
+      }
+
+      if (pathname === '/api/wiki/links' && request.method === 'GET') {
+        return await handleGetWikiLinks(url, user, env, corsHeaders);
+      }
+
+      if (pathname === '/api/wiki/ai-organize' && request.method === 'POST') {
+        return await handleAiOrganizeWiki(request, user, env, corsHeaders);
+      }
+
+      if (pathname === '/api/wiki/reset-taxonomy' && request.method === 'POST') {
+        return await handleResetWikiTaxonomy(request, user, env, corsHeaders);
       }
 
       // Community links — members only (join required before dump)
@@ -3458,6 +3481,270 @@ async function handleGetTags(url, user, env, corsHeaders) {
   const total = Number(countRow?.total || 0);
 
   return Response.json({ success: true, tags: topTags, total }, { headers: corsHeaders });
+}
+
+async function handleGetWikiCategories(url, user, env, corsHeaders) {
+  const scope = (url.searchParams.get('scope') || 'community').toLowerCase();
+  const rawCommId = (url.searchParams.get('community_id') || '').trim();
+  let table = 'links';
+  let scopeKey = rawCommId;
+
+  if (scope === 'personal') {
+    if (!(await isInstanceOwnerUserAsync(user, env))) {
+      return deny(corsHeaders, 'Personal mode is for GOD rank (instance host) only', 'PERSONAL_LOCKED', 403);
+    }
+    table = 'personal_links';
+    scopeKey = user.id;
+  } else {
+    if (!scopeKey) {
+      const firstComm = await env.DB.prepare('SELECT id FROM communities ORDER BY created_at DESC LIMIT 1').first();
+      scopeKey = firstComm?.id || '';
+    }
+    if (!scopeKey) {
+      return Response.json({ success: true, categories: DEFAULT_FMHY_CATEGORIES, total: 0 }, { headers: corsHeaders });
+    }
+  }
+
+  const taxonomy = await getWikiTaxonomy(env, scope, scopeKey);
+  const scopeWhere = scope === 'personal' ? 'WHERE user_id = ?' : 'WHERE community_id = ?';
+
+  const { results: allRows } = await env.DB.prepare(
+    `SELECT id, title, url, notes, tags FROM ${table} ${scopeWhere}`
+  ).bind(scopeKey).all();
+
+  const links = allRows || [];
+  const catCounts = new Map();
+  const subCounts = new Map();
+
+  for (const l of links) {
+    const { categoryId, subheadingId } = classifyLink(l, taxonomy);
+    catCounts.set(categoryId, (catCounts.get(categoryId) || 0) + 1);
+    subCounts.set(subheadingId, (subCounts.get(subheadingId) || 0) + 1);
+  }
+
+  const categoriesWithCounts = taxonomy.map(cat => {
+    const subs = (cat.subheadings || []).map(s => ({
+      ...s,
+      count: subCounts.get(s.id) || 0
+    }));
+    return {
+      id: cat.id,
+      title: cat.title,
+      icon: cat.icon || '📁',
+      description: cat.description || '',
+      count: catCounts.get(cat.id) || 0,
+      subheadings: subs
+    };
+  });
+
+  return Response.json({
+    success: true,
+    total: links.length,
+    scope,
+    community_id: scopeKey,
+    categories: categoriesWithCounts
+  }, { headers: corsHeaders });
+}
+
+async function handleGetWikiLinks(url, user, env, corsHeaders) {
+  const scope = (url.searchParams.get('scope') || 'community').toLowerCase();
+  const rawCommId = (url.searchParams.get('community_id') || '').trim();
+  const targetCategory = (url.searchParams.get('category') || '').trim();
+  const targetSubheading = (url.searchParams.get('subheading') || '').trim();
+  const q = (url.searchParams.get('q') || '').trim().toLowerCase();
+  const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10) || 1);
+  const limit = Math.min(150, Math.max(1, parseInt(url.searchParams.get('limit') || '50', 10) || 50));
+
+  let table = 'links';
+  let scopeKey = rawCommId;
+
+  if (scope === 'personal') {
+    if (!(await isInstanceOwnerUserAsync(user, env))) {
+      return deny(corsHeaders, 'Personal mode is for GOD rank (instance host) only', 'PERSONAL_LOCKED', 403);
+    }
+    table = 'personal_links';
+    scopeKey = user.id;
+  } else {
+    if (!scopeKey) {
+      const firstComm = await env.DB.prepare('SELECT id FROM communities ORDER BY created_at DESC LIMIT 1').first();
+      scopeKey = firstComm?.id || '';
+    }
+    if (!scopeKey) {
+      return Response.json({ success: true, links: [], total: 0, page: 1, totalPages: 1 }, { headers: corsHeaders });
+    }
+  }
+
+  const taxonomy = await getWikiTaxonomy(env, scope, scopeKey);
+  const scopeWhere = scope === 'personal' ? 'WHERE user_id = ?' : 'WHERE community_id = ?';
+
+  const { results: allRows } = await env.DB.prepare(
+    `SELECT id, title, url, notes, tags, image_url, site_name, created_at, manual_edited_at, last_edited_by_name FROM ${table} ${scopeWhere} ORDER BY created_at DESC`
+  ).bind(scopeKey).all();
+
+  const matched = [];
+  for (const row of (allRows || [])) {
+    const { categoryId, subheadingId } = classifyLink(row, taxonomy);
+    if (targetCategory && categoryId !== targetCategory) continue;
+    if (targetSubheading && subheadingId !== targetSubheading) continue;
+
+    if (q) {
+      const tagsStr = Array.isArray(row.tags) ? row.tags.join(' ') : String(row.tags || '');
+      const bag = [row.title, row.url, row.notes, tagsStr, categoryId, subheadingId].join(' ').toLowerCase();
+      if (!bag.includes(q)) continue;
+    }
+
+    let parsedTags = [];
+    if (Array.isArray(row.tags)) {
+      parsedTags = row.tags;
+    } else if (typeof row.tags === 'string') {
+      try { parsedTags = JSON.parse(row.tags); } catch (_) {
+        parsedTags = row.tags.split(/[\s,]+/).map(t => t.replace(/^#+/, '').trim()).filter(Boolean);
+      }
+    }
+
+    matched.push({
+      ...row,
+      tags: parsedTags,
+      category: categoryId,
+      subheading: subheadingId
+    });
+  }
+
+  const total = matched.length;
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  const offset = (page - 1) * limit;
+  const paged = matched.slice(offset, offset + limit);
+
+  return Response.json({
+    success: true,
+    category: targetCategory || 'all',
+    subheading: targetSubheading || 'all',
+    page,
+    limit,
+    total,
+    totalPages,
+    links: paged
+  }, { headers: corsHeaders });
+}
+
+async function handleAiOrganizeWiki(request, user, env, corsHeaders) {
+  const isOwner = await isInstanceOwnerUserAsync(user, env);
+  const isStaff = isOwner || (!ownerListsConfigured(env)) || (await isCommunityAdminUser(user, env));
+  if (!isStaff) {
+    return deny(corsHeaders, 'Admin or Owner rank required to re-organize wiki taxonomy', 'ADMIN_ONLY', 403);
+  }
+
+  let body = {};
+  try { body = await request.json(); } catch (_) {}
+  const scope = (body.scope || 'community').toLowerCase();
+  const communityId = (body.community_id || '').trim();
+
+  let table = 'links';
+  let scopeKey = communityId;
+  if (scope === 'personal') {
+    table = 'personal_links';
+    scopeKey = user.id;
+  } else if (!scopeKey) {
+    const firstComm = await env.DB.prepare('SELECT id FROM communities ORDER BY created_at DESC LIMIT 1').first();
+    scopeKey = firstComm?.id || '';
+  }
+
+  const scopeWhere = scope === 'personal' ? 'WHERE user_id = ?' : 'WHERE community_id = ?';
+
+  const tagRows = await env.DB.prepare(
+    `SELECT tags, count(*) as cnt FROM ${table} ${scopeWhere} GROUP BY tags ORDER BY cnt DESC LIMIT 30`
+  ).bind(scopeKey).all();
+
+  const titleRows = await env.DB.prepare(
+    `SELECT title, url FROM ${table} ${scopeWhere} ORDER BY created_at DESC LIMIT 40`
+  ).bind(scopeKey).all();
+
+  const sampleTags = (tagRows?.results || []).map(r => r.tags).filter(Boolean).slice(0, 25);
+  const sampleTitles = (titleRows?.results || []).map(r => `${r.title || ''} (${r.url || ''})`).slice(0, 30);
+
+  let aiConfig = null;
+  try { aiConfig = await getInstanceAiConfig(env); } catch (_) {}
+
+  if (!aiConfig?.api_key) {
+    return Response.json({
+      success: true,
+      categories: DEFAULT_FMHY_CATEGORIES,
+      message: 'AI credentials not configured — using default FMHY taxonomy'
+    }, { headers: corsHeaders });
+  }
+
+  const prompt = `You are an expert knowledge curator specializing in directory wikis like FreeMediaHeckYeah (fmhy.net).
+Review this sample of links and tags from our library:
+Sample Tags: ${JSON.stringify(sampleTags)}
+Sample Links: ${JSON.stringify(sampleTitles)}
+
+Generate a structured FMHY-style wiki taxonomy with 10 to 16 categories that covers these items.
+Each category must have:
+- "id": lowercase slug (e.g. "video", "privacy", "tools")
+- "title": human-readable title (e.g. "Video & Streaming")
+- "icon": single emoji (e.g. "🎬")
+- "description": concise 1-sentence description
+- "subheadings": array of 2 to 5 subheadings, each having:
+  - "id": slug (e.g. "video-streaming")
+  - "title": title (e.g. "Movies & TV Streaming")
+  - "description": description
+  - "tags": array of 3 to 10 matching tag words
+  - "keywords": array of 3 to 10 matching keywords
+
+Return ONLY a valid JSON object without markdown fences:
+{ "categories": [ ... ] }`;
+
+  try {
+    const aiRes = await callAiChatShared(env, {
+      baseUrl: aiConfig.base_url,
+      apiKey: aiConfig.api_key,
+      mode: aiConfig.mode,
+      model: aiConfig.model,
+      system: 'You are a JSON-only taxonomy generator for directory wikis. Output only valid JSON without markdown fences.',
+      user: prompt,
+      maxTokens: 3500,
+      temperature: 0.2
+    });
+
+    let parsed = null;
+    try {
+      const cleaned = aiRes.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+      parsed = JSON.parse(cleaned);
+    } catch (_) {}
+
+    if (parsed && Array.isArray(parsed.categories) && parsed.categories.length >= 3) {
+      await saveWikiTaxonomy(env, scope, scopeKey, parsed.categories, user.displayName || user.username || user.id);
+      return Response.json({
+        success: true,
+        categories: parsed.categories,
+        ai_generated: true
+      }, { headers: corsHeaders });
+    }
+  } catch (err) {
+    console.warn('[wiki] AI organize failed, keeping existing taxonomy:', err);
+  }
+
+  return Response.json({
+    success: true,
+    categories: DEFAULT_FMHY_CATEGORIES,
+    message: 'Taxonomy generated from FMHY defaults'
+  }, { headers: corsHeaders });
+}
+
+async function handleResetWikiTaxonomy(request, user, env, corsHeaders) {
+  const isOwner = await isInstanceOwnerUserAsync(user, env);
+  const isStaff = isOwner || (!ownerListsConfigured(env)) || (await isCommunityAdminUser(user, env));
+  if (!isStaff) {
+    return deny(corsHeaders, 'Admin or Owner rank required', 'ADMIN_ONLY', 403);
+  }
+  let body = {};
+  try { body = await request.json(); } catch (_) {}
+  const scope = (body.scope || 'community').toLowerCase();
+  const communityId = (body.community_id || '').trim();
+  const id = scope === 'personal' ? 'personal:god' : `community:${communityId || 'default'}`;
+  await ensureWikiTaxonomyTable(env);
+  await env.DB.prepare('DELETE FROM wiki_taxonomy WHERE id = ?').bind(id).run();
+  return Response.json({ success: true, categories: DEFAULT_FMHY_CATEGORIES }, { headers: corsHeaders });
 }
 
 async function handleAdminGetLinks(url, user, env, corsHeaders) {
@@ -18838,4 +19125,8 @@ export {
   USERBOT_ACCOUNTS,
   handleAdminGetLinks,
   handleGetTags,
+  handleGetWikiCategories,
+  handleGetWikiLinks,
+  handleAiOrganizeWiki,
+  handleResetWikiTaxonomy,
 };
