@@ -2808,7 +2808,8 @@ document.addEventListener('DOMContentLoaded', () => {
               Edit
             </button>
             <button type="button" class="btn btn-secondary btn-sm admin-card-del-btn" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(item.title || item.url || 'this link')}" title="Delete link">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;color:var(--danger,#ef4444);"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px;"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+              Delete
             </button>
           </div>
         </div>
@@ -2835,6 +2836,10 @@ document.addEventListener('DOMContentLoaded', () => {
           <div class="edit-panel-actions">
             <button type="button" class="btn btn-primary btn-sm admin-save-btn">Save Changes</button>
             <button type="button" class="btn btn-secondary btn-sm admin-cancel-btn">Cancel</button>
+            <button type="button" class="btn btn-secondary btn-sm admin-panel-del-btn" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(item.title || item.url || 'this link')}" style="margin-left:auto;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px;"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+              Delete Link
+            </button>
           </div>
         </div>
       `;
@@ -2853,7 +2858,7 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     });
 
-    listEl.querySelectorAll('.admin-card-del-btn').forEach(btn => {
+    listEl.querySelectorAll('.admin-card-del-btn, .admin-panel-del-btn').forEach(btn => {
       btn.addEventListener('click', async (e) => {
         e.preventDefault();
         e.stopPropagation();

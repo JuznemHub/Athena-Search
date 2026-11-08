@@ -678,8 +678,22 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   border: 1px solid var(--accent-border); font-weight: 500; font-size: 0.74rem;
 }
 .admin-card-actions { display: flex; align-items: center; gap: 8px; }
-.admin-card-del-btn { padding: 4px 8px; color: var(--danger, #ef4444); border-color: rgba(239, 68, 68, 0.25); }
-.admin-card-del-btn:hover { background: rgba(239, 68, 68, 0.15); border-color: var(--danger, #ef4444); color: #ff6b6b; }
+.admin-card-del-btn, .admin-panel-del-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  color: var(--danger, #ef4444) !important;
+  border: 1px solid rgba(239, 68, 68, 0.35) !important;
+  background: rgba(239, 68, 68, 0.08) !important;
+  cursor: pointer;
+  border-radius: 6px;
+  font-size: 0.78rem;
+}
+.admin-card-del-btn:hover, .admin-panel-del-btn:hover {
+  background: rgba(239, 68, 68, 0.22) !important;
+  border-color: var(--danger, #ef4444) !important;
+  color: #ff6b6b !important;
+}
 .admin-card-notag { border: 1px dashed rgba(255, 255, 255, 0.2); }
 
 .admin-db-pagination { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 12px; }
