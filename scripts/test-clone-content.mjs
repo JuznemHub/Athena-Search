@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import worker from '../worker/index.js';
 import { Api } from 'telegram';
 import bigInt from 'big-integer';
-import { classifyCloneMessage, countCloneMessage, documentCounter, emptyCloneCounters, scanCloneHistory, sourceClonePost } from '../worker/clone-content.js';
+import { classifyCloneMessage, countCloneMessage, documentCounter, emptyCloneCounters, scanCloneHistory, sourceClonePost, isDirectImageUrl } from '../worker/clone-content.js';
 
 // Exercise the actual authenticated webhook, with SQL executed by SQLite and
 // only the external Bot API replaced. No saved Telegram account is contacted.
@@ -307,5 +307,34 @@ let abortedComplete = false;
 await assert.rejects(scanCloneHistory({ async getMessages() { controller.abort(); return [{ id: 5 }]; } }, '-100fixture', {
   signal: controller.signal, onProgress(frame) { abortedComplete ||= frame.complete; }
 }), { name: 'AbortError', code: 'CLONE_ABORTED' });
+assert.equal(isDirectImageUrl('https://external-preview.redd.it/banner.jpg'), true);
+assert.equal(isDirectImageUrl('https://telegra.ph/file/banner.png'), true);
+assert.equal(isDirectImageUrl('https://example.com/blog/wp-content/uploads/2020/10/pic.jpg'), true);
+assert.equal(isDirectImageUrl('https://example.com/tool/page'), false);
+
+const mixedImageText = 'Resources for Privacy News & Tools\n\nA collection of resources\nhttps://example.org/privacy-tools\nhttps://external-preview.redd.it/banner.jpg';
+const u1 = 'https://example.org/privacy-tools';
+const u2 = 'https://external-preview.redd.it/banner.jpg';
+const mixedImageMsg = {
+  text: mixedImageText,
+  entities: [
+    { type: 'url', offset: mixedImageText.indexOf(u1), length: u1.length },
+    { type: 'url', offset: mixedImageText.indexOf(u2), length: u2.length }
+  ]
+};
+const classifiedMixed = classifyCloneMessage(mixedImageMsg);
+assert.deepEqual(classifiedMixed.urls, [u1], 'image preview url excluded when content url exists');
+assert.equal(classifiedMixed.previewImage, u2);
+
+const onlyImageText = 'Featured Poster\nhttps://telegra.ph/file/banner.jpg';
+const u3 = 'https://telegra.ph/file/banner.jpg';
+const onlyImageMsg = {
+  text: onlyImageText,
+  entities: [{ type: 'url', offset: onlyImageText.indexOf(u3), length: u3.length }]
+};
+const classifiedOnlyImage = classifyCloneMessage(onlyImageMsg);
+assert.deepEqual(classifiedOnlyImage.urls, ['https://telegra.ph/file/banner.jpg'], 'image url retained when only url');
+assert.equal(classifiedOnlyImage.previewImage, 'https://telegra.ph/file/banner.jpg');
+
 assert.equal(abortedComplete, false);
 console.log('clone classification and accessible-history scanner tests passed');

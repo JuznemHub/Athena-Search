@@ -1,5 +1,5 @@
 import { createUcloneManager, cloneFailure, withCloneAccount, ensureUcloneTables } from './uclone-manager.js';
-import { classifyCloneMessage, countCloneMessage, emptyCloneCounters, sourceClonePost, documentCounter } from './clone-content.js';
+import { classifyCloneMessage, countCloneMessage, emptyCloneCounters, sourceClonePost, documentCounter, isDirectImageUrl } from './clone-content.js';
 import { renderCloneProgress } from './clone-ui.js';
 import { dokployConfigured, dokployApps, dokployStatus, dokployLogSnapshot, dokployDeploy, dokploySimple } from './dokploy.js';
 import { handleLogApi } from './log-api.js';
@@ -189,7 +189,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.62',
+          version: '1.0.63',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -10613,7 +10613,7 @@ async function capturePostIntoSinks(env, sinks, ctx) {
     const before = { ...item };
     await persistClonePost(env, job, sink, msg, classification, topicId);
     const component = (key, save) => persistCloneComponent(env, { job, sink, message: msg, classification, topicId, item, key, save, replay: false });
-    for (const url of classification.urls) await component('url:' + generateUrlHash(url), () => saveBackfillLink(env, job, sink, msg, url));
+    for (const url of classification.urls) await component('url:' + generateUrlHash(url), () => saveBackfillLink(env, job, sink, msg, url, classification));
     const media = classification.media;
     if (media && media.kind !== 'video') await component('media', async () => {
       if (!downloaded) {
@@ -12789,7 +12789,20 @@ async function wipeCloneVaultPaths(env, { transferIds = [], chatKeys = [] } = {}
   return removed;
 }
 
-async function saveBackfillLink(env, job, sink, message, url) {
+function extractTitleFromNoteText(noteText, url = '') {
+  const text = String(noteText || '').trim();
+  if (!text) return '';
+  for (const rawLine of text.split(/\r?\n+/)) {
+    const line = rawLine.trim().replace(/^[*_#\-–•·\s]+|[*_#\s]+$/g, '').trim();
+    if (!line || /^tags:/i.test(line) || /^#\w/.test(line) || /^https?:\/\//i.test(line) || /^shared by/i.test(line)) continue;
+    if (line.length >= 2 && line.length <= 120 && !isWeakTitle(line, url)) {
+      return line;
+    }
+  }
+  return '';
+}
+
+async function saveBackfillLink(env, job, sink, message, url, classification = null) {
   const personal = sink === 'personal';
   const table = personal ? 'personal_links' : 'links';
   const key = personal ? job.user_id : job.community_id;
@@ -12800,7 +12813,10 @@ async function saveBackfillLink(env, job, sink, message, url) {
   if (existing) return { duplicate: true, id: existing.id };
   const id = 'ix_' + randomToken().slice(0, 20);
   const noteText = String(message.message || message.text || message.caption || '');
-  const common = [id, key, url, generateUrlHash(url), titleFromUrl(url), noteText, '[]', Date.now(), job.chat_id, String(message.id ?? message.message_id), job.id];
+  const titleHint = extractTitleFromNoteText(noteText, url);
+  const initialTitle = titleHint || titleFromUrl(url);
+  const previewImage = classification?.previewImage || (isDirectImageUrl(url) ? url : null);
+  const common = [id, key, url, generateUrlHash(url), initialTitle, noteText, '[]', Date.now(), job.chat_id, String(message.id ?? message.message_id), job.id];
   try {
     if (personal) await env.DB.prepare("INSERT INTO personal_links (id,user_id,url,url_hash,title,notes,tags,created_at,source_chat_id,source_message_id,transfer_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)").bind(...common).run();
     else await env.DB.prepare("INSERT INTO links (id,community_id,url,url_hash,title,notes,tags,created_at,source_chat_id,source_message_id,transfer_id,added_by,added_by_user_id,added_by_provider) VALUES (?,?,?,?,?,?,?,?,?,?,?,'history backfill',?,'telegram')").bind(...common, job.user_id).run();
@@ -12815,7 +12831,7 @@ async function saveBackfillLink(env, job, sink, message, url) {
   // scrape the page (AI when configured) so no cloned row stays untitled
   // or undescribed. Caption hashtags are kept as curated tags.
   try {
-    const seedTitle = titleFromUrl(url);
+    const seedTitle = titleHint || titleFromUrl(url);
     const seedNotes = cleanAllNotes(noteText, url, seedTitle, await loadLinkNamePattern(env).catch(() => null));
     const tagged = await describeAndTagLink(env, url, { title: seedTitle, notes: seedNotes || noteText }, { config: null, maxTags: 8, scrape: true });
     const finalTags = mergePipelineTags({
@@ -12824,10 +12840,12 @@ async function saveBackfillLink(env, job, sink, message, url) {
     });
     let finalTitle = seedTitle;
     if (isWeakTitle(finalTitle, url) && tagged.title && !isWeakTitle(tagged.title, url)) finalTitle = String(tagged.title).slice(0, 200);
+    else if (isWeakTitle(finalTitle, url) && titleHint) finalTitle = titleHint.slice(0, 200);
     let finalNotes = seedNotes || noteText;
     if ((!finalNotes || !isDetailedNotes(finalNotes)) && tagged.description) finalNotes = String(tagged.description).slice(0, 600);
     finalNotes = String(finalNotes || '').replace(/\s+/g, ' ').trim().slice(0, 600);
-    await env.DB.prepare(`UPDATE ${table} SET title = ?, notes = ?, tags = ? WHERE id = ?`).bind(finalTitle, finalNotes, JSON.stringify(finalTags), id).run();
+    const finalImage = previewImage || tagged.image || null;
+    await env.DB.prepare(`UPDATE ${table} SET title = ?, notes = ?, tags = ?, image_url = COALESCE(image_url, ?) WHERE id = ?`).bind(finalTitle, finalNotes, JSON.stringify(finalTags), finalImage, id).run();
   } catch (_) {}
   markMeiliScopeDirty(env, sink, key);
   return { saved: id };
@@ -12957,7 +12975,7 @@ async function runHistoryIndexJob(env, initialJob, token, runtime = {}) {
               }
               if (!postSaved) { durable = false; recordCloneFailure(counters, 'database', postError); continue; }
               const media = classification.media;
-              for (const url of classification.urls) await component(sink, 'url:' + generateUrlHash(url), () => saveBackfillLink(env, job, sink, message, url));
+              for (const url of classification.urls) await component(sink, 'url:' + generateUrlHash(url), () => saveBackfillLink(env, job, sink, message, url, classification));
               if (media && media.kind !== 'video') await component(sink, 'media', async () => {
                 if (!downloaded) {
                   if (media.size > 2 * 1024 * 1024 * 1024) throw new Error('FILE_SIZE_LIMIT');
@@ -13455,8 +13473,12 @@ async function structureDatabase(env, { onProgress = null, scope = null, scopeId
           // link (AI polishes when a key is configured). search_blob resets
           // so AI/search re-read the row; scopes are marked dirty so the
           // index cannot serve stale rows.
-          const updTitle = cleanTitleText(row.title);
+          let updTitle = cleanTitleText(row.title);
           let updNotes = cleanAllNotes(row.notes, row.url, row.title, nameRe);
+          if (isWeakTitle(updTitle, row.url) && row.notes) {
+            const hint = extractTitleFromNoteText(row.notes, row.url);
+            if (hint) updTitle = hint;
+          }
           const updTags = cleanTagsForStructure(rowTagCandidates(row), row.url, row.title, row.notes);
           const tagsChanged = JSON.stringify(updTags) !== JSON.stringify(rawTagList(row.tags));
           if (!updNotes) {
@@ -13471,9 +13493,11 @@ async function structureDatabase(env, { onProgress = null, scope = null, scopeId
               }
             } catch (_) {}
           }
-          if (updTitle !== row.title || updNotes !== row.notes || tagsChanged || row.url !== originalUrl || row.url_hash !== generateUrlHash(row.url)) {
-            await env.DB.prepare(`UPDATE ${t.name} SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, search_blob = NULL WHERE id = ?`)
-              .bind(row.url, generateUrlHash(row.url), updTitle, updNotes, JSON.stringify(updTags), row.id).run();
+          const isDirectImg = isDirectImageUrl(row.url);
+          const updImage = isDirectImg ? row.url : null;
+          if (updTitle !== row.title || updNotes !== row.notes || tagsChanged || row.url !== originalUrl || row.url_hash !== generateUrlHash(row.url) || (isDirectImg && !row.image_url)) {
+            await env.DB.prepare(`UPDATE ${t.name} SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, image_url = COALESCE(image_url, ?), search_blob = NULL WHERE id = ?`)
+              .bind(row.url, generateUrlHash(row.url), updTitle, updNotes, JSON.stringify(updTags), updImage, row.id).run();
             if (updTitle !== row.title) stats.titlesCleaned++;
             if (updNotes !== row.notes) stats.notesCleaned++;
             if (tagsChanged) stats.tagsCleaned++;
@@ -17201,6 +17225,10 @@ function isWeakTitle(title, url) {
   if (/^https?:\/\//i.test(t)) return true;
   if (/^link from telegram/i.test(t)) return true;
   if (t.startsWith('Telegram ·')) return true;
+  if (/\.(jpe?g|png|gif|webp|svg|bmp|avif|ico)(\?.*)?$/i.test(t)) return true;
+  if (/(telegra\.ph|graph\.org)\/file\//i.test(t)) return true;
+  if (/\/wp-content\/uploads\//i.test(t)) return true;
+  if (isDirectImageUrl(t)) return true;
   try {
     const u = new URL(url.startsWith('http') ? url : `https://${url}`);
     const hostPath = (u.hostname.replace(/^www\./, '') + u.pathname.replace(/\/$/, '')).toLowerCase();
@@ -19563,5 +19591,7 @@ export {
   handleGetWikiShareLinks,
   handleCreateWikiShareLink,
   handleRevokeWikiShareLink,
+  extractTitleFromNoteText,
+  isWeakTitle,
   validateWikiShareToken,
 };

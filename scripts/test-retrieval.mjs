@@ -56,7 +56,9 @@ import {
   parseInlineEditDraft,
   searchEditButtons,
   searchEditFormHtml,
-  stripInlineHashtags
+  stripInlineHashtags,
+  extractTitleFromNoteText,
+  isWeakTitle,
 } from '../worker/index.js';
 
 assert.equal(resultLimitClause(null), '');
@@ -1054,6 +1056,16 @@ console.log('clone attribution tests passed');
     assert.ok(ebtn.includes(cb), `editor wires ${cb}`);
     assert.ok(cb.length <= 64, 'editor callback fits Telegram limit');
   }
+
+  // Weak titles & note headline extraction for cloned image posts
+  assert.equal(isWeakTitle('https://telegra.ph/file/pic.jpg', 'https://telegra.ph/file/pic.jpg'), true);
+  assert.equal(isWeakTitle('site.com/uploads/2020/banner.jpg', 'https://site.com/uploads/2020/banner.jpg'), true);
+  assert.equal(isWeakTitle('Real Title', 'https://site.com/uploads/2020/banner.jpg'), false);
+
+  const sampleNote = 'Resources for Privacy News & Tools\n\nA collection of resources for staying up-to-date\nhttps://example.com';
+  assert.equal(extractTitleFromNoteText(sampleNote, 'https://example.com/banner.jpg'), 'Resources for Privacy News & Tools');
+  const markdownNote = '## **Top Useful Tools 2026**\n\nFull description here';
+  assert.equal(extractTitleFromNoteText(markdownNote, 'https://example.com'), 'Top Useful Tools 2026');
 }
 
 console.log('section layout tests passed');

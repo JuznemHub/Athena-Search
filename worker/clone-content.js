@@ -96,11 +96,24 @@ function classifyDocument(document, forcedKind = '', fallbackMime = '') {
   return { kind, filename, ext, mime, size: Math.max(0, Number(document.size ?? document.file_size) || 0) };
 }
 
+export function isDirectImageUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  try {
+    const u = new URL(url.startsWith('http') ? url : `https://${url}`);
+    const pathname = u.pathname.toLowerCase();
+    if (/\.(jpe?g|png|gif|webp|svg|bmp|avif|ico)(\?.*)?$/i.test(pathname) || /\.(jpe?g|png|gif|webp|svg|bmp|avif|ico)$/i.test(pathname)) return true;
+    if (/^(telegra\.ph|graph\.org)$/i.test(u.hostname) && /^\/file\/[a-z0-9]+/i.test(pathname)) return true;
+    if (/^(external-preview|preview)\.redd\.it$/i.test(u.hostname)) return true;
+    if (/\/wp-content\/uploads\/.*\.(jpe?g|png|gif|webp)/i.test(pathname)) return true;
+  } catch (_) {}
+  return false;
+}
+
 /** Classify original media only: web previews, thumbnails and pinned references
  * are not additional files. Attributes and MIME beat a misleading filename. */
 export function classifyCloneMessage(message) {
   const topicId = topicOf(message);
-  if (!isContentMessage(message)) return { urls: [], occurrences: [], media: null, topicId };
+  if (!isContentMessage(message)) return { urls: [], occurrences: [], media: null, topicId, previewImage: null };
   const urls = new Set();
   const occurrences = [];
   const field = message.message ? 'message' : 'text';
@@ -149,7 +162,14 @@ export function classifyCloneMessage(message) {
     for (const variant of message.photo) size = Math.max(size, Number(variant.file_size) || 0);
     media = { kind: 'photo', filename: '', ext: 'jpg', mime: 'image/jpeg', size };
   }
-  return { urls: [...urls], occurrences, media, topicId };
+  const allUrls = [...urls];
+  const contentUrls = allUrls.filter((u) => !isDirectImageUrl(u));
+  const imageUrls = allUrls.filter((u) => isDirectImageUrl(u));
+  // If post has normal content URLs alongside direct preview images,
+  // do not duplicate preview image as standalone link rows.
+  const finalUrls = contentUrls.length ? contentUrls : imageUrls;
+  const previewImage = imageUrls[0] || null;
+  return { urls: finalUrls, occurrences, media, topicId, previewImage };
 }
 
 export function emptyCloneCounters() {
