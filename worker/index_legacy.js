@@ -189,7 +189,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.60',
+          version: '1.0.61',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -11405,6 +11405,24 @@ function ucloneManager(env) {
       ).bind(user.id, user.id).all();
       return results || [];
     },
+    checkBotPresence: async (chatId, token) => {
+      try {
+        const me = await telegramApi(token, 'getMe');
+        const botId = me?.result?.id;
+        if (!botId) return { ok: false, reason: 'Bot identity unavailable' };
+        const member = await telegramApi(token, 'getChatMember', { chat_id: normalizeTgChatId(chatId), user_id: botId });
+        if (!member?.ok) return { ok: false, reason: member?.description || 'Bot is not in chat' };
+        const status = String(member?.result?.status || '');
+        if (['creator', 'administrator', 'member', 'restricted'].includes(status)) {
+          return { ok: true, status };
+        }
+        return { ok: false, reason: `Bot is not an active member (status: ${status})` };
+      } catch (err) {
+        return { ok: false, reason: err?.message || 'Check failed' };
+      }
+    },
+    resolveAccountLabel: (userId) => resolveJobLabel(env, userId),
+    getWebsiteUrl: () => getWebsiteDisplayUrl(env),
     telegram: telegramApi,
     classicText: richHtmlToClassic,
     beforeRequest: ubWaitForRelease,
@@ -11432,7 +11450,7 @@ async function ensurePendingCloneTable(env){
   )`).run().catch(()=>{});
   await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_pending_clones_expiry ON pending_clones(expires_at)`).run().catch(()=>{});
 }
-async function storePendingClone(env, row){ await ensurePendingCloneTable(env); await env.DB.prepare(`INSERT INTO pending_clones (id, chat_id, thread_id, community_id, target, requester_tg_id, requester_user_id, stats_json, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(row.id,row.chat_id,row.thread_id||null,row.community_id||null,row.target||null,row.requester_tg_id,row.requester_user_id,JSON.stringify(row.stats),row.created_at,row.expires_at).run(); }
+async function _storePendingClone(env, row){ await ensurePendingCloneTable(env); await env.DB.prepare(`INSERT INTO pending_clones (id, chat_id, thread_id, community_id, target, requester_tg_id, requester_user_id, stats_json, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(row.id,row.chat_id,row.thread_id||null,row.community_id||null,row.target||null,row.requester_tg_id,row.requester_user_id,JSON.stringify(row.stats),row.created_at,row.expires_at).run(); }
 async function getPendingClone(env, id){ await ensurePendingCloneTable(env); return await env.DB.prepare(`SELECT * FROM pending_clones WHERE id=? AND expires_at>?`).bind(id,Date.now()).first(); }
 async function deletePendingClone(env,id){ await env.DB.prepare(`DELETE FROM pending_clones WHERE id=?`).bind(id).run().catch(()=>{}); }
 async function activateBotClone(env, { pendingId, stats, chatId, token, messageId, threadId, user }) {
@@ -13962,7 +13980,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     const personalBot = await findPersonalBotForOwner(env, athenaUser.id);
     if (personalBot?.bot_token) token = await decryptBotToken(env, personalBot.bot_token);
   }
-  if (['/uclone', '/ubclone', '/userbot_accounts', '/userbot_select'].includes(cmd)) {
+  if (['/clone', '/uclone', '/ubclone', '/userbot_accounts', '/userbot_select'].includes(cmd)) {
     try {
       if (!isSelfHosted(env)) await sendTelegramMessage(token, chatId, 'Saved-account history cloning requires the self-hosted server.', forumThreadId);
       else await ucloneManager(env).command({ text, tgUserId, user: athenaUser, chatId, threadId: forumThreadId, token, isGod: isGodTgId(tgUserId, env) });
@@ -14464,66 +14482,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
-// ---- /clone shared flow: ask Personal vs community, then backfill + follow ----
-function cloneUsageHtml() {
-  return [
-    `Whole chat: ${codeHtml('/clone <chat_id> <community_id>')}.`,
-    `One topic: ${codeHtml('/clone <chat_id> <topic_id> <community_id>')}.`,
-    `A channel: ${codeHtml('/clone <channel_id> <community_id>')}.`,
-    `Guided tour with per-topic stats: ${codeHtml('/uclone <chat_id> [topic_id] [community_id]')} (whole chat: ${codeHtml('/uclone <chat_id> <community_id>')}).`,
-  ].join('\n');
-}
 
-async function cloneEligibleCommunities(env, athenaUser, isGod) {
-  const out = [];
-  try {
-    const rows = await env.DB.prepare(`SELECT id, name, created_at FROM communities WHERE id != 'default' ORDER BY created_at DESC`).all();
-    let linkCounts = {};
-    try {
-      const lr = await env.DB.prepare(`SELECT community_id, COUNT(*) AS n FROM links GROUP BY community_id`).all().catch(() => ({ results: [] }));
-      for (const r of lr?.results || lr || []) linkCounts[String(r.community_id || '')] = Number(r.n || 0);
-    } catch (_) {}
-    for (const c of (rows?.results || rows || [])) {
-      if (!c?.id) continue;
-      if (isGod || await ensureOwnerOrAdmin(c.id, athenaUser?.id || '', env)) out.push({ ...c, links: linkCounts[String(c.id)] || 0 });
-    }
-  } catch (_) {}
-  return out;
-}
-
-async function startCloneTargetAsk(env, ctx) {
-  const { token, chatId, forumThreadId, tgUserId, athenaUser, isGod, flowChat, flowThread, communityArg } = ctx;
-  const resolved = await resolveCloneChat(env, token, flowChat);
-  const chatTitle = resolved.title, chatType = resolved.type;
-  if (communityArg) {
-    const ok = await env.DB.prepare('SELECT id, name FROM communities WHERE id = ?').bind(communityArg).first().catch(() => null);
-    if (!ok || (!isGod && !(await ensureOwnerOrAdmin(communityArg, athenaUser.id, env)))) {
-      await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Community ${codeHtml(communityArg)} not found or not yours.`, forumThreadId);
-      return;
-    }
-  }
-  const eligible = dedupeEligibleCommunities(await cloneEligibleCommunities(env, athenaUser, isGod));
-  if (!eligible.length) {
-    await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} No community available — ask a community owner to make you owner/admin first.`, forumThreadId);
-    return;
-  }
-  const pinned = communityArg ? eligible.filter((c) => String(c.id) === communityArg) : [];
-  const rest = eligible.filter((c) => String(c.id) !== communityArg);
-  const display = cloneDisplayName(chatTitle, chatType, flowThread, '');
-  const pendingId = 'bc_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-  const stats = { manager: 'botclone', stage: 'choice', sourceName: display, threadId: flowThread || null, communityId: communityArg || null, target: null, isForum: !!flowThread, sourceType: chatType === 'channel' ? 'channel' : 'group', label: '', destinationName: '', requesterTgId: String(tgUserId || ''), requesterUserId: String(athenaUser.id), topics: flowThread ? [{ id: flowThread }] : [], createdAt: Date.now() };
-  await storePendingClone(env, { id: pendingId, chat_id: flowChat, thread_id: flowThread || null, community_id: communityArg || null, target: null, requester_tg_id: String(tgUserId || ''), requester_user_id: String(athenaUser.id), stats, created_at: Date.now(), expires_at: Date.now() + 15 * 60 * 1000 });
-  const rows = [];
-  if (isGod) rows.push(richButtonRow([{ label: '📥 Personal brain', data: `clone:target:${pendingId}:personal` }]));
-  for (const c of [...pinned, ...rest].slice(0, 8)) rows.push(richButtonRow([{ label: `🗂 ${String(c.name || c.id).slice(0, 40)}`, data: `clone:target:${pendingId}:${c.id}` }]));
-  rows.push(richButtonRow([{ label: '❌ Cancel', data: `clone:no:${pendingId}` }]));
-  await sendTelegramRichMessage(token, chatId, [
-    richHeading(3, `🧬 Clone ${flowThread ? 'topic' : (chatType === 'channel' ? 'channel' : 'group')}`),
-    '',
-    richParagraph(`Source: ${escHtml(display)} ${codeHtml(flowChat)}`),
-    richParagraph('Where should it land? History backfills first, then live indexing follows.'),
-  ].join('\n'), forumThreadId, rows.join('\n'));
-}
 
 
    // /group_copy removed: forums are auto-detected, clone/uclone copy per flow.
@@ -14653,51 +14612,7 @@ async function startCloneTargetAsk(env, ctx) {
     //   /clone <chat_id> <topic_id> <community_id>  that topic of that chat (DM-friendly)
     // Every run asks Personal vs community first, backfills history, then
     // follows live. Stats show Group[Topic] / [Channel] with the usual ⏹.
-    if (cmd === '/clone') {
-      const args = parts.slice(1).map((a) => String(a || '').trim()).filter(Boolean);
-      const communityArg = args.find((a) => /^c_/i.test(a)) || '';
-      const chatArg = args.find((a) => /^-?\d{8,}$/.test(a)) || '';
-      const topicArg = args.find((a) => /^\d{1,7}$/.test(a) && a !== chatArg) || '';
-      const flagArg = args.find((a) => /^(bot|userbot|personal|community|both)$/i.test(a)) || '';
-      // No chat id, no answer: bare /clone (DM, General or topic) and
-      // community-only forms stay silent. Only explicit-ID forms respond.
-      if (!chatArg) return new Response('OK', { status: 200, headers: corsHeaders });
-      if (flagArg) {
-        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Engine/target flags are gone — every /clone asks Personal vs community from buttons, then backfills history and follows live.\n${cloneUsageHtml()}`, forumThreadId);
-        return new Response('OK', { status: 200, headers: corsHeaders });
-      }
-      // Old community-first order is removed: community goes last now.
-      if (args.length >= 2 && /^c_/i.test(args[0]) && /^-?\d{8,}$/.test(args[1])) {
-        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} That order is removed — community id goes LAST now: ${codeHtml('/clone ' + args[1] + ' ' + args[0])}.\n${cloneUsageHtml()}`, forumThreadId);
-        return new Response('OK', { status: 200, headers: corsHeaders });
-      }
-      // Single chat id alone (old inspect form) is removed.
-      if (args.length === 1 && /^-?\d{8,}$/.test(args[0])) {
-        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} The inspect form is gone — clone it instead:\n${cloneUsageHtml()}`, forumThreadId);
-        return new Response('OK', { status: 200, headers: corsHeaders });
-      }
-      const inGroup = chatId.startsWith('-');
-      const threadCtx = (msg.is_topic_message && forumThreadId != null) ? String(forumThreadId) : '';
-      const flowChat = chatArg ? normalizeTgChatId(chatArg) : (inGroup ? normalizeTgChatId(chatId) : '');
-      if (!flowChat) {
-        await sendTelegramFormatted(token, chatId, `${boldHtml('🧬 Clone a chat')}\n${cloneUsageHtml()}`, forumThreadId);
-        return new Response('OK', { status: 200, headers: corsHeaders });
-      }
-      let flowThread = topicArg || '';
-      if (!flowThread && inGroup && !chatArg && threadCtx && threadCtx !== '1') flowThread = threadCtx;
-      if (!athenaUser) {
-        await sendTelegramFormatted(token, chatId, `Login at ${await getWebsiteDisplayUrl(env)} with Telegram first.`, forumThreadId);
-        return new Response('OK', { status: 200, headers: corsHeaders });
-      }
-      if (!isSelfHosted(env)) {
-        await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Cloning runs on the self-hosted server only.`, forumThreadId);
-        return new Response('OK', { status: 200, headers: corsHeaders });
-      }
-      // ID forms always ask Personal vs community first (the given
-      // community id is pre-selected first). Bare forms stay silent above.
-      await startCloneTargetAsk(env, { token, chatId, forumThreadId, msg, tgUserId, athenaUser, isGod, flowChat, flowThread, communityArg });
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
+    // /clone is handled unified with /uclone via ucloneManager above.
 
 
    // ---- /userbot_add — GOD: store a named account (multiple allowed) ----

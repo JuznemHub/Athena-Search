@@ -77,6 +77,7 @@ async function fixture({ forum = false, sourceClass = 'Channel', topics = [7, 9]
     startAccount: async label => { f.connections.push(label); return { ok: true }; },
     getClient: label => { f.clientLabels.push(label); return client; },
     canSeeChat: async (label, chat) => !(f.blindChats || []).includes(String(chat)),
+    checkBotPresence: async (chat) => (f.botChatsAbsent || []).includes(String(chat)) ? { ok: false, reason: 'Bot is not in chat' } : { ok: true },
     beforeRequest: async () => {}, onFlood: async (_label, seconds) => { f.now += seconds * 1000; },
     listCommunities: async () => [{ id: 'c_a', name: 'Community A' }, { id: 'c_b', name: 'Community B' }],
     authorizeCommunity: async (user, id) => user.id === 'u_fixture' && !f.denied.has(id) && ['c_a', 'c_b'].includes(id),
@@ -381,6 +382,39 @@ await scenario('selecting an account migrates live follows it can see', {}, asyn
   const summary = f.sent.map(s => s.body?.rich_message?.html || s.body?.text || '').join('\n');
   assert.match(summary, /Live follows moved to beta/, 'migration is reported');
   assert.match(summary, /-100222/, 'unmoved chat is named');
+});
+
+await scenario('/clone rejects when bot is absent, proceeds when present', {}, async f => {
+  f.botChatsAbsent = ['-1009999999999'];
+  f.sent.length = 0;
+  await f.manager.command({ ...f.context, text: '/clone -1009999999999' });
+  const rejectMsg = f.sent.find(s => /Bot presence required/.test(s.body?.rich_message?.html || s.body?.text || ''));
+  assert.ok(rejectMsg, '/clone rejects when bot is not present in chat');
+
+  // Present bot proceeds to measuring history and destination stats
+  f.sent.length = 0;
+  await f.manager.command({ ...f.context, text: '/clone -1001234567890' });
+  await f.drain();
+  assert.equal(f.run().state.stage, 'destination');
+  assert.equal(f.run().state.counters.messages, 3);
+  const destText = f.edits().at(-1)?.body?.rich_message?.html || f.edits().at(-1)?.body?.text || '';
+  assert.match(destText, /Clone statistics/, 'shows group stats before cloning');
+  assert.match(destText, /Encountered messages/, 'includes message stats table');
+
+  // Launching destination starts cloning with progress
+  await f.click('Personal');
+  await f.drain();
+  assert.equal(f.run().state.stage, 'done');
+});
+
+await scenario('/clone inside a group defaults target to current chat and honors topic', { forum: true }, async f => {
+  f.sent.length = 0;
+  const groupCtx = { ...f.context, chatId: '-1005555555555', threadId: '7' };
+  await f.manager.command({ ...groupCtx, text: '/clone' });
+  await f.drain();
+  assert.equal(f.run().chat_id, '-1005555555555');
+  assert.equal(f.run().state.prescribedThread, '7');
+  assert.equal(f.run().state.stage, 'destination');
 });
 
 console.log(`clone manager workflow tests passed (${passed.length} cases):\n${passed.join('\n')}`);

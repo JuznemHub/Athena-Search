@@ -81,9 +81,10 @@ export function createUcloneManager(env, deps) {
     throw new Error('SESSION_UNAVAILABLE');
   }
   async function authorized(run, context) {
-    if (!context.isGod || !context.user || String(context.user.id) !== run.requester_user_id ||
+    if (!context.user || String(context.user.id) !== run.requester_user_id ||
         String(context.tgUserId) !== run.requester_tg_id || String(context.chatId) !== run.state.progressChatId ||
         Number(context.messageId) !== Number(run.state.progressMessageId) || run.expires_at <= clock()) return false;
+    if (run.target === 'personal' && !context.isGod) return false;
     return !run.community_id || await deps.authorizeCommunity(context.user, run.community_id);
   }
   const richBody = (text, rows = []) => text + rows.map(row => '<tg-button-row>' + row.map(control => `<tg-button type="callback_data" data="${esc(control.callback_data)}">${esc(control.text)}</tg-button>`).join('') + '</tg-button-row>').join('');
@@ -328,19 +329,30 @@ export function createUcloneManager(env, deps) {
       }
     } catch (_) {}
     const page = Math.max(0, Number(run.state.destinationPage || 0));
-    const rows = [[button(run, 'Personal', 'personal')]];
+    const isGodUser = !!run.state.isGod;
+    const rows = [];
+    if (isGodUser) {
+      rows.push([button(run, 'Personal', 'personal')]);
+    }
     for (const [index, community] of run.state.communities.entries()) {
       if (index < page * 8 || index >= (page + 1) * 8) continue;
       const name = community.name || community.id;
       const pin = followedName && String(community.id) === String(run.state.communities[0]?.id) && index === 0 ? '📌 ' : '';
-      rows.push([button(run, `${pin}${name} — community DB`, 'community', index), button(run, `${name} — Personal + community`, 'both', index)]);
+      const destButtons = [button(run, `${pin}${name} — community DB`, 'community', index)];
+      if (isGodUser) {
+        destButtons.push(button(run, `${name} — Personal + community`, 'both', index));
+      }
+      rows.push(destButtons);
     }
     if (page > 0) rows.push([button(run, 'Previous communities', 'destpage', page - 1)]);
     if ((page + 1) * 8 < run.state.communities.length) rows.push([button(run, 'More communities', 'destpage', page + 1)]);
     rows.push([button(run, 'Back to topic statistics', 'topics'), button(run, 'Cancel', 'stop')]);
     const counters = run.state.chosen.reduce((sum, topic) => { for (const key of Object.keys(sum)) sum[key] += Number(topic.counters?.[key] || 0); return sum; }, emptyCloneCounters());
     run.state.total = counters.messages;
-    await edit(run, token, renderCloneStatistics({ sourceName: run.state.sourceName, chatId: run.chat_id, username: run.state.username, members: run.state.members, topic: run.state.chosen.length === 1 && run.state.isForum ? run.state.chosen[0] : null, counters, complete: true, measurement: 'accessible-history' }) + '\n\nChoose a destination. Personal is your private brain; community DB is the selected community. Nothing has been copied yet.' + (followedName ? `\n📌 Already followed → ${esc(followedName)} is pinned first: picking it continues into the same brain.` : (run.state.communities.length ? '' : '\n⚠️ No community available: only your Personal brain can receive this clone. Ask a community owner to make you owner/admin first.')), rows, true);
+    const destExplanation = isGodUser
+      ? 'Choose a destination. Personal is your private brain; community DB is the selected community. Nothing has been copied yet.'
+      : 'Choose a destination. community DB is the selected community. Nothing has been copied yet.';
+    await edit(run, token, renderCloneStatistics({ sourceName: run.state.sourceName, chatId: run.chat_id, username: run.state.username, members: run.state.members, topic: run.state.chosen.length === 1 && run.state.isForum ? run.state.chosen[0] : null, counters, complete: true, measurement: 'accessible-history' }) + `\n\n${destExplanation}` + (followedName ? `\n📌 Already followed → ${esc(followedName)} is pinned first: picking it continues into the same brain.` : (run.state.communities.length ? '' : '\n⚠️ No community available: only your Personal brain can receive this clone. Ask a community owner to make you owner/admin first.')), rows, true);
   }
   async function returnToTopics(run, token) {
     run.state.cancelled = false;
@@ -486,27 +498,92 @@ export function createUcloneManager(env, deps) {
     try { await operation; } finally { activeRuns.delete(id); }
   }
   async function command(context) {
-    const [raw, source, topicArg, communityArg] = String(context.text || '').trim().split(/\s+/);
-    const cmd = raw?.split('@')[0].toLowerCase();
-    if (!['/uclone', '/ubclone', '/userbot_accounts', '/userbot_select'].includes(cmd)) return false;
-    if (!context.isGod || !context.user) { await send(context, 'GOD rank and an Athena login are required.'); return true; }
+    const tokens = String(context.text || '').trim().split(/\s+/);
+    const cmd = tokens[0]?.split('@')[0].toLowerCase();
+    if (!['/clone', '/uclone', '/ubclone', '/userbot_accounts', '/userbot_select'].includes(cmd)) return false;
+    if (!context.user) {
+      const webUrl = (await deps.getWebsiteUrl?.()) || 'Athena';
+      await send(context, `Login at ${webUrl} with Telegram first.`);
+      return true;
+    }
     await deps.ensureTables();
     await ensureUcloneTables(env);
     if (cmd.startsWith('/userbot_')) {
+      if (!context.isGod) { await send(context, 'GOD rank is required to manage userbot accounts.'); return true; }
       if (String(context.chatId).startsWith('-')) { await send(context, 'Manage saved accounts in a DM only.'); return true; }
       const run = await create(context, 'accounts', { stage: 'accounts' });
       await accounts(run, context.token);
       return true;
     }
-    if (!/^-?\d+$/.test(source || '')) { await send(context, 'Usage: <code>/uclone &lt;channel_or_group_id&gt; [topic_id] [community_id]</code>\nChoose a saved account with /userbot_accounts first.'); return true; }
-    const prescribedThread = /^\d{1,9}$/.test(String(topicArg || '').trim()) ? String(topicArg).trim() : null;
-    // Community may sit in 3rd position, or 2nd when no topic is given.
-    const prescribedCommunity = /^c_/i.test(String(communityArg || '').trim()) ? String(communityArg).trim()
-      : (/^c_/i.test(String(topicArg || '').trim()) ? String(topicArg).trim() : null);
-    const selected = await db.prepare('SELECT label FROM userbot_selections WHERE requester_tg_id=?').bind(String(context.tgUserId)).first();
-    if (!selected) { await send(context, 'No account selected. In a DM, open /userbot_accounts and select an account.'); return true; }
-    const chat = /^\d{9,}$/.test(source) ? `-100${source}` : source;
-    const run = await create(context, chat, { label: selected.label, stage: 'scanning', cursor: 0, cancelled: false, prescribedThread, prescribedCommunity });
+    const args = tokens.slice(1);
+    const inGroup = String(context.chatId).startsWith('-');
+    const chatArg = args.find((t) => /^-100\d+$|^-\d{6,}$|^\d{8,}$/.test(t));
+    const communityArg = args.find((t) => /^c_/i.test(t));
+    const topicArg = args.find((t) => /^\d{1,9}$/.test(t) && t !== chatArg);
+
+    let chat = '';
+    if (chatArg) {
+      chat = /^\d{8,}$/.test(chatArg) ? `-100${chatArg}` : chatArg;
+    } else if (inGroup) {
+      chat = String(context.chatId);
+    } else if (args[0] && /^-?\d+$/.test(args[0])) {
+      chat = /^\d{8,}$/.test(args[0]) ? `-100${args[0]}` : args[0];
+    }
+
+    if (!chat) {
+      await send(context, `Usage: <code>${cmd} &lt;channel_or_group_id&gt; [topic_id] [community_id]</code>\nSent inside a group or topic, the chat id can be omitted.`);
+      return true;
+    }
+
+    let prescribedThread = topicArg ? String(topicArg).trim() : null;
+    if (!prescribedThread && inGroup && context.threadId && String(context.threadId) !== '1' && (!chatArg || chatArg === chat)) {
+      prescribedThread = String(context.threadId);
+    }
+    const prescribedCommunity = communityArg ? String(communityArg).trim()
+      : (args.length >= 2 && /^c_/i.test(args[args.length - 1]) ? String(args[args.length - 1]).trim() : null);
+
+    const eligible = await deps.listCommunities({ id: context.user.id });
+    if (!context.isGod && (!eligible || !eligible.length)) {
+      await send(context, '⚠️ No community available — ask a community owner to make you owner/admin first (or GOD rank).');
+      return true;
+    }
+    if (prescribedCommunity && !context.isGod) {
+      const hasComm = eligible.some((c) => String(c.id) === prescribedCommunity);
+      if (!hasComm) {
+        await send(context, `⚠️ Community <code>${esc(prescribedCommunity)}</code> not found or not yours.`);
+        return true;
+      }
+    }
+
+    // Bot presence check: for /clone, the bot must be present in the chat.
+    if (cmd === '/clone') {
+      const presence = await deps.checkBotPresence?.(chat, context.token);
+      if (presence && !presence.ok) {
+        await send(context, `<b>⚠️ Bot presence required</b>\nThe bot must be present in <code>${esc(chat)}</code> to use <code>/clone</code>. Add the bot to the chat first, or use <code>/uclone</code> if you only have a userbot account.`);
+        return true;
+      }
+    }
+
+    let selected = await db.prepare('SELECT label FROM userbot_selections WHERE requester_tg_id=?').bind(String(context.tgUserId)).first();
+    let label = selected?.label;
+    if (!label && deps.resolveAccountLabel) {
+      label = await deps.resolveAccountLabel(context.user.id);
+    }
+    if (!label) {
+      await send(context, 'No userbot account connected. In a DM, connect an account with /userbot_add first.');
+      return true;
+    }
+
+    const run = await create(context, chat, {
+      label,
+      stage: 'scanning',
+      cursor: 0,
+      cancelled: false,
+      prescribedThread,
+      prescribedCommunity,
+      isGod: !!context.isGod,
+      commandSource: cmd,
+    });
     background(preview(run, context.token));
     return true;
   }
@@ -640,8 +717,12 @@ export function createUcloneManager(env, deps) {
     } else if (run.state.stage === 'destination') {
       if (action === 'topics') { await returnToTopics(run, context.token); return true; }
       if (action === 'destpage') { run.state.destinationPage = index; await destinations(run, context.token); return true; }
-      if (action === 'personal') { run.target = 'personal'; run.community_id = ''; run.state.destinationName = 'Personal'; }
+      if (action === 'personal') {
+        if (!context.isGod) return true;
+        run.target = 'personal'; run.community_id = ''; run.state.destinationName = 'Personal';
+      }
       else if (action === 'community' || action === 'both') {
+        if (action === 'both' && !context.isGod) return true;
         const community = run.state.communities[index];
         if (!community || !await deps.authorizeCommunity(context.user, community.id)) return true;
         run.target = action; run.community_id = community.id;
