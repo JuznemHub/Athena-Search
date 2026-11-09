@@ -515,6 +515,7 @@ body {
 .btn-discord { background: #5865F2 !important; color: #fff !important; border: none !important; font-weight: 600; }
 .btn-discord:hover:not(:disabled) { filter: brightness(1.08); }
 .btn-discord:disabled { opacity: 0.45; }
+.telegram-widget-wrap { display: flex; justify-content: center; min-height: 40px; margin: 4px 0; }
 .auth-error { color: var(--danger-color, #ff5c7c); font-size: 0.85rem; margin-top: 14px; }
 .auth-gate-note { margin-top: 20px; font-size: 0.78rem; color: var(--text-muted, #8e95b0); line-height: 1.4; }
 

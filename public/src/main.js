@@ -90,6 +90,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const appRoot = $('appRoot');
   const authGateError = $('authGateError');
   const telegramLoginBtn = $('telegramLoginBtn');
+  const telegramWebLoginBtn = $('telegramWebLoginBtn');
   const discordLoginBtn = $('discordLoginBtn');
   const hamburgerBtn = $('hamburgerBtn');
   const sideDrawer = $('sideDrawer');
@@ -458,6 +459,107 @@ document.addEventListener('DOMContentLoaded', () => {
       state.authConfig = {};
     }
     const cfg = state.authConfig || {};
+
+    if ((cfg.telegramBotEnabled || cfg.botUsername) && telegramWebLoginBtn) {
+      telegramWebLoginBtn.classList.remove('hidden');
+      telegramWebLoginBtn.disabled = false;
+      telegramWebLoginBtn.onclick = async () => {
+        try {
+          telegramWebLoginBtn.disabled = true;
+          telegramWebLoginBtn.textContent = 'Preparing login...';
+          const r = await fetch(`${API_BASE}/api/auth/telegram/bot-login-start`, { method: 'POST' });
+          const d = await r.json();
+          if (!d.success || !d.token) {
+            showAuthError(d.error || 'Could not start Telegram Web login.');
+            telegramWebLoginBtn.disabled = false;
+            telegramWebLoginBtn.textContent = 'Log in with Telegram Web';
+            return;
+          }
+          const targetUrl = d.tgWebUrl || d.tmeUrl;
+          window.open(targetUrl, '_blank', 'noopener,noreferrer');
+          telegramWebLoginBtn.textContent = 'Confirming in Telegram...';
+          authGateError.innerHTML = `Confirm login: click START in <a href="${targetUrl}" target="_blank" style="color:var(--accent,#2AABEE);text-decoration:underline;">Telegram Web</a> or <a href="${d.tmeUrl}" target="_blank" style="color:var(--accent,#2AABEE);text-decoration:underline;">Bot</a>.`;
+          authGateError.classList.remove('hidden');
+
+          let attempts = 0;
+          const pollInterval = setInterval(async () => {
+            attempts++;
+            if (attempts > 120) {
+              clearInterval(pollInterval);
+              telegramWebLoginBtn.disabled = false;
+              telegramWebLoginBtn.textContent = 'Log in with Telegram Web';
+              showAuthError('Login session timed out. Click again to retry.');
+              return;
+            }
+            try {
+              const pr = await fetch(`${API_BASE}/api/auth/telegram/bot-login-poll?token=${encodeURIComponent(d.token)}`);
+              const pd = await pr.json();
+              if (pd.status === 'authenticated' && pd.session) {
+                clearInterval(pollInterval);
+                await persistSession(pd.session);
+                if (pd.user) {
+                  state.currentUser = pd.user;
+                  state.isInstanceOwner = !!pd.user.is_god;
+                  state.isElevated = !!pd.user.is_elevated;
+                }
+                showLoggedIn();
+                updateUserUI();
+                await bootstrapAppData();
+              } else if (pd.status === 'expired' || pd.status === 'invalid') {
+                clearInterval(pollInterval);
+                telegramWebLoginBtn.disabled = false;
+                telegramWebLoginBtn.textContent = 'Log in with Telegram Web';
+                showAuthError('Login session expired. Try again.');
+              }
+            } catch (_) {}
+          }, 1500);
+        } catch (err) {
+          showAuthError(err.message || 'Telegram Web login failed.');
+          telegramWebLoginBtn.disabled = false;
+          telegramWebLoginBtn.textContent = 'Log in with Telegram Web';
+        }
+      };
+    }
+
+    window.onTelegramAuth = async (user) => {
+      try {
+        const initData = new URLSearchParams(user).toString();
+        const res = await fetch(`${API_BASE}/api/auth/telegram/webapp`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ initData })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (data.success && data.session) {
+          await persistSession(data.session);
+          if (data.user) {
+            state.currentUser = data.user;
+            state.isInstanceOwner = !!data.user.is_god;
+            state.isElevated = !!data.user.is_elevated;
+          }
+          showLoggedIn();
+          updateUserUI();
+          await bootstrapAppData();
+        } else {
+          showAuthError(data.error || 'Telegram Widget authentication failed.');
+        }
+      } catch (err) {
+        showAuthError(err.message || 'Telegram Widget authentication error.');
+      }
+    };
+
+    if (cfg.botUsername && $('telegramWidgetContainer') && !$('telegramWidgetContainer').hasChildNodes()) {
+      const s = document.createElement('script');
+      s.async = true;
+      s.src = 'https://telegram.org/js/telegram-widget.js?22';
+      s.setAttribute('data-telegram-login', cfg.botUsername);
+      s.setAttribute('data-size', 'large');
+      s.setAttribute('data-userpic', 'false');
+      s.setAttribute('data-onauth', 'onTelegramAuth(user)');
+      s.setAttribute('data-request-access', 'write');
+      $('telegramWidgetContainer').appendChild(s);
+    }
+
     if (cfg.telegramEnabled && telegramLoginBtn) {
       telegramLoginBtn.disabled = false;
       telegramLoginBtn.onclick = async () => {

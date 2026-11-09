@@ -93,7 +93,12 @@ function telegramText(html) {
       return '\n';
     });
   assert.deepEqual(stack, [], 'no unclosed formatting tags');
-  plain = plain.replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+  let prev;
+  do {
+    prev = plain;
+    plain = plain.replace(/<[^>]+>/g, '');
+  } while (plain !== prev);
+  plain = plain.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
   assert.doesNotMatch(plain, /[\ud800-\udbff](?![\udc00-\udfff])/u, 'no split surrogate pairs');
   assert.ok(html.length <= 32000, 'rich message under transport cap');
   return plain;

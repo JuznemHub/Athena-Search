@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import { paginateCloneTopics, renderCloneProgress, renderCloneStatistics } from '../worker/clone-ui.js';
-const plain = (html) => html.replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
+const plain = (html) => {
+  let s = String(html || '');
+  let prev;
+  do {
+    prev = s;
+    s = s.replace(/<[^>]+>/g, '');
+  } while (s !== prev);
+  return s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+};
 const source = { sourceName: 'Reading room', chatId: '-1001234567890', destination: 'Community archive' };
 const counters = { messages: 10, links: 11, linkPosts: 4, files: 6, copiedMessages: 5, savedLinkPosts: 3, savedLinks: 7, savedFiles: 2, savedPdfs: 1, duplicates: 4, failed: 2, errorCategories: { database: 2 } };
 const activeHtml = renderCloneProgress({ ...source, status: 'running', topicsTotal: 237, topicsDone: 12, currentTopic: { id: '3', name: 'Current discussion' }, processed: 5, total: 10, counters, overallCounters: { ...counters, messages: 250, savedLinks: 77, total: 500 } });
@@ -40,7 +48,7 @@ const incomplete = plain(renderCloneStatistics({ ...source, counters, measuremen
 assert.match(incomplete, /Scan incomplete/);
 assert.doesNotMatch(incomplete, /exact counts/);
 const hostile = renderCloneProgress({ sourceName: '<script>bad</script>', chatId: '<chat>', destination: '<bad>', status: 'running', counters });
-assert.doesNotMatch(hostile, /<script>/);
+assert.doesNotMatch(hostile, /<script\b/i);
 assert.match(hostile, /&lt;script&gt;/);
 const topics = Array.from({ length: 237 }, (_, i) => ({ id: String(i + 1), name: 'Topic ' + (i + 1) }));
 for (const items of [topics, topics.map(t => ({ ...t, name: 'A𐐀<&"'.repeat(1000) }))]) {

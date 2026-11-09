@@ -73,6 +73,8 @@ const PUBLIC_API = new Set([
   '/api/auth/telegram',
   '/api/auth/telegram/callback',
   '/api/auth/telegram/webapp',
+  '/api/auth/telegram/bot-login-start',
+  '/api/auth/telegram/bot-login-poll',
   '/api/auth/discord',
   '/api/auth/discord/callback',
   '/api/telegram-webhook',
@@ -200,7 +202,7 @@ export default {
       }
 
       if (pathname === '/api/auth/config' && request.method === 'GET') {
-        return handleAuthConfig(env, corsHeaders);
+        return await handleAuthConfig(env, corsHeaders);
       }
 
       // Telegram OAuth (redirect to oauth.telegram.org → callback)
@@ -218,6 +220,15 @@ export default {
           return Response.json({ success: false, error: 'Too many login attempts', code: 'RATE_LIMITED' }, { status: 429, headers: corsHeaders });
         }
         return await handleTelegramWebAppAuth(request, env, corsHeaders, url);
+      }
+      if (pathname === '/api/auth/telegram/bot-login-start' && request.method === 'POST') {
+        if (rateLimit(`botlogin:${clientIp(request)}`, 20, 60_000)) {
+          return Response.json({ success: false, error: 'Too many login attempts', code: 'RATE_LIMITED' }, { status: 429, headers: corsHeaders });
+        }
+        return await handleTelegramBotLoginStart(request, env, corsHeaders);
+      }
+      if (pathname === '/api/auth/telegram/bot-login-poll' && request.method === 'GET') {
+        return await handleTelegramBotLoginPoll(url, env, corsHeaders);
       }
 
       // Discord OAuth (redirect → callback)
@@ -1810,12 +1821,90 @@ async function upsertOAuthUser({ provider, providerId, username, displayName, av
   return await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(id).first();
 }
 
-function handleAuthConfig(env, corsHeaders) {
+let cachedBotUsername = null;
+async function resolveBotUsername(env) {
+  if (env.TELEGRAM_BOT_USERNAME) return env.TELEGRAM_BOT_USERNAME;
+  if (cachedBotUsername) return cachedBotUsername;
+  const token = env.TELEGRAM_BOT_TOKEN;
+  if (!token) return null;
+  try {
+    const me = await telegramApi(token, 'getMe');
+    if (me?.ok && me?.result?.username) {
+      cachedBotUsername = me.result.username;
+      return cachedBotUsername;
+    }
+  } catch (_) {}
+  return null;
+}
+
+async function handleAuthConfig(env, corsHeaders) {
+  const botUsername = await resolveBotUsername(env);
   return Response.json({
     success: true,
     telegramEnabled: !!(env.TELEGRAM_CLIENT_ID && env.TELEGRAM_CLIENT_SECRET),
+    telegramBotEnabled: !!(env.TELEGRAM_BOT_TOKEN && botUsername),
+    botUsername: botUsername || null,
     discordEnabled: !!(env.DISCORD_CLIENT_ID && env.DISCORD_CLIENT_SECRET)
   }, { headers: corsHeaders });
+}
+
+async function handleTelegramBotLoginStart(request, env, corsHeaders) {
+  const botUsername = await resolveBotUsername(env);
+  if (!botUsername) {
+    return Response.json({ success: false, error: 'Telegram bot username not configured' }, { status: 503, headers: corsHeaders });
+  }
+  await ensureOAuthStatesTable(env);
+  const token = 'auth_' + randomToken().slice(0, 32);
+  const expires = Date.now() + 10 * 60 * 1000;
+  await env.DB.prepare(
+    'INSERT OR REPLACE INTO oauth_states (state, code_verifier, expires_at) VALUES (?, ?, ?)'
+  ).bind(token, 'pending', expires).run();
+
+  const tgWebUrl = `https://web.telegram.org/a/#?tgaddr=${encodeURIComponent(`resolve?domain=${botUsername}&start=${token}`)}`;
+  const tmeUrl = `https://t.me/${botUsername}?start=${token}`;
+  return Response.json({
+    success: true,
+    token,
+    botUsername,
+    tgWebUrl,
+    tmeUrl
+  }, { headers: corsHeaders });
+}
+
+async function handleTelegramBotLoginPoll(url, env, corsHeaders) {
+  const token = url.searchParams.get('token');
+  if (!token || !token.startsWith('auth_')) {
+    return Response.json({ success: false, status: 'invalid' }, { status: 400, headers: corsHeaders });
+  }
+  await ensureOAuthStatesTable(env);
+  const row = await env.DB.prepare(
+    'SELECT state, code_verifier, expires_at FROM oauth_states WHERE state = ?'
+  ).bind(token).first();
+  if (!row || Number(row.expires_at) < Date.now()) {
+    return Response.json({ success: false, status: 'expired' }, { headers: corsHeaders });
+  }
+  if (row.code_verifier === 'pending') {
+    return Response.json({ success: true, status: 'pending' }, { headers: corsHeaders });
+  }
+  if (typeof row.code_verifier === 'string' && row.code_verifier.startsWith('auth:')) {
+    const sessionToken = row.code_verifier.slice(5);
+    await env.DB.prepare('DELETE FROM oauth_states WHERE state = ?').bind(token).run();
+    const sessionRow = await env.DB.prepare('SELECT user_id FROM sessions WHERE id = ?').bind(sessionToken).first();
+    if (!sessionRow) {
+      return Response.json({ success: false, status: 'invalid_session' }, { headers: corsHeaders });
+    }
+    const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(sessionRow.user_id).first();
+    const owner = await isInstanceOwnerUserAsync(user, env);
+    const elevated = owner || (await isElevatedUser(user, env));
+    const cookieMaxAge = Math.floor(SESSION_TTL_MS / 1000);
+    return Response.json({
+      success: true,
+      status: 'authenticated',
+      session: sessionToken,
+      user: publicUser(user, { god: owner, elevated })
+    }, { headers: { ...corsHeaders, 'Set-Cookie': sessionCookieHeader(url, sessionToken, cookieMaxAge) } });
+  }
+  return Response.json({ success: false, status: 'unknown' }, { headers: corsHeaders });
 }
 
 function base64UrlEncode(buf) {
@@ -7923,7 +8012,7 @@ function scoreUrlAsPrimary(rawUrl, fullText = '') {
  * From a multi-link Telegram post, pick 1 primary URL (optionally keep related list).
  * Prefer: package/store/repo root > release > other > telegram/social/profile/donate.
  */
-function selectPrimaryLinks(urls, fullText = '') {
+function _selectPrimaryLinks(urls, fullText = '') {
   const unique = [...new Set((urls || []).map(u => u.trim()).filter(Boolean))];
   if (unique.length <= 1) {
     return { primary: unique, related: [], mode: 'single' };
@@ -9316,12 +9405,22 @@ function richHtmlToClassic(richHtml) {
     .replace(/<tg-[a-z-]+[^>]*>|<\/tg-[a-z-]+>/gi, '');
 }
 
+function stripHtmlTags(value) {
+  let s = String(value || '');
+  let prev;
+  do {
+    prev = s;
+    s = s.replace(/<[^>]*>/g, '');
+  } while (s !== prev);
+  return s;
+}
+
 function richFallbackKeyboard(html) {
   const decode = (value) => String(value).replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
   const rows = [...String(html || '').matchAll(/<tg-button-row\b[^>]*>([\s\S]*?)<\/tg-button-row>/gi)].map(row => {
     return [...row[1].matchAll(/<tg-button\b([^>]*)>([\s\S]*?)<\/tg-button>/gi)].flatMap(match => {
       const attrs = Object.fromEntries([...match[1].matchAll(/([\w-]+)="([^"]*)"/g)].map(a => [a[1], decode(a[2])]));
-      const text = decode(match[2].replace(/<[^>]*>/g, ''));
+      const text = decode(stripHtmlTags(match[2]));
       if (attrs.type === 'callback_data' && attrs.data) return [{ text, callback_data: attrs.data }];
       if (attrs.type === 'url' && attrs.url) return [{ text, url: attrs.url }];
       return [];
@@ -13175,7 +13274,7 @@ if (scope === 'community' && !binding.community_id) {
 // Topic lock already applied early for all group traffic
 const fullPost = telegramFullPostText(msg);
 const richPost = telegramRichNotesForSave(msg) || fullPost;
-const linkMode = (binding.dump_link_mode || dumpLinkMode || 'smart').toLowerCase();
+const _linkMode = (binding.dump_link_mode || dumpLinkMode || 'smart').toLowerCase();
 // A forum topic post belongs to exactly one topic: never let AI grouping or
 // primary-picking mix it with other topics. Save every URL with the full
 // entity-preserving copy instead.
@@ -13232,19 +13331,11 @@ if (useGrouping) {
   return;
 }
 
-if (topicLocked && urls.length > 1) {
-  toSave = urls;
+if (urls.length > 1) {
+  toSave = [...new Set(urls)];
   const built = buildMultiLinkNotes(fullPost);
-  notesForSave = richPost || fullPost;
+  notesForSave = richPost || built.notes || captionNotes || fullPost;
   titleHint = built.titleHint;
-} else if (urls.length > 1 && linkMode !== 'all') {
-  const picked = selectPrimaryLinks(urls, fullPost);
-  toSave = picked.primary;
-  const built = buildMultiLinkNotes(fullPost);
-  notesForSave = richPost || built.notes;
-  titleHint = built.titleHint;
-} else if (urls.length > 1 && linkMode === 'all') {
-  notesForSave = richPost || captionNotes || fullPost;
 } else {
   notesForSave = isDetailedNotes(fullPost) ? richPost : (richPost || captionNotes);
   const built = buildMultiLinkNotes(fullPost);
@@ -13876,9 +13967,11 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   // Idempotency: ignore Telegram redeliveries of the same update_id (slow scrape/AI replies trigger retries).
   if (isRecentWebhookUpdate(update)) return new Response('OK', { status: 200, headers: corsHeaders });
 
-  // Edits re-deliver the full old text hours later — never re-save or reply
-  // for them (a long-ago edited post must not resurface as "Already in community").
-  if (update.edited_message) return new Response('OK', { status: 200, headers: corsHeaders });
+  // Edits and reactions re-deliver or update posts — never re-save or reply
+  // for them (a reaction or edited post must not resurface as "Already in community").
+  if (update.message_reaction || update.message_reaction_count || update.edited_message || update.edited_channel_post) {
+    return new Response('OK', { status: 200, headers: corsHeaders });
+  }
 
   await ensureBotBindingColumns(env);
   await ensureCommunityMembersColumns(env);
@@ -13931,7 +14024,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     return await handleTelegramCallbackQuery(update.callback_query, env, corsHeaders);
   }
 
-  const msg = update.message || update.edited_message || update.channel_post;
+  const msg = update.message || update.channel_post;
   if (!msg) return new Response('OK', { status: 200, headers: corsHeaders });
 
   let text = (msg.text || msg.caption || '').trim();
@@ -14408,6 +14501,59 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
 
   // ---- /start (welcome) vs /help (commands) ----
   if (cmd === '/start') {
+    // Deep link: t.me/<bot>?start=auth_<token> — web login via TG Web or Bot DM
+    const deepAuth = /^auth_([a-zA-Z0-9_-]{16,64})$/.exec(String(rest || '').trim());
+    if (deepAuth) {
+      const stateToken = deepAuth[0];
+      await ensureOAuthStatesTable(env);
+      const row = await env.DB.prepare(
+        'SELECT state, code_verifier, expires_at FROM oauth_states WHERE state = ? AND expires_at > ?'
+      ).bind(stateToken, Date.now()).first();
+      if (!row || row.code_verifier !== 'pending') {
+        await sendTelegramFormatted(token, chatId, '⚠️ This login session has expired or was already used. Please request a new login on the website.', forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      const tgUser = msg.from;
+      if (!tgUser) {
+        await sendTelegramFormatted(token, chatId, '⚠️ Could not resolve Telegram user.', forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      const tgId = String(tgUser.id);
+      const username = tgUser.username || `tg_${tgId}`;
+      const displayName = [tgUser.first_name, tgUser.last_name].filter(Boolean).join(' ') || username;
+      let user = null;
+      try {
+        user = await env.DB.prepare(
+          `SELECT * FROM users
+           WHERE provider = 'telegram' AND (provider_id = ? OR telegram_api_id = ?)
+           LIMIT 1`
+        ).bind(tgId, tgId).first();
+      } catch (_) {}
+      if (!user) {
+        user = await upsertOAuthUser({
+          provider: 'telegram',
+          providerId: tgId,
+          username,
+          displayName,
+          avatarUrl: null
+        }, env);
+      }
+      try {
+        await env.DB.prepare('UPDATE users SET telegram_api_id = ? WHERE id = ?').bind(tgId, user.id).run();
+        user.telegram_api_id = tgId;
+      } catch (_) {}
+      if (await isUserFullySiteBanned(env, user)) {
+        await sendTelegramFormatted(token, chatId, '🚫 You are banned from all communities.', forumThreadId);
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      const sessionToken = await createSession(user.id, env);
+      await env.DB.prepare(
+        'UPDATE oauth_states SET code_verifier = ? WHERE state = ?'
+      ).bind(`auth:${sessionToken}`, stateToken).run();
+      await sendTelegramFormatted(token, chatId, `✅ ${boldHtml('Logged in successfully to Athena Web!')}\nYou can now return to your browser tab.`, forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+
     // Deep link: t.me/<bot>?start=tag_<tag> — tap a tag chip to search it.
     const deepTag = /^tag_([a-z0-9][\w-]{0,39})$/i.exec(String(rest || '').trim());
     if (deepTag) {
@@ -18858,6 +19004,7 @@ export async function startUserbotAccount(env, label = 'main') {
       let message;
       try {
         if (!update) return;
+        if (update.className === 'UpdateEditChannelMessage' || update.className === 'UpdateEditMessage' || update.className === 'UpdateMessageReactions') return;
         message = (update.message && update.message.id != null) ? update.message : null;
         if (!message) return;
         chatId = gramjsChatId(message);

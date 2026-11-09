@@ -43,7 +43,9 @@
       <h1>Welcome</h1>
       <p class="auth-gate-sub">Sign in with Telegram or Discord to use Athena.</p>
       <div class="oauth-buttons">
+        <button type="button" id="telegramWebLoginBtn" class="btn btn-telegram btn-block hidden">Log in with Telegram Web</button>
         <button type="button" id="telegramLoginBtn" class="btn btn-telegram btn-block" disabled>Continue with Telegram</button>
+        <div id="telegramWidgetContainer" class="telegram-widget-wrap"></div>
         <button type="button" id="discordLoginBtn" class="btn btn-discord btn-block" disabled>Continue with Discord</button>
       </div>
       <p id="authGateError" class="auth-error hidden"></p>

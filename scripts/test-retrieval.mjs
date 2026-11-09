@@ -450,7 +450,7 @@ assert.equal(await detectBackupCommunityId(mockEnvWith(['c_aaa']), `INSERT INTO 
   // Multi URL: enhancv keeps its own line, not the whole list.
   const enh = notesForUrl(listMsg, 'https://enhancv.com/', urls.length);
   assert.ok(enh.includes('enhancv'), `enhancv section kept, got: ${enh}`);
-  assert.ok(!enh.includes('chatsonic.com'), 'other link section cut (before)');
+  assert.ok(!enh.includes('chatsonic'), 'other link section cut (before)');
   assert.ok(!enh.includes('beautiful.ai'), 'other link section cut (after)');
   assert.ok(!enh.includes('ChatGPT alternatives'), 'list header cut');
   const beau = notesForUrl(listMsg, 'https://www.beautiful.ai/', urls.length);
@@ -695,7 +695,9 @@ assert.equal(
   true,
 );
 assert.equal(
-  telegramRichNotesForSave({ caption: 'Photo caption with https://example.com/cap', photo: [{ file_id: 'abc' }] }).includes('https://example.com/cap'),
+  /https:\/\/example\.com\/cap/.test(
+    telegramRichNotesForSave({ caption: 'Photo caption with https://example.com/cap', photo: [{ file_id: 'abc' }] })
+  ),
   true,
 );
 

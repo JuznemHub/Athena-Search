@@ -207,7 +207,13 @@ try {
   for (let i = 0; i < 60; i++) await webhook(`/log ${'z'.repeat(180)}`);
   await webhook('/log --json 60');
   const jsonMessage = sent.filter(call => call.method === 'sendMessage').at(-1).body.text;
-  const decoded = jsonMessage.replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&'); // strip <code> wrapper + undo escHtml
+  let decoded = jsonMessage;
+  let prevDecoded;
+  do {
+    prevDecoded = decoded;
+    decoded = decoded.replace(/<[^>]+>/g, '');
+  } while (decoded !== prevDecoded);
+  decoded = decoded.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&'); // strip <code> wrapper + undo escHtml
   const parsed = JSON.parse(decoded);
   assert.equal(parsed.source, 'app');
   assert.ok(Array.isArray(parsed.records) && parsed.records.length >= 1);

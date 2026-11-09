@@ -20,6 +20,16 @@ import { spawnSync } from 'node:child_process';
 
 const isHttp = (url) => /^https?:\/\//i.test(url || '');
 
+function stripTags(val) {
+  let s = String(val || '');
+  let prev;
+  do {
+    prev = s;
+    s = s.replace(/<[^>]*>/g, '');
+  } while (s !== prev);
+  return s;
+}
+
 function normTag(s) {
   return String(s || '')
     .toLowerCase()
@@ -77,7 +87,8 @@ export function parseRedditFetchHtml(html) {
   while ((m = re.exec(html))) {
     const href = /HREF="([^"]*)"/i.exec(m[1])?.[1] || /HREF='([^']*)'/i.exec(m[1])?.[1];
     if (!href || !isHttp(href)) continue;
-    const title = cleanText(String(m[2]).replace(/<[^>]*>/g, '').replace(/&(lt|gt|quot|amp|#\d+|#x[0-9a-f]+);/gi, '')) || href;
+    const rawInner = stripTags(m[2]).replace(/&(lt|gt|quot|amp|#\d+|#x[0-9a-f]+);/gi, '');
+    const title = cleanText(rawInner) || href;
     const sub = /reddit\.com\/r\/([^/?#]+)/i.exec(href)?.[1];
     out.push({ url: href, title, tags: tagList('reddit', sub ? `r-${sub}` : '') });
   }
