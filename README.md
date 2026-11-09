@@ -4,9 +4,21 @@ Your second brain for links, documents, Telegram messages, and grounded AI answe
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-1.0.65-blueviolet?style=flat-square" alt="version">
-  <img src="https://img.shields.io/badge/license_CC_BY--NC_4.0-blue?style=flat-square" alt="license">
-  <img src="https://img.shields.io/badge/PostgreSQL-required-336791?style=flat-square&logo=postgresql" alt="PostgreSQL">
-  <img src="https://img.shields.io/badge/Telegram-bot-26A5E4?style=flat-square&logo=telegram" alt="Telegram">
+  <img src="https://img.shields.io/badge/license-CC_BY--NC_4.0-blue?style=flat-square" alt="license">
+  <img src="https://img.shields.io/badge/PostgreSQL-14%2B-336791?style=flat-square&logo=postgresql" alt="PostgreSQL">
+  <img src="https://img.shields.io/badge/Node.js-%3E%3D22-339933?style=flat-square&logo=node.js" alt="Node.js">
+  <img src="https://img.shields.io/badge/Telegram-bot_%2B_userbot-26A5E4?style=flat-square&logo=telegram" alt="Telegram">
+  <img src="https://img.shields.io/badge/MCP-standard_stdio-black?style=flat-square" alt="MCP">
+</p>
+
+<p align="center">
+  <a href="#juznems-favourite-features">Features</a> •
+  <a href="#quick-start">Quick Start</a> •
+  <a href="#web-directory-and-database-explorer">Wiki & Explorer</a> •
+  <a href="#telegram-bot">Telegram Bot</a> •
+  <a href="#terminal-ui">Terminal UI</a> •
+  <a href="#model-context-protocol-mcp">MCP Guide</a> •
+  <a href="#api-surface">API Reference</a>
 </p>
 
 Athena is a self-hostable bookmark and document archive. Save from the web UI, Telegram, the terminal, or a linked channel; search the whole database; and ask an AI model to answer with sources from your own collection.
@@ -32,19 +44,21 @@ Athena is a self-hostable bookmark and document archive. Save from the web UI, T
 - **📚 Dump all your browser bookmarks straight into Athena via the TUI** — Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Arc and Firefox are detected automatically; scan, pick folders, and dump everything into your personal or community brain from the terminal. No export-file gymnastics.
 - **🐦 Reddit & X (Twitter) bookmark imports** — Import saved posts, bookmarks, and likes from Reddit (via [Reddit-Fetch](https://github.com/akashpandey/Reddit-Fetch)) and X / Twitter (official archive or [TweetNook](https://github.com/GezerWezer/TweetNook) export) directly into your brain. Outside links in posts become distinct bookmarks, and the TUI setup remembers your paths for future syncs.
 - **🧠 Model Context Protocol (MCP) server for any agent** — Wire your second brain into Claude Code, Hermes, Codex, Cursor, or any MCP host: grounded semantic search, paragraph-level chunk lookups (`para_idx`), citations with `[#n]`, and rank-scoped access. Press `Tab` in the TUI or run `node tui/src/mcp-athena.js --config`.
+- **🗂️ FMHY-style wiki directory & database explorer** — Browse your collection as an interactive catalog with auto-grouped categories, global tag clouds, and public shareable wiki links. Administer the database directly with inline editing, `#notags` filtering, and audit history.
 - **🏠 Self-host it for yourself — or run your own Telegram community** — full control end-to-end: PostgreSQL storage, your own bot, rank hierarchy (GOD / owner / admin / member), approve whom to add, kick/ban with automatic sync to Telegram group presence, per-community brains, backups to Telegram, and GOD-only switches like AI credentials and channel targets.
 - **📡 Live cloning of any Telegram channel, group — even a single forum topic** — powered by a userbot session or a linked bot: links, documents (pdf/epub/docx/…), button links, and text posts land in your brain automatically, with GOD-rank targets (community / personal / both), one-command history backfill by id range or topic, a VPS media vault, per-session rollback, and honest live progress bars.
-- *…and much more:* Meilisearch acceleration, pgvector paragraph search, multi-agent MCP memory, streaming AI answers grounded in your own sources, themes, accent colors, and a zero-build frontend.
+- *…and much more:* pgvector paragraph search, multi-agent MCP memory, streaming AI answers grounded in your own sources, themes, accent colors, and a zero-build frontend.
 
 ## What it does
 
 - Saves URLs, notes, code, text files, and self-hosted binary documents as searchable Markdown.
-- Searches titles, URLs, notes, tags, and document content across the complete PostgreSQL corpus.
-- Uses optional [Meilisearch](https://www.meilisearch.com/) as a fast derived index; PostgreSQL remains the source of truth and the fallback.
+- Searches titles, URLs, notes, tags, and document content across PostgreSQL with full-text indexing and pgvector embeddings.
 - Answers questions with retrieval-augmented context and source links.
 - Supports OpenAI-compatible gateways, Anthropic, OpenRouter, Groq, and local routers such as [OmniRoute](https://github.com/df4p/omniroute).
 - Exposes a native Model Context Protocol (MCP) server so AI agents (Claude Code, Hermes, Codex, Cursor) can query your saved collection.
 - Imports bookmarks from 8+ desktop browsers, Reddit saved posts, and X (Twitter) archives via a zero-dependency terminal UI.
+- Interactive FMHY-style wiki directory layout with live database synchronization and public shareable links.
+- Database explorer view with inline editing, tag aggregation, and `#notags` filtering.
 - Provides personal and community brains with rank-aware permissions, voting, reports, and Telegram group membership gates.
 - Clones Telegram channels, groups, and individual forum topics into your brain — links, documents (pdf/epub/docx/…), and text posts — with GOD-rank targets (community / personal / both) and one-time history backfill.
 - Grounds every AI answer in retrieved sources and rejects responses containing URLs outside your saved set.
@@ -93,14 +107,13 @@ Text uploads work in the Worker runtime. Binary conversion needs the self-hosted
 | Telegram bot | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` | Bot API ingestion, commands, and webhooks. |
 | Telegram login | `TELEGRAM_CLIENT_ID`, `TELEGRAM_CLIENT_SECRET` | OAuth/Mini App login. |
 | Session history | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `STORAGE_KEY` | Optional self-hosted GramJS backfill; never expose these to the browser. |
-| Search index | `MEILI_URL`, `MEILI_MASTER_KEY`, `MEILI_INDEX` | Optional Meilisearch accelerator; defaults to index `athena`. |
 | JS scraping | `CHROME_BIN` | Optional headless Chromium fallback for JavaScript-rendered pages. |
 | Local Bot API | `TELEGRAM_API_BASE` | Optional self-hosted telegram-bot-api; lifts file cap 20 MB → 2 GB. |
 | AI | `OPENROUTER_API_KEY` or settings UI | Credentials are stored server-side and never returned to normal users. |
 
 ## Search and AI
 
-PostgreSQL is authoritative. When `MEILI_URL` is configured, Athena creates the `athena` index, syncs each personal/community scope in the background, and uses it for normal search and AI retrieval. Writes mark the relevant scope dirty; an unavailable or warming Meilisearch instance falls back to the complete PostgreSQL search instead of returning an incomplete corpus.
+PostgreSQL is the single source of truth for all search operations. Queries run directly against PostgreSQL full-text search indexes (`tsvector`), combined with `pgvector` embeddings for paragraph-level document lookup (`athena_get_chunk`).
 
 The web UI’s **Models** picker calls the configured endpoint’s live `/models` catalog and preserves provider metadata, pricing, context length, and supported model IDs. OpenRouter’s router model is available as:
 
@@ -117,6 +130,13 @@ Model:    openrouter/free   # or a model exposed by the gateway
 ```
 
 Local HTTP endpoints are allowed only by the self-hosted server and are restricted to loopback/private addresses. Public upstream endpoints must use HTTPS. The proxy keeps streaming responses, model fallbacks, rate limits, and upstream error history.
+
+## Web directory and database explorer
+
+Athena includes an interactive frontend that serves as both a curated knowledge directory and an administrative database manager:
+
+- **FMHY-style wiki directory**: an interactive directory catalog inspired by free-media knowledge wikis. It dynamically groups your links by category (Dev, Media, Tools, Reading) and ecosystem based on the taxonomy classifier, updating as new links land. Public shareable links can be generated for community brains.
+- **Database explorer**: an administrative interface to search, filter, and inspect links across the entire database. Features include global tag frequency clouds, `#notags` filtering to locate unclassified items, inline title/description/tag editing, and a manual tag lock (`manual_edited_at`) to preserve custom changes from automated scrapers.
 
 ## Telegram bot
 
@@ -209,7 +229,7 @@ Self-hosted Athena keeps a persistent account store and an interactive wizard in
 
 The destination picker is intentionally explicit: `Personal` is the private brain; each authorized community is shown as `<community name> — community DB`, with a separate `Personal + community` option. Topic statistics and clone completion both include Back so another topic can be selected without rescanning the source.
 
-`/stats` opens with totals across every source you clone — link posts, URLs, files and other — then one page per run with topic pages, run navigation and a refresh control. A source reports `🟢 LIVE CLONING: ON` only while a real capture path exists (linked channel, whole-group copy, or an active userbot follow); a topic binding or a finished job alone reads OFF, and its counters grow as new posts land. Every finished clone subscribes its chat for live indexing under the account that ran it, so no separate follow step is needed; switching accounts in `/userbot_accounts` moves your follows to the new account wherever it can see the chat. `/userbot_status` is a userbot health dashboard; it does not represent Bot API `/clone` groups. Disconnected-session errors are summarized and repeated identical errors are collapsed.
+`/stats` provides a paginated dashboard across every cloned source (5 sources per page with navigation and quick refresh). A source displays `🟢 LIVE CLONING: ON` while an active capture path exists (linked channel, whole-group copy, or active userbot follow). Drilling into any source shows isolated latest links, topic-scoped metrics, encountered preview counts vs saved database rows, and a stop button (`⏹`) for live jobs. Every finished clone automatically subscribes for live indexing under the account that ran it; switching active accounts in `/userbot_accounts` migrates your follows. `/userbot_status` is a userbot health dashboard that summarizes account state and collapses duplicate session errors.
 
 - every saved session is AES-GCM encrypted at rest (`STORAGE_KEY`); credentials typed into a command are never logged;
 - `/uclone` scans the accessible history first (it never guesses totals it cannot measure), shows per-topic statistics, then asks where to copy: your personal brain, one of your communities, or both (combined destinations copy to both brains);
@@ -271,18 +291,6 @@ Useful commands:
 | `/delete` | Picker (one link, one cloned chat, one backfill session — each with confirm); `/delete <url>` removes a link, `/delete <chat_id> [thread_id]` a whole clone. |
 
 `/search` is deliberately scoped: every page contains only results matching the query, and **Next page** loads the next matching slice before the close button. Unrelated recent bookmarks are never appended to the result list.
-
-## Search index (Meilisearch, optional)
-
-PostgreSQL is always the source of truth. For large brains, add [Meilisearch](https://www.meilisearch.com/) as a derived index — search and AI retrieval get sub-second candidate finding while PostgreSQL hydrates the authoritative rows:
-
-```dotenv
-MEILI_URL=http://127.0.0.1:7700
-MEILI_MASTER_KEY=change-me-strong
-MEILI_INDEX=athena
-```
-
-Writes mark scopes dirty and re-sync in the background; if Meili is slow, warming, or down, Athena silently falls back to complete PostgreSQL search. AI retrieval reports which engine served a query (`meilisearch+postgres` vs `postgres`).
 
 ## Duplicate protection
 
@@ -394,7 +402,7 @@ Empty `TG_OWNER_IDS` is convenient for a private instance: every authenticated u
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/api/health` | Runtime, database, version, and feature status. |
-| GET | `/api/links/search` | Whole-corpus scoped search; Meilisearch-backed when configured. |
+| GET | `/api/links/search` | Whole-corpus scoped PostgreSQL search. |
 | GET/POST/PATCH/DELETE | `/api/links` | Community link CRUD. |
 | GET/POST/DELETE | `/api/documents` | Document CRUD. |
 | GET | `/api/ai/models` | Live model catalog for the settings picker. |
@@ -440,7 +448,6 @@ Athena stands on the shoulders of these projects — their code and ideas are pa
 - [Reddit-Fetch](https://github.com/akashpandey/Reddit-Fetch) — Reddit saved post extraction for terminal imports.
 - [TweetNook](https://github.com/GezerWezer/TweetNook) — X archive export format and parsing.
 - [gramjs](https://github.com/gram-js/gramjs) — Telegram user-session client for history backfill.
-- [Meilisearch](https://www.meilisearch.com/) — optional derived search index.
 - [pgvector](https://github.com/pgvector/pgvector) — embedding similarity for paragraph-level document search.
 - [aiogram/telegram-bot-api](https://github.com/aiogram/telegram-bot-api) — local Bot API server for 2 GB file support.
 
