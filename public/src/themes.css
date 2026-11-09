@@ -4,6 +4,7 @@
 /* Accent defaults (JS overrides these). Flat color, no gradient. */
 :root {
   --accent: #8e70f6;
+  --accent-bright: #a78bfa;
   --accent-fg: #08080f;
   --accent-soft: rgba(142, 112, 246, 0.15);
   --accent-gradient: var(--accent);

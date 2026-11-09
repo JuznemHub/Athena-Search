@@ -29,8 +29,8 @@
       }
     })();
   </script>
-<link rel="stylesheet" href="./src/style.css?v=1.0.59">
-<link rel="stylesheet" href="./src/themes.css?v=1.0.59">
+<link rel="stylesheet" href="./src/style.css?v=1.0.60">
+<link rel="stylesheet" href="./src/themes.css?v=1.0.60">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -316,11 +316,15 @@
             <div class="wiki-title-group">
               <span class="wiki-icon-badge">📖</span>
               <div>
-                <h2>Athena Wiki</h2>
-                <p class="wiki-tagline">FMHY-style curated knowledge base &amp; link directory · Live database sync</p>
+                <h2 id="wikiBrandTitle">Athena Wiki</h2>
+                <p id="wikiBrandTagline" class="wiki-tagline">FMHY-style curated directory · Live database sync</p>
               </div>
             </div>
             <div class="wiki-header-actions">
+              <button type="button" id="wikiShareBtn" class="btn btn-secondary btn-sm wiki-share-btn hidden" title="Generate public shareable link (Owner rank only)">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"></path><polyline points="16 6 12 2 8 6"></polyline><line x1="12" y1="2" x2="12" y2="15"></line></svg>
+                <span>Share</span>
+              </button>
               <button type="button" id="wikiAiOrganizeBtn" class="btn btn-secondary btn-sm" title="Let AI organize &amp; refine categories based on database links">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
                 <span>AI Re-organize</span>
@@ -331,9 +335,15 @@
             </div>
           </div>
 
+          <!-- Public Share Badge (Visible in public share mode) -->
+          <div id="wikiPublicBanner" class="wiki-public-banner hidden">
+            <span class="wiki-public-pill">Public Read-Only</span>
+            <span id="wikiPublicExpiry" class="wiki-public-expiry">Expires soon</span>
+          </div>
+
           <!-- Controls Bar: Scope, Community, and Search -->
-          <div class="wiki-controls-bar">
-            <div class="wiki-ctrl-group">
+          <div class="wiki-controls-bar" id="wikiControlsBar">
+            <div class="wiki-ctrl-group" id="wikiScopeWrap">
               <label for="wikiScopeSelect">Scope</label>
               <select id="wikiScopeSelect" class="input input-sm">
                 <option value="community">Community</option>
@@ -350,10 +360,13 @@
               <button type="button" id="wikiClearSearch" class="clear-btn hidden" aria-label="Clear search">&times;</button>
             </div>
             <button type="button" id="wikiSidebarToggle" class="btn btn-secondary btn-sm wiki-mobile-cat-btn" title="Toggle Categories">
-              <span>Categories</span>
+              <span id="wikiMobileCatBtnText">Categories</span>
             </button>
           </div>
         </div>
+
+        <!-- Mobile Categories Drawer Backdrop -->
+        <div id="wikiSidebarBackdrop" class="wiki-sidebar-backdrop hidden"></div>
 
         <!-- 2-Column FMHY Layout -->
         <div class="wiki-layout">
@@ -616,9 +629,68 @@
     </div>
   </aside>
 
-  <script src="./src/lib/dedupe.js?v=1.0.59"></script>
-  <script src="./src/lib/search.js?v=1.0.59"></script>
-  <script src="./src/lib/ai.js?v=1.0.59"></script>
-  <script src="./src/main.js?v=1.0.59"></script>
+  <!-- Owner Wiki Share Modal -->
+  <div id="wikiShareModal" class="wiki-modal hidden" role="dialog" aria-modal="true" aria-labelledby="wikiShareTitle">
+    <div class="wiki-modal-backdrop" id="wikiShareModalBackdrop"></div>
+    <div class="wiki-modal-card">
+      <div class="wiki-modal-header">
+        <div class="wiki-modal-title-group">
+          <span class="wiki-modal-icon">🔗</span>
+          <div>
+            <h3 id="wikiShareTitle">Share Athena Wiki</h3>
+            <p class="wiki-modal-desc">Generate a public read-only link. Anyone with this link can view the wiki without logging in. All other Athena search and database tools remain locked.</p>
+          </div>
+        </div>
+        <button type="button" id="wikiShareCloseBtn" class="icon-btn wiki-modal-close" aria-label="Close modal">&times;</button>
+      </div>
+
+      <div class="wiki-modal-body">
+        <div class="wiki-share-form">
+          <div class="wiki-share-field">
+            <label for="wikiShareDuration">Expiration Time Frame</label>
+            <select id="wikiShareDuration" class="input">
+              <option value="7d">7 Days</option>
+              <option value="15d">15 Days</option>
+              <option value="1m" selected>1 Month (30 Days)</option>
+              <option value="2m">2 Months (60 Days)</option>
+              <option value="3m">3 Months (90 Days)</option>
+              <option value="6m">6 Months (180 Days)</option>
+              <option value="1y">1 Year (365 Days)</option>
+            </select>
+          </div>
+          <button type="button" id="wikiGenerateShareBtn" class="btn btn-primary wiki-generate-btn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
+            <span>Generate Share Link</span>
+          </button>
+        </div>
+
+        <!-- Generated Link Box (revealed when created) -->
+        <div id="wikiGeneratedLinkBox" class="wiki-generated-box hidden">
+          <div class="wiki-gen-header">
+            <span class="wiki-gen-label">Active Shareable Link</span>
+            <span id="wikiGenExpiryBadge" class="wiki-gen-badge">Expires in 30 days</span>
+          </div>
+          <div class="wiki-copy-row">
+            <input type="text" id="wikiShareUrlInput" class="input" readonly>
+            <button type="button" id="wikiCopyShareBtn" class="btn btn-primary btn-sm">Copy Link</button>
+          </div>
+          <div class="wiki-gen-hint">Outsiders viewing this link will only see the curated wiki, with zero access to your search history or other tabs.</div>
+        </div>
+
+        <!-- Existing Active Share Links -->
+        <div class="wiki-share-history-section">
+          <div class="wiki-share-history-title">Active Share Links</div>
+          <div id="wikiShareLinksList" class="wiki-share-links-list">
+            <div class="wiki-share-links-loading">Loading share links…</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="./src/lib/dedupe.js?v=1.0.60"></script>
+  <script src="./src/lib/search.js?v=1.0.60"></script>
+  <script src="./src/lib/ai.js?v=1.0.60"></script>
+  <script src="./src/main.js?v=1.0.60"></script>
 </body>
 </html>

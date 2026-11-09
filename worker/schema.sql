@@ -283,3 +283,21 @@ CREATE TABLE IF NOT EXISTS pending_clones (
   expires_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pending_clones_expiry ON pending_clones(expires_at);
+
+-- Shareable public wiki links (Owner rank only)
+CREATE TABLE IF NOT EXISTS wiki_share_links (
+  id TEXT PRIMARY KEY,
+  token TEXT UNIQUE NOT NULL,
+  created_by TEXT NOT NULL,
+  scope TEXT NOT NULL DEFAULT 'community',
+  community_id TEXT,
+  duration_label TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  revoked_at INTEGER,
+  views INTEGER NOT NULL DEFAULT 0,
+  FOREIGN KEY(created_by) REFERENCES users(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wiki_share_links_token ON wiki_share_links(token);
+CREATE INDEX IF NOT EXISTS idx_wiki_share_links_expires ON wiki_share_links(expires_at);
+

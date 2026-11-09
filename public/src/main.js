@@ -164,13 +164,16 @@ document.addEventListener('DOMContentLoaded', () => {
       ...options,
       headers: {
         ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
-        ...authHeaders(options.headers || {})
+        ...authHeaders(options.headers || {}),
+        ...(state.wikiShareToken ? { 'X-Wiki-Share-Token': state.wikiShareToken } : {})
       }
     });
     const data = await res.json().catch(() => ({}));
     if (res.status === 401 || data.code === 'AUTH_REQUIRED') {
-      clearSession();
-      showLoggedOut();
+      if (!state.publicWikiMode) {
+        clearSession();
+        showLoggedOut();
+      }
       throw Object.assign(new Error('Login required'), { auth: true });
     }
     return { res, data };
@@ -656,6 +659,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (adminNavBtn) adminNavBtn.classList.toggle('hidden', !isStaff);
     const adminDrawer = $('adminDrawerSection');
     if (adminDrawer) adminDrawer.classList.toggle('hidden', !isStaff);
+
+    const wikiShareBtn = $('wikiShareBtn');
+    if (wikiShareBtn) wikiShareBtn.classList.toggle('hidden', !god);
 
     const wipeWrap = $('wipePersonalWrap');
     const wipeBtn = $('wipePersonalBtn');
@@ -3362,6 +3368,12 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     window.addEventListener('hashchange', () => {
+      if (state.publicWikiMode) {
+        if (window.location.hash !== '#wiki') {
+          window.location.hash = '#wiki';
+        }
+        return;
+      }
       if (window.location.hash === '#db' || window.location.hash === '#admin') {
         if (isStaffRank()) openAdminDb();
       } else if (window.location.hash === '#wiki') {
@@ -3483,9 +3495,15 @@ document.addEventListener('DOMContentLoaded', () => {
     if (searchWrapper) searchWrapper.classList.add('hidden');
     if (resultsContainer) resultsContainer.classList.add('hidden');
     wikiView.classList.remove('hidden');
+    document.body.classList.add('wiki-active');
 
     if (window.location.hash !== '#wiki') {
       window.location.hash = '#wiki';
+    }
+
+    const shareBtn = $('wikiShareBtn');
+    if (shareBtn) {
+      shareBtn.classList.toggle('hidden', !isGod() || state.publicWikiMode);
     }
 
     wikiState.scope = state.scope || 'community';
@@ -3522,11 +3540,16 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function closeWiki() {
+    if (state.publicWikiMode) return;
     const wikiView = $('wikiView');
     const searchWrapper = $('searchWrapper');
     const resultsContainer = $('resultsContainer');
     if (!wikiView) return;
     wikiView.classList.add('hidden');
+    document.body.classList.remove('wiki-active');
+    $('wikiSidebar')?.classList.remove('mobile-open');
+    $('wikiSidebarBackdrop')?.classList.add('hidden');
+    document.body.style.overflow = '';
     if (searchWrapper) searchWrapper.classList.remove('hidden');
     if (resultsContainer) resultsContainer.classList.remove('hidden');
     if (window.location.hash === '#wiki') {
@@ -3551,6 +3574,9 @@ document.addEventListener('DOMContentLoaded', () => {
       });
       if (wikiState.scope === 'community' && wikiState.communityId) {
         qParams.set('community_id', wikiState.communityId);
+      }
+      if (state.wikiShareToken) {
+        qParams.set('share', state.wikiShareToken);
       }
       const { res, data } = await api(`/api/wiki/categories?${qParams.toString()}`);
       if (res.ok && data.success && Array.isArray(data.categories)) {
@@ -3587,6 +3613,10 @@ document.addEventListener('DOMContentLoaded', () => {
       </button>
     `).join('');
 
+    const cur = wikiState.categories.find(c => c.id === wikiState.activeCategory);
+    const mobileBtnText = $('wikiMobileCatBtnText');
+    if (mobileBtnText && cur) mobileBtnText.textContent = cur.title || 'Categories';
+
     listEl.querySelectorAll('.wiki-cat-item').forEach(btn => {
       btn.addEventListener('click', () => {
         const catId = btn.dataset.cat;
@@ -3596,8 +3626,13 @@ document.addEventListener('DOMContentLoaded', () => {
         wikiState.page = 1;
         listEl.querySelectorAll('.wiki-cat-item').forEach(b => b.classList.toggle('active', b === btn));
 
-        // Close mobile sidebar if open
+        const targetCat = wikiState.categories.find(c => c.id === catId);
+        if (mobileBtnText && targetCat) mobileBtnText.textContent = targetCat.title || 'Categories';
+
+        // Close mobile sidebar and backdrop
         $('wikiSidebar')?.classList.remove('mobile-open');
+        $('wikiSidebarBackdrop')?.classList.add('hidden');
+        document.body.style.overflow = '';
 
         loadWikiLinks();
       });
@@ -3628,6 +3663,9 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       if (wikiState.q) {
         qParams.set('q', wikiState.q);
+      }
+      if (state.wikiShareToken) {
+        qParams.set('share', state.wikiShareToken);
       }
 
       const { res, data } = await api(`/api/wiki/links?${qParams.toString()}`);
@@ -3753,6 +3791,7 @@ document.addEventListener('DOMContentLoaded', () => {
                       </a>
                       ${host ? `<span class="wiki-domain-chip">${escapeHtml(host)}</span>` : ''}
                     </div>
+                    ${l.url ? `<button type="button" class="wiki-copy-url-btn" data-url="${escapeHtml(l.url)}" title="Copy URL" aria-label="Copy URL"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>` : ''}
                   </div>
                   ${l.notes ? `<p class="wiki-card-desc">${escapeHtml(l.notes)}</p>` : ''}
                   <div class="wiki-card-footer">
@@ -3773,6 +3812,22 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     blocksEl.innerHTML = blocksHtml;
+
+    // Wire copy buttons on link cards
+    blocksEl.querySelectorAll('.wiki-copy-url-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const u = btn.dataset.url;
+        if (!u) return;
+        try {
+          await navigator.clipboard.writeText(u);
+          showToast('Link copied to clipboard');
+        } catch (_) {
+          showToast('Failed to copy', true);
+        }
+      });
+    });
 
     // Wire tag clicks inside wiki link cards
     blocksEl.querySelectorAll('.wiki-tag-pill').forEach(pill => {
@@ -3802,6 +3857,179 @@ document.addEventListener('DOMContentLoaded', () => {
         pageInfo.textContent = `Page ${wikiState.page} of ${wikiState.totalPages}`;
         prevBtn.disabled = wikiState.page <= 1;
         nextBtn.disabled = wikiState.page >= wikiState.totalPages;
+      }
+    }
+  }
+
+  function setupWikiShareModal() {
+    const shareBtn = $('wikiShareBtn');
+    const modal = $('wikiShareModal');
+    const backdrop = $('wikiShareModalBackdrop');
+    const closeBtn = $('wikiShareCloseBtn');
+    const generateBtn = $('wikiGenerateShareBtn');
+    const durationSel = $('wikiShareDuration');
+    const genBox = $('wikiGeneratedLinkBox');
+    const urlInput = $('wikiShareUrlInput');
+    const copyBtn = $('wikiCopyShareBtn');
+    const expiryBadge = $('wikiGenExpiryBadge');
+    const linksList = $('wikiShareLinksList');
+
+    if (!shareBtn || !modal) return;
+
+    function openModal() {
+      if (!isGod()) {
+        showToast('Owner rank required to generate shareable links', true);
+        return;
+      }
+      modal.classList.remove('hidden');
+      if (genBox) genBox.classList.add('hidden');
+      loadActiveShareLinks();
+    }
+
+    function closeModal() {
+      modal.classList.add('hidden');
+    }
+
+    shareBtn.addEventListener('click', openModal);
+    closeBtn?.addEventListener('click', closeModal);
+    backdrop?.addEventListener('click', closeModal);
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !modal.classList.contains('hidden')) {
+        closeModal();
+      }
+    });
+
+    generateBtn?.addEventListener('click', async () => {
+      if (!isGod()) return;
+      generateBtn.disabled = true;
+      try {
+        const duration = durationSel?.value || '1m';
+        const { res, data } = await api('/api/wiki/share-links', {
+          method: 'POST',
+          body: JSON.stringify({
+            duration,
+            community_id: wikiState.communityId || ''
+          })
+        });
+        if (res.ok && data.success && data.link) {
+          const l = data.link;
+          const fullUrl = `${window.location.origin}/wiki?share=${encodeURIComponent(l.token)}`;
+          if (urlInput) urlInput.value = fullUrl;
+          if (expiryBadge) {
+            const expDate = new Date(l.expires_at).toLocaleDateString();
+            expiryBadge.textContent = `Expires ${expDate} (${l.duration_label})`;
+          }
+          if (genBox) genBox.classList.remove('hidden');
+          showToast('Shareable link generated! Copied to clipboard.');
+          try {
+            await navigator.clipboard.writeText(fullUrl);
+          } catch (_) {}
+          loadActiveShareLinks();
+        } else {
+          showToast(data.error || 'Failed to generate link', true);
+        }
+      } catch (err) {
+        showToast(err.message || 'Error creating link', true);
+      } finally {
+        generateBtn.disabled = false;
+      }
+    });
+
+    copyBtn?.addEventListener('click', async () => {
+      if (urlInput?.value) {
+        try {
+          await navigator.clipboard.writeText(urlInput.value);
+          const origText = copyBtn.textContent;
+          copyBtn.textContent = 'Copied!';
+          setTimeout(() => { copyBtn.textContent = origText; }, 2000);
+          showToast('Link copied to clipboard');
+        } catch (_) {
+          urlInput.select();
+          showToast('Please copy the URL manually');
+        }
+      }
+    });
+
+    async function loadActiveShareLinks() {
+      if (!linksList) return;
+      linksList.innerHTML = '<div class="wiki-share-links-loading" style="padding:12px;font-size:0.75rem;color:var(--text-muted);">Loading active share links…</div>';
+      try {
+        const { res, data } = await api('/api/wiki/share-links');
+        if (res.ok && data.success && Array.isArray(data.links)) {
+          if (!data.links.length) {
+            linksList.innerHTML = '<div style="padding:10px;font-size:0.75rem;color:var(--text-muted);">No share links generated yet.</div>';
+            return;
+          }
+          linksList.innerHTML = data.links.map(item => {
+            const fullUrl = `${window.location.origin}/wiki?share=${encodeURIComponent(item.token)}`;
+            const expDate = new Date(item.expires_at).toLocaleDateString();
+            const createdDate = new Date(item.created_at).toLocaleDateString();
+            let statusBadge = '<span class="wiki-share-badge-active">Active</span>';
+            if (item.is_revoked) {
+              statusBadge = '<span class="wiki-share-badge-revoked">Revoked</span>';
+            } else if (item.is_expired) {
+              statusBadge = '<span class="wiki-share-badge-expired">Expired</span>';
+            }
+
+            const canRevoke = !item.is_revoked && !item.is_expired;
+
+            return `
+              <div class="wiki-share-row" data-id="${escapeHtml(item.id)}">
+                <div class="wiki-share-meta">
+                  <div class="wiki-share-dur">${escapeHtml(item.duration_label || 'Share Link')} · ${statusBadge}</div>
+                  <div class="wiki-share-details">
+                    <span>Expires: ${escapeHtml(expDate)}</span>
+                    <span>Views: ${(item.views || 0).toLocaleString()}</span>
+                    <span>Created: ${escapeHtml(createdDate)}</span>
+                  </div>
+                </div>
+                <div class="wiki-share-actions">
+                  <button type="button" class="btn btn-secondary btn-sm wiki-share-copy-item" data-url="${escapeHtml(fullUrl)}" title="Copy link">Copy</button>
+                  ${canRevoke ? `<button type="button" class="btn btn-danger btn-sm wiki-share-revoke-item" data-id="${escapeHtml(item.id)}" title="Revoke access immediately">Revoke</button>` : ''}
+                </div>
+              </div>
+            `;
+          }).join('');
+
+          linksList.querySelectorAll('.wiki-share-copy-item').forEach(btn => {
+            btn.addEventListener('click', async () => {
+              const u = btn.dataset.url;
+              if (u) {
+                try {
+                  await navigator.clipboard.writeText(u);
+                  showToast('Share link copied');
+                } catch (_) {}
+              }
+            });
+          });
+
+          linksList.querySelectorAll('.wiki-share-revoke-item').forEach(btn => {
+            btn.addEventListener('click', async () => {
+              const id = btn.dataset.id;
+              if (!id) return;
+              btn.disabled = true;
+              try {
+                const { res, data } = await api('/api/wiki/share-links/revoke', {
+                  method: 'POST',
+                  body: JSON.stringify({ id })
+                });
+                if (res.ok && data.success) {
+                  showToast('Share link revoked');
+                  loadActiveShareLinks();
+                } else {
+                  showToast(data.error || 'Failed to revoke', true);
+                  btn.disabled = false;
+                }
+              } catch (err) {
+                showToast(err.message || 'Revoke failed', true);
+                btn.disabled = false;
+              }
+            });
+          });
+        }
+      } catch (_err) {
+        linksList.innerHTML = `<div style="padding:10px;font-size:0.75rem;color:var(--text-muted);">Failed to load share history.</div>`;
       }
     }
   }
@@ -3859,8 +4087,22 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     }
 
-    $('wikiSidebarToggle')?.addEventListener('click', () => {
-      $('wikiSidebar')?.classList.toggle('mobile-open');
+    // Mobile sidebar toggle and backdrop
+    const sidebarEl = $('wikiSidebar');
+    const backdropEl = $('wikiSidebarBackdrop');
+    const toggleBtn = $('wikiSidebarToggle');
+
+    function toggleMobileSidebar() {
+      const open = sidebarEl?.classList.toggle('mobile-open');
+      backdropEl?.classList.toggle('hidden', !open);
+      document.body.style.overflow = open ? 'hidden' : '';
+    }
+
+    toggleBtn?.addEventListener('click', toggleMobileSidebar);
+    backdropEl?.addEventListener('click', () => {
+      sidebarEl?.classList.remove('mobile-open');
+      backdropEl?.classList.add('hidden');
+      document.body.style.overflow = '';
     });
 
     $('wikiPrevBtn')?.addEventListener('click', () => {
@@ -3902,6 +4144,84 @@ document.addEventListener('DOMContentLoaded', () => {
         if (btn) btn.disabled = false;
       }
     });
+
+    setupWikiShareModal();
+  }
+
+  async function initPublicWiki(shareToken) {
+    state.publicWikiMode = true;
+    state.wikiShareToken = shareToken;
+    document.body.classList.add('public-wiki-only');
+    document.body.classList.add('wiki-active');
+
+    // Hide auth gate & show root
+    authGate.classList.add('hidden');
+    appRoot.classList.remove('hidden');
+
+    // Hide drawer and hamburger
+    if (sideDrawer) sideDrawer.classList.add('hidden');
+    if (drawerOverlay) drawerOverlay.classList.add('hidden');
+
+    try {
+      const verifyRes = await fetch(`${API_BASE}/api/wiki/share-links/verify?share=${encodeURIComponent(shareToken)}`);
+      const verifyData = await verifyRes.json().catch(() => ({}));
+
+      if (!verifyRes.ok || !verifyData.valid) {
+        showPublicWikiError(verifyData.error || 'This wiki share link is invalid or has expired.');
+        return;
+      }
+
+      const banner = $('wikiPublicBanner');
+      const expEl = $('wikiPublicExpiry');
+      if (banner && expEl) {
+        banner.classList.remove('hidden');
+        const expDate = new Date(verifyData.expires_at).toLocaleDateString();
+        expEl.textContent = `Valid until ${expDate} · ${escapeHtml(verifyData.duration_label || '')}`;
+      }
+
+      const brandTitle = $('wikiBrandTitle');
+      const brandTagline = $('wikiBrandTagline');
+      if (brandTitle) brandTitle.textContent = 'Athena Wiki';
+      if (brandTagline) brandTagline.textContent = 'Public curated directory · Read-only view';
+
+      openWiki();
+
+      window.addEventListener('hashchange', () => {
+        if (state.publicWikiMode && window.location.hash !== '#wiki') {
+          window.location.hash = '#wiki';
+        }
+      });
+    } catch (_err) {
+      showPublicWikiError('Network error connecting to Athena Wiki.');
+    }
+  }
+
+  function showPublicWikiError(msg) {
+    const wikiView = $('wikiView');
+    const searchWrapper = $('searchWrapper');
+    const resultsContainer = $('resultsContainer');
+    const adminView = $('adminDbView');
+    if (searchWrapper) searchWrapper.classList.add('hidden');
+    if (resultsContainer) resultsContainer.classList.add('hidden');
+    if (adminView) adminView.classList.add('hidden');
+    if (wikiView) wikiView.classList.remove('hidden');
+
+    $('wikiControlsBar')?.classList.add('hidden');
+    $('wikiSidebar')?.classList.add('hidden');
+    $('wikiCatHero')?.classList.add('hidden');
+    $('wikiPagination')?.classList.add('hidden');
+
+    const blocks = $('wikiBlocks');
+    if (blocks) {
+      blocks.innerHTML = `
+        <div class="wiki-empty" style="padding: 60px 20px; text-align: center;">
+          <div style="font-size: 2.8rem; line-height: 1; margin-bottom: 14px;">⌛</div>
+          <h3 style="font-size: 1.35rem; font-weight: 700; color: var(--text-main); margin-bottom: 8px;">Access Expired or Unavailable</h3>
+          <p style="color: var(--text-muted); max-width: 460px; margin: 0 auto 24px; font-size: 0.9rem; line-height: 1.5;">${escapeHtml(msg)}</p>
+          <a href="/" class="btn btn-primary" style="display: inline-flex; border-radius: 999px; padding: 8px 24px; text-decoration: none;">Return to Athena</a>
+        </div>
+      `;
+    }
   }
 
   // ---- Events ----
@@ -4357,6 +4677,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // Must run before anything talks to the API, including the login buttons.
     await adoptInstanceBackend();
     setupEventListeners();
+
+    // Check for public shareable wiki link
+    const urlParams = new URLSearchParams(window.location.search);
+    const shareToken = urlParams.get('share');
+    if (shareToken) {
+      await initPublicWiki(shareToken);
+      return;
+    }
+
     await loadAuthConfig();
     // Telegram Mini App: try initData login first
     if (window.Telegram?.WebApp?.initData) {

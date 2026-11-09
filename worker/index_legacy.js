@@ -79,6 +79,7 @@ const PUBLIC_API = new Set([
   // Read-only instance defaults; the login page needs these before auth.
   '/api/instance/config',
   '/api/ai/config',
+  '/api/wiki/share-links/verify',
 ]);
 
 /**
@@ -188,7 +189,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.59',
+          version: '1.0.60',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -266,7 +267,17 @@ export default {
       let user = null;
       if (pathname.startsWith('/api/')) {
         user = await requireUser(request, env);
-        if (!user && !PUBLIC_API.has(pathname)) {
+        let validWikiShare = false;
+        if (!user && (pathname === '/api/wiki/categories' || pathname === '/api/wiki/links') && request.method === 'GET') {
+          const shareToken = url.searchParams.get('share') || request.headers.get('X-Wiki-Share-Token') || '';
+          if (shareToken) {
+            const tokenRow = await validateWikiShareToken(shareToken, env);
+            if (tokenRow) {
+              validWikiShare = true;
+            }
+          }
+        }
+        if (!user && !PUBLIC_API.has(pathname) && !validWikiShare) {
           return Response.json(
             { success: false, error: 'Login required', code: 'AUTH_REQUIRED' },
             { status: 401, headers: corsHeaders }
@@ -376,6 +387,23 @@ export default {
 
       if (pathname === '/api/wiki/reset-taxonomy' && request.method === 'POST') {
         return await handleResetWikiTaxonomy(request, user, env, corsHeaders);
+      }
+
+      if (pathname === '/api/wiki/share-links/verify' && request.method === 'GET') {
+        return await handleVerifyWikiShare(url, env, corsHeaders);
+      }
+
+      if (pathname === '/api/wiki/share-links') {
+        if (request.method === 'GET') {
+          return await handleGetWikiShareLinks(user, env, corsHeaders);
+        }
+        if (request.method === 'POST') {
+          return await handleCreateWikiShareLink(request, user, env, corsHeaders);
+        }
+      }
+
+      if (pathname === '/api/wiki/share-links/revoke' && request.method === 'POST') {
+        return await handleRevokeWikiShareLink(request, user, env, corsHeaders);
       }
 
       // Community links — members only (join required before dump)
@@ -3483,14 +3511,72 @@ async function handleGetTags(url, user, env, corsHeaders) {
   return Response.json({ success: true, tags: topTags, total }, { headers: corsHeaders });
 }
 
+let _wikiShareTableReady = false;
+async function ensureWikiShareTable(env) {
+  if (_wikiShareTableReady) return;
+  try {
+    if (typeof env.DB.exec === 'function') {
+      await env.DB.exec(`
+        CREATE TABLE IF NOT EXISTS wiki_share_links (
+          id TEXT PRIMARY KEY,
+          token TEXT UNIQUE NOT NULL,
+          created_by TEXT NOT NULL,
+          scope TEXT NOT NULL DEFAULT 'community',
+          community_id TEXT,
+          duration_label TEXT NOT NULL,
+          expires_at BIGINT NOT NULL,
+          created_at BIGINT NOT NULL,
+          revoked_at BIGINT,
+          views INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_wiki_share_links_token ON wiki_share_links(token);
+        CREATE INDEX IF NOT EXISTS idx_wiki_share_links_expires ON wiki_share_links(expires_at);
+      `);
+    }
+  } catch (_) {}
+  _wikiShareTableReady = true;
+}
+
+async function validateWikiShareToken(token, env) {
+  if (!token || typeof token !== 'string') return null;
+  const clean = token.trim();
+  if (!clean || clean.length < 16) return null;
+  try {
+    await ensureWikiShareTable(env);
+    const now = Date.now();
+    const row = await env.DB.prepare(
+      `SELECT id, token, created_by, scope, community_id, duration_label, expires_at, created_at, revoked_at
+       FROM wiki_share_links
+       WHERE token = ? AND (revoked_at IS NULL OR revoked_at = 0) AND expires_at > ?`
+    ).bind(clean, now).first();
+    return row || null;
+  } catch (_) {
+    return null;
+  }
+}
+
 async function handleGetWikiCategories(url, user, env, corsHeaders) {
-  const scope = (url.searchParams.get('scope') || 'community').toLowerCase();
-  const rawCommId = (url.searchParams.get('community_id') || '').trim();
+  const shareToken = (url.searchParams.get('share') || '').trim();
+  let shareRow = null;
+  if (!user && shareToken) {
+    shareRow = await validateWikiShareToken(shareToken, env);
+    if (!shareRow) {
+      return deny(corsHeaders, 'Valid share link or login required', 'AUTH_REQUIRED', 401);
+    }
+  }
+
+  let scope = (url.searchParams.get('scope') || 'community').toLowerCase();
+  let rawCommId = (url.searchParams.get('community_id') || '').trim();
+  if (!user && shareRow) {
+    scope = 'community';
+    if (shareRow.community_id) rawCommId = shareRow.community_id;
+  }
+
   let table = 'links';
   let scopeKey = rawCommId;
 
   if (scope === 'personal') {
-    if (!(await isInstanceOwnerUserAsync(user, env))) {
+    if (!user || !(await isInstanceOwnerUserAsync(user, env))) {
       return deny(corsHeaders, 'Personal mode is for GOD rank (instance host) only', 'PERSONAL_LOCKED', 403);
     }
     table = 'personal_links';
@@ -3547,8 +3633,22 @@ async function handleGetWikiCategories(url, user, env, corsHeaders) {
 }
 
 async function handleGetWikiLinks(url, user, env, corsHeaders) {
-  const scope = (url.searchParams.get('scope') || 'community').toLowerCase();
-  const rawCommId = (url.searchParams.get('community_id') || '').trim();
+  const shareToken = (url.searchParams.get('share') || '').trim();
+  let shareRow = null;
+  if (!user && shareToken) {
+    shareRow = await validateWikiShareToken(shareToken, env);
+    if (!shareRow) {
+      return deny(corsHeaders, 'Valid share link or login required', 'AUTH_REQUIRED', 401);
+    }
+  }
+
+  let scope = (url.searchParams.get('scope') || 'community').toLowerCase();
+  let rawCommId = (url.searchParams.get('community_id') || '').trim();
+  if (!user && shareRow) {
+    scope = 'community';
+    if (shareRow.community_id) rawCommId = shareRow.community_id;
+  }
+
   const targetCategory = (url.searchParams.get('category') || '').trim();
   const targetSubheading = (url.searchParams.get('subheading') || '').trim();
   const q = (url.searchParams.get('q') || '').trim().toLowerCase();
@@ -3559,7 +3659,7 @@ async function handleGetWikiLinks(url, user, env, corsHeaders) {
   let scopeKey = rawCommId;
 
   if (scope === 'personal') {
-    if (!(await isInstanceOwnerUserAsync(user, env))) {
+    if (!user || !(await isInstanceOwnerUserAsync(user, env))) {
       return deny(corsHeaders, 'Personal mode is for GOD rank (instance host) only', 'PERSONAL_LOCKED', 403);
     }
     table = 'personal_links';
@@ -3745,6 +3845,127 @@ async function handleResetWikiTaxonomy(request, user, env, corsHeaders) {
   await ensureWikiTaxonomyTable(env);
   await env.DB.prepare('DELETE FROM wiki_taxonomy WHERE id = ?').bind(id).run();
   return Response.json({ success: true, categories: DEFAULT_FMHY_CATEGORIES }, { headers: corsHeaders });
+}
+
+async function handleVerifyWikiShare(url, env, corsHeaders) {
+  await ensureWikiShareTable(env);
+  const token = (url.searchParams.get('share') || '').trim();
+  const row = await validateWikiShareToken(token, env);
+  if (!row) {
+    return Response.json({
+      success: false,
+      valid: false,
+      error: 'This wiki share link is invalid or has expired.'
+    }, { status: 404, headers: corsHeaders });
+  }
+
+  try {
+    await env.DB.prepare('UPDATE wiki_share_links SET views = views + 1 WHERE id = ?').bind(row.id).run();
+  } catch (_) {}
+
+  return Response.json({
+    success: true,
+    valid: true,
+    expires_at: Number(row.expires_at),
+    duration_label: row.duration_label,
+    community_id: row.community_id,
+    created_at: Number(row.created_at)
+  }, { headers: corsHeaders });
+}
+
+async function handleGetWikiShareLinks(user, env, corsHeaders) {
+  if (!(await isInstanceOwnerUserAsync(user, env))) {
+    return deny(corsHeaders, 'Owner rank required to manage shareable wiki links', 'OWNER_ONLY', 403);
+  }
+  await ensureWikiShareTable(env);
+  const { results } = await env.DB.prepare(
+    `SELECT id, token, created_by, scope, community_id, duration_label, expires_at, created_at, revoked_at, views
+     FROM wiki_share_links
+     ORDER BY created_at DESC
+     LIMIT 50`
+  ).all();
+
+  const now = Date.now();
+  const links = (results || []).map(r => ({
+    id: r.id,
+    token: r.token,
+    share_path: `/wiki?share=${r.token}`,
+    scope: r.scope,
+    community_id: r.community_id,
+    duration_label: r.duration_label,
+    expires_at: Number(r.expires_at),
+    created_at: Number(r.created_at),
+    revoked_at: r.revoked_at ? Number(r.revoked_at) : null,
+    views: Number(r.views || 0),
+    is_expired: Number(r.expires_at) <= now,
+    is_revoked: Boolean(r.revoked_at && Number(r.revoked_at) > 0)
+  }));
+
+  return Response.json({ success: true, links }, { headers: corsHeaders });
+}
+
+async function handleCreateWikiShareLink(request, user, env, corsHeaders) {
+  if (!(await isInstanceOwnerUserAsync(user, env))) {
+    return deny(corsHeaders, 'Owner rank required to generate shareable wiki links', 'OWNER_ONLY', 403);
+  }
+  await ensureWikiShareTable(env);
+  let body = {};
+  try { body = await request.json(); } catch (_) {}
+  const rawDuration = String(body.duration || '1m').toLowerCase().trim();
+  const communityId = (body.community_id || '').trim();
+
+  const DURATION_MAP = {
+    '7d': { ms: 7 * 86400 * 1000, label: '7 Days' },
+    '15d': { ms: 15 * 86400 * 1000, label: '15 Days' },
+    '1m': { ms: 30 * 86400 * 1000, label: '1 Month' },
+    '2m': { ms: 60 * 86400 * 1000, label: '2 Months' },
+    '3m': { ms: 90 * 86400 * 1000, label: '3 Months' },
+    '6m': { ms: 180 * 86400 * 1000, label: '6 Months' },
+    '1y': { ms: 365 * 86400 * 1000, label: '1 Year' }
+  };
+
+  const selected = DURATION_MAP[rawDuration] || DURATION_MAP['1m'];
+  const now = Date.now();
+  const expiresAt = now + selected.ms;
+  const token = (crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '')).slice(0, 48);
+  const id = 'wsl_' + (crypto.randomUUID().replace(/-/g, '')).slice(0, 16);
+
+  await env.DB.prepare(
+    `INSERT INTO wiki_share_links (id, token, created_by, scope, community_id, duration_label, expires_at, created_at, revoked_at, views)
+     VALUES (?, ?, ?, 'community', ?, ?, ?, ?, NULL, 0)`
+  ).bind(id, token, user.id, communityId || null, selected.label, expiresAt, now).run();
+
+  return Response.json({
+    success: true,
+    link: {
+      id,
+      token,
+      share_path: `/wiki?share=${token}`,
+      duration_label: selected.label,
+      expires_at: expiresAt,
+      created_at: now,
+      views: 0
+    }
+  }, { headers: corsHeaders });
+}
+
+async function handleRevokeWikiShareLink(request, user, env, corsHeaders) {
+  if (!(await isInstanceOwnerUserAsync(user, env))) {
+    return deny(corsHeaders, 'Owner rank required to revoke shareable wiki links', 'OWNER_ONLY', 403);
+  }
+  await ensureWikiShareTable(env);
+  let body = {};
+  try { body = await request.json(); } catch (_) {}
+  const id = (body.id || '').trim();
+  if (!id) {
+    return Response.json({ success: false, error: 'Link id is required' }, { status: 400, headers: corsHeaders });
+  }
+
+  await env.DB.prepare(
+    `UPDATE wiki_share_links SET revoked_at = ? WHERE id = ?`
+  ).bind(Date.now(), id).run();
+
+  return Response.json({ success: true, revoked: true }, { headers: corsHeaders });
 }
 
 async function handleAdminGetLinks(url, user, env, corsHeaders) {
@@ -19315,4 +19536,9 @@ export {
   handleGetWikiLinks,
   handleAiOrganizeWiki,
   handleResetWikiTaxonomy,
+  handleVerifyWikiShare,
+  handleGetWikiShareLinks,
+  handleCreateWikiShareLink,
+  handleRevokeWikiShareLink,
+  validateWikiShareToken,
 };
