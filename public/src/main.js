@@ -2635,7 +2635,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // ---- Accent color system ----
-  const ACCENT_DEFAULT = '#7c5ce0';
+  const ACCENT_DEFAULT = '#8e70f6';
   const ACCENT_LS_KEY = 'athena_accent_color';
 
   function hexToHsl(hex) {
@@ -2669,6 +2669,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const h = hsl.h, s = hsl.s, l = hsl.l;
 
     root.style.setProperty('--accent', hex);
+    const fg = l > 50 ? '#08080f' : '#ffffff';
+    root.style.setProperty('--accent-fg', fg);
     root.style.setProperty('--accent-soft', `hsla(${h}, ${s}%, ${l}%, 0.22)`);
     root.style.setProperty('--accent-gradient', `linear-gradient(135deg, hsl(${h}, ${s}%, ${Math.min(l + 15, 80)}%), hsl(${h}, ${s}%, ${Math.max(l - 15, 15)}%))`);
     root.style.setProperty('--accent-hover', `hsl(${h}, ${Math.min(s + 5, 100)}%, ${Math.min(l + 8, 85)}%)`);

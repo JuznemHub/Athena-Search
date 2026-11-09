@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#06070a">
-  <title>Athena — Second Brain Search</title>
+  <title>Athena | Second Brain Search</title>
   <meta name="description" content="One bar: search, dump, and AI answers from your markdown brain.">
   <script>
     (function () {
@@ -29,8 +29,8 @@
       }
     })();
   </script>
-<link rel="stylesheet" href="./src/style.css?v=1.0.58">
-<link rel="stylesheet" href="./src/themes.css?v=1.0.58">
+<link rel="stylesheet" href="./src/style.css?v=1.0.59">
+<link rel="stylesheet" href="./src/themes.css?v=1.0.59">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -53,7 +53,7 @@
         <button type="button" class="theme-chip" data-theme="material">Material</button>
         <button type="button" class="theme-chip" data-theme="glass">Glass</button>
       </div>
-      <p class="auth-gate-note">Communities are optional — configure later in Settings.</p>
+      <p class="auth-gate-note">Communities are optional; configure later in Settings.</p>
     </div>
   </div>
 
@@ -419,8 +419,8 @@
         <div class="profile-card">
           <div class="avatar" id="userAvatar">U</div>
           <div class="user-info">
-            <span class="user-name" id="userName">—</span>
-            <span class="user-role" id="userEmail">—</span>
+            <span class="user-name" id="userName">-</span>
+            <span class="user-role" id="userEmail">-</span>
           </div>
         </div>
         <button id="logoutBtn" class="btn btn-danger btn-sm">Logout</button>
@@ -445,12 +445,12 @@
         <h3>Accent Color</h3>
         <p class="section-desc">Pick a color for buttons, highlights, glows, and accents across all themes.</p>
         <div class="accent-picker-row">
-          <input type="color" id="accentColorInput" class="accent-color-input" value="#7c5ce0" aria-label="Pick accent color">
-          <span class="accent-current-label" id="accentCurrentLabel">#7c5ce0</span>
+          <input type="color" id="accentColorInput" class="accent-color-input" value="#8e70f6" aria-label="Pick accent color">
+          <span class="accent-current-label" id="accentCurrentLabel">#8e70f6</span>
           <button type="button" id="accentResetBtn" class="btn btn-secondary btn-sm">Reset</button>
         </div>
         <div class="accent-swatches" id="accentSwatches">
-          <button type="button" class="accent-swatch" data-color="#7c5ce0" title="Purple" style="--sw:#7c5ce0"></button>
+          <button type="button" class="accent-swatch" data-color="#8e70f6" title="Purple" style="--sw:#8e70f6"></button>
           <button type="button" class="accent-swatch" data-color="#3b82f6" title="Blue" style="--sw:#3b82f6"></button>
           <button type="button" class="accent-swatch" data-color="#ef4444" title="Red" style="--sw:#ef4444"></button>
           <button type="button" class="accent-swatch" data-color="#22c55e" title="Green" style="--sw:#22c55e"></button>
@@ -476,13 +476,13 @@
 
       <div class="drawer-section auth-only" id="storageSection">
         <h3>Storage backend <span id="storageGodBadge" class="lock-badge hidden">GOD</span></h3>
-        <p class="section-desc" id="storageDesc">PostgreSQL — the only store. Set <code>DATABASE_URL</code> on the server.</p>
+        <p class="section-desc" id="storageDesc">PostgreSQL is the only store. Set <code>DATABASE_URL</code> on the server.</p>
         <div id="storageSettingsBody">
           <label class="field-label" for="storageProvider">Provider</label>
           <select id="storageProvider" class="input" disabled>
             <option value="postgres" selected>PostgreSQL</option>
           </select>
-          <p class="section-desc" style="margin-top:8px;font-size:0.9em;opacity:0.8">D1 and GitHub Markdown removed — see README Storage. MCP memory uses the same Postgres DB (<code>postgres-mcp</code>).</p>
+          <p class="section-desc" style="margin-top:8px;font-size:0.9em;">D1 and GitHub Markdown removed (see README Storage). MCP memory uses the same Postgres DB (<code>postgres-mcp</code>).</p>
         </div>
         <div id="storageStatus" class="status-msg mt-2"></div>
       </div>
@@ -526,7 +526,7 @@
           </div>
         </div>
         <div id="aiFreeBadge" class="status-msg" style="font-size:0.85em;min-height:1.2em;"></div>
-        <p class="section-desc">OpenCode Zen free models work via Zen / Go presets — just set model to any free id (e.g. <code>deepseek-v4-flash</code>).</p>
+        <p class="section-desc">OpenCode Zen free models work via Zen / Go presets: just set model to any free id (e.g. <code>deepseek-v4-flash</code>).</p>
         <div class="form-group">
           <label for="aiApiKey">API key</label>
           <input type="password" id="aiApiKey" placeholder="sk-… or key" autocomplete="off">
@@ -541,7 +541,7 @@
         <div class="form-group">
           <label for="steroidModeToggle" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
             <input type="checkbox" id="steroidModeToggle">
-            <span>Steroid mode — no search/AI limits, only provider context window</span>
+            <span>Steroid mode: no search/AI limits, only provider context window</span>
           </label>
           <p class="section-desc" id="steroidCapsDesc">Off = throttled (default). On = unlimited.</p>
         </div>
@@ -616,9 +616,9 @@
     </div>
   </aside>
 
-  <script src="./src/lib/dedupe.js?v=1.0.58"></script>
-  <script src="./src/lib/search.js?v=1.0.58"></script>
-  <script src="./src/lib/ai.js?v=1.0.58"></script>
-  <script src="./src/main.js?v=1.0.58"></script>
+  <script src="./src/lib/dedupe.js?v=1.0.59"></script>
+  <script src="./src/lib/search.js?v=1.0.59"></script>
+  <script src="./src/lib/ai.js?v=1.0.59"></script>
+  <script src="./src/main.js?v=1.0.59"></script>
 </body>
 </html>
