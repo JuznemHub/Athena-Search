@@ -1,0 +1,31 @@
+# Publish athena-tui + alias to npm via trusted publishing (OIDC).
+#
+# One-time setup (browser, security key works fine):
+#   npmjs.com/package/athena-tui → Settings → Trusted Publisher → GitHub Actions
+#   org: JuznemHub, repo: Athena-Search, workflow: publish-tui.yml
+#   Repeat for npmjs.com/package/athenasearch-tui.
+# Then: Actions → publish-tui → Run workflow. No tokens, no OTP, ever.
+# (1.0.37 sits stuck as a staged version CLI approval can't reach with a
+# security-key-only account — this workflow publishes 1.0.38+ instead.)
+
+name: publish-tui
+
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm install -g npm@latest
+      - run: cd tui && npm publish --provenance --access public
+      - run: npm view athena-tui version
+      - run: cd tui/alias/athenasearch-tui && npm publish --provenance --access public
