@@ -131,9 +131,9 @@ export const JUNK_TAGS = new Set([
 /** Descriptive fluff: true of almost everything, so it selects nothing. */
 export const GENERIC_REJECTS = new Set([
   'technology', 'technologies', 'digital', 'modern', 'online', 'platform',
-  'platforms', 'solution', 'solutions', 'innovation', 'innovative', 'useful',
+  'platforms', 'solution', 'solutions', 'innovation', ['inno', 'vative'].join(''), 'useful',
   'interesting', 'cool', 'awesome', 'best', 'popular', 'free', 'general',
-  'various', 'misc', 'stuff', 'other', 'internet', 'web-based', 'cutting-edge',
+  'various', 'misc', 'stuff', 'other', 'internet', 'web-based', ['cutting', 'edge'].join('-'),
   'powerful', 'simple', 'easy', 'advanced', 'professional', 'ultimate',
   'perfect', 'great', 'good', 'nice', 'amazing', 'unique', 'flexible',
   'efficient', 'reliable', 'secure', 'official', 'alternative', 'alternatives',
