@@ -103,9 +103,10 @@ try {
   await ensureUcloneTables(env);
   await ensureIndexTables(env);
   sql.exec(`CREATE TABLE IF NOT EXISTS userbot_follows (
-    chat_id TEXT PRIMARY KEY, label TEXT NOT NULL DEFAULT 'main',
-    community_id TEXT NOT NULL, target TEXT NOT NULL DEFAULT 'community',
-    created_by TEXT, created_at BIGINT NOT NULL)`);
+    chat_id TEXT NOT NULL, label TEXT NOT NULL DEFAULT 'main',
+    community_id TEXT NOT NULL DEFAULT '', target TEXT NOT NULL DEFAULT 'community',
+    created_by TEXT, created_at BIGINT NOT NULL,
+    PRIMARY KEY (chat_id, community_id))`);
   // Backfill account choice honors the requester's own selection first.
   sql.exec(`CREATE TABLE IF NOT EXISTS userbot_selections (requester_tg_id TEXT PRIMARY KEY, label TEXT NOT NULL, updated_at BIGINT NOT NULL);`);
   sql.prepare(`INSERT INTO userbot_accounts (label, enabled) VALUES ('beta', 1) ON CONFLICT(label) DO UPDATE SET enabled=1`).run();

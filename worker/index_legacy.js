@@ -189,7 +189,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.61',
+          version: '1.0.62',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -10060,7 +10060,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       await answered();
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    if (action === 'refresh' || action === 'dashboard' || action === 'src' || action === 'run') {
+    if (action === 'refresh' || action === 'dashboard' || action === 'dash' || action === 'src' || action === 'run') {
       try {
         const user = await resolveAthenaUserFromTg(env, tgUserId);
         const report = await buildStatsReport(env, token, { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user ? String(user.id) : '') });
@@ -10068,11 +10068,15 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
         if (action === 'src') {
           const idx = Math.max(0, Number(parts[2]) || 0);
           const tp = Math.max(0, Number(parts[3]) || 0);
-          sel = { src: idx, topicPage: tp };
+          const dp = Math.max(0, Number(parts[4]) || 0);
+          sel = { src: idx, topicPage: tp, dashPage: dp };
+        } else if (action === 'dash' || action === 'dashboard' || action === 'refresh') {
+          const dp = Math.max(0, Number(parts[2]) || 0);
+          sel = { dashPage: dp };
         }
-        const src = sel ? (report.sources || [])[sel.src] : true;
+        const src = (sel && sel.src != null) ? (report.sources || [])[sel.src] : true;
         const mine = (s) => s && s.auth && (isGodCb || (s.auth.tgIds || []).includes(String(tgUserId)) || (user && (s.auth.userIds || []).includes(String(user.id))));
-        if (sel && (!src || !mine(src))) {
+        if (sel && sel.src != null && (!src || !mine(src))) {
           await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Expired or not yours', show_alert: true }).catch(() => {});
           return new Response('OK', { status: 200, headers: corsHeaders });
         }
@@ -10081,7 +10085,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
         // source from its newest saved message, then rebuild so the fresh
         // jobs show immediately.
         let catchNote = '';
-        if (action === 'refresh' && !sel) {
+        if (action === 'refresh' && (!sel || sel.src == null)) {
           try {
             const scope2 = { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user ? String(user.id) : '') };
             const cu = await refreshCloneCatchUp(env, { token, chatId, sources: report.sources, isGodCb, user });
@@ -10109,7 +10113,9 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       try {
         const user = await resolveAthenaUserFromTg(env, tgUserId);
         const report = await buildStatsReport(env, token, { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user ? String(user.id) : '') });
-        const src = (report.sources || [])[Math.max(0, Number(parts[2]) || 0)];
+        const idx = Math.max(0, Number(parts[2]) || 0);
+        const dashPage = Math.max(0, Number(parts[3]) || 0);
+        const src = (report.sources || [])[idx];
         const mine = (s) => s && s.auth && (isGodCb || (s.auth.tgIds || []).includes(String(tgUserId)) || (user && (s.auth.userIds || []).includes(String(user.id))));
         if (!src || !mine(src)) {
           await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Expired or not yours', show_alert: true }).catch(() => {});
@@ -10122,7 +10128,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
         await answered();
         const { bits } = await stopSourceLiveJobs(env, src, { isGodCb, user });
         const fresh = await buildStatsReport(env, token, { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user ? String(user.id) : '') });
-        const view = formatStatsRichReport(fresh);
+        const view = formatStatsRichReport(fresh, { dashPage });
         const display = statsSourceDisplayName(src, 60);
         const note = bits.length
           ? `${boldHtml('⏹')} Stopped for ${escHtml(display)}: ${bits.join(' + ')} stopped. Saved history stays.`
@@ -10139,11 +10145,13 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       // The userbot account must see the chat (it runs the backfill and the
       // follow); the bot is optional — without it the restart runs in
       // userbot mode and says so.
+      const dashPage = Math.max(0, Number(parts[3]) || 0);
       try {
         const user = await resolveAthenaUserFromTg(env, tgUserId);
         const scope = { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user ? String(user.id) : '') };
         const report = await buildStatsReport(env, token, scope);
-        const src = (report.sources || [])[Math.max(0, Number(parts[2]) || 0)];
+        const idx = Math.max(0, Number(parts[2]) || 0);
+        const src = (report.sources || [])[idx];
         const mine = (s) => s && s.auth && (isGodCb || (s.auth.tgIds || []).includes(String(tgUserId)) || (user && (s.auth.userIds || []).includes(String(user.id))));
         if (!src || !mine(src)) {
           await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Expired or not yours', show_alert: true }).catch(() => {});
@@ -10156,7 +10164,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
         if (src.live) {
           await answered();
           const fresh = await buildStatsReport(env, token, scope);
-          const view = formatStatsRichReport(fresh);
+          const view = formatStatsRichReport(fresh, { dashPage });
           await editTelegramRichMessage(token, chatId, msgId, `${boldHtml('▶️')} ${escHtml(statsSourceDisplayName(src, 60))} is already live.` + '\n\n' + view.html, threadId, view.buttons);
           return new Response('OK', { status: 200, headers: corsHeaders });
         }
@@ -10171,7 +10179,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
           // without sending /stats again.
           try {
             const fresh = await buildStatsReport(env, token, scope);
-            const view = formatStatsRichReport(fresh);
+            const view = formatStatsRichReport(fresh, { dashPage });
             await editTelegramRichMessage(token, chatId, msgId, `${boldHtml('❌ Live clone failed:')} ${escHtml(why)}` + '\n\n' + view.html, threadId, view.buttons);
           } catch (_) {
             await editTelegramMessage(token, chatId, msgId, `${boldHtml('❌ Live clone failed:')} ${escHtml(why)}`, null, threadId).catch(() => {});
@@ -10213,7 +10221,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
           }
         }
         const fresh = await buildStatsReport(env, token, scope);
-        const view = formatStatsRichReport(fresh);
+        const view = formatStatsRichReport(fresh, { dashPage });
         const note = `${boldHtml('▶️')} Live clone restarted for ${escHtml(display)}: full clone running first, then live follows${userbotMode ? ' (userbot mode — bot is not in the chat, so bot-mode live stays off)' : ''}. Progress in ${codeHtml('/stats')}.`;
         await editTelegramRichMessage(token, chatId, msgId, note + '\n\n' + view.html, threadId, view.buttons);
       } catch (e) {
@@ -10221,7 +10229,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
         try {
           const user2 = await resolveAthenaUserFromTg(env, tgUserId);
           const scope2 = { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user2 ? String(user2.id) : '') };
-          const view = formatStatsRichReport(await buildStatsReport(env, token, scope2));
+          const view = formatStatsRichReport(await buildStatsReport(env, token, scope2), { dashPage });
           await editTelegramRichMessage(token, chatId, msgId, boldHtml('❌') + ' Live clone failed: ' + codeHtml(escHtml(String(e?.message || e).slice(0, 160))) + '\n\n' + view.html, threadId, view.buttons);
         } catch (_) {
           await editTelegramMessage(token, chatId, msgId, boldHtml('❌') + ' Live clone failed: ' + codeHtml(escHtml(String(e?.message || e).slice(0, 160))), null, threadId).catch(() => {});
@@ -10237,6 +10245,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
         const scope = { requesterTgId: isGodCb ? null : tgUserId, athenaUserId: isGodCb ? null : (user ? String(user.id) : '') };
         const idx = Math.max(0, Number(parts[2]) || 0);
         const tp = Math.max(0, Number(parts[3]) || 0);
+        const dashPage = Math.max(0, (action === 'delyes' ? Number(parts[3]) : Number(parts[4])) || 0);
         const report = await buildStatsReport(env, token, scope);
         const src = (report.sources || [])[idx];
         const mine = (s) => s && s.auth && (isGodCb || (s.auth.tgIds || []).includes(String(tgUserId)) || (user && (s.auth.userIds || []).includes(String(user.id))));
@@ -10255,8 +10264,8 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
             `${boldHtml('⚠️ Remove')} ${escHtml(display)} ${boldHtml('from stats?')}`,
             `Stops its live capture too. Saved links and files stay — re-clone to bring it back.`,
           ].join('\n'), threadId, [
-            [{ label: '✅ Yes, remove', data: 'stats:delyes:' + idx }],
-            [{ label: '« Back', data: 'stats:src:' + idx + ':' + tp }],
+            [{ label: '✅ Yes, remove', data: `stats:delyes:${idx}:${dashPage}` }],
+            [{ label: '« Back', data: `stats:src:${idx}:${tp}:${dashPage}` }],
           ].map((r) => richButtonRow(r)).join('\n'));
           return new Response('OK', { status: 200, headers: corsHeaders });
         }
@@ -10264,7 +10273,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
         const { bits } = await stopSourceLiveJobs(env, src, { isGodCb, user });
         const hidden = await hideSourceFromStats(env, src);
         const fresh = await buildStatsReport(env, token, scope);
-        const view = formatStatsRichReport(fresh);
+        const view = formatStatsRichReport(fresh, { dashPage });
         const removed = [];
         if (bits.length) removed.push(bits.join(' + ') + ' stopped');
         if (hidden.parents + hidden.jobs) removed.push(`${hidden.parents + hidden.jobs} run${hidden.parents + hidden.jobs === 1 ? '' : 's'} hidden`);
@@ -11099,7 +11108,7 @@ async function statsSourceAllowed(env, { isGodCb, user, src }) {
  * the drill-down delete (which additionally hides the source from stats).
  */
 async function stopSourceLiveJobs(env, src, { isGodCb, user }) {
-  const stopped = await stopLiveCapture(env, src.chat_id, src.community || '');
+  const stopped = await stopLiveCapture(env, src.chat_id, src.community || '', src.thread_id || '');
   const bits = [];
   if (stopped.followsRemoved) bits.push(`${stopped.followsRemoved} follow${stopped.followsRemoved === 1 ? '' : 's'}`);
   if (stopped.linksRemoved) bits.push(`${stopped.linksRemoved} bot live${stopped.linksRemoved === 1 ? '' : 's'}`);
@@ -11108,13 +11117,14 @@ async function stopSourceLiveJobs(env, src, { isGodCb, user }) {
   let jobsStopped = 0;
   try {
     const stopComm = String(src.community || '');
+    const thr = src.thread_id ? String(src.thread_id) : '';
     const jobRows = await env.DB.prepare(
-      `SELECT id FROM index_jobs WHERE status IN ('queued','running','stopping') AND (chat_id = ? OR chat_id = ?) AND (community_id = ? OR ? = '')`
+      `SELECT id, user_id, thread_id FROM index_jobs WHERE status IN ('queued','running','stopping') AND (chat_id = ? OR chat_id = ?) AND (community_id = ? OR ? = '')`
     ).bind(stopped.chatId, stopped.chatId.replace(/^-100/, ''), stopComm, stopComm).all().catch(() => ({ results: [] }));
     for (const j of jobRows?.results || jobRows || []) {
+      if (thr && String(j.thread_id || '') !== thr) continue;
       if (!isGodCb) {
-        const owner = await env.DB.prepare('SELECT user_id FROM index_jobs WHERE id = ?').bind(j.id).first().catch(() => null);
-        if (!owner || String(owner.user_id) !== String(user?.id || '—none—')) continue;
+        if (!j.user_id || String(j.user_id) !== String(user?.id || '—none—')) continue;
       }
       await env.DB.prepare(`UPDATE index_jobs SET status = 'stopping', updated_at = ? WHERE id = ?`).bind(Date.now(), j.id).run().catch(() => {});
       await env.DB.prepare('DELETE FROM telegram_index_sessions WHERE id = ?').bind(j.id).run().catch(() => {});
@@ -11141,26 +11151,42 @@ export async function hideSourceFromStats(env, src) {
   const srcBare = srcChat.replace(/^-100/, '');
   const srcTarget = String(src?.target || 'community');
   const srcOwner = String(src?.owner || '');
+  const srcThr = (src?.thread_id != null && String(src.thread_id).trim() !== '') ? String(src.thread_id).trim() : null;
   const normTarget = (t) => { const s = String(t || ''); return s === '' ? 'community' : s; };
   const ownerOf = (normT, community, user) => normT === 'personal' ? String(user || '') : String(community || '');
   const parentIds = new Set([...((src?.ids?.parents || []).map(String)).filter(Boolean)]);
   const jobIds = new Set([...((src?.ids?.jobs || []).map(String)).filter(Boolean)]);
   try {
     const prow = await env.DB.prepare(
-      `SELECT id, target, community_id, requester_user_id FROM pending_clones WHERE chat_id = ? OR chat_id = ?`
+      `SELECT id, target, community_id, requester_user_id, stats_json, thread_id FROM pending_clones WHERE chat_id = ? OR chat_id = ?`
     ).bind(srcChat, srcBare).all().catch(() => ({ results: [] }));
     for (const p of prow?.results || prow || []) {
       const t = normTarget(p.target);
-      if (t === srcTarget && ownerOf(t, p.community_id, p.requester_user_id) === srcOwner && p.id != null) parentIds.add(String(p.id));
+      if (t === srcTarget && ownerOf(t, p.community_id, p.requester_user_id) === srcOwner && p.id != null) {
+        if (srcThr) {
+          let pState = {};
+          try { pState = typeof p.stats_json === 'string' ? JSON.parse(p.stats_json) : (p.stats_json || {}); } catch (_) {}
+          const pThr = statsExtractThreadKey({ ...p, state: pState });
+          if (pThr === srcThr) parentIds.add(String(p.id));
+        } else {
+          parentIds.add(String(p.id));
+        }
+      }
     }
   } catch (_) {}
   try {
     const jrow = await env.DB.prepare(
-      `SELECT id, target, community_id, user_id FROM index_jobs WHERE chat_id = ? OR chat_id = ? OR chat_id LIKE ? OR chat_id LIKE ?`
+      `SELECT id, target, community_id, user_id, thread_id FROM index_jobs WHERE chat_id = ? OR chat_id = ? OR chat_id LIKE ? OR chat_id LIKE ?`
     ).bind(srcChat, srcBare, `${srcChat}:%`, `${srcBare}:%`).all().catch(() => ({ results: [] }));
     for (const j of jrow?.results || jrow || []) {
       const t = normTarget(j.target);
-      if (t === srcTarget && ownerOf(t, j.community_id, j.user_id) === srcOwner && j.id != null) jobIds.add(String(j.id));
+      if (t === srcTarget && ownerOf(t, j.community_id, j.user_id) === srcOwner && j.id != null) {
+        if (srcThr) {
+          if (String(j.thread_id || '') === srcThr) jobIds.add(String(j.id));
+        } else {
+          jobIds.add(String(j.id));
+        }
+      }
     }
   } catch (_) {}
   const parentIdList = [...parentIds];
@@ -11180,39 +11206,57 @@ export async function hideSourceFromStats(env, src) {
   return out;
 }
 
-export async function stopLiveCapture(env, chatIdArg, communityId = '') {
+export async function stopLiveCapture(env, chatIdArg, communityId = '', threadId = '') {
   const cid = normalizeTgChatId(String(chatIdArg || ''));
   const bare = cid.replace(/^-100/, '');
   const comm = String(communityId || '').trim();
+  const thr = String(threadId || '').trim();
   let followsRemoved = 0;
   let linksRemoved = 0;
   try {
     await ensureUserbotTables(env);
-    const r = comm
-      ? await env.DB.prepare(
-        `DELETE FROM userbot_follows WHERE (chat_id = ? OR chat_id = ? OR chat_id LIKE ? OR chat_id LIKE ?) AND community_id = ?`
-      ).bind(cid, bare, `${cid}:%`, `${bare}:%`, comm).run().catch(() => null)
-      : await env.DB.prepare(
-        `DELETE FROM userbot_follows WHERE chat_id = ? OR chat_id = ? OR chat_id LIKE ? OR chat_id LIKE ?`
-      ).bind(cid, bare, `${cid}:%`, `${bare}:%`).run().catch(() => null);
-    followsRemoved = Number(r?.meta?.changes ?? r?.changes ?? 0);
+    if (thr) {
+      const r = comm
+        ? await env.DB.prepare(
+          `DELETE FROM userbot_follows WHERE (chat_id = ? OR chat_id = ?) AND community_id = ?`
+        ).bind(`${cid}:${thr}`, `${bare}:${thr}`, comm).run().catch(() => null)
+        : await env.DB.prepare(
+          `DELETE FROM userbot_follows WHERE chat_id = ? OR chat_id = ?`
+        ).bind(`${cid}:${thr}`, `${bare}:${thr}`).run().catch(() => null);
+      followsRemoved = Number(r?.meta?.changes ?? r?.changes ?? 0);
+      try {
+        await ensureTopicBindingTable(env);
+        await env.DB.prepare('DELETE FROM telegram_topic_bindings WHERE (chat_id = ? OR chat_id = ?) AND thread_id = ?').bind(cid, bare, thr).run().catch(() => {});
+      } catch (_) {}
+    } else {
+      const r = comm
+        ? await env.DB.prepare(
+          `DELETE FROM userbot_follows WHERE (chat_id = ? OR chat_id = ? OR chat_id LIKE ? OR chat_id LIKE ?) AND community_id = ?`
+        ).bind(cid, bare, `${cid}:%`, `${bare}:%`, comm).run().catch(() => null)
+        : await env.DB.prepare(
+          `DELETE FROM userbot_follows WHERE chat_id = ? OR chat_id = ? OR chat_id LIKE ? OR chat_id LIKE ?`
+        ).bind(cid, bare, `${cid}:%`, `${bare}:%`).run().catch(() => null);
+      followsRemoved = Number(r?.meta?.changes ?? r?.changes ?? 0);
+    }
   } catch (_) {}
   try {
     await ensureBotBindingColumns(env);
-    const rows = comm
-      ? await env.DB.prepare(
-        `SELECT id FROM community_bots WHERE platform = 'telegram' AND group_id IN (?, ?) AND community_id = ?`
-      ).bind(cid, bare, comm).all().catch(() => ({ results: [] }))
-      : await env.DB.prepare(
-        `SELECT id FROM community_bots WHERE platform = 'telegram' AND group_id IN (?, ?) AND community_id IS NOT NULL`
-      ).bind(cid, bare).all().catch(() => ({ results: [] }));
-    // Neutralize bot-mode live capture WITHOUT deleting the binding row:
-    // the row is the group↔community link (/community_verify), the topic
-    // lock, and the bot token. Deleting it unlinked the group and forced a
-    // duplicate community on re-verify. Re-clone re-enables capture.
-    for (const row of rows?.results || rows || []) {
-      await env.DB.prepare(`UPDATE community_bots SET channel_target = NULL, copy_text = 0 WHERE id = ?`).bind(row.id).run().catch(() => null);
-      linksRemoved++;
+    if (!thr) {
+      const rows = comm
+        ? await env.DB.prepare(
+          `SELECT id FROM community_bots WHERE platform = 'telegram' AND group_id IN (?, ?) AND community_id = ?`
+        ).bind(cid, bare, comm).all().catch(() => ({ results: [] }))
+        : await env.DB.prepare(
+          `SELECT id FROM community_bots WHERE platform = 'telegram' AND group_id IN (?, ?) AND community_id IS NOT NULL`
+        ).bind(cid, bare).all().catch(() => ({ results: [] }));
+      // Neutralize bot-mode live capture WITHOUT deleting the binding row:
+      // the row is the group↔community link (/community_verify), the topic
+      // lock, and the bot token. Deleting it unlinked the group and forced a
+      // duplicate community on re-verify. Re-clone re-enables capture.
+      for (const row of rows?.results || rows || []) {
+        await env.DB.prepare(`UPDATE community_bots SET channel_target = NULL, copy_text = 0 WHERE id = ?`).bind(row.id).run().catch(() => null);
+        linksRemoved++;
+      }
     }
   } catch (_) {}
   return { chatId: cid, followsRemoved, linksRemoved };
@@ -11525,17 +11569,52 @@ function statsCountersText(c) {
     '<br>📄 Files: ' + statsNum(c.savedFiles) + '<br>📦 Other: ' + statsNum(statsOtherCount(c)));
 }
 
-async function statsDatabaseCounters(env, target, owner, chatId) {
+function statsExtractThreadKey(item) {
+  if (!item) return '';
+  if (item.thread_id != null && String(item.thread_id).trim() !== '') {
+    return String(item.thread_id).trim();
+  }
+  const st = item.state || {};
+  if (st.prescribedThread != null && String(st.prescribedThread).trim() !== '') {
+    return String(st.prescribedThread).trim();
+  }
+  if (st.topicId != null && String(st.topicId).trim() !== '') {
+    return String(st.topicId).trim();
+  }
+  if (st.threadId != null && String(st.threadId).trim() !== '') {
+    return String(st.threadId).trim();
+  }
+  if (st.isForum && Array.isArray(st.chosen) && st.chosen.length === 1 && st.chosen[0]?.id != null) {
+    return String(st.chosen[0].id).trim();
+  }
+  if (Array.isArray(item.topics) && item.topics.length === 1 && item.topics[0]?.threadId != null) {
+    return String(item.topics[0].threadId).trim();
+  }
+  return '';
+}
+
+async function statsDatabaseCounters(env, target, owner, chatId, threadId = null) {
   if (!target || !owner || !chatId) return null;
   try {
     const destination = `${target}:${owner}`;
-    const row = await env.DB.prepare(`SELECT
-      COUNT(CASE WHEN content_key LIKE 'url:%' THEN 1 END) AS links,
-      COUNT(DISTINCT CASE WHEN content_key LIKE 'url:%' THEN message_id END) AS posts,
-      COUNT(CASE WHEN content_key = 'media' THEN 1 END) AS files,
-      COUNT(CASE WHEN content_key = 'text' THEN 1 END) AS docs
-      FROM clone_sources
-      WHERE destination=? AND chat_id=? AND status IN ('saved','duplicate')`).bind(destination, chatId).first();
+    const thr = (threadId != null && String(threadId).trim() !== '') ? String(threadId).trim() : null;
+    const q = thr
+      ? `SELECT
+          COUNT(CASE WHEN content_key LIKE 'url:%' THEN 1 END) AS links,
+          COUNT(DISTINCT CASE WHEN content_key LIKE 'url:%' THEN message_id END) AS posts,
+          COUNT(CASE WHEN content_key = 'media' THEN 1 END) AS files,
+          COUNT(CASE WHEN content_key = 'text' THEN 1 END) AS docs
+          FROM clone_sources
+          WHERE destination=? AND chat_id=? AND topic_id=? AND status IN ('saved','duplicate')`
+      : `SELECT
+          COUNT(CASE WHEN content_key LIKE 'url:%' THEN 1 END) AS links,
+          COUNT(DISTINCT CASE WHEN content_key LIKE 'url:%' THEN message_id END) AS posts,
+          COUNT(CASE WHEN content_key = 'media' THEN 1 END) AS files,
+          COUNT(CASE WHEN content_key = 'text' THEN 1 END) AS docs
+          FROM clone_sources
+          WHERE destination=? AND chat_id=? AND status IN ('saved','duplicate')`;
+    const bindArgs = thr ? [destination, chatId, thr] : [destination, chatId];
+    const row = await env.DB.prepare(q).bind(...bindArgs).first();
     return {
       savedLinks: Number(row?.links || 0), savedLinkPosts: Number(row?.posts || 0),
       savedFiles: Number(row?.files || 0), savedDocs: Number(row?.docs || 0), savedOther: Number(row?.docs || 0),
@@ -11601,11 +11680,12 @@ function statsSourceOverall(runs) {
  * clone_sources where the link was saved by a clone; personal links and
  * older rows without a source row simply carry no thread.
  */
-async function statsRecentLinks(env, target, owner, chatId, limit = 8) {
+async function statsRecentLinks(env, target, owner, chatId, limit = 8, threadId = null) {
   const out = [];
   if (!target || !owner || !chatId) return out;
   const cap = Math.max(1, Math.min(12, Number(limit) || 8));
   const since = Date.now() - 86400000;
+  const thr = (threadId != null && String(threadId).trim() !== '') ? String(threadId).trim() : null;
   try {
     const norm = normalizeTgChatId(chatId);
     const variants = [String(norm), String(norm).replace(/^-100/, '')];
@@ -11633,11 +11713,11 @@ async function statsRecentLinks(env, target, owner, chatId, limit = 8) {
         `SELECT DISTINCT s.snippet AS title, s.url AS url, s.mdate AS created_at, s.thread AS thread, s.linktitle AS linktitle FROM (
            SELECT cp.message_text AS snippet, elem->>'url' AS url, cp.message_date * 1000 AS mdate, cp.topic_id AS thread, l.title AS linktitle
            FROM (SELECT message_text, urls_json, message_date, topic_id FROM clone_posts
-                 WHERE destination = ? AND chat_id IN (${ph}) AND message_date > ?) cp
+                 WHERE destination = ? AND chat_id IN (${ph}) AND message_date > ? AND (? IS NULL OR topic_id = ?)) cp
            CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN cp.urls_json IS NULL OR cp.urls_json = '' THEN '[]'::jsonb ELSE cp.urls_json::jsonb END) AS elem
            LEFT JOIN links l ON l.community_id = ? AND l.url = (elem->>'url')
          ) s WHERE s.url IS NOT NULL AND s.url != '' ORDER BY s.mdate DESC LIMIT ${cap}`
-      ).bind(dest, ...variants, sinceSec, String(owner)).all().catch(() => null);
+      ).bind(dest, ...variants, sinceSec, thr, thr, String(owner)).all().catch(() => null);
       const prows = pr?.results || pr || [];
       if (prows.length) {
         return prows.slice(0, cap).map((x) => ({
@@ -11650,9 +11730,9 @@ async function statsRecentLinks(env, target, owner, chatId, limit = 8) {
       const r = await env.DB.prepare(
         `SELECT l.title AS title, l.url AS url, l.created_at AS created_at, MAX(cs.topic_id) AS thread FROM links l
          LEFT JOIN clone_sources cs ON cs.destination=? AND cs.chat_id IN (${ph}) AND cs.message_id=l.source_message_id AND cs.content_key LIKE 'url:%'
-         WHERE l.community_id=? AND l.source_chat_id IN (${ph}) AND l.created_at>?
+         WHERE l.community_id=? AND l.source_chat_id IN (${ph}) AND l.created_at>? AND (? IS NULL OR cs.topic_id = ?)
          GROUP BY l.id, l.title, l.url, l.created_at ORDER BY l.created_at DESC LIMIT ${cap}`
-      ).bind(dest, ...variants, String(owner), ...variants, since).all().catch(() => null);
+      ).bind(dest, ...variants, String(owner), ...variants, since, thr, thr).all().catch(() => null);
       if (r) return mapRows(r.results || r || []).slice(0, cap);
     } catch (_) {}
     // Older databases without source_chat_id: community-wide fallback.
@@ -11686,6 +11766,7 @@ function statsSourcesTotalsText(sources) {
 function statsSourceTopicsSuffix(s, max = 5) {
   const topics = Array.isArray(s?.topics) ? s.topics : [];
   if (!s?.isForum || !topics.length) return '';
+  if (String(s?.name || '').includes('[')) return '';
   const names = topics.map((t) => String(t?.title || (t?.threadId != null && t.threadId !== '' ? '#' + t.threadId : '')).trim()).filter(Boolean);
   if (!names.length) return '';
   const shown = names.slice(0, max);
@@ -11706,15 +11787,19 @@ function statsSourceRowLine(s, index) {
     ' · 🆕 +' + Number(s.fresh?.links || 0) + '/+' + Number(s.fresh?.files || 0);
 }
 
+const STATS_DASH_PAGE_SIZE = 5;
+
 /** One dashboard page: one row per cloned source, each with live state. */
-function statsDashboardPage(sources) {
-  const lines = [richHeading(3, '📊 CLONE STATS'), statsSourcesTotalsText(sources)];
+function statsDashboardPage(sources, pageSources = sources, dashPage = 0, totalDashPages = 1) {
+  const pageLabel = totalDashPages > 1 ? ` (Page ${dashPage + 1}/${totalDashPages})` : '';
+  const lines = [richHeading(3, '📊 CLONE STATS' + pageLabel), statsSourcesTotalsText(sources)];
   if (!sources.length) {
     lines.push(richParagraph('No clones yet. Start one with ' + codeHtml('/uclone') + ' or ' + codeHtml('/clone') + '.'));
     return lines.join('\n');
   }
   lines.push(richParagraph('Tap a source for its topics and the absolute latest links (last 24h).'));
-  lines.push('<ul>' + sources.map((s, i) => `<li>${statsSourceRowLine(s, i)}</li>`).join('') + '</ul>');
+  const start = dashPage * STATS_DASH_PAGE_SIZE;
+  lines.push('<ul>' + pageSources.map((s, i) => `<li>${statsSourceRowLine(s, start + i)}</li>`).join('') + '</ul>');
   return lines.join('\n');
 }
 
@@ -11773,6 +11858,8 @@ function formatStatsRichReport(report, sel = {}) {
   let src = -1;
   let topicPage;
   let topicPagesList;
+  const currentDashPage = Math.max(0, Number(sel?.dashPage || 0));
+
   if (!sources.length) {
     html = statsEmptyPage();
   } else if (sel && sel.src != null && sources[Number(sel.src)]) {
@@ -11783,33 +11870,48 @@ function formatStatsRichReport(report, sel = {}) {
     html = statsSourcePage(s, topicPagesList, topicPage);
     if (topicPagesList.length > 1) {
       rows.push([
-        { label: '◀ Previous', data: 'stats:src:' + src + ':' + Math.max(0, topicPage - 1) },
-        { label: '📚 Page ' + (topicPage + 1) + ' / ' + topicPagesList.length, data: 'stats:noop' },
-        { label: 'Next ▶', data: 'stats:src:' + src + ':' + Math.min(topicPagesList.length - 1, topicPage + 1) },
+        { label: '◀ Previous', data: `stats:src:${src}:${Math.max(0, topicPage - 1)}:${currentDashPage}` },
+        { label: `📚 Page ${topicPage + 1} / ${topicPagesList.length}`, data: 'stats:noop' },
+        { label: 'Next ▶', data: `stats:src:${src}:${Math.min(topicPagesList.length - 1, topicPage + 1)}:${currentDashPage}` },
       ]);
     }
     // Delete from the stats display: stops live capture too, saved links stay.
     // Two-step (ask → yes) like the /delete picker.
-    rows.push([{ label: '🗑 Delete from stats', data: 'stats:del:' + src + ':' + (topicPage || 0) }]);
-    rows.push([{ label: '« All sources', data: 'stats:dashboard' }]);
+    rows.push([{ label: '🗑 Delete from stats', data: `stats:del:${src}:${topicPage || 0}:${currentDashPage}` }]);
+    rows.push([{ label: '« All sources', data: `stats:dash:${currentDashPage}` }]);
   } else {
-    html = statsDashboardPage(sources);
-    for (let i = 0; i < sources.length; i++) {
-      const s = sources[i];
+    const totalSources = sources.length;
+    const totalDashPages = Math.max(1, Math.ceil(totalSources / STATS_DASH_PAGE_SIZE));
+    const safeDashPage = Math.min(totalDashPages - 1, currentDashPage);
+    const start = safeDashPage * STATS_DASH_PAGE_SIZE;
+    const pageSources = sources.slice(start, start + STATS_DASH_PAGE_SIZE);
+
+    html = statsDashboardPage(sources, pageSources, safeDashPage, totalDashPages);
+    for (let i = 0; i < pageSources.length; i++) {
+      const s = pageSources[i];
+      const globalIdx = start + i;
       const short = statsSourceDisplayName(s, 22);
       rows.push([
-        { label: `${i + 1}. ${short} ▸`, data: 'stats:src:' + i },
+        { label: `${globalIdx + 1}. ${short} ▸`, data: `stats:src:${globalIdx}:0:${safeDashPage}` },
         // Beside toggle: ⏹ stops live, ▶️ restarts it (full clone first).
-        { label: s.live ? '⏹' : '▶️', data: (s.live ? 'stats:stop:' : 'stats:start:') + i },
+        { label: s.live ? '⏹' : '▶️', data: `${s.live ? 'stats:stop:' : 'stats:start:'}${globalIdx}:${safeDashPage}` },
+      ]);
+    }
+    if (totalDashPages > 1) {
+      rows.push([
+        { label: '◀ Prev', data: safeDashPage > 0 ? `stats:dash:${safeDashPage - 1}` : 'stats:noop' },
+        { label: `📄 ${safeDashPage + 1} / ${totalDashPages}`, data: 'stats:noop' },
+        { label: 'Next ▶', data: safeDashPage + 1 < totalDashPages ? `stats:dash:${safeDashPage + 1}` : 'stats:noop' },
       ]);
     }
   }
   rows.push([
-    { label: '🔄 Refresh', data: 'stats:refresh' },
+    { label: '🔄 Refresh', data: `stats:refresh:${currentDashPage}` },
     { label: '💻 Clone', data: 'menu:clone' },
     { label: '❌ Close', data: 'stats:close' },
   ]);
-  return { html, pages: Math.max(1, sources.length), page: Math.max(0, src), totalRuns: sources.length, buttons: rows.map((r) => richButtonRow(r)).join('\n') };
+  const totalDashPages = Math.max(1, Math.ceil(sources.length / STATS_DASH_PAGE_SIZE));
+  return { html, pages: totalDashPages, page: Math.max(0, src >= 0 ? src : currentDashPage), totalRuns: sources.length, buttons: rows.map((r) => richButtonRow(r)).join('\n') };
 }
 
 function statsEmptyPage() {
@@ -19104,7 +19206,8 @@ export async function buildStatsReport(env, _token = null, scope = null) {
     {
       const seen = new Set();
       parents = parents.filter((p) => {
-        const key = [normalizeTgChatId(p.chat_id), String(p.target || ''), String(p.community_id || ''), String(p.requester_user_id || '')].join('|');
+        const thr = statsExtractThreadKey(p);
+        const key = [normalizeTgChatId(p.chat_id), thr ? `topic:${thr}` : 'all', String(p.target || ''), String(p.community_id || ''), String(p.requester_user_id || '')].join('|');
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
@@ -19243,7 +19346,7 @@ export async function buildStatsReport(env, _token = null, scope = null) {
     if (!agg.rows.length) statsMergeCounters(overall, state.counters || {}); // measuring-stage snapshot fallback
     const target = p.target || state.target;
     const owner = target === 'personal' ? p.requester_user_id : (p.community_id || state.communityId);
-    const stored = await statsDatabaseCounters(env, target, owner, p.chat_id);
+    const stored = await statsDatabaseCounters(env, target, owner, p.chat_id, statsExtractThreadKey(p));
     if (stored) Object.assign(overall, stored);
     // Old terminal runs that never saved anything are old logs, not status.
     if (['done', 'stopped', 'error', 'cancelled'].includes(String(state.stage || '')) &&
@@ -19282,8 +19385,9 @@ export async function buildStatsReport(env, _token = null, scope = null) {
     }
     const followKey = [normalizeTgChatId(p.chat_id), String(state.label || ''), String(p.target || ''), String(p.community_id || ''), String(p.requester_user_id || '')].join('|');
     const latest = await statsLatestActivity(env, p.target, p.target === 'personal' ? p.requester_user_id : p.community_id, p.chat_id);
+    const thrKey = statsExtractThreadKey(p);
     runs.push({
-      id: String(p.id), chat_id: normalizeTgChatId(p.chat_id), state: { ...state, overall, latest, requesterTgId: String(p.requester_tg_id || ''), requesterUserId: String(p.requester_user_id || '') },
+      id: String(p.id), chat_id: normalizeTgChatId(p.chat_id), thread_id: thrKey || null, state: { ...state, overall, latest, requesterTgId: String(p.requester_tg_id || ''), requesterUserId: String(p.requester_user_id || '') },
       jobs: agg.rows, live: state.stage === 'running' || agg.rows.some((j) => j.status === 'running' || j.status === 'queued') || liveFollowKeys.has(followKey) || liveBoundChats.has(normalizeTgChatId(p.chat_id)),
       topics, standalone: false,
       ids: { parents: [String(p.id)], jobs: (agg.rows || []).map((j) => String(j.id)) },
@@ -19316,7 +19420,7 @@ export async function buildStatsReport(env, _token = null, scope = null) {
     s.target = s.target || 'community';
     s.owner = s.target === 'personal' ? String(s.user_id || '') : String(s.community_id || '');
     const state = { ...s.state, isForum: topics.length > 0, stage: active ? 'running' : (s.jobs.some((j) => j.status === 'error') ? 'error' : 'done'), sourceType: topics.length ? 'group' : null, username: null, overall, latest, requesterTgId: String(s.requester_tg_id || ''), requesterUserId: String(s.user_id || '') };
-    runs.push({ id: 'standalone:' + s.jobs.map((j) => j.id).sort().join(','), chat_id: normalizeTgChatId(s.chat_id), state, jobs: s.jobs, live: active || s.live || liveBoundChats.has(normalizeTgChatId(s.chat_id)), topics, standalone: true, ids: { parents: [], jobs: (s.jobs || []).map((j) => String(j.id)) }, target: s.target || 'community', owner: s.owner || '' });
+    runs.push({ id: 'standalone:' + s.jobs.map((j) => j.id).sort().join(','), chat_id: normalizeTgChatId(s.chat_id), thread_id: null, state, jobs: s.jobs, live: active || s.live || liveBoundChats.has(normalizeTgChatId(s.chat_id)), topics, standalone: true, ids: { parents: [], jobs: (s.jobs || []).map((j) => String(j.id)) }, target: s.target || 'community', owner: s.owner || '' });
   }
 
   // One dashboard row per cloned source: merge every run (managed parents
@@ -19325,7 +19429,8 @@ export async function buildStatsReport(env, _token = null, scope = null) {
   {
     const byKey = new Map();
     for (const run of runs) {
-      const key = [run.chat_id, String(run.target || 'community'), String(run.owner || '')].join('|');
+      const thr = statsExtractThreadKey(run);
+      const key = [run.chat_id, thr ? `topic:${thr}` : 'all', String(run.target || 'community'), String(run.owner || '')].join('|');
       if (!byKey.has(key)) byKey.set(key, []);
       byKey.get(key).push(run);
     }
@@ -19349,7 +19454,8 @@ export async function buildStatsReport(env, _token = null, scope = null) {
       const st0 = first.state || {};
       const isForum = groupRuns.some((r) => r.state?.isForum) || topics.length > 0;
       const type = st0.sourceType === 'channel' ? 'channel' : groupRuns.some((r) => r.state?.sourceType === 'channel') ? 'channel' : (isForum ? 'forum' : (first.target === 'personal' ? 'personal' : 'group'));
-      const recent = await statsRecentLinks(env, first.target || 'community', first.owner || '', first.chat_id, 8);
+      const thr = statsExtractThreadKey(first);
+      const recent = await statsRecentLinks(env, first.target || 'community', first.owner || '', first.chat_id, 8, thr || null);
       const auth = {
         tgIds: [...new Set(groupRuns.map((r) => String(r.state?.requesterTgId || '')).filter(Boolean))],
         userIds: [...new Set(groupRuns.map((r) => String(r.state?.requesterUserId || '')).filter(Boolean))],
@@ -19361,8 +19467,8 @@ export async function buildStatsReport(env, _token = null, scope = null) {
         for (const id of r.ids?.jobs || []) idJobs.add(String(id));
       }
       sources.push({
-        key: [first.chat_id, String(first.target || 'community'), String(first.community_id || ''), String(first.owner || '')].join('|'),
-        chat_id: first.chat_id, target: first.target || 'community', community: first.community_id || '', owner: first.owner || '',
+        key: [first.chat_id, thr ? `topic:${thr}` : 'all', String(first.target || 'community'), String(first.community_id || ''), String(first.owner || '')].join('|'),
+        chat_id: first.chat_id, thread_id: thr || null, target: first.target || 'community', community: first.community_id || '', owner: first.owner || '',
         name: st0.sourceName || first.chat_id, destinationName: st0.destinationName || '',
         label: st0.label || '', type, isForum, topics, overall, fresh, recent, live, auth,
         ids: { parents: [...idParents], jobs: [...idJobs] },
@@ -19444,6 +19550,8 @@ export {
   formatStatsRichReport,
   resolveJobLabel,
   STATS_TOPICS_PAGE_MAX,
+  STATS_DASH_PAGE_SIZE,
+  statsExtractThreadKey,
   USERBOT_ACCOUNTS,
   handleAdminGetLinks,
   handleGetTags,
