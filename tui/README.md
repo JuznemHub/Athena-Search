@@ -75,7 +75,11 @@ npm install -g athenasearch-tui
 4. **4 Scan bookmarks** — scans every browser profile found locally at once
    (Chrome/Chromium/Edge/Brave/Opera/Vivaldi/Arc/Firefox); if none are found it
    asks for an HTML/JSON export file.
-5. **5 Dump bookmarks** — GODs pick *personal* or *community* brain; others
+5. **5 Import social (Reddit/X)** — reads Reddit-Fetch `saved_posts.json`/`.html`
+   and X archives (official `twitter-archive` folder or TweetNook
+   `export json`) into the same dump queue; set `REDDIT_EXPORT_PATH`,
+   `X_ARCHIVE_PATH` or `TWEETNOOK_EXPORT_PATH` to skip the prompt.
+6. **6 Dump bookmarks** — GODs pick *personal* or *community* brain; others
    dump to their community. Server-side dedupe is handled (skips reported),
    folder paths become tags.
 
@@ -103,6 +107,13 @@ Or run it directly: `node tui/src/index.js`
   (colon-separated) — scanned one level deep for `Bookmarks`/`places.sqlite`;
   `athena-tui --diagnose` shows every root it checks
 - Non-HTTP(S) bookmarks are skipped; local duplicates collapse before upload
+- Social imports: [Reddit-Fetch](https://github.com/akashpandey/Reddit-Fetch)
+  `saved_posts.json`/`.html` (run `reddit-fetcher` once to create it) and X
+  archives — an extracted official archive (`data/tweets.js`, …) or
+  [TweetNook](https://github.com/GezerWezer/TweetNook)
+  (`tweetnook import x-archive <zip>`, `tweetnook export json --collection all`).
+  Tweets with outside links dump one entry per link; text-only tweets/likes
+  dump as a link to the tweet itself, tagged `x` (+ `r-<sub>` for Reddit)
 
 ## Env
 
@@ -110,6 +121,9 @@ Or run it directly: `node tui/src/index.js`
 | --- | --- |
 | `ATHENA_INSTANCE` | Skip the instance prompt |
 | `ATHENA_TOKEN` | Skip Telegram login (scripted use) |
+| `REDDIT_EXPORT_PATH` | Skip the social-import prompt (Reddit-Fetch JSON/HTML) |
+| `X_ARCHIVE_PATH` | Skip the social-import prompt (extracted X archive dir) |
+| `TWEETNOOK_EXPORT_PATH` | Skip the social-import prompt (TweetNook JSON export) |
 | `ATHENA_TUI_NO_ANIMATION` | Disable intro/spinner |
 
 ## Test

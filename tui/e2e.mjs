@@ -97,7 +97,7 @@ await waitFor(/Press .*to continue/);
 keys('\n');                    // continue
 console.log('> continue');
 await waitFor(/Dump bookmarks/);
-keys('5');                     // Dump bookmarks
+keys('6');                     // Dump bookmarks (5 is Import social)
 console.log('> dump');
 await waitFor(/Dump where\?/);
 keys('2');                     // Personal brain
