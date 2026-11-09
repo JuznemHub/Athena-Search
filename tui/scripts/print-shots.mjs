@@ -27,10 +27,12 @@ const items = [
   { label: 'Connect instance', hint: 'not connected' },
   { label: 'Join community', hint: 'not joined' },
   { label: 'Scan bookmarks', hint: 'not scanned' },
+  { label: 'Import social (Reddit/X)', hint: 'not imported' },
   { label: 'Dump bookmarks', hint: '' },
+  { label: 'Advanced (MCP)', hint: 'MCP config for any agent' },
   { label: 'Status', hint: '' },
   { label: 'Quit', hint: '' },
 ];
-await menu(io, theme, { title: 'ATHENA SEARCH', items, width: WIDTH, header: head, label: 'actions' });
+await menu(io, theme, { title: 'ATHENA SEARCH', items, width: WIDTH, header: head, label: 'actions', allowTab: true });
 print('MENU', clean(out).trimEnd().split('\n'));
 print('WORDMARK', clean(titleBlock(theme, WIDTH, true).join('\n')).split('\n'));

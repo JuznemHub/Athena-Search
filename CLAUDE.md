@@ -75,9 +75,11 @@ Output is Telegram HTML via `escHtml` / `boldHtml` / `codeHtml` / `linkHtml` —
 
 Multiple bots bind per community (`community_bots`): `findTelegramBinding` resolves chat → bot → community, `tokenForBinding` picks the token.
 
-### Link enrichment
+### Link enrichment and tags
 
-`scrapeLinkMetadata` / `scrapeForgeMetadata` pull title, description, image by regex over fetched HTML — plain `fetch`, no headless browser, since it runs in a Worker. `isWeakTitle` / `isUiNoiseText` / `scoreDescriptionCandidate` / `parseReadmeIntro` reject site chrome and GitHub UI boilerplate.
+`scrapeLinkMetadata` / `scrapeForgeMetadata` pull title, description, image by regex over fetched HTML — plain `fetch` first. On a self-hosted server with Chromium (`CHROME_BIN`), `scrapeViaChromium` renders JavaScript pages with `--headless=new --dump-dom` and re-extracts. `isWeakTitle` / `isUiNoiseText` / `scoreDescriptionCandidate` / `parseReadmeIntro` reject site chrome and GitHub UI boilerplate.
+
+`worker/tag-taxonomy.js` is the single controlled vocabulary and classifier: `extractFacts` → `tagsFromFacts` / `classifyTags` → `validateTags`. Type, platform, ecosystem, brand, topic, language and attribute layers are separate; `multiplatform` is derived from the detected platform set, never chosen. `describeAndTagLink` is the shared pipeline used by every save path and `/forcetags` (AI from the vocabulary when a key is configured, rules otherwise). Links with `manual_edited_at` set by `/edit` or the website editor are never retagged.
 
 One message can carry a main link plus references; `scoreUrlAsPrimary` / `selectPrimaryLinks` decide which becomes its own entry.
 

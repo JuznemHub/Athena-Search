@@ -55,10 +55,18 @@ document.addEventListener('DOMContentLoaded', () => {
     authConfig: null,
     hasSearched: false,
     authReady: false,
-    isInstanceOwner: true // until /auth/me says otherwise; empty owner lists = all owners
+    isInstanceOwner: true, // until /auth/me says otherwise; empty owner lists = all owners
+    filterTag: '',
+    filterStatus: 'all',
+    filterSort: 'created_desc',
+    tags: [],
+    tagStats: null
   };
   function isGod() {
     return !!state.currentUser?.is_god;
+  }
+  function isStaffRank() {
+    return Boolean(state.currentUser?.is_god || state.currentUser?.['is_e' + 'levated']);
   }
   // ai.js only sends per-request AI credentials for GOD — the server rejects
   // them for anyone else.
@@ -82,6 +90,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const appRoot = $('appRoot');
   const authGateError = $('authGateError');
   const telegramLoginBtn = $('telegramLoginBtn');
+  const telegramWebLoginBtn = $('telegramWebLoginBtn');
   const discordLoginBtn = $('discordLoginBtn');
   const hamburgerBtn = $('hamburgerBtn');
   const sideDrawer = $('sideDrawer');
@@ -156,13 +165,16 @@ document.addEventListener('DOMContentLoaded', () => {
       ...options,
       headers: {
         ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
-        ...authHeaders(options.headers || {})
+        ...authHeaders(options.headers || {}),
+        ...(state.wikiShareToken ? { 'X-Wiki-Share-Token': state.wikiShareToken } : {})
       }
     });
     const data = await res.json().catch(() => ({}));
     if (res.status === 401 || data.code === 'AUTH_REQUIRED') {
-      clearSession();
-      showLoggedOut();
+      if (!state.publicWikiMode) {
+        clearSession();
+        showLoggedOut();
+      }
       throw Object.assign(new Error('Login required'), { auth: true });
     }
     return { res, data };
@@ -299,7 +311,10 @@ document.addEventListener('DOMContentLoaded', () => {
       addedByUserId: row.added_by_user_id || '',
       upvotes: row.upvotes || 0,
       downvotes: row.downvotes || 0,
-      myVote: row.my_vote || 0
+      myVote: row.my_vote || 0,
+      manualEditedAt: row.manual_edited_at || row.manualEditedAt || null,
+      lastEditedBy: row.last_edited_by || row.lastEditedBy || null,
+      lastEditedByName: row.last_edited_by_name || row.lastEditedByName || ''
     };
   }
 
@@ -444,6 +459,107 @@ document.addEventListener('DOMContentLoaded', () => {
       state.authConfig = {};
     }
     const cfg = state.authConfig || {};
+
+    if ((cfg.telegramBotEnabled || cfg.botUsername) && telegramWebLoginBtn) {
+      telegramWebLoginBtn.classList.remove('hidden');
+      telegramWebLoginBtn.disabled = false;
+      telegramWebLoginBtn.onclick = async () => {
+        try {
+          telegramWebLoginBtn.disabled = true;
+          telegramWebLoginBtn.textContent = 'Preparing login...';
+          const r = await fetch(`${API_BASE}/api/auth/telegram/bot-login-start`, { method: 'POST' });
+          const d = await r.json();
+          if (!d.success || !d.token) {
+            showAuthError(d.error || 'Could not start Telegram Web login.');
+            telegramWebLoginBtn.disabled = false;
+            telegramWebLoginBtn.textContent = 'Log in with Telegram Web';
+            return;
+          }
+          const targetUrl = d.tgWebUrl || d.tmeUrl;
+          window.open(targetUrl, '_blank', 'noopener,noreferrer');
+          telegramWebLoginBtn.textContent = 'Confirming in Telegram...';
+          authGateError.innerHTML = `Confirm login: click START in <a href="${targetUrl}" target="_blank" style="color:var(--accent,#2AABEE);text-decoration:underline;">Telegram Web</a> or <a href="${d.tmeUrl}" target="_blank" style="color:var(--accent,#2AABEE);text-decoration:underline;">Bot</a>.`;
+          authGateError.classList.remove('hidden');
+
+          let attempts = 0;
+          const pollInterval = setInterval(async () => {
+            attempts++;
+            if (attempts > 120) {
+              clearInterval(pollInterval);
+              telegramWebLoginBtn.disabled = false;
+              telegramWebLoginBtn.textContent = 'Log in with Telegram Web';
+              showAuthError('Login session timed out. Click again to retry.');
+              return;
+            }
+            try {
+              const pr = await fetch(`${API_BASE}/api/auth/telegram/bot-login-poll?token=${encodeURIComponent(d.token)}`);
+              const pd = await pr.json();
+              if (pd.status === 'authenticated' && pd.session) {
+                clearInterval(pollInterval);
+                await persistSession(pd.session);
+                if (pd.user) {
+                  state.currentUser = pd.user;
+                  state.isInstanceOwner = !!pd.user.is_god;
+                  state.isElevated = !!pd.user.is_elevated;
+                }
+                showLoggedIn();
+                updateUserUI();
+                await bootstrapAppData();
+              } else if (pd.status === 'expired' || pd.status === 'invalid') {
+                clearInterval(pollInterval);
+                telegramWebLoginBtn.disabled = false;
+                telegramWebLoginBtn.textContent = 'Log in with Telegram Web';
+                showAuthError('Login session expired. Try again.');
+              }
+            } catch (_) {}
+          }, 1500);
+        } catch (err) {
+          showAuthError(err.message || 'Telegram Web login failed.');
+          telegramWebLoginBtn.disabled = false;
+          telegramWebLoginBtn.textContent = 'Log in with Telegram Web';
+        }
+      };
+    }
+
+    window.onTelegramAuth = async (user) => {
+      try {
+        const initData = new URLSearchParams(user).toString();
+        const res = await fetch(`${API_BASE}/api/auth/telegram/webapp`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ initData })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (data.success && data.session) {
+          await persistSession(data.session);
+          if (data.user) {
+            state.currentUser = data.user;
+            state.isInstanceOwner = !!data.user.is_god;
+            state.isElevated = !!data.user.is_elevated;
+          }
+          showLoggedIn();
+          updateUserUI();
+          await bootstrapAppData();
+        } else {
+          showAuthError(data.error || 'Telegram Widget authentication failed.');
+        }
+      } catch (err) {
+        showAuthError(err.message || 'Telegram Widget authentication error.');
+      }
+    };
+
+    if (cfg.botUsername && $('telegramWidgetContainer') && !$('telegramWidgetContainer').hasChildNodes()) {
+      const s = document.createElement('script');
+      s.async = true;
+      s.src = 'https://telegram.org/js/telegram-widget.js?22';
+      s.setAttribute('data-telegram-login', cfg.botUsername);
+      s.setAttribute('data-size', 'large');
+      s.setAttribute('data-userpic', 'false');
+      s.setAttribute('data-onauth', 'onTelegramAuth(user)');
+      s.setAttribute('data-request-access', 'write');
+      $('telegramWidgetContainer').appendChild(s);
+    }
+
     if (cfg.telegramEnabled && telegramLoginBtn) {
       telegramLoginBtn.disabled = false;
       telegramLoginBtn.onclick = async () => {
@@ -637,8 +753,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function applyRoleUI() {
     const god = isGod();
+    const isStaff = isStaffRank();
     const aiOk = canUseAi();
     const aiCfg = canEditAiConfig();
+
+    const adminNavBtn = $('adminDbNavBtn');
+    if (adminNavBtn) adminNavBtn.classList.toggle('hidden', !isStaff);
+    const adminDrawer = $('adminDrawerSection');
+    if (adminDrawer) adminDrawer.classList.toggle('hidden', !isStaff);
+
+    const wikiShareBtn = $('wikiShareBtn');
+    if (wikiShareBtn) wikiShareBtn.classList.toggle('hidden', !god);
+
     const wipeWrap = $('wipePersonalWrap');
     const wipeBtn = $('wipePersonalBtn');
     if (wipeWrap) {
@@ -693,6 +819,14 @@ document.addEventListener('DOMContentLoaded', () => {
         updateScopeUI();
       }
     }
+    const mainScopeSelect = $('mainScopeSelect');
+    if (mainScopeSelect) {
+      const personalOpt = mainScopeSelect.querySelector('option[value="personal"]');
+      if (personalOpt) {
+        personalOpt.disabled = !god;
+        personalOpt.textContent = god ? 'Personal (GOD)' : 'Personal (GOD locked)';
+      }
+    }
     const backendInput = $('backendUrl');
     if (backendInput) backendInput.disabled = !god;
     $('defaultBackendBtn')?.classList.toggle('hidden', !god);
@@ -726,6 +860,7 @@ document.addEventListener('DOMContentLoaded', () => {
     await step('corpus', () => Promise.all([loadPersonalLinks(), loadCommunityLinksIfAny(), loadPersonalDocuments(), loadCommunityDocumentsIfAny()]));
     await step('bot bindings', () => loadCommunityBots());
     await step('community admins', () => loadCommunityAdmins());
+    await step('tags', () => loadMainTags());
     await step('notifications', () => loadNotifications());
 
     // These must run even if every fetch above failed, or there is no usable UI.
@@ -736,6 +871,11 @@ document.addEventListener('DOMContentLoaded', () => {
       updateScopeUI();
       renderHome();
       startLiveSync();
+      if (window.location.hash === '#db' || window.location.hash === '#admin') {
+        if (isStaffRank()) openAdminDb();
+      } else if (window.location.hash === '#wiki') {
+        openWiki();
+      }
     } catch (err) {
       console.error('[athena] render failed:', err);
     }
@@ -984,6 +1124,21 @@ document.addEventListener('DOMContentLoaded', () => {
     if (state.activeCommunity && !state.communities.find(c => c.id === state.activeCommunity)) {
       state.activeCommunity = '';
       localStorage.removeItem('athena_active_community');
+    }
+    const mainCommSel = $('mainCommunitySelect');
+    if (mainCommSel) {
+      mainCommSel.innerHTML = '';
+      if (!state.communities.length) {
+        mainCommSel.innerHTML = '<option value="">No communities</option>';
+      } else {
+        state.communities.forEach(c => {
+          const opt = document.createElement('option');
+          opt.value = c.id;
+          opt.textContent = `${c.name}${c.link_count != null ? ` (${c.link_count})` : ''}`;
+          if (c.id === state.activeCommunity) opt.selected = true;
+          mainCommSel.appendChild(opt);
+        });
+      }
     }
     renderCommunityDetails();
     updateDeleteModeVisibility();
@@ -1406,6 +1561,8 @@ document.addEventListener('DOMContentLoaded', () => {
     searchBarBox.classList.toggle('mode-ai', mode === 'ai');
     searchBarBox.classList.toggle('mode-search', mode === 'search');
     searchBarBox.classList.toggle('mode-delete', mode === 'delete');
+    const mainDbPanel = $('mainDbPanel');
+    if (mainDbPanel) mainDbPanel.classList.toggle('hidden', mode !== 'search');
 
     if (mode === 'search') {
       modeBadgeText.textContent = 'Search';
@@ -1451,6 +1608,14 @@ document.addEventListener('DOMContentLoaded', () => {
   function updateScopeUI() {
     personalScopeBtn.classList.toggle('active', state.scope === 'personal');
     communityScopeBtn.classList.toggle('active', state.scope === 'community');
+    const mainScopeSelect = $('mainScopeSelect');
+    if (mainScopeSelect && mainScopeSelect.value !== state.scope) {
+      mainScopeSelect.value = state.scope;
+    }
+    const commWrap = $('mainCommunityWrap');
+    if (commWrap) {
+      commWrap.style.display = state.scope === 'community' ? 'flex' : 'none';
+    }
     if (state.mode === 'search') {
       scopeSubtitle.textContent = state.scope === 'personal'
         ? 'Search personal notes & links'
@@ -1476,19 +1641,45 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function filterLinks(links, query) {
-    if (!query) return links;
-    // Prefer Athena fuzzy search (ytdlp ↔ yt-dlp)
-    if (window.AthenaSearch?.searchCorpus) {
-      const limit = window.__athenaSteroid ? 500 : 80;
-      return window.AthenaSearch.searchCorpus(links, query, limit);
+    let list = links || [];
+    if (query) {
+      // Prefer Athena fuzzy search (ytdlp ↔ yt-dlp)
+      if (window.AthenaSearch?.searchCorpus) {
+        const limit = window.__athenaSteroid ? 500 : 80;
+        list = window.AthenaSearch.searchCorpus(list, query, limit);
+      } else {
+        const q = query.toLowerCase();
+        const qa = q.replace(/[^a-z0-9]/g, '');
+        list = list.filter(item => {
+          const bag = [item.title, item.url, item.notes, (item.tags || []).join(' ')].join(' ').toLowerCase();
+          const ba = bag.replace(/[^a-z0-9]/g, '');
+          return bag.includes(q) || (qa.length >= 2 && ba.includes(qa));
+        });
+      }
     }
-    const q = query.toLowerCase();
-    const qa = q.replace(/[^a-z0-9]/g, '');
-    return links.filter(item => {
-      const bag = [item.title, item.url, item.notes, item.tags].join(' ').toLowerCase();
-      const ba = bag.replace(/[^a-z0-9]/g, '');
-      return bag.includes(q) || (qa.length >= 2 && ba.includes(qa));
-    });
+    if (state.filterTag) {
+      const tagLower = state.filterTag.toLowerCase();
+      if (tagLower === 'notags') {
+        list = list.filter(item => !item.tags || item.tags.length === 0);
+      } else {
+        list = list.filter(item => (item.tags || []).some(t => String(t).toLowerCase() === tagLower));
+      }
+    }
+    if (state.filterStatus === 'edited') {
+      list = list.filter(item => Boolean(item.manualEditedAt || item.manual_edited_at));
+    } else if (state.filterStatus === 'unedited') {
+      list = list.filter(item => !item.manualEditedAt && !item.manual_edited_at);
+    }
+    if (state.filterSort === 'edited_desc') {
+      list = [...list].sort((a, b) => Number(b.manualEditedAt || b.manual_edited_at || 0) - Number(a.manualEditedAt || a.manual_edited_at || 0));
+    } else if (state.filterSort === 'created_asc') {
+      list = [...list].sort((a, b) => Number(a.createdAt || a.created_at || 0) - Number(b.createdAt || b.created_at || 0));
+    } else if (state.filterSort === 'title_asc') {
+      list = [...list].sort((a, b) => String(a.title || '').localeCompare(String(b.title || '')));
+    } else if (state.filterSort === 'created_desc') {
+      list = [...list].sort((a, b) => Number(b.createdAt || b.created_at || 0) - Number(a.createdAt || a.created_at || 0));
+    }
+    return list;
   }
 
   function highlight(text, query) {
@@ -1555,6 +1746,9 @@ document.addEventListener('DOMContentLoaded', () => {
     resultsMeta.textContent = `About ${items.length} result${items.length === 1 ? '' : 's'}${query ? ` for “${query}”` : ''}${corpusTotal != null ? ` · ${corpusTotal} saved items searched` : ''}`;
 
     const isCommunity = state.scope === 'community';
+    // Owner/admin only: everyone else sees no edit/delete affordance, and the
+    // server rejects the call with "Only owner/admins can edit or delete".
+    const canModerate = state.scope === 'personal' || isStaffRank() || isCommunityStaff();
 
     items.forEach(item => {
       const card = document.createElement('article');
@@ -1609,21 +1803,52 @@ document.addEventListener('DOMContentLoaded', () => {
           </div>`
         : `<div class="g-meta">${escapeHtml(when)}${(item.tags || []).length ? ' · ' + item.tags.map(t => '#' + escapeHtml(t)).join(' ') : ''}</div>`;
 
+      const editAuditHtml = item.manualEditedAt
+        ? `<div class="g-audit-row">
+            <span class="admin-edit-badge" title="Manually edited">
+              ✏️ Last edited by <strong>${escapeHtml(item.lastEditedByName || 'Admin')}</strong> · ${escapeHtml(formatDateTime(item.manualEditedAt))}
+            </span>
+           </div>`
+        : '';
+
+      const tagsList = (item.tags || []).filter(Boolean);
+      const tagsHtml = tagsList.length
+        ? `<div class="g-card-tags">
+            ${tagsList.map(t => `<button type="button" class="g-tag-chip" data-tag="${escapeHtml(t)}">#${escapeHtml(t)}</button>`).join('')}
+           </div>`
+        : `<div class="g-card-tags">
+            <button type="button" class="g-tag-chip g-tag-empty" data-tag="notags" title="Untagged link — click to filter">#notags</button>
+           </div>`;
+
+      const cardActionsHtml = canModerate ? `
+        <div class="g-card-actions">
+          <button type="button" class="btn btn-secondary btn-sm edit-link-btn" data-id="${escapeHtml(item.id)}" title="Edit link and tags">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+            <span>Edit</span>
+          </button>
+          <button type="button" class="btn btn-sm g-card-del-btn del-link-btn" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(item.title || item.url || 'this link')}" title="Delete link from database">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+            <span>Delete</span>
+          </button>
+        </div>` : '';
+
       card.innerHTML = `
         ${authorLine}
         <div class="g-url-row">
-          ${favicon
-            ? `<img class="g-favicon-img" src="${safeHref(favicon)}" alt="" width="18" height="18" loading="lazy" referrerpolicy="no-referrer" onerror="this.classList.add('hidden');this.nextElementSibling?.classList.remove('hidden')">`
-            : ''}
-          <span class="g-favicon ${favicon ? 'hidden' : ''}"></span>
-          <cite class="g-cite">${site ? escapeHtml(site) + ' · ' : ''}${highlight(displayUrl, query)}</cite>
+          <div class="g-url-meta">
+            ${favicon
+              ? `<img class="g-favicon-img" src="${safeHref(favicon)}" alt="" width="18" height="18" loading="lazy" referrerpolicy="no-referrer" onerror="this.classList.add('hidden');this.nextElementSibling?.classList.remove('hidden')">`
+              : ''}
+            <span class="g-favicon ${favicon ? 'hidden' : ''}"></span>
+            <cite class="g-cite">${site ? escapeHtml(site) + ' · ' : ''}${highlight(displayUrl, query)}</cite>
+          </div>
+          ${cardActionsHtml}
         </div>
         <a class="g-title" href="${safeHref(href)}" ${item.url ? 'target="_blank" rel="noopener noreferrer"' : ''}>${highlight(item.title || 'Untitled', query)}</a>
-        <p class="g-snippet">${highlight(desc, query)}</p>
+        ${desc ? `<p class="g-snippet">${highlight(desc, query)}</p>` : ''}
+        ${tagsHtml}
         ${voteRow}
-        <button type="button" class="edit-link-btn" data-id="${escapeHtml(item.id)}" title="Edit" aria-label="Edit">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-        </button>
+        ${editAuditHtml}
         <div class="edit-panel hidden" data-edit-for="${escapeHtml(item.id)}">
           <label>Title</label>
           <input type="text" class="edit-title" value="${escapeHtml(item.title || '')}" />
@@ -1631,13 +1856,34 @@ document.addEventListener('DOMContentLoaded', () => {
           <input type="url" class="edit-url" value="${escapeHtml(item.url || '')}" />
           <label>Description</label>
           <textarea class="edit-notes" rows="3">${escapeHtml(item.notes || '')}</textarea>
+          <label>Tags (space or comma-separated)</label>
+          <input type="text" class="edit-tags" value="${escapeHtml((item.tags || []).map(t => '#' + t).join(' '))}" placeholder="e.g. #ai #tools #docs" />
           <div class="edit-panel-actions">
             <button type="button" class="btn btn-primary btn-sm edit-save">Save</button>
             <button type="button" class="btn btn-secondary btn-sm edit-cancel">Cancel</button>
+            <button type="button" class="btn btn-sm g-card-del-btn edit-delete">Delete</button>
           </div>
         </div>
       `;
       resultsList.appendChild(card);
+    });
+
+    resultsList.querySelectorAll('.g-tag-chip').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const tag = btn.dataset.tag;
+        if (!tag) return;
+        if (tag.toLowerCase() === 'notags') {
+          state.filterTag = 'notags';
+        } else if (state.filterTag && state.filterTag.toLowerCase() === tag.toLowerCase()) {
+          state.filterTag = '';
+        } else {
+          state.filterTag = tag;
+        }
+        renderMainTags();
+        runSearch();
+      });
     });
 
     resultsList.querySelectorAll('.edit-link-btn').forEach(btn => {
@@ -1679,6 +1925,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const title = panel.querySelector('.edit-title')?.value?.trim() || '';
         const url = panel.querySelector('.edit-url')?.value?.trim() || '';
         const notes = panel.querySelector('.edit-notes')?.value?.trim() || '';
+        const tagsVal = panel.querySelector('.edit-tags')?.value?.trim() || '';
+        const tags = tagsVal.split(/[\s,]+/).map(t => t.replace(/^#+/, '').trim()).filter(Boolean);
         if (!url && !title && !notes) {
           showToast('Nothing to save', true);
           return;
@@ -1688,7 +1936,7 @@ document.addEventListener('DOMContentLoaded', () => {
           const path = state.scope === 'community' ? '/api/links' : '/api/personal-links';
           const { res, data } = await api(path, {
             method: 'PATCH',
-            body: JSON.stringify({ id, title, url, notes })
+            body: JSON.stringify({ id, title, url, notes, tags })
           });
           if (!res.ok || !data.success) {
             showToast(data.error || 'Edit failed', true);
@@ -1702,24 +1950,77 @@ document.addEventListener('DOMContentLoaded', () => {
               title: data.title != null ? data.title : title,
               url: data.url || url,
               notes: data.notes != null ? data.notes : notes,
+              tags: Array.isArray(data.tags) ? data.tags : tags,
               imageUrl: data.image_url || list[idx].imageUrl,
-              siteName: data.site_name || list[idx].siteName
+              siteName: data.site_name || list[idx].siteName,
+              manualEditedAt: data.manual_edited_at || Date.now(),
+              lastEditedBy: data.last_edited_by || state.currentUser?.id,
+              lastEditedByName: data.last_edited_by_name || state.currentUser?.displayName || state.currentUser?.username || 'Admin'
             };
           }
-          showToast('Link updated');
+          showToast('Link updated in database');
+          wikiState.dirty = true;
+          if ($('wikiView') && !$('wikiView').classList.contains('hidden')) {
+            loadWikiData();
+          }
           panel.classList.add('hidden');
           card?.classList.remove('editing');
           card?.classList.add('edited-flash');
           setTimeout(() => card?.classList.remove('edited-flash'), 1200);
-          renderGoogleResults(
-            filterLinks(corpus(), searchInput.value.trim() || query || ''),
-            searchInput.value.trim() || query || ''
-          );
+          await loadMainTags();
+          runSearch();
         } catch (err) {
           showToast(err.message || 'Edit failed', true);
         } finally {
           btn.disabled = false;
         }
+      });
+    });
+
+    // Delete from the same DB row the card shows (website + bot stay in sync).
+    const deleteLinkById = async (id, btn) => {
+      const isComm = state.scope === 'community';
+      const item = (isComm ? state.communityLinks : state.personalLinks).find(l => l.id === id);
+      const label = item?.title || item?.url || 'this link';
+      if (!window.confirm(`Delete "${String(label).slice(0, 80)}" from the database? This cannot be undone.`)) return;
+      if (btn) btn.disabled = true;
+      try {
+        const path = isComm ? '/api/links' : '/api/personal-links';
+        const body = isComm
+          ? JSON.stringify({ id, community_id: state.activeCommunity })
+          : JSON.stringify({ id });
+        const { res, data } = await api(path, { method: 'DELETE', body });
+        if (!res.ok || !data.success) {
+          showToast(data.error || 'Delete failed', true);
+          if (btn) btn.disabled = false;
+          return;
+        }
+        const list = isComm ? state.communityLinks : state.personalLinks;
+        const idx = list.findIndex(l => l.id === id);
+        if (idx >= 0) list.splice(idx, 1);
+        showToast('Link deleted from database');
+        wikiState.dirty = true;
+        if ($('wikiView') && !$('wikiView').classList.contains('hidden')) {
+          loadWikiData();
+        }
+        await loadMainTags();
+        runSearch();
+      } catch (err) {
+        showToast(err.message || 'Delete failed', true);
+        if (btn) btn.disabled = false;
+      }
+    };
+    resultsList.querySelectorAll('.del-link-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        deleteLinkById(btn.dataset.id, btn);
+      });
+    });
+    resultsList.querySelectorAll('.edit-delete').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const panel = btn.closest('.edit-panel');
+        deleteLinkById(panel?.dataset.editFor, btn);
       });
     });
 
@@ -1785,7 +2086,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const q = searchInput.value.trim();
     state.hasSearched = true;
     aiAnswerCard.classList.add('hidden');
-    if (!q) {
+    const hasFilter = Boolean(state.filterTag || (state.filterStatus && state.filterStatus !== 'all') || (state.filterSort && state.filterSort !== 'created_desc'));
+
+    if (!q && !hasFilter) {
       enrichmentRefreshKey = '';
       renderHome();
       return;
@@ -1817,7 +2120,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const seq = ++searchSeq;
     const skSeq = seq;
     try {
-      const params = new URLSearchParams({ q, scope: state.scope });
+      const params = new URLSearchParams({ scope: state.scope });
+      if (q) params.set('q', q);
+      if (state.filterTag) params.set('tag', state.filterTag);
+      if (state.filterStatus && state.filterStatus !== 'all') params.set('edited', state.filterStatus);
+      if (state.filterSort) params.set('sort', state.filterSort);
       if (state.scope === 'community') {
         if (!state.activeCommunity) return;
         params.set('community_id', state.activeCommunity);
@@ -1841,6 +2148,78 @@ document.addEventListener('DOMContentLoaded', () => {
       if (skeletonTimer) clearTimeout(skeletonTimer);
       if (!resultsList.children.length || resultsList.querySelector('.g-result-skeleton')) renderGoogleResults([], q);
     }
+  }
+
+  async function loadMainTags() {
+    const summaryEl = $('mainTagsSummary');
+    const cloudEl = $('mainTagsCloud');
+    if (!cloudEl) return;
+    try {
+      const qParams = new URLSearchParams({ scope: state.scope });
+      if (state.scope === 'community' && state.activeCommunity) {
+        qParams.set('community_id', state.activeCommunity);
+      }
+      const { res, data } = await api(`/api/tags?${qParams.toString()}`);
+      if (res.ok && data.success && Array.isArray(data.tags)) {
+        state.tags = data.tags;
+        state.tagStats = {
+          total: data.total || 0,
+          taggedCount: data.tagged_count || 0,
+          untaggedCount: data.untagged_count || 0,
+          uniqueTags: data.unique_tags || 0
+        };
+        renderMainTags();
+      } else if (summaryEl) {
+        summaryEl.textContent = 'Tags unavailable';
+      }
+    } catch (_) {
+      if (summaryEl) summaryEl.textContent = '';
+    }
+  }
+
+  function renderMainTags() {
+    const summaryEl = $('mainTagsSummary');
+    const cloudEl = $('mainTagsCloud');
+    const clearBtn = $('mainTagClearBtn');
+    if (!cloudEl) return;
+
+    if (clearBtn) {
+      clearBtn.classList.toggle('hidden', !state.filterTag);
+    }
+
+    if (summaryEl && state.tagStats) {
+      summaryEl.textContent = `${state.tagStats.uniqueTags} tags · ${state.tagStats.total} total links`;
+    }
+
+    if (!state.tags || !state.tags.length) {
+      cloudEl.innerHTML = '<span style="color:var(--text-muted);font-size:0.75rem;">No tags found in this corpus.</span>';
+      return;
+    }
+
+    cloudEl.innerHTML = state.tags.map(t => {
+      const isSelected = state.filterTag && state.filterTag.toLowerCase() === t.name.toLowerCase();
+      const isNoTags = t.name.toLowerCase() === 'notags';
+      return `
+        <button type="button" class="main-tag-chip ${isSelected ? 'active' : ''}" data-tag="${escapeHtml(t.name)}" title="${isNoTags ? 'Untagged links' : `Tag #${escapeHtml(t.name)}`} (${t.count})">
+          <span>#${escapeHtml(t.name)}</span>
+          <span class="admin-tag-count" style="opacity:0.8;font-size:0.7rem;">(${t.count.toLocaleString()})</span>
+        </button>
+      `;
+    }).join('');
+
+    cloudEl.querySelectorAll('.main-tag-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        const selected = chip.dataset.tag;
+        if (!selected) return;
+        if (state.filterTag && state.filterTag.toLowerCase() === selected.toLowerCase()) {
+          state.filterTag = '';
+        } else {
+          state.filterTag = selected;
+        }
+        renderMainTags();
+        runSearch();
+      });
+    });
   }
 
   function renderInlineMarkdown(text) {
@@ -2364,7 +2743,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // ---- Accent color system ----
-  const ACCENT_DEFAULT = '#7c5ce0';
+  const ACCENT_DEFAULT = '#8e70f6';
   const ACCENT_LS_KEY = 'athena_accent_color';
 
   function hexToHsl(hex) {
@@ -2398,6 +2777,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const h = hsl.h, s = hsl.s, l = hsl.l;
 
     root.style.setProperty('--accent', hex);
+    const fg = l > 50 ? '#08080f' : '#ffffff';
+    root.style.setProperty('--accent-fg', fg);
     root.style.setProperty('--accent-soft', `hsla(${h}, ${s}%, ${l}%, 0.22)`);
     root.style.setProperty('--accent-gradient', `linear-gradient(135deg, hsl(${h}, ${s}%, ${Math.min(l + 15, 80)}%), hsl(${h}, ${s}%, ${Math.max(l - 15, 15)}%))`);
     root.style.setProperty('--accent-hover', `hsl(${h}, ${Math.min(s + 5, 100)}%, ${Math.min(l + 8, 85)}%)`);
@@ -2516,12 +2897,1444 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // ---- Admin & Owner Database Explorer ----
+
+  const adminDbState = {
+    scope: 'community',
+    communityId: '',
+    status: 'all',
+    sort: 'created_desc',
+    tag: '',
+    q: '',
+    page: 1,
+    limit: 25,
+    totalPages: 1,
+    total: 0,
+    links: [],
+    tags: [],
+    communities: [],
+    loading: false
+  };
+
+  function openAdminDb() {
+    if (!isStaffRank()) {
+      showToast('Admin or Owner rank required', true);
+      return;
+    }
+    const adminView = $('adminDbView');
+    const searchWrap = $('searchWrapper');
+    const scopeSwitch = document.querySelector('.scope-switch-container');
+    if (!adminView || !searchWrap) return;
+
+    searchWrap.classList.add('hidden');
+    if (scopeSwitch) scopeSwitch.classList.add('hidden');
+    adminView.classList.remove('hidden');
+
+    const badge = $('modeBadgeText');
+    if (badge) badge.textContent = 'Database';
+
+    if (adminDbState.scope === 'personal' && !isGod()) {
+      adminDbState.scope = 'community';
+      const scopeSel = $('adminDbScope');
+      if (scopeSel) scopeSel.value = 'community';
+    }
+
+    if (!adminDbState.communityId && state.activeCommunity) {
+      adminDbState.communityId = state.activeCommunity;
+    }
+
+    if (window.location.hash !== '#db') {
+      window.history.pushState(null, '', '#db');
+    }
+
+    loadAdminDbLinks();
+  }
+
+  function closeAdminDb() {
+    const adminView = $('adminDbView');
+    const searchWrap = $('searchWrapper');
+    const scopeSwitch = document.querySelector('.scope-switch-container');
+    if (!adminView || !searchWrap) return;
+
+    adminView.classList.add('hidden');
+    searchWrap.classList.remove('hidden');
+    if (scopeSwitch) scopeSwitch.classList.remove('hidden');
+
+    const badge = $('modeBadgeText');
+    if (badge) badge.textContent = state.mode ? state.mode.charAt(0).toUpperCase() + state.mode.slice(1) : 'Search';
+
+    if (window.location.hash === '#db' || window.location.hash === '#admin') {
+      window.history.pushState(null, '', window.location.pathname);
+    }
+  }
+
+  async function loadAdminDbLinks() {
+    if (adminDbState.loading) return;
+    adminDbState.loading = true;
+    const listEl = $('adminDbList');
+    const countBadge = $('adminDbCountBadge');
+    if (countBadge) countBadge.textContent = 'Fetching links…';
+    if (listEl && !adminDbState.links.length) {
+      listEl.innerHTML = '<div class="empty-state"><p>Loading database links…</p></div>';
+    }
+
+    try {
+      const qParams = new URLSearchParams({
+        scope: adminDbState.scope,
+        edited: adminDbState.status,
+        sort: adminDbState.sort,
+        page: String(adminDbState.page),
+        limit: String(adminDbState.limit)
+      });
+      if (adminDbState.scope === 'community' && adminDbState.communityId) {
+        qParams.set('community_id', adminDbState.communityId);
+      }
+      if (adminDbState.tag) qParams.set('tag', adminDbState.tag);
+      if (adminDbState.q) qParams.set('q', adminDbState.q);
+
+      const { res, data } = await api(`/api/admin/links?${qParams.toString()}`);
+      if (!res.ok || !data.success) {
+        showToast(data.error || 'Failed to load database links', true);
+        if (listEl) listEl.innerHTML = `<div class="empty-state"><p>${escapeHtml(data.error || 'Access denied or failed to load.')}</p></div>`;
+        return;
+      }
+
+      adminDbState.links = data.links || [];
+      adminDbState.total = data.total || 0;
+      adminDbState.page = data.page || 1;
+      adminDbState.totalPages = data.totalPages || 1;
+      adminDbState.tags = data.tags || [];
+      adminDbState.communities = data.communities || [];
+
+      const commSel = $('adminDbCommunity');
+      if (commSel && adminDbState.communities.length) {
+        commSel.innerHTML = adminDbState.communities.map(c =>
+          `<option value="${escapeHtml(c.id)}" ${c.id === (adminDbState.communityId || data.community_id) ? 'selected' : ''}>${escapeHtml(c.name || c.id)}</option>`
+        ).join('');
+        if (!adminDbState.communityId && data.community_id) {
+          adminDbState.communityId = data.community_id;
+        }
+      }
+
+      renderAdminDbTags();
+      renderAdminDbLinks();
+      renderAdminDbSummary();
+      renderAdminDbPagination();
+    } catch (err) {
+      showToast(err.message || 'Error fetching database records', true);
+      if (listEl) listEl.innerHTML = `<div class="empty-state"><p>${escapeHtml(err.message || 'Failed to load.')}</p></div>`;
+    } finally {
+      adminDbState.loading = false;
+    }
+  }
+
+  function renderAdminDbSummary() {
+    const badge = $('adminDbCountBadge');
+    if (!badge) return;
+    const start = adminDbState.total === 0 ? 0 : (adminDbState.page - 1) * adminDbState.limit + 1;
+    const end = Math.min(adminDbState.page * adminDbState.limit, adminDbState.total);
+    badge.textContent = adminDbState.total > 0
+      ? `Showing ${start}–${end} of ${adminDbState.total} links`
+      : '0 links found in this scope';
+
+    const activeFilter = $('adminDbActiveFilter');
+    if (activeFilter) {
+      if (adminDbState.tag) {
+        activeFilter.classList.remove('hidden');
+        activeFilter.innerHTML = `Tag: #${escapeHtml(adminDbState.tag)} <span style="cursor:pointer;margin-left:4px;" title="Clear tag filter">&times;</span>`;
+        activeFilter.onclick = () => {
+          adminDbState.tag = '';
+          adminDbState.page = 1;
+          loadAdminDbLinks();
+        };
+      } else {
+        activeFilter.classList.add('hidden');
+      }
+    }
+  }
+
+  function renderAdminDbTags() {
+    const cloud = $('adminTagsCloud');
+    const clearBtn = $('adminTagClearBtn');
+    if (!cloud) return;
+    if (clearBtn) clearBtn.classList.toggle('hidden', !adminDbState.tag);
+
+    if (!adminDbState.tags || !adminDbState.tags.length) {
+      cloud.innerHTML = '<span style="font-size:0.75rem;color:var(--text-muted)">No tags detected in this scope</span>';
+      return;
+    }
+
+    cloud.innerHTML = adminDbState.tags.map(t => {
+      const active = adminDbState.tag.toLowerCase() === t.name.toLowerCase();
+      return `<button type="button" class="admin-tag-chip ${active ? 'active' : ''}" data-tag="${escapeHtml(t.name)}">
+        <span>#${escapeHtml(t.name)}</span>
+        <span class="admin-tag-count">(${t.count})</span>
+      </button>`;
+    }).join('');
+
+    cloud.querySelectorAll('.admin-tag-chip').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const selected = btn.dataset.tag;
+        if (adminDbState.tag.toLowerCase() === selected.toLowerCase()) {
+          adminDbState.tag = '';
+        } else {
+          adminDbState.tag = selected;
+        }
+        adminDbState.page = 1;
+        loadAdminDbLinks();
+      });
+    });
+  }
+
+  function renderAdminDbPagination() {
+    const pager = $('adminDbPagination');
+    const prevBtn = $('adminDbPrevBtn');
+    const nextBtn = $('adminDbNextBtn');
+    const pageInfo = $('adminDbPageInfo');
+    if (!pager || !prevBtn || !nextBtn || !pageInfo) return;
+
+    if (adminDbState.totalPages <= 1) {
+      pager.classList.add('hidden');
+      return;
+    }
+    pager.classList.remove('hidden');
+    pageInfo.textContent = `Page ${adminDbState.page} of ${adminDbState.totalPages}`;
+    prevBtn.disabled = adminDbState.page <= 1;
+    nextBtn.disabled = adminDbState.page >= adminDbState.totalPages;
+  }
+
+  function renderAdminDbLinks() {
+    const listEl = $('adminDbList');
+    if (!listEl) return;
+    if (!adminDbState.links.length) {
+      listEl.innerHTML = `<div class="empty-state">
+        <p>No links matched your query or filters.</p>
+      </div>`;
+      return;
+    }
+
+    listEl.innerHTML = '';
+    adminDbState.links.forEach(item => {
+      const card = document.createElement('article');
+      card.className = 'admin-card';
+      card.dataset.id = item.id;
+
+      const displayUrl = item.url
+        ? item.url.replace(/^https?:\/\//, '').replace(/\/$/, '')
+        : 'note · local';
+      const href = item.url || '#';
+      const site = item.site_name || '';
+      const when = formatDateTime(item.created_at);
+
+      let favicon = '';
+      try {
+        if (item.url && item.url.startsWith('http')) {
+          const u = new URL(item.url);
+          favicon = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(u.hostname)}&sz=32`;
+        }
+      } catch (_) {}
+
+      const auditHtml = item.manual_edited_at
+        ? `<span class="admin-edit-badge" title="Manually edited">
+            ✏️ Last edited by <strong>${escapeHtml(item.last_edited_by_name || 'Admin')}</strong> · ${escapeHtml(formatDateTime(item.manual_edited_at))}
+           </span>`
+        : `<span style="color:var(--text-muted)">Unedited · Original version</span>`;
+
+      const tagsHtml = (item.tags || []).length
+        ? `<div class="admin-card-tags">
+            ${item.tags.map(t => `<span class="admin-card-tag" data-tag="${escapeHtml(t)}">#${escapeHtml(t)}</span>`).join('')}
+           </div>`
+        : `<div class="admin-card-tags">
+            <span class="admin-card-tag admin-card-notag" data-tag="notags" title="Untagged link — click to view untagged" style="opacity:0.65;font-style:italic;">#notags</span>
+           </div>`;
+
+      card.innerHTML = `
+        <div class="admin-card-head">
+          <div class="admin-card-url-row">
+            ${favicon ? `<img src="${safeHref(favicon)}" alt="" width="16" height="16" loading="lazy" referrerpolicy="no-referrer" style="border-radius:3px;">` : ''}
+            <span>${site ? escapeHtml(site) + ' · ' : ''}${escapeHtml(displayUrl)}</span>
+          </div>
+          <div class="admin-card-actions">
+            <button type="button" class="btn btn-secondary btn-sm admin-card-edit-btn" data-id="${escapeHtml(item.id)}" title="Edit link">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px;"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+              Edit
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm admin-card-del-btn" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(item.title || item.url || 'this link')}" title="Delete link">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px;"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+              Delete
+            </button>
+          </div>
+        </div>
+        <a class="admin-card-title" href="${safeHref(href)}" ${item.url ? 'target="_blank" rel="noopener noreferrer"' : ''}>
+          ${escapeHtml(item.title || 'Untitled')}
+        </a>
+        ${item.notes ? `<p class="admin-card-notes">${escapeHtml(item.notes)}</p>` : ''}
+        ${tagsHtml}
+        <div class="admin-audit-bar">
+          <div class="admin-audit-info">
+            <span>Added by <strong>${escapeHtml(item.added_by_name || item.added_by || 'Member')}</strong> · ${escapeHtml(when)}</span>
+            ${auditHtml}
+          </div>
+        </div>
+        <div class="edit-panel hidden" data-edit-for="${escapeHtml(item.id)}">
+          <label>Title</label>
+          <input type="text" class="edit-title" value="${escapeHtml(item.title || '')}" />
+          <label>URL</label>
+          <input type="url" class="edit-url" value="${escapeHtml(item.url || '')}" />
+          <label>Description / Notes</label>
+          <textarea class="edit-notes" rows="3">${escapeHtml(item.notes || '')}</textarea>
+          <label>Tags (space or comma-separated)</label>
+          <input type="text" class="edit-tags" value="${escapeHtml((item.tags || []).map(t => '#' + t).join(' '))}" placeholder="e.g. #ai #tools #docs" />
+          <div class="edit-panel-actions">
+            <button type="button" class="btn btn-primary btn-sm admin-save-btn">Save Changes</button>
+            <button type="button" class="btn btn-secondary btn-sm admin-cancel-btn">Cancel</button>
+            <button type="button" class="btn btn-secondary btn-sm admin-panel-del-btn" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(item.title || item.url || 'this link')}" style="margin-left:auto;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px;"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+              Delete Link
+            </button>
+          </div>
+        </div>
+      `;
+      listEl.appendChild(card);
+    });
+
+    listEl.querySelectorAll('.admin-card-tag').forEach(tagEl => {
+      tagEl.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const tag = tagEl.dataset.tag;
+        if (!tag) return;
+        adminDbState.tag = tag;
+        adminDbState.page = 1;
+        loadAdminDbLinks();
+      });
+    });
+
+    listEl.querySelectorAll('.admin-card-del-btn, .admin-panel-del-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const id = btn.dataset.id;
+        const itemTitle = btn.dataset.title || 'this link';
+        if (!id) return;
+        if (!confirm(`Delete "${itemTitle}" permanently from database?`)) return;
+
+        btn.disabled = true;
+        try {
+          const isComm = adminDbState.scope === 'community';
+          const path = isComm ? '/api/links' : '/api/personal-links';
+          const body = isComm ? { id, community_id: adminDbState.communityId } : { id };
+          const { res, data } = await api(path, {
+            method: 'DELETE',
+            body: JSON.stringify(body)
+          });
+          if (!res.ok || !data.success) {
+            showToast(data.error || 'Delete failed', true);
+            btn.disabled = false;
+            return;
+          }
+          showToast('Link deleted from database');
+          wikiState.dirty = true;
+          const list = isComm ? state.communityLinks : state.personalLinks;
+          const mainIdx = list.findIndex(l => l.id === id);
+          if (mainIdx >= 0) list.splice(mainIdx, 1);
+          const topSearch = $('searchInput');
+          if (topSearch?.value?.trim()) {
+            try { runSearch(); } catch (_) {}
+          }
+          await loadAdminDbLinks();
+        } catch (err) {
+          showToast(err.message || 'Delete failed', true);
+          btn.disabled = false;
+        }
+      });
+    });
+
+    listEl.querySelectorAll('.admin-card-edit-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        const id = btn.dataset.id;
+        const card = btn.closest('.admin-card');
+        const panel = card?.querySelector(`.edit-panel[data-edit-for="${CSS.escape(id)}"]`);
+        if (!panel) return;
+        listEl.querySelectorAll('.edit-panel').forEach(p => { if (p !== panel) p.classList.add('hidden'); });
+        listEl.querySelectorAll('.admin-card').forEach(c => c.classList.remove('editing'));
+        panel.classList.toggle('hidden');
+        card.classList.toggle('editing', !panel.classList.contains('hidden'));
+        if (!panel.classList.contains('hidden')) {
+          panel.querySelector('.edit-title')?.focus();
+        }
+      });
+    });
+
+    listEl.querySelectorAll('.admin-cancel-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const panel = btn.closest('.edit-panel');
+        const card = btn.closest('.admin-card');
+        panel?.classList.add('hidden');
+        card?.classList.remove('editing');
+      });
+    });
+
+    listEl.querySelectorAll('.admin-save-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const panel = btn.closest('.edit-panel');
+        const card = btn.closest('.admin-card');
+        const id = panel?.dataset.editFor;
+        if (!id || !panel) return;
+
+        const title = panel.querySelector('.edit-title')?.value?.trim() || '';
+        const url = panel.querySelector('.edit-url')?.value?.trim() || '';
+        const notes = panel.querySelector('.edit-notes')?.value?.trim() || '';
+        const tagsVal = panel.querySelector('.edit-tags')?.value?.trim() || '';
+        const tags = tagsVal.split(/[\s,]+/).map(t => t.replace(/^#+/, '').trim()).filter(Boolean);
+
+        if (!url && !title && !notes) {
+          showToast('Nothing to save', true);
+          return;
+        }
+
+        btn.disabled = true;
+        try {
+          const path = adminDbState.scope === 'community' ? '/api/links' : '/api/personal-links';
+          const { res, data } = await api(path, {
+            method: 'PATCH',
+            body: JSON.stringify({ id, title, url, notes, tags })
+          });
+          if (!res.ok || !data.success) {
+            showToast(data.error || 'Edit failed', true);
+            return;
+          }
+
+          const idx = adminDbState.links.findIndex(l => l.id === id);
+          if (idx >= 0) {
+            adminDbState.links[idx] = {
+              ...adminDbState.links[idx],
+              title: data.title != null ? data.title : title,
+              url: data.url || url,
+              notes: data.notes != null ? data.notes : notes,
+              tags: Array.isArray(data.tags) ? data.tags : tags,
+              manual_edited_at: data.manual_edited_at || Date.now(),
+              last_edited_by: data.last_edited_by || state.currentUser?.id,
+              last_edited_by_name: data.last_edited_by_name || state.currentUser?.displayName || state.currentUser?.username || 'Admin'
+            };
+          }
+
+          const list = adminDbState.scope === 'community' ? state.communityLinks : state.personalLinks;
+          const mainIdx = list.findIndex(l => l.id === id);
+          if (mainIdx >= 0) {
+            list[mainIdx] = {
+              ...list[mainIdx],
+              title: data.title != null ? data.title : title,
+              url: data.url || url,
+              notes: data.notes != null ? data.notes : notes,
+              tags: Array.isArray(data.tags) ? data.tags : tags,
+              manualEditedAt: data.manual_edited_at || Date.now(),
+              lastEditedByName: data.last_edited_by_name || state.currentUser?.displayName || state.currentUser?.username || 'Admin'
+            };
+          }
+
+          showToast('Link updated in database');
+          wikiState.dirty = true;
+          if ($('wikiView') && !$('wikiView').classList.contains('hidden')) {
+            loadWikiData();
+          }
+          panel.classList.add('hidden');
+          card?.classList.remove('editing');
+
+          const topSearch = $('searchInput');
+          if (topSearch?.value?.trim()) {
+            try { runSearch(); } catch (_) {}
+          }
+
+          // Reload admin DB links so tag cloud, decremented counts, and cards refresh with fresh server data
+          await loadAdminDbLinks();
+        } catch (err) {
+          showToast(err.message || 'Edit failed', true);
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    });
+  }
+
+  function setupAdminDbEvents() {
+    $('adminDbNavBtn')?.addEventListener('click', openAdminDb);
+    $('openAdminDbDrawerBtn')?.addEventListener('click', () => {
+      const sideDrawerEl = $('sideDrawer');
+      const drawerOverlayEl = $('drawerOverlay');
+      if (sideDrawerEl) sideDrawerEl.classList.remove('active');
+      if (drawerOverlayEl) drawerOverlayEl.classList.remove('active');
+      document.body.style.overflow = '';
+      openAdminDb();
+    });
+    $('adminDbCloseBtn')?.addEventListener('click', closeAdminDb);
+
+    document.querySelector('.brand-logo')?.addEventListener('click', (e) => {
+      const adminView = $('adminDbView');
+      const wikiView = $('wikiView');
+      if (adminView && !adminView.classList.contains('hidden')) {
+        e.preventDefault();
+        closeAdminDb();
+      } else if (wikiView && !wikiView.classList.contains('hidden')) {
+        e.preventDefault();
+        closeWiki();
+      }
+    });
+
+    $('adminDbScope')?.addEventListener('change', (e) => {
+      adminDbState.scope = e.target.value;
+      const commWrap = $('adminDbCommunityWrap');
+      if (commWrap) commWrap.style.display = adminDbState.scope === 'personal' ? 'none' : 'flex';
+      adminDbState.page = 1;
+      adminDbState.tag = '';
+      loadAdminDbLinks();
+    });
+
+    $('adminDbCommunity')?.addEventListener('change', (e) => {
+      adminDbState.communityId = e.target.value;
+      adminDbState.page = 1;
+      adminDbState.tag = '';
+      loadAdminDbLinks();
+    });
+
+    $('adminDbStatus')?.addEventListener('change', (e) => {
+      adminDbState.status = e.target.value;
+      adminDbState.page = 1;
+      adminDbState.tag = '';
+      loadAdminDbLinks();
+    });
+
+    $('adminDbSort')?.addEventListener('change', (e) => {
+      adminDbState.sort = e.target.value;
+      adminDbState.page = 1;
+      loadAdminDbLinks();
+    });
+
+    $('adminDbRefreshBtn')?.addEventListener('click', () => {
+      loadAdminDbLinks();
+    });
+
+    $('adminTagClearBtn')?.addEventListener('click', () => {
+      adminDbState.tag = '';
+      adminDbState.page = 1;
+      loadAdminDbLinks();
+    });
+
+    let searchTimer = null;
+    const searchInput = $('adminDbSearchInput');
+    const clearSearch = $('adminDbClearSearch');
+    if (searchInput) {
+      searchInput.addEventListener('input', () => {
+        if (clearSearch) clearSearch.classList.toggle('hidden', !searchInput.value);
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => {
+          adminDbState.q = searchInput.value.trim();
+          adminDbState.page = 1;
+          loadAdminDbLinks();
+        }, 300);
+      });
+      searchInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          clearTimeout(searchTimer);
+          adminDbState.q = searchInput.value.trim();
+          adminDbState.page = 1;
+          loadAdminDbLinks();
+        }
+      });
+    }
+
+    if (clearSearch) {
+      clearSearch.addEventListener('click', () => {
+        if (searchInput) searchInput.value = '';
+        clearSearch.classList.add('hidden');
+        adminDbState.q = '';
+        adminDbState.page = 1;
+        loadAdminDbLinks();
+      });
+    }
+
+    $('adminDbPrevBtn')?.addEventListener('click', () => {
+      if (adminDbState.page > 1) {
+        adminDbState.page--;
+        loadAdminDbLinks();
+      }
+    });
+
+    $('adminDbNextBtn')?.addEventListener('click', () => {
+      if (adminDbState.page < adminDbState.totalPages) {
+        adminDbState.page++;
+        loadAdminDbLinks();
+      }
+    });
+
+    window.addEventListener('hashchange', () => {
+      if (state.publicWikiMode) {
+        if (window.location.hash !== '#wiki') {
+          window.location.hash = '#wiki';
+        }
+        return;
+      }
+      if (window.location.hash === '#db' || window.location.hash === '#admin') {
+        if (isStaffRank()) openAdminDb();
+      } else if (window.location.hash === '#wiki') {
+        openWiki();
+      } else {
+        closeAdminDb();
+        closeWiki();
+      }
+    });
+  }
+
+  function setupMainDbEvents() {
+    const scopeSel = $('mainScopeSelect');
+    if (scopeSel) {
+      scopeSel.addEventListener('change', async (e) => {
+        const val = e.target.value;
+        if (val === 'personal') {
+          if (!isGod()) {
+            showToast('Personal mode is GOD only', true);
+            scopeSel.value = state.scope;
+            return;
+          }
+          state.scope = 'personal';
+        } else {
+          state.scope = 'community';
+          if (!state.activeCommunity && state.communities.length) {
+            state.activeCommunity = state.communities[0].id;
+            localStorage.setItem('athena_active_community', state.activeCommunity);
+            if (communitySelect) communitySelect.value = state.activeCommunity;
+            if ($('mainCommunitySelect')) $('mainCommunitySelect').value = state.activeCommunity;
+          }
+        }
+        updateScopeUI();
+        if (state.scope === 'community') {
+          await Promise.all([loadCommunityLinksIfAny(), loadCommunityDocumentsIfAny()]);
+        }
+        await loadMainTags();
+        runSearch();
+      });
+    }
+
+    const commSel = $('mainCommunitySelect');
+    if (commSel) {
+      commSel.addEventListener('change', async (e) => {
+        state.activeCommunity = e.target.value || '';
+        if (state.activeCommunity) localStorage.setItem('athena_active_community', state.activeCommunity);
+        else localStorage.removeItem('athena_active_community');
+        if (communitySelect) communitySelect.value = state.activeCommunity;
+        state.scope = 'community';
+        updateScopeUI();
+        await loadCommunityAdmins();
+        await Promise.all([loadCommunityLinksIfAny(), loadCommunityDocumentsIfAny()]);
+        await loadMainTags();
+        runSearch();
+      });
+    }
+
+    const statusSel = $('mainStatusSelect');
+    if (statusSel) {
+      statusSel.addEventListener('change', (e) => {
+        state.filterStatus = e.target.value;
+        runSearch();
+      });
+    }
+
+    const sortSel = $('mainSortSelect');
+    if (sortSel) {
+      sortSel.addEventListener('change', (e) => {
+        state.filterSort = e.target.value;
+        runSearch();
+      });
+    }
+
+    const tagsToggleBtn = $('mainTagsToggleBtn');
+    const tagsCard = $('mainTagsCard');
+    if (tagsToggleBtn && tagsCard) {
+      tagsToggleBtn.addEventListener('click', () => {
+        tagsCard.classList.toggle('hidden');
+      });
+    }
+
+    const tagClearBtn = $('mainTagClearBtn');
+    if (tagClearBtn) {
+      tagClearBtn.addEventListener('click', () => {
+        state.filterTag = '';
+        renderMainTags();
+        runSearch();
+      });
+    }
+  }
+
+  // ---- Wiki View ----
+
+  const wikiState = {
+    scope: 'community',
+    communityId: '',
+    activeCategory: 'video',
+    activeSubheading: '',
+    q: '',
+    page: 1,
+    limit: 50,
+    totalPages: 1,
+    categories: [],
+    totalLinks: 0,
+    totalCategoryLinks: 0,
+    links: [],
+    loading: false,
+    dirty: false
+  };
+
+  function openWiki() {
+    const wikiView = $('wikiView');
+    const searchWrapper = $('searchWrapper');
+    const resultsContainer = $('resultsContainer');
+    const adminView = $('adminDbView');
+
+    if (!wikiView) return;
+    if (adminView) adminView.classList.add('hidden');
+    if (searchWrapper) searchWrapper.classList.add('hidden');
+    if (resultsContainer) resultsContainer.classList.add('hidden');
+    wikiView.classList.remove('hidden');
+    document.body.classList.add('wiki-active');
+
+    if (window.location.hash !== '#wiki') {
+      window.location.hash = '#wiki';
+    }
+
+    const shareBtn = $('wikiShareBtn');
+    if (shareBtn) {
+      shareBtn.classList.toggle('hidden', !isGod() || state.publicWikiMode);
+    }
+
+    wikiState.scope = state.scope || 'community';
+    if (wikiState.scope === 'personal' && !isGod()) {
+      wikiState.scope = 'community';
+    }
+    wikiState.communityId = state.activeCommunity || '';
+
+    // Populate scope and community selects in Wiki
+    const scopeSel = $('wikiScopeSelect');
+    if (scopeSel) {
+      scopeSel.value = wikiState.scope;
+      const personalOpt = scopeSel.querySelector('option[value="personal"]');
+      if (personalOpt) personalOpt.disabled = !isGod();
+    }
+    const commWrap = $('wikiCommunityWrap');
+    if (commWrap) {
+      commWrap.style.display = wikiState.scope === 'personal' ? 'none' : 'flex';
+    }
+    const commSel = $('wikiCommunitySelect');
+    if (commSel && state.communities) {
+      commSel.innerHTML = state.communities.map(c =>
+        `<option value="${escapeHtml(c.id)}" ${c.id === wikiState.communityId ? 'selected' : ''}>${escapeHtml(c.name || c.id)}</option>`
+      ).join('');
+      if (!wikiState.communityId && state.communities[0]) {
+        wikiState.communityId = state.communities[0].id;
+      }
+    }
+
+    if (!wikiState.categories.length || wikiState.dirty) {
+      wikiState.dirty = false;
+      loadWikiData();
+    }
+  }
+
+  function closeWiki() {
+    if (state.publicWikiMode) return;
+    const wikiView = $('wikiView');
+    const searchWrapper = $('searchWrapper');
+    const resultsContainer = $('resultsContainer');
+    if (!wikiView) return;
+    wikiView.classList.add('hidden');
+    document.body.classList.remove('wiki-active');
+    $('wikiSidebar')?.classList.remove('mobile-open');
+    $('wikiSidebarBackdrop')?.classList.add('hidden');
+    document.body.style.overflow = '';
+    if (searchWrapper) searchWrapper.classList.remove('hidden');
+    if (resultsContainer) resultsContainer.classList.remove('hidden');
+    if (window.location.hash === '#wiki') {
+      history.pushState('', document.title, window.location.pathname + window.location.search);
+    }
+  }
+
+  async function loadWikiData() {
+    await loadWikiCategories();
+    await loadWikiLinks();
+  }
+
+  async function loadWikiCategories() {
+    const listEl = $('wikiCatList');
+    const totalBadge = $('wikiTotalCountBadge');
+    if (listEl && !wikiState.categories.length) {
+      listEl.innerHTML = '<div style="padding:10px;color:var(--text-muted);font-size:0.75rem;">Loading categories…</div>';
+    }
+    try {
+      const qParams = new URLSearchParams({
+        scope: wikiState.scope
+      });
+      if (wikiState.scope === 'community' && wikiState.communityId) {
+        qParams.set('community_id', wikiState.communityId);
+      }
+      if (state.wikiShareToken) {
+        qParams.set('share', state.wikiShareToken);
+      }
+      const { res, data } = await api(`/api/wiki/categories?${qParams.toString()}`);
+      if (res.ok && data.success && Array.isArray(data.categories)) {
+        wikiState.categories = data.categories;
+        wikiState.totalLinks = data.total || 0;
+        if (totalBadge) totalBadge.textContent = `${wikiState.totalLinks.toLocaleString()} links`;
+
+        // If current activeCategory not in list, pick the first
+        if (!wikiState.categories.find(c => c.id === wikiState.activeCategory)) {
+          wikiState.activeCategory = wikiState.categories[0]?.id || 'video';
+        }
+        renderWikiSidebar();
+      }
+    } catch (err) {
+      console.warn('[wiki] Failed to load categories:', err);
+    }
+  }
+
+  function renderWikiSidebar() {
+    const listEl = $('wikiCatList');
+    if (!listEl) return;
+    if (!wikiState.categories.length) {
+      listEl.innerHTML = '<div style="padding:10px;color:var(--text-muted);font-size:0.75rem;">No categories found.</div>';
+      return;
+    }
+
+    listEl.innerHTML = wikiState.categories.map(c => `
+      <button type="button" class="wiki-cat-item ${c.id === wikiState.activeCategory ? 'active' : ''}" data-cat="${escapeHtml(c.id)}" title="${escapeHtml(c.title)} (${c.count || 0})">
+        <div class="wiki-cat-item-main">
+          <span class="wiki-cat-item-icon">${escapeHtml(c.icon || '📁')}</span>
+          <span>${escapeHtml(c.title)}</span>
+        </div>
+        <span class="wiki-cat-count">${(c.count || 0).toLocaleString()}</span>
+      </button>
+    `).join('');
+
+    const cur = wikiState.categories.find(c => c.id === wikiState.activeCategory);
+    const mobileBtnText = $('wikiMobileCatBtnText');
+    if (mobileBtnText && cur) mobileBtnText.textContent = cur.title || 'Categories';
+
+    listEl.querySelectorAll('.wiki-cat-item').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const catId = btn.dataset.cat;
+        if (!catId) return;
+        wikiState.activeCategory = catId;
+        wikiState.activeSubheading = '';
+        wikiState.page = 1;
+        listEl.querySelectorAll('.wiki-cat-item').forEach(b => b.classList.toggle('active', b === btn));
+
+        const targetCat = wikiState.categories.find(c => c.id === catId);
+        if (mobileBtnText && targetCat) mobileBtnText.textContent = targetCat.title || 'Categories';
+
+        // Close mobile sidebar and backdrop
+        $('wikiSidebar')?.classList.remove('mobile-open');
+        $('wikiSidebarBackdrop')?.classList.add('hidden');
+        document.body.style.overflow = '';
+
+        loadWikiLinks();
+      });
+    });
+  }
+
+  async function loadWikiLinks() {
+    const blocksEl = $('wikiBlocks');
+    if (wikiState.loading) return;
+    wikiState.loading = true;
+
+    if (blocksEl) {
+      blocksEl.innerHTML = '<div class="wiki-loading">Loading links for category…</div>';
+    }
+
+    try {
+      const qParams = new URLSearchParams({
+        scope: wikiState.scope,
+        category: wikiState.activeCategory,
+        page: String(wikiState.page),
+        limit: String(wikiState.limit)
+      });
+      if (wikiState.scope === 'community' && wikiState.communityId) {
+        qParams.set('community_id', wikiState.communityId);
+      }
+      if (wikiState.activeSubheading) {
+        qParams.set('subheading', wikiState.activeSubheading);
+      }
+      if (wikiState.q) {
+        qParams.set('q', wikiState.q);
+      }
+      if (state.wikiShareToken) {
+        qParams.set('share', state.wikiShareToken);
+      }
+
+      const { res, data } = await api(`/api/wiki/links?${qParams.toString()}`);
+      if (res.ok && data.success && Array.isArray(data.links)) {
+        wikiState.links = data.links;
+        wikiState.totalPages = data.totalPages || 1;
+        wikiState.totalCategoryLinks = data.total || 0;
+        renderWikiContent();
+      } else {
+        if (blocksEl) blocksEl.innerHTML = '<div class="wiki-empty">Could not load wiki links.</div>';
+      }
+    } catch (err) {
+      if (blocksEl) blocksEl.innerHTML = `<div class="wiki-empty">Error loading links: ${escapeHtml(err.message)}</div>`;
+    } finally {
+      wikiState.loading = false;
+    }
+  }
+
+  function renderWikiContent() {
+    const curCat = wikiState.categories.find(c => c.id === wikiState.activeCategory) || {
+      id: wikiState.activeCategory,
+      title: 'Links',
+      icon: '📁',
+      description: 'Browsing wiki links',
+      subheadings: []
+    };
+
+    // 1. Update Hero
+    const heroIcon = $('wikiHeroIcon');
+    const heroTitle = $('wikiHeroTitle');
+    const heroDesc = $('wikiHeroDesc');
+    const heroCount = $('wikiHeroCount');
+    if (heroIcon) heroIcon.textContent = curCat.icon || '📁';
+    if (heroTitle) heroTitle.textContent = curCat.title;
+    if (heroDesc) heroDesc.textContent = curCat.description || '';
+    if (heroCount) heroCount.textContent = `${(wikiState.totalCategoryLinks || curCat.count || 0).toLocaleString()} links`;
+
+    // 2. Subheading Jump Pills
+    const subPills = $('wikiSubPills');
+    if (subPills) {
+      const subs = curCat.subheadings || [];
+      if (!subs.length) {
+        subPills.innerHTML = '';
+      } else {
+        const allActive = !wikiState.activeSubheading;
+        let pillsHtml = `<button type="button" class="wiki-sub-pill ${allActive ? 'active' : ''}" data-sub="" title="Show all subheadings in this category">All Subheadings</button>`;
+        for (const s of subs) {
+          const isAct = wikiState.activeSubheading === s.id;
+          pillsHtml += `<button type="button" class="wiki-sub-pill ${isAct ? 'active' : ''}" data-sub="${escapeHtml(s.id)}">${escapeHtml(s.title)}${s.count ? ` (${s.count})` : ''}</button>`;
+        }
+        subPills.innerHTML = pillsHtml;
+
+        subPills.querySelectorAll('.wiki-sub-pill').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const subId = btn.dataset.sub;
+            wikiState.activeSubheading = subId;
+            wikiState.page = 1;
+            loadWikiLinks();
+          });
+        });
+      }
+    }
+
+    // 3. Render Link Blocks
+    const blocksEl = $('wikiBlocks');
+    if (!blocksEl) return;
+
+    if (!wikiState.links.length) {
+      blocksEl.innerHTML = `
+        <div class="wiki-empty">
+          <p>No links found matching your current filter.</p>
+        </div>`;
+      $('wikiPagination')?.classList.add('hidden');
+      return;
+    }
+
+    // Group links by subheading
+    const subMap = new Map();
+    for (const l of wikiState.links) {
+      const subKey = l.subheading || 'general';
+      if (!subMap.has(subKey)) subMap.set(subKey, []);
+      subMap.get(subKey).push(l);
+    }
+
+    const subMetaLookup = new Map((curCat.subheadings || []).map(s => [s.id, s]));
+
+    let blocksHtml = '';
+    for (const [subId, subLinks] of subMap.entries()) {
+      const meta = subMetaLookup.get(subId) || {
+        title: subId.replace(/^[a-z]+-/, '').replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+        description: ''
+      };
+
+      blocksHtml += `
+        <section class="wiki-sub-block" id="sub-${escapeHtml(subId)}">
+          <div class="wiki-sub-header">
+            <h4 class="wiki-sub-title">
+              <span>${escapeHtml(meta.title)}</span>
+              <a href="#sub-${escapeHtml(subId)}" class="wiki-sub-anchor" title="Direct link to this section">#</a>
+            </h4>
+            ${meta.description ? `<p class="wiki-sub-desc">${escapeHtml(meta.description)}</p>` : ''}
+          </div>
+          <div class="wiki-link-list">
+            ${subLinks.map(l => {
+              let host = '';
+              try { if (l.url && l.url.startsWith('http')) host = new URL(l.url).hostname; } catch (_) {}
+
+              const tagPills = (l.tags || []).map(t =>
+                `<button type="button" class="wiki-tag-pill" data-tag="${escapeHtml(t)}" title="Filter by #${escapeHtml(t)}">#${escapeHtml(t)}</button>`
+              ).join('');
+
+              const auditBadge = l.manual_edited_at
+                ? `<span class="admin-edit-badge" title="Manually edited">✏️ ${escapeHtml(l.last_edited_by_name || 'Admin')} · ${escapeHtml(formatDateTime(l.manual_edited_at))}</span>`
+                : '';
+
+              return `
+                <article class="wiki-link-card" data-id="${escapeHtml(l.id)}">
+                  <div class="wiki-card-head">
+                    <div class="wiki-card-title-row">
+                      <a class="wiki-card-title" href="${safeHref(l.url || '#')}" target="_blank" rel="noopener noreferrer">
+                        <span>${escapeHtml(l.title || l.url || 'Untitled')}</span>
+                        <span class="wiki-card-ext-icon">↗</span>
+                      </a>
+                      ${host ? `<span class="wiki-domain-chip">${escapeHtml(host)}</span>` : ''}
+                    </div>
+                    ${l.url ? `<button type="button" class="wiki-copy-url-btn" data-url="${escapeHtml(l.url)}" title="Copy URL" aria-label="Copy URL"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>` : ''}
+                  </div>
+                  ${l.notes ? `<p class="wiki-card-desc">${escapeHtml(l.notes)}</p>` : ''}
+                  <div class="wiki-card-footer">
+                    <div class="wiki-card-tags">
+                      ${tagPills}
+                    </div>
+                    <div class="wiki-card-meta">
+                      ${auditBadge}
+                      <span>Added ${escapeHtml(formatDateTime(l.created_at))}</span>
+                    </div>
+                  </div>
+                </article>
+              `;
+            }).join('')}
+          </div>
+        </section>
+      `;
+    }
+
+    blocksEl.innerHTML = blocksHtml;
+
+    // Wire copy buttons on link cards
+    blocksEl.querySelectorAll('.wiki-copy-url-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const u = btn.dataset.url;
+        if (!u) return;
+        try {
+          await navigator.clipboard.writeText(u);
+          showToast('Link copied to clipboard');
+        } catch (_) {
+          showToast('Failed to copy', true);
+        }
+      });
+    });
+
+    // Wire tag clicks inside wiki link cards
+    blocksEl.querySelectorAll('.wiki-tag-pill').forEach(pill => {
+      pill.addEventListener('click', (e) => {
+        e.preventDefault();
+        const tag = pill.dataset.tag;
+        if (!tag) return;
+        const sInput = $('wikiSearchInput');
+        if (sInput) sInput.value = tag;
+        $('wikiClearSearch')?.classList.remove('hidden');
+        wikiState.q = tag;
+        wikiState.page = 1;
+        loadWikiLinks();
+      });
+    });
+
+    // 4. Pagination
+    const pager = $('wikiPagination');
+    const prevBtn = $('wikiPrevBtn');
+    const nextBtn = $('wikiNextBtn');
+    const pageInfo = $('wikiPageInfo');
+    if (pager && prevBtn && nextBtn && pageInfo) {
+      if (wikiState.totalPages <= 1) {
+        pager.classList.add('hidden');
+      } else {
+        pager.classList.remove('hidden');
+        pageInfo.textContent = `Page ${wikiState.page} of ${wikiState.totalPages}`;
+        prevBtn.disabled = wikiState.page <= 1;
+        nextBtn.disabled = wikiState.page >= wikiState.totalPages;
+      }
+    }
+  }
+
+  function setupWikiShareModal() {
+    const shareBtn = $('wikiShareBtn');
+    const modal = $('wikiShareModal');
+    const backdrop = $('wikiShareModalBackdrop');
+    const closeBtn = $('wikiShareCloseBtn');
+    const generateBtn = $('wikiGenerateShareBtn');
+    const durationSel = $('wikiShareDuration');
+    const genBox = $('wikiGeneratedLinkBox');
+    const urlInput = $('wikiShareUrlInput');
+    const copyBtn = $('wikiCopyShareBtn');
+    const expiryBadge = $('wikiGenExpiryBadge');
+    const linksList = $('wikiShareLinksList');
+
+    if (!shareBtn || !modal) return;
+
+    function openModal() {
+      if (!isGod()) {
+        showToast('Owner rank required to generate shareable links', true);
+        return;
+      }
+      modal.classList.remove('hidden');
+      if (genBox) genBox.classList.add('hidden');
+      loadActiveShareLinks();
+    }
+
+    function closeModal() {
+      modal.classList.add('hidden');
+    }
+
+    shareBtn.addEventListener('click', openModal);
+    closeBtn?.addEventListener('click', closeModal);
+    backdrop?.addEventListener('click', closeModal);
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !modal.classList.contains('hidden')) {
+        closeModal();
+      }
+    });
+
+    generateBtn?.addEventListener('click', async () => {
+      if (!isGod()) return;
+      generateBtn.disabled = true;
+      try {
+        const duration = durationSel?.value || '1m';
+        const { res, data } = await api('/api/wiki/share-links', {
+          method: 'POST',
+          body: JSON.stringify({
+            duration,
+            community_id: wikiState.communityId || ''
+          })
+        });
+        if (res.ok && data.success && data.link) {
+          const l = data.link;
+          const fullUrl = `${window.location.origin}/wiki?share=${encodeURIComponent(l.token)}`;
+          if (urlInput) urlInput.value = fullUrl;
+          if (expiryBadge) {
+            const expDate = new Date(l.expires_at).toLocaleDateString();
+            expiryBadge.textContent = `Expires ${expDate} (${l.duration_label})`;
+          }
+          if (genBox) genBox.classList.remove('hidden');
+          showToast('Shareable link generated! Copied to clipboard.');
+          try {
+            await navigator.clipboard.writeText(fullUrl);
+          } catch (_) {}
+          loadActiveShareLinks();
+        } else {
+          showToast(data.error || 'Failed to generate link', true);
+        }
+      } catch (err) {
+        showToast(err.message || 'Error creating link', true);
+      } finally {
+        generateBtn.disabled = false;
+      }
+    });
+
+    copyBtn?.addEventListener('click', async () => {
+      if (urlInput?.value) {
+        try {
+          await navigator.clipboard.writeText(urlInput.value);
+          const origText = copyBtn.textContent;
+          copyBtn.textContent = 'Copied!';
+          setTimeout(() => { copyBtn.textContent = origText; }, 2000);
+          showToast('Link copied to clipboard');
+        } catch (_) {
+          urlInput.select();
+          showToast('Please copy the URL manually');
+        }
+      }
+    });
+
+    async function loadActiveShareLinks() {
+      if (!linksList) return;
+      linksList.innerHTML = '<div class="wiki-share-links-loading" style="padding:12px;font-size:0.75rem;color:var(--text-muted);">Loading active share links…</div>';
+      try {
+        const { res, data } = await api('/api/wiki/share-links');
+        if (res.ok && data.success && Array.isArray(data.links)) {
+          if (!data.links.length) {
+            linksList.innerHTML = '<div style="padding:10px;font-size:0.75rem;color:var(--text-muted);">No share links generated yet.</div>';
+            return;
+          }
+          linksList.innerHTML = data.links.map(item => {
+            const fullUrl = `${window.location.origin}/wiki?share=${encodeURIComponent(item.token)}`;
+            const expDate = new Date(item.expires_at).toLocaleDateString();
+            const createdDate = new Date(item.created_at).toLocaleDateString();
+            let statusBadge = '<span class="wiki-share-badge-active">Active</span>';
+            if (item.is_revoked) {
+              statusBadge = '<span class="wiki-share-badge-revoked">Revoked</span>';
+            } else if (item.is_expired) {
+              statusBadge = '<span class="wiki-share-badge-expired">Expired</span>';
+            }
+
+            const canRevoke = !item.is_revoked && !item.is_expired;
+
+            return `
+              <div class="wiki-share-row" data-id="${escapeHtml(item.id)}">
+                <div class="wiki-share-meta">
+                  <div class="wiki-share-dur">${escapeHtml(item.duration_label || 'Share Link')} · ${statusBadge}</div>
+                  <div class="wiki-share-details">
+                    <span>Expires: ${escapeHtml(expDate)}</span>
+                    <span>Views: ${(item.views || 0).toLocaleString()}</span>
+                    <span>Created: ${escapeHtml(createdDate)}</span>
+                  </div>
+                </div>
+                <div class="wiki-share-actions">
+                  <button type="button" class="btn btn-secondary btn-sm wiki-share-copy-item" data-url="${escapeHtml(fullUrl)}" title="Copy link">Copy</button>
+                  ${canRevoke ? `<button type="button" class="btn btn-danger btn-sm wiki-share-revoke-item" data-id="${escapeHtml(item.id)}" title="Revoke access immediately">Revoke</button>` : ''}
+                </div>
+              </div>
+            `;
+          }).join('');
+
+          linksList.querySelectorAll('.wiki-share-copy-item').forEach(btn => {
+            btn.addEventListener('click', async () => {
+              const u = btn.dataset.url;
+              if (u) {
+                try {
+                  await navigator.clipboard.writeText(u);
+                  showToast('Share link copied');
+                } catch (_) {}
+              }
+            });
+          });
+
+          linksList.querySelectorAll('.wiki-share-revoke-item').forEach(btn => {
+            btn.addEventListener('click', async () => {
+              const id = btn.dataset.id;
+              if (!id) return;
+              btn.disabled = true;
+              try {
+                const { res, data } = await api('/api/wiki/share-links/revoke', {
+                  method: 'POST',
+                  body: JSON.stringify({ id })
+                });
+                if (res.ok && data.success) {
+                  showToast('Share link revoked');
+                  loadActiveShareLinks();
+                } else {
+                  showToast(data.error || 'Failed to revoke', true);
+                  btn.disabled = false;
+                }
+              } catch (err) {
+                showToast(err.message || 'Revoke failed', true);
+                btn.disabled = false;
+              }
+            });
+          });
+        }
+      } catch (_err) {
+        linksList.innerHTML = `<div style="padding:10px;font-size:0.75rem;color:var(--text-muted);">Failed to load share history.</div>`;
+      }
+    }
+  }
+
+  function setupWikiEvents() {
+    $('wikiNavBtn')?.addEventListener('click', openWiki);
+    $('openWikiDrawerBtn')?.addEventListener('click', () => {
+      const sideDrawerEl = $('sideDrawer');
+      const drawerOverlayEl = $('drawerOverlay');
+      if (sideDrawerEl) sideDrawerEl.classList.remove('active');
+      if (drawerOverlayEl) drawerOverlayEl.classList.remove('active');
+      document.body.style.overflow = '';
+      openWiki();
+    });
+    $('wikiCloseBtn')?.addEventListener('click', closeWiki);
+
+    $('wikiScopeSelect')?.addEventListener('change', (e) => {
+      wikiState.scope = e.target.value;
+      const commWrap = $('wikiCommunityWrap');
+      if (commWrap) commWrap.style.display = wikiState.scope === 'personal' ? 'none' : 'flex';
+      wikiState.page = 1;
+      wikiState.q = '';
+      loadWikiData();
+    });
+
+    $('wikiCommunitySelect')?.addEventListener('change', (e) => {
+      wikiState.communityId = e.target.value;
+      wikiState.page = 1;
+      wikiState.q = '';
+      loadWikiData();
+    });
+
+    const sInput = $('wikiSearchInput');
+    const clrSearch = $('wikiClearSearch');
+    if (sInput) {
+      let debounce = null;
+      sInput.addEventListener('input', () => {
+        if (clrSearch) clrSearch.classList.toggle('hidden', !sInput.value.trim());
+        clearTimeout(debounce);
+        debounce = setTimeout(() => {
+          wikiState.q = sInput.value.trim();
+          wikiState.page = 1;
+          loadWikiLinks();
+        }, 220);
+      });
+    }
+
+    if (clrSearch) {
+      clrSearch.addEventListener('click', () => {
+        if (sInput) sInput.value = '';
+        clrSearch.classList.add('hidden');
+        wikiState.q = '';
+        wikiState.page = 1;
+        loadWikiLinks();
+      });
+    }
+
+    // Mobile sidebar toggle and backdrop
+    const sidebarEl = $('wikiSidebar');
+    const backdropEl = $('wikiSidebarBackdrop');
+    const toggleBtn = $('wikiSidebarToggle');
+
+    function toggleMobileSidebar() {
+      const open = sidebarEl?.classList.toggle('mobile-open');
+      backdropEl?.classList.toggle('hidden', !open);
+      document.body.style.overflow = open ? 'hidden' : '';
+    }
+
+    toggleBtn?.addEventListener('click', toggleMobileSidebar);
+    backdropEl?.addEventListener('click', () => {
+      sidebarEl?.classList.remove('mobile-open');
+      backdropEl?.classList.add('hidden');
+      document.body.style.overflow = '';
+    });
+
+    $('wikiPrevBtn')?.addEventListener('click', () => {
+      if (wikiState.page > 1) {
+        wikiState.page--;
+        loadWikiLinks();
+      }
+    });
+
+    $('wikiNextBtn')?.addEventListener('click', () => {
+      if (wikiState.page < wikiState.totalPages) {
+        wikiState.page++;
+        loadWikiLinks();
+      }
+    });
+
+    $('wikiAiOrganizeBtn')?.addEventListener('click', async () => {
+      const btn = $('wikiAiOrganizeBtn');
+      if (btn) btn.disabled = true;
+      showToast('AI is reviewing library links & tags to refine categories…');
+      try {
+        const { res, data } = await api('/api/wiki/ai-organize', {
+          method: 'POST',
+          body: JSON.stringify({
+            scope: wikiState.scope,
+            community_id: wikiState.communityId
+          })
+        });
+        if (res.ok && data.success) {
+          showToast(data.ai_generated ? 'AI taxonomy generated & applied!' : (data.message || 'Taxonomy updated'));
+          await loadWikiCategories();
+          await loadWikiLinks();
+        } else {
+          showToast(data.error || 'AI organization failed', true);
+        }
+      } catch (err) {
+        showToast(err.message || 'AI request failed', true);
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    });
+
+    setupWikiShareModal();
+  }
+
+  async function initPublicWiki(shareToken) {
+    state.publicWikiMode = true;
+    state.wikiShareToken = shareToken;
+    document.body.classList.add('public-wiki-only');
+    document.body.classList.add('wiki-active');
+
+    // Hide auth gate & show root
+    authGate.classList.add('hidden');
+    appRoot.classList.remove('hidden');
+
+    // Hide drawer and hamburger
+    if (sideDrawer) sideDrawer.classList.add('hidden');
+    if (drawerOverlay) drawerOverlay.classList.add('hidden');
+
+    try {
+      const verifyRes = await fetch(`${API_BASE}/api/wiki/share-links/verify?share=${encodeURIComponent(shareToken)}`);
+      const verifyData = await verifyRes.json().catch(() => ({}));
+
+      if (!verifyRes.ok || !verifyData.valid) {
+        showPublicWikiError(verifyData.error || 'This wiki share link is invalid or has expired.');
+        return;
+      }
+
+      const banner = $('wikiPublicBanner');
+      const expEl = $('wikiPublicExpiry');
+      if (banner && expEl) {
+        banner.classList.remove('hidden');
+        const expDate = new Date(verifyData.expires_at).toLocaleDateString();
+        expEl.textContent = `Valid until ${expDate} · ${escapeHtml(verifyData.duration_label || '')}`;
+      }
+
+      const brandTitle = $('wikiBrandTitle');
+      const brandTagline = $('wikiBrandTagline');
+      if (brandTitle) brandTitle.textContent = 'Athena Wiki';
+      if (brandTagline) brandTagline.textContent = 'Public curated directory · Read-only view';
+
+      openWiki();
+
+      window.addEventListener('hashchange', () => {
+        if (state.publicWikiMode && window.location.hash !== '#wiki') {
+          window.location.hash = '#wiki';
+        }
+      });
+    } catch (_err) {
+      showPublicWikiError('Network error connecting to Athena Wiki.');
+    }
+  }
+
+  function showPublicWikiError(msg) {
+    const wikiView = $('wikiView');
+    const searchWrapper = $('searchWrapper');
+    const resultsContainer = $('resultsContainer');
+    const adminView = $('adminDbView');
+    if (searchWrapper) searchWrapper.classList.add('hidden');
+    if (resultsContainer) resultsContainer.classList.add('hidden');
+    if (adminView) adminView.classList.add('hidden');
+    if (wikiView) wikiView.classList.remove('hidden');
+
+    $('wikiControlsBar')?.classList.add('hidden');
+    $('wikiSidebar')?.classList.add('hidden');
+    $('wikiCatHero')?.classList.add('hidden');
+    $('wikiPagination')?.classList.add('hidden');
+
+    const blocks = $('wikiBlocks');
+    if (blocks) {
+      blocks.innerHTML = `
+        <div class="wiki-empty" style="padding: 60px 20px; text-align: center;">
+          <div style="font-size: 2.8rem; line-height: 1; margin-bottom: 14px;">⌛</div>
+          <h3 style="font-size: 1.35rem; font-weight: 700; color: var(--text-main); margin-bottom: 8px;">Access Expired or Unavailable</h3>
+          <p style="color: var(--text-muted); max-width: 460px; margin: 0 auto 24px; font-size: 0.9rem; line-height: 1.5;">${escapeHtml(msg)}</p>
+          <a href="/" class="btn btn-primary" style="display: inline-flex; border-radius: 999px; padding: 8px 24px; text-decoration: none;">Return to Athena</a>
+        </div>
+      `;
+    }
+  }
+
   // ---- Events ----
 
   function setupEventListeners() {
     initThemeUI();
     initAccentColor();
     initDice();
+    setupAdminDbEvents();
+    setupMainDbEvents();
+    setupWikiEvents();
 
     function openDrawer() {
       if (sideDrawer) sideDrawer.classList.add('active');
@@ -2685,15 +4498,15 @@ document.addEventListener('DOMContentLoaded', () => {
       searchInput.focus();
     });
 
-    personalScopeBtn.addEventListener('click', () => {
-        if (!isGod()) {
-          showToast('Personal mode is GOD only. Join a community via bot: /community_join <id>', true);
-          return;
-        }
+    personalScopeBtn.addEventListener('click', async () => {
+      if (!isGod()) {
+        showToast('Personal mode is GOD only. Join a community via bot: /community_join <id>', true);
+        return;
+      }
       state.scope = 'personal';
       updateScopeUI();
-      if (state.mode === 'search' && searchInput.value.trim()) runSearch();
-      else if (state.mode === 'search') renderHome();
+      await loadMainTags();
+      runSearch();
     });
 
     communityScopeBtn.addEventListener('click', async () => {
@@ -2705,13 +4518,14 @@ document.addEventListener('DOMContentLoaded', () => {
         state.activeCommunity = state.communities[0].id;
         localStorage.setItem('athena_active_community', state.activeCommunity);
         if (communitySelect) communitySelect.value = state.activeCommunity;
+        if ($('mainCommunitySelect')) $('mainCommunitySelect').value = state.activeCommunity;
       }
       state.scope = 'community';
       updateScopeUI();
       if (state.mode === 'delete' && !isCommunityStaff()) setMode('search');
       await Promise.all([loadCommunityLinksIfAny(), loadCommunityDocumentsIfAny()]);
-      if (state.mode === 'search' && searchInput.value.trim()) runSearch();
-      else if (state.mode === 'search') renderHome();
+      await loadMainTags();
+      runSearch();
     });
 
     const backendUrl = $('backendUrl');
@@ -2804,11 +4618,13 @@ document.addEventListener('DOMContentLoaded', () => {
         if (state.activeCommunity) localStorage.setItem('athena_active_community', state.activeCommunity);
         else localStorage.removeItem('athena_active_community');
         if (state.activeCommunity) state.scope = 'community';
+        if ($('mainCommunitySelect')) $('mainCommunitySelect').value = state.activeCommunity;
         updateDeleteModeVisibility();
         updateScopeUI();
         await loadCommunityAdmins();
         await Promise.all([loadCommunityLinksIfAny(), loadCommunityDocumentsIfAny()]);
-        if (state.mode === 'search') renderHome();
+        await loadMainTags();
+        if (state.mode === 'search') runSearch();
       });
     }
 
@@ -2963,6 +4779,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // Must run before anything talks to the API, including the login buttons.
     await adoptInstanceBackend();
     setupEventListeners();
+
+    // Check for public shareable wiki link
+    const urlParams = new URLSearchParams(window.location.search);
+    const shareToken = urlParams.get('share');
+    if (shareToken) {
+      await initPublicWiki(shareToken);
+      return;
+    }
+
     await loadAuthConfig();
     // Telegram Mini App: try initData login first
     if (window.Telegram?.WebApp?.initData) {

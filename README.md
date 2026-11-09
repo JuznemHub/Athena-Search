@@ -3,10 +3,22 @@
 Your second brain for links, documents, Telegram messages, and grounded AI answers.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.54-blueviolet?style=flat-square" alt="version">
-  <img src="https://img.shields.io/badge/license_CC_BY--NC_4.0-blue?style=flat-square" alt="license">
-  <img src="https://img.shields.io/badge/PostgreSQL-required-336791?style=flat-square&logo=postgresql" alt="PostgreSQL">
-  <img src="https://img.shields.io/badge/Telegram-bot-26A5E4?style=flat-square&logo=telegram" alt="Telegram">
+  <img src="https://img.shields.io/badge/version-1.0.65-blueviolet?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/license-CC_BY--NC_4.0-blue?style=flat-square" alt="license">
+  <img src="https://img.shields.io/badge/PostgreSQL-14%2B-336791?style=flat-square&logo=postgresql" alt="PostgreSQL">
+  <img src="https://img.shields.io/badge/Node.js-%3E%3D22-339933?style=flat-square&logo=node.js" alt="Node.js">
+  <img src="https://img.shields.io/badge/Telegram-bot_%2B_userbot-26A5E4?style=flat-square&logo=telegram" alt="Telegram">
+  <img src="https://img.shields.io/badge/MCP-standard_stdio-black?style=flat-square" alt="MCP">
+</p>
+
+<p align="center">
+  <a href="#juznems-favourite-features">Features</a> •
+  <a href="#quick-start">Quick Start</a> •
+  <a href="#web-directory-and-database-explorer">Wiki & Explorer</a> •
+  <a href="#telegram-bot">Telegram Bot</a> •
+  <a href="#terminal-ui">Terminal UI</a> •
+  <a href="#model-context-protocol-mcp">MCP Guide</a> •
+  <a href="#api-surface">API Reference</a>
 </p>
 
 Athena is a self-hostable bookmark and document archive. Save from the web UI, Telegram, the terminal, or a linked channel; search the whole database; and ask an AI model to answer with sources from your own collection.
@@ -20,11 +32,6 @@ Athena is a self-hostable bookmark and document archive. Save from the web UI, T
 <p align="center">
   <em>Live captures — public pages only; no accounts, tokens, or private brains shown.</em>
 </p>
-<p align="center">
-  <img src="screenshots/screenshot-2026-08-21_14-28-39.png" width="32%" alt="Athena app view">
-  <img src="screenshots/screenshot-2026-08-21_14-28-56.png" width="32%" alt="Athena app view">
-  <img src="screenshots/screenshot-2026-08-21_14-29-24.png" width="32%" alt="Athena app view">
-</p>
 
 > ⭐ **Like Athena?** [Star the repo](https://github.com/JuznemHub/Athena-Search/stargazers) and test it out extensively — real usage is what makes it better.
 >
@@ -35,22 +42,26 @@ Athena is a self-hostable bookmark and document archive. Save from the web UI, T
 ## Juznem's favourite features
 
 - **📚 Dump all your browser bookmarks straight into Athena via the TUI** — Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Arc and Firefox are detected automatically; scan, pick folders, and dump everything into your personal or community brain from the terminal. No export-file gymnastics.
-- **🧠 Advanced (opencode) mode tailored for research** — press `Tab` in the TUI and you get an opencode-powered session wired to your brain through the `athena` MCP server, with the `/athena` command kept strict for Athena-related research and knowledge work: grounded search, citations with `[#n]`, paragraph-level document lookup (`para_idx`), plus `/athena-study` and `/athena-ingest` skills.
+- **🐦 Reddit & X (x.com) bookmark imports** — Import saved posts, bookmarks, and likes from Reddit (via [Reddit-Fetch](https://github.com/akashpandey/Reddit-Fetch)) and X (x.com / Twitter official archive or [TweetNook](https://github.com/GezerWezer/TweetNook) export) directly into your brain. Outside links in posts become distinct bookmarks, and the TUI setup remembers your paths for future syncs.
+- **🧠 Model Context Protocol (MCP) server for any agent** — Wire your second brain into Claude Code, Hermes, Codex, Cursor, or any MCP host: grounded semantic search, paragraph-level chunk lookups (`para_idx`), citations with `[#n]`, and rank-scoped access. Press `Tab` in the TUI or run `node tui/src/mcp-athena.js --config`.
+- **🗂️ Wiki directory & database explorer** — Browse your collection as an interactive catalog with auto-grouped categories, global tag clouds, and public shareable wiki links. Administer the database directly with inline editing, `#notags` filtering, and audit history.
 - **🏠 Self-host it for yourself — or run your own Telegram community** — full control end-to-end: PostgreSQL storage, your own bot, rank hierarchy (GOD / owner / admin / member), approve whom to add, kick/ban with automatic sync to Telegram group presence, per-community brains, backups to Telegram, and GOD-only switches like AI credentials and channel targets.
 - **📡 Live cloning of any Telegram channel, group — even a single forum topic** — powered by a userbot session or a linked bot: links, documents (pdf/epub/docx/…), button links, and text posts land in your brain automatically, with GOD-rank targets (community / personal / both), one-command history backfill by id range or topic, a VPS media vault, per-session rollback, and honest live progress bars.
-- *…and much more:* Meilisearch acceleration, pgvector paragraph search, multi-agent MCP memory, streaming AI answers grounded in your own sources, themes, accent colors, and a zero-build frontend.
+- *…and much more:* pgvector paragraph search, multi-agent MCP memory, streaming AI answers grounded in your own sources, themes, accent colors, and a zero-build frontend.
 
 ## What it does
 
 - Saves URLs, notes, code, text files, and self-hosted binary documents as searchable Markdown.
-- Searches titles, URLs, notes, tags, and document content across the complete PostgreSQL corpus.
-- Uses optional [Meilisearch](https://www.meilisearch.com/) as a fast derived index; PostgreSQL remains the source of truth and the fallback.
+- Searches titles, URLs, notes, tags, and document content across PostgreSQL with full-text indexing and pgvector embeddings.
 - Answers questions with retrieval-augmented context and source links.
-- Supports OpenAI-compatible gateways, Anthropic, OpenRouter, OpenCode Zen, Groq, and local routers such as [OmniRoute](https://github.com/df4p/omniroute).
+- Supports OpenAI-compatible gateways, Anthropic, OpenRouter, Groq, and local routers such as [OmniRoute](https://github.com/df4p/omniroute).
+- Exposes a native Model Context Protocol (MCP) server so AI agents (Claude Code, Hermes, Codex, Cursor) can query your saved collection.
+- Imports bookmarks from 8+ desktop browsers, Reddit saved posts, and X (x.com) archives via a zero-dependency terminal UI.
+- Interactive wiki directory layout with live database synchronization and public shareable links.
+- Database explorer view with inline editing, tag aggregation, and `#notags` filtering.
 - Provides personal and community brains with rank-aware permissions, voting, reports, and Telegram group membership gates.
 - Clones Telegram channels, groups, and individual forum topics into your brain — links, documents (pdf/epub/docx/…), and text posts — with GOD-rank targets (community / personal / both) and one-time history backfill.
 - Grounds every AI answer in retrieved sources and rejects responses containing URLs outside your saved set.
-- Includes a zero-build terminal UI for bookmark import and MCP-powered AI sessions.
 
 ## Quick start
 
@@ -96,14 +107,13 @@ Text uploads work in the Worker runtime. Binary conversion needs the self-hosted
 | Telegram bot | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` | Bot API ingestion, commands, and webhooks. |
 | Telegram login | `TELEGRAM_CLIENT_ID`, `TELEGRAM_CLIENT_SECRET` | OAuth/Mini App login. |
 | Session history | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `STORAGE_KEY` | Optional self-hosted GramJS backfill; never expose these to the browser. |
-| Search index | `MEILI_URL`, `MEILI_MASTER_KEY`, `MEILI_INDEX` | Optional Meilisearch accelerator; defaults to index `athena`. |
-| JS scraping | `KAGE_BIN`, `KAGE_CHROME` | Optional [Kage](https://github.com/tamnd/kage) + Chrome/Chromium fallback. |
+| JS scraping | `CHROME_BIN` | Optional headless Chromium fallback for JavaScript-rendered pages. |
 | Local Bot API | `TELEGRAM_API_BASE` | Optional self-hosted telegram-bot-api; lifts file cap 20 MB → 2 GB. |
 | AI | `OPENROUTER_API_KEY` or settings UI | Credentials are stored server-side and never returned to normal users. |
 
 ## Search and AI
 
-PostgreSQL is authoritative. When `MEILI_URL` is configured, Athena creates the `athena` index, syncs each personal/community scope in the background, and uses it for normal search and AI retrieval. Writes mark the relevant scope dirty; an unavailable or warming Meilisearch instance falls back to the complete PostgreSQL search instead of returning an incomplete corpus.
+PostgreSQL is the single source of truth for all search operations. Queries run directly against PostgreSQL full-text search indexes (`tsvector`), combined with `pgvector` embeddings for paragraph-level document lookup (`athena_get_chunk`).
 
 The web UI’s **Models** picker calls the configured endpoint’s live `/models` catalog and preserves provider metadata, pricing, context length, and supported model IDs. OpenRouter’s router model is available as:
 
@@ -121,6 +131,13 @@ Model:    openrouter/free   # or a model exposed by the gateway
 
 Local HTTP endpoints are allowed only by the self-hosted server and are restricted to loopback/private addresses. Public upstream endpoints must use HTTPS. The proxy keeps streaming responses, model fallbacks, rate limits, and upstream error history.
 
+## Web directory and database explorer
+
+Athena includes an interactive frontend that serves as both a curated knowledge directory and an administrative database manager:
+
+- **Wiki directory**: an interactive directory catalog that dynamically groups your links by category (Dev, Media, Tools, Reading) and ecosystem based on the taxonomy classifier, updating as new links land. Public shareable links can be generated for community brains.
+- **Database explorer**: an administrative interface to search, filter, and inspect links across the entire database. Features include global tag frequency clouds, `#notags` filtering to locate unclassified items, inline title/description/tag editing, and a manual tag lock (`manual_edited_at`) to preserve custom changes from automated scrapers.
+
 ## Telegram bot
 
 1. Create a bot with [@BotFather](https://t.me/BotFather).
@@ -134,21 +151,20 @@ Bot API mode is the default and safest mode:
 
 - no user session string is required for live indexing;
 - links, captions, documents (pdf/docx/epub/md/…), and text-only announcements are captured;
-- video/audio/apk/archives are skipped by design;
+- video is excluded; full-copy channel/topic/group capture also stores photos, audio and other non-video files;
 - every insert is deduplicated — canonical URL hash per brain (community or personal), plus `chat_id + message_id` identity for channel documents, so replays and cross-posts never create duplicates.
 
-Session mode is optional and self-host-only. It uses a Telegram user session to backfill older history with `/index_start`; the encrypted session is kept only for the job and removed when the job finishes or is stopped. Treat a session string like a password: it can grant access to the Telegram account that created it.
+Userbot mode is optional and self-host-only. It uses a saved Telegram user session (see `/userbot_add`) to backfill older history and keep indexing new posts. Treat a session string like a password: it can grant access to the Telegram account that created it.
 
-Athena accepts compatible Telethon/Pyrogram-style StringSession values for this bridge. It does not vendor or execute the full [Ultroid](https://github.com/TeamUltroid/Ultroid) userbot; Ultroid can remain a separate session generator/client if you already use one.
+Athena accepts compatible Telethon/Pyrogram-style StringSession values for this bridge. It does not vendor or execute an external userbot framework; any standard session generator works.
 
 ### Channels: full-copy indexing with rank-aware targets
 
-Link any public or private channel; from then on every post is cloned into a brain automatically.
+Link any public or private channel; from then on every post is cloned into a brain automatically. One command does it all — it links when the bot is an admin there, otherwise it backfills history with your userbot account:
 
 ```text
-/channel_link <community_id> <channel_id> [community|personal|both]
-/channel_target <channel_id> <community|personal|both>   # GOD: switch later
-/channel_unlink <channel_id>
+/clone <community_id> <channel_id> [thread_id] [bot|userbot] [community|personal|both]
+/clone <channel_id>     # inspect: where it saves (bot link, userbot follow, or nothing)
 ```
 
 | Target | Who can set | Where content lands |
@@ -173,50 +189,78 @@ Groups work out of the box once bound with `/community_verify`: member links and
 **Forum topics** can be cloned individually — each topic gets its own binding and target:
 
 ```text
-/topic_link <community_id> [community|personal|both]   # run inside the topic
+/topic_link [community_id] [community|personal|both]   # run inside the topic
+/topic link                                            # same command, the spelling people reach for
 /topic_list                                            # linked topics in this group
-/topic_target <thread_id> <community|personal|both>    # GOD: switch target
-/topic_unlink <thread_id>
+/topic_unlink [thread_id]
+# (re-running /topic_link inside the topic with a new target re-routes it)
 ```
 
 New posts in a linked topic are indexed in real time; existing topic history is pulled in by the backfill below (pass the thread id as the last argument).
 
+For the guided Bot API flow, run `/clone` inside the linked group. Confirming `/clone` enables live copying without a userbot: omit the topic id to cover the group and all topics, or pass a topic id (or run it inside that topic) to bind one forum topic. The Bot API still cannot read earlier history; use `/clone <community_id> <chat_id>` (userbot path, same command) or `/uclone` for history.
+
 ### History backfill (one-time, self-hosted)
 
-Bots cannot read old messages. To clone everything already in a channel/group/topic, run a one-time backfill with your own session:
-
-```bash
-node scripts/gen-session.js   # on the server — prints a gramjs StringSession
-```
-
-Then in a **private bot DM**:
+Bots cannot read old messages. To clone everything already in a channel/group/topic, first connect a userbot account once (`/userbot_add`), then run one command from anywhere:
 
 ```text
-/index_start <community_id> <chat_id> <api_id> <api_hash> <session_string> [thread_id]
+/clone <community_id> <chat_id> [thread_id] [bot|userbot] [community|personal|both]
 ```
 
 - pass `thread_id` to clone a single forum topic instead of the whole chat;
-- pacing honors Telegram flood-waits; progress every 300 messages (`/index_status`);
-- `/index_stop` cancels; jobs resume from their cursor;
-- the session is AES-GCM encrypted at rest (`STORAGE_KEY`) and auto-deleted when the job completes.
+- starting the backfill subscribes the chat (or the single topic) for live indexing under the same account — history and live follow-up come from one command;
+- pacing honors Telegram flood-waits; progress every 300 messages (`/status`, or `/status all` for every user's jobs);
+- stop anytime from the ⏹ button beside the source on `/stats`; jobs resume from their cursor;
+- no per-command session strings: the account lives encrypted on the server.
 
-### Userbot mode: live cloning without adding the bot
+### Managed userbot mode: persistent accounts and the clone wizard
 
-Bot mode requires the bot to be an admin of each channel/group. **Userbot mode** removes that requirement: a Telegram *user account* (via session string) does the cloning, so any chat the account can read can be mirrored — including channels where adding bots is impossible.
+Self-hosted Athena keeps a persistent account store and an interactive wizard in the bot DM:
 
 ```text
-/userbot_connect <api_id> <api_hash> <session_string>   # GOD, bot DM, self-host
-/userbot_follow <community_id> <chat_id> [community|personal|both]
-/userbot_status
-/userbot_unfollow <chat_id>
-/userbot_disconnect    # stops the daemon and deletes the stored session
+/userbot_add <label> <api_id> <api_hash> <session_string>  # save an encrypted account
+/userbot_accounts                                          # list, select, re-authenticate, remove
+/userbot_select                                            # pick the account future clones use
+/uclone <chat_id>          # scan a channel/group, preview exact statistics, pick a destination
+/ubclone <chat_id>         # alias for the same managed wizard
+/userbot_status            # accounts, follows, backfill progress
 ```
 
-- generate the session with `node scripts/gen-session.js` (the account must already be a member of the chats you want to follow);
-- followed chats clone **live** — links, documents (pdf/epub/…), and text posts — into the chosen target (`community` / `personal` / `both`, rank rules identical to channel targets);
-- existing history: run `/index_start` for that chat once (optionally with `thread_id`);
-- the session is AES-GCM encrypted at rest under `STORAGE_KEY`; `/userbot_disconnect` deletes it completely;
-- self-hosted only (needs the persistent Node process; gramjs is bundled).
+The destination picker is intentionally explicit: `Personal` is the private brain; each authorized community is shown as `<community name> — community DB`, with a separate `Personal + community` option. Topic statistics and clone completion both include Back so another topic can be selected without rescanning the source.
+
+`/stats` provides a paginated dashboard across every cloned source (5 sources per page with navigation and quick refresh). A source displays `🟢 LIVE CLONING: ON` while an active capture path exists (linked channel, whole-group copy, or active userbot follow). Drilling into any source shows isolated latest links, topic-scoped metrics, encountered preview counts vs saved database rows, and a stop button (`⏹`) for live jobs. Every finished clone automatically subscribes for live indexing under the account that ran it; switching active accounts in `/userbot_accounts` migrates your follows. `/userbot_status` is a userbot health dashboard that summarizes account state and collapses duplicate session errors.
+
+- every saved session is AES-GCM encrypted at rest (`STORAGE_KEY`); credentials typed into a command are never logged;
+- `/uclone` scans the accessible history first (it never guesses totals it cannot measure), shows per-topic statistics, then asks where to copy: your personal brain, one of your communities, or both (combined destinations copy to both brains);
+- forum groups list their topics with pagination (more than 100 topics work); choosing "All topics, sequentially" clones topic by topic, one live progress card;
+- videos are excluded by design; links, documents (pdf/epub/md/…), images and audio are cloned with per-message provenance, so re-cloning the same source never duplicates rows;
+- a failed item is recorded and cloning continues; Telegram flood-waits are honored; interrupted jobs resume from their cursor after restart;
+- `/status [all]` lists backfill jobs with their ids; `/delete` opens a picker (one link, one cloned chat, one backfill session — each with confirm).
+- `/stats` reads persisted run and per-message checkpoints and shows dashboard totals before the per-run detail. Preview counts describe encountered content; saved counters describe successful writes.
+- URL search returns the original source post, including the other URLs in that message. Source bodies, entity offsets and reply metadata are preserved separately from canonical URL rows.
+
+### Dokploy control and runtime logs
+
+GOD users can manage Dokploy applications and inspect logs directly from Telegram:
+
+```text
+/dok apps                # list Dokploy applications (project.all)
+/dok status [app]        # container state and last deployment status
+/dok logs [app] [n]      # live container runtime logs
+/dok buildlogs [app] [n] # last deployment build output
+/dok deploy [app]        # queue fresh deployment of latest commit
+/dok redeploy [app]      # rebuild and redeploy
+/dok restart [app]       # restart container without rebuilding
+/dok stop [app]          # stop container
+/dok start [app]         # start container
+/log [n]                 # process buffer log tail
+/log --json [n]          # structured JSON records
+```
+
+Configure `DOKPLOY_URL`, `DOKPLOY_API_KEY` and optionally `DOKPLOY_APP_ID` in `.env`. Deploy and redeploy requests confirm acceptance; follow `/dok buildlogs` and verify `/dok status` to confirm completion.
+
+For continuous agent consumption, use an authenticated GOD session with `GET /api/logs?source=app&tail=100&follow=1`. For Dokploy, select `source=container` or `source=deployment` and `app=<application_id>`.
 
 ### Local Bot API server (2 GB files)
 
@@ -232,42 +276,33 @@ Then move the webhook once: call `logOut` on the cloud API, restart Athena, and 
 
 ### Exporting into the bot
 
-Use `/export` for the complete setup guide. A Telegram export is normally imported in bot format through the TUI or `/index_start` workflow; it does not require changing the bot into a userbot. The bot’s normal link/document dump path remains available in both personal and community scopes.
+Use `/export` for the complete setup guide. A Telegram export is normally imported in bot format through the TUI or `/clone` workflow; it does not require changing the bot into a userbot. The bot’s normal link/document dump path remains available in both personal and community scopes.
 
 Useful commands:
 
 | Command | Purpose |
 | --- | --- |
-| `/help` | Detailed command menu and setup guidance. |
+| `/help` | Detailed command menu and setup guidance. Long panels are paginated and every page carries section buttons. |
 | `/search <query>` | Search only matching links/documents with page buttons. |
 | `/ai <question>` | Ask the configured model over the active brain. |
 | `/export` | Explain bot-mode export and optional session-history import. |
-| `/channel_link <community_id> <channel_id> [target]` | Clone a channel; GOD may pick `personal`/`both`. |
-| `/channel_target <channel_id> <target>` | GOD: switch where a channel lands. |
-| `/channel_unlink <channel_id>` | Stop channel indexing. |
-| `/group_copy on\|off` | Owner: full-copy text posts for this group. |
-| `/topic_link <community_id> [target]` | Clone the forum topic you are in. |
-| `/topic_list` / `/topic_target` / `/topic_unlink` | Manage topic bindings. |
-| `/index` | Show indexing status and available backfill actions. |
-| `/index_start ...` | Start optional self-hosted history backfill (optional `thread_id`). |
-| `/index_status` / `/index_stop` | Inspect or cancel a backfill. |
+| `/clone <community_id> <channel_id> [thread_id] [bot|userbot] [target]` | Clone a channel or chat: bot link when the bot is admin there, else userbot history + live follow-up (re-run to re-route). |
+| `/clone <chat_id>` | Inspect where a chat saves (bot link, userbot follow, or nothing). |
+| `/group_copy on|off` | Owner: full-copy text posts for this group. |
+| `/topic_link [community_id] [target]` | Clone the forum topic you are in (re-run to re-route). The community id defaults to this group's; `/topic link` is the same command. |
+| `/topic_list` / `/topic_unlink` | List or remove topic bindings. |
+| `/status [all]` | What is indexing right now plus running and recent backfill jobs; `all` lists every user's jobs (GOD). Stopping happens from the ⏹ button on `/stats`. |
 | `/community_join <id>` | Join a community after joining its Telegram group. |
+| `/clone [topic_id] [community|personal|both]` | Owner/GOD: inside a linked group, preview and confirm Bot API live indexing for the whole group or one forum topic; no userbot and no old-history access. |
+| `/stats` | Dashboard totals across every cloned source with a ⏹ stop button per live row, per-source drill-downs, live state and a refresh control. |
+| `/userbot_status` | GOD, DM only: show account identity, actual connection state, saved userbot follows, backfill/topic progress and recent normalized errors. |
+| `/uclone <chat_id>` | GOD: clone a channel/group via the account wizard (personal/community/both); confirming the destination subscribes the live follow, and switching accounts later moves it along. |
 | `/personal` / `/community` | Switch the GOD user’s dump target. |
-| `/delete <url>` | Delete a link, or reply to a saved link with `/delete`. |
+| `/delete` | Picker (one link, one cloned chat, one backfill session — each with confirm); `/delete <url>` removes a link, `/delete <chat_id> [thread_id]` a whole clone. |
+| `/dok <command> [app]` | GOD: Dokploy control (`apps`, `status`, `logs`, `buildlogs`, `deploy`, `redeploy`, `restart`, `stop`, `start`). |
+| `/log [n]` | GOD: inspect runtime process buffer logs; add `dokploy` or `buildlogs` for container logs. |
 
 `/search` is deliberately scoped: every page contains only results matching the query, and **Next page** loads the next matching slice before the close button. Unrelated recent bookmarks are never appended to the result list.
-
-## Search index (Meilisearch, optional)
-
-PostgreSQL is always the source of truth. For large brains, add [Meilisearch](https://www.meilisearch.com/) as a derived index — search and AI retrieval get sub-second candidate finding while PostgreSQL hydrates the authoritative rows:
-
-```dotenv
-MEILI_URL=http://127.0.0.1:7700
-MEILI_MASTER_KEY=change-me-strong
-MEILI_INDEX=athena
-```
-
-Writes mark scopes dirty and re-sync in the background; if Meili is slow, warming, or down, Athena silently falls back to complete PostgreSQL search. AI retrieval reports which engine served a query (`meilisearch+postgres` vs `postgres`).
 
 ## Duplicate protection
 
@@ -275,31 +310,92 @@ Every save path — website, bot DM, group, channel, topic, TUI batch — shares
 
 ## Scraping
 
-Every saved URL is first handled by Athena’s normal safe fetch and extractor. GitHub, GitLab, Reddit, and common forge pages have dedicated metadata paths. If a page is JavaScript-rendered and the static result is too thin, self-hosted Athena can invoke Kage with a real Chrome/Chromium browser:
+Every saved URL is first handled by Athena’s normal safe fetch and extractor. GitHub, GitLab, Reddit, and common forge pages have dedicated metadata paths. If a page is JavaScript-rendered and the static result is too thin, self-hosted Athena can render it with a real headless Chromium and read the DOM:
 
 ```bash
-kage clone https://example.com --max-pages 1 --workers 1 -o /tmp/athena-kage-check
+chromium --headless=new --no-sandbox --disable-gpu --dump-dom https://example.com
 ```
 
-Configure the binary explicitly when needed:
+Configure the binary explicitly when needed (otherwise Athena tries `chromium`, `chromium-browser`, `google-chrome`, then `google-chrome-stable`):
 
 ```dotenv
-KAGE_BIN=/usr/local/bin/kage
-KAGE_CHROME=/usr/bin/chromium
+CHROME_BIN=/usr/bin/chromium
 ```
 
-Kage is optional. If it is missing, disabled, or fails, Athena keeps the safe static metadata fallback. The browser-rendered output is read from Kage’s host directory under the selected output root; scripts are not stored as page content.
+Chromium is optional. If it is missing, disabled, or fails, Athena keeps the safe static metadata fallback. The `railpack.json` in the repository installs `chromium` for Railpack deployments.
 
 ## Terminal UI
 
-[`athena-tui`](tui/README.md) imports browser bookmarks and export files without requiring a browser session on the server.
+[`athena-tui`](tui/README.md) is a zero-dependency CLI client for scanning and importing your bookmarks and archives directly into Athena.
 
 ```bash
 npm install -g athena-tui
 athena-tui
 ```
 
-It supports Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Arc, Firefox, and explicit export files. `Tab` opens the advanced AI/MCP view when configured; the website and database can stay on a VPS while the TUI runs locally.
+```text
+                                    ✦
+                   █▀█ ▀█▀ █ █ █▀▀ █▄ █ █▀█  ▄▀▀ █▀▀ █▀█ █▀▄ ▄▀▀ █ █
+                   █▄█  █  █▀█ █▀  █ ▀█ █▄█  █▄▄ █▀  █▄█ █▀▄ █   █▀█
+                   ▀ ▀  ▀  ▀ ▀ ▀▀▀ ▀  ▀ ▀ ▀  ▀▀▀ ▀▀▀ ▀ ▀ ▀▀  ▀▀▀ ▀ ▀
+              search your second brain · dump your bookmarks · ai answers
+                                 server  not connected
+
+              ╭─ actions ────────────────────────────────────────────────╮
+              │ ❯ 1 Login with Telegram         not logged in            │
+              │   2 Connect instance            not connected            │
+              │   3 Join community              not joined               │
+              │   4 Scan bookmarks              not scanned              │
+              │   5 Import social (Reddit/X)    not imported             │
+              │   6 Dump bookmarks                                       │
+              │   7 Advanced (MCP)              MCP config for any agent │
+              │   8 Status                                               │
+              │   9 Quit                                                 │
+              ╰──────────────────────────────────────────────────────────╯
+               ╭───────────────────────────────────────────────────────╮
+               │ ↑↓ move · ↵ select · 1-9 jump · Tab advanced · q quit │
+               ╰───────────────────────────────────────────────────────╯
+```
+
+### Browser and social imports
+
+- **Browser bookmarks**: auto-detects profiles across Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Arc, and Firefox (`places.sqlite` read via `node:sqlite`), including Flatpak and Snap installations. Custom roots can be supplied via `ATHENA_BOOKMARK_ROOTS`.
+- **Reddit saved posts**: guided setup integrates with [Reddit-Fetch](https://github.com/akashpandey/Reddit-Fetch), handling OAuth and parsing `saved_posts.json` or `.html`. Posts are automatically tagged `#reddit` and `#r-<subreddit>`.
+- **X (x.com / Twitter) archives**: reads official Twitter archive directories (`data/tweets.js`, `data/like.js`) or [TweetNook](https://github.com/GezerWezer/TweetNook) JSON exports. External links in tweets are saved as distinct entries, while text-only posts and likes save as links to the tweet tagged `#x`.
+- **Path persistence**: verified paths are saved in `~/.config/athena-tui/config.json` so subsequent syncs run without re-prompting. Headless or scripted environments can set `REDDIT_EXPORT_PATH`, `X_ARCHIVE_PATH`, or `TWEETNOOK_EXPORT_PATH`.
+
+## Model Context Protocol (MCP)
+
+Athena runs a native Model Context Protocol (MCP) stdio server, connecting your brain directly to AI agent hosts like Claude Code, Hermes, Codex, Cursor, and Antigravity.
+
+### Capabilities and tools
+
+- `athena_search` — search personal and community collections using hybrid full-text and semantic matching, with domain and tag filters.
+- `athena_get_chunk` — paragraph-level retrieval (`para_idx`) to pull exact context blocks from long-form documents and PDFs.
+- `athena_list_sources` — inspect indexed channels, groups, and collections.
+
+### Agent configuration
+
+Run `node tui/src/mcp-athena.js --config` or select **Advanced (MCP)** (or press `Tab`) in the TUI to print your configuration snippet.
+
+Example configuration for Claude Code or desktop MCP clients:
+
+```json
+{
+  "mcpServers": {
+    "athena": {
+      "command": "node",
+      "args": ["/path/to/Athena-Search/tui/src/mcp-athena.js"],
+      "env": {
+        "ATHENA_INSTANCE": "https://athena.example.org",
+        "ATHENA_TOKEN": "your_session_token"
+      }
+    }
+  }
+}
+```
+
+Ranks apply: `personal` collection access requires GOD rank, while community collections are accessible to active members.
 
 ## Permissions
 
@@ -318,7 +414,7 @@ Empty `TG_OWNER_IDS` is convenient for a private instance: every authenticated u
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/api/health` | Runtime, database, version, and feature status. |
-| GET | `/api/links/search` | Whole-corpus scoped search; Meilisearch-backed when configured. |
+| GET | `/api/links/search` | Whole-corpus scoped PostgreSQL search. |
 | GET/POST/PATCH/DELETE | `/api/links` | Community link CRUD. |
 | GET/POST/DELETE | `/api/documents` | Document CRUD. |
 | GET | `/api/ai/models` | Live model catalog for the settings picker. |
@@ -347,10 +443,6 @@ npm run test:unit
 
 The repository’s CI also runs the TUI test suite and secret scanning. PostgreSQL is required for runtime integration checks; the unit retrieval test is self-contained.
 
-## Note on Discord
-
-You will see a **Discord login** option in the UI. It is **not tested and not supported yet** — do not use it. Telegram login is the supported auth path.
-
 ## Roadmap
 
 - [ ] **RSS support** — live indexing of RSS/Atom feeds with change tracking: new items land automatically, and edits/removals on the source site are reflected (content updated or removed from the DB) instead of leaving stale copies.
@@ -362,12 +454,12 @@ You will see a **Discord login** option in the UI. It is **not tested and not su
 
 Athena stands on the shoulders of these projects — their code and ideas are part of this codebase:
 
-- [OpenCode](https://github.com/anomalyco/opencode) — the CLI agent harness; Athena's MCP integration and TUI advanced mode build on its patterns.
-- [Kage](https://github.com/tamnd/kage) — headless-Chrome site cloner powering JS-rendered page scraping.
+- [modelcontextprotocol](https://modelcontextprotocol.io/) — open specification for AI agent context and memory.
 - [@firecrawl/anydoc](https://github.com/firecrawl/anydoc) — Rust document converter (pdf/docx/pptx/xlsx/odt/rtf/epub → Markdown).
 - [binthere](https://github.com/nxfu/binthere) — the TUI app whose wordmark, box menus, cursor, and spinner `athena-tui` is based on.
+- [Reddit-Fetch](https://github.com/akashpandey/Reddit-Fetch) — Reddit saved post extraction for terminal imports.
+- [TweetNook](https://github.com/GezerWezer/TweetNook) — X archive export format and parsing.
 - [gramjs](https://github.com/gram-js/gramjs) — Telegram user-session client for history backfill.
-- [Meilisearch](https://www.meilisearch.com/) — optional derived search index.
 - [pgvector](https://github.com/pgvector/pgvector) — embedding similarity for paragraph-level document search.
 - [aiogram/telegram-bot-api](https://github.com/aiogram/telegram-bot-api) — local Bot API server for 2 GB file support.
 

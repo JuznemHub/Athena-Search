@@ -21,4 +21,10 @@ node_modules/
 agent/
 .claude/skills/
 .local/
+.codex/
+.agents/skills/impeccable/
+.github/agents/
+.github/hooks/
+.github/skills/
+
 

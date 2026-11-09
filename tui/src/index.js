@@ -3,6 +3,7 @@
 
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
+import fs from 'node:fs';
 import readline from 'node:readline';
 
 import { makeTheme } from './theme.js';
@@ -12,9 +13,10 @@ import { playIntro, withSpinner } from './anim.js';
 import { keyStream } from './keys.js';
 import { makeClient, ApiError, STORAGE_LABELS, rankOf } from './api.js';
 import { detectBookmarks, loadBookmarks, dedupe, scanDiagnose, filterSynthetic } from './browsers.js';
+import { detectSocialSources, loadSocialLinks, socialScanDiagnose, socialSourceFor, ensureRedditExport, ensureXArchive } from './social-import.js';
 import { loadConfig, saveConfig } from './config.js';
 import { parseSessionToken } from './session.js';
-import { launchAdvanced, isOpencodeAvailable } from './opencode-launcher.js';
+import { launchAdvanced } from './opencode-launcher.js';
 
 const theme = makeTheme();
 const stderr = (s) => process.stderr.write(s);
@@ -141,6 +143,11 @@ async function stepConnectInstance() {
         community_id: undefined,
         community_name: undefined,
         scanned: undefined,
+        social: undefined,
+        socialSources: undefined,
+        redditExportPath: undefined,
+        redditCheckout: undefined,
+        xArchivePath: undefined,
         last_dump: undefined,
       });
     }
@@ -267,6 +274,81 @@ async function stepScan() {
   return true;
 }
 
+async function stepSocial() {
+  if (!state.token) { stderr(theme.danger('Login first.\n')); return false; }
+  await renderHeader(false);
+  stderr(center(theme.bold('Import social'), columns()) + '\n\n');
+  const say = (s) => stderr(theme.dim(s + '\n'));
+  const pick = await menu(io, theme, {
+    title: 'Import what?',
+    items: [
+      { label: 'Reddit saves', hint: state.redditExportPath ? 'ready' : 'guided setup' },
+      { label: 'X posts', hint: state.xArchivePath ? 'ready' : 'guided setup' },
+      { label: 'Both', hint: '' },
+    ],
+    width: columns(),
+  });
+  if (pick === null) return false;
+  const ctx = { prompt, say, state, confirm: (q) => confirm(io, theme, q, columns()) };
+  const wanted = pick === 0 ? ['reddit'] : pick === 1 ? ['x'] : ['reddit', 'x'];
+  for (const kind of wanted) {
+    try {
+      const src = kind === 'reddit' ? await ensureRedditExport(ctx) : await ensureXArchive(ctx);
+      if (!src) say(`${kind === 'reddit' ? 'Reddit' : 'X'} skipped.`);
+    } catch (e) {
+      say(`${kind === 'reddit' ? 'Reddit' : 'X'} setup failed: ${e.message}`);
+    }
+  }
+  saveConfig(state);
+  // Everything with a good stored path loads with no further prompts.
+  let sources = [];
+  if (state.redditExportPath) {
+    try { if (fsStat(state.redditExportPath)?.isFile()) sources.push(socialSourceFor(state.redditExportPath, 'Reddit saved posts')); } catch {}
+  }
+  if (state.xArchivePath) {
+    try { if (fsStat(state.xArchivePath)) sources.push(socialSourceFor(state.xArchivePath, 'X archive')); } catch {}
+  }
+  if (!sources.length) sources = detectSocialSources();
+  if (sources.length === 0) {
+    say('Nothing to import yet — set a path up above, then come back.');
+    return false;
+  }
+  const all = [];
+  const failed = [];
+  for (const src of sources) {
+    try {
+      const links = await withSpinner(io, theme, `Reading ${src.name}…`, () => loadSocialLinks(src));
+      all.push(...links);
+    } catch (e) {
+      failed.push(`${src.name}: ${e.message}`);
+    }
+  }
+  const unique = dedupe(filterSynthetic(all));
+  state.socialSources = sources;
+  state.social = { count: unique.length, time: Date.now(), sources: sources.map((s) => s.name) };
+  saveConfig(state);
+  await renderHeader(false);
+  stderr(center(theme.bold('Social imports found'), columns()) + '\n\n');
+  stderr(box([
+    `${theme.accent(String(unique.length))} Reddit/X links ready to dump`,
+    ...sources.map((s) => theme.dim('◦ ' + s.name)),
+    ...(failed.length ? [theme.danger(`${failed.length} source(s) unreadable:`), ...failed.map((f) => theme.dim('  ' + f))] : []),
+  ], theme).join('\n') + '\n');
+  stderr(center(theme.dim('Press ↵ to continue'), columns()) + '\n');
+  const keys = await keyStream();
+  await keys.next();
+  keys.close();
+  return true;
+}
+
+function fsStat(p) {
+  try {
+    return fs.statSync(p);
+  } catch {
+    return null;
+  }
+}
+
 async function pickDumpTarget() {
   const pick = await menu(io, theme, {
     title: 'Dump where?',
@@ -282,8 +364,8 @@ async function pickDumpTarget() {
 
 async function stepDump() {
   if (!state.token) { stderr(theme.danger('Login first.\n')); return false; }
-  if (!state.scanned?.count) {
-    stderr(theme.danger('Scan bookmarks first.\n'));
+  if (!state.scanned?.count && !state.socialSources?.length) {
+    stderr(theme.danger('Scan bookmarks or import social first.\n'));
     return false;
   }
   const client = makeClient(state.instance, state.token);
@@ -300,7 +382,8 @@ async function stepDump() {
   }
 
   // Dump the same sources that were scanned; fall back to a fresh detection
-  // only when the scan state was lost (e.g. old config file).
+  // only when the scan state was lost (e.g. old config file). Social imports
+  // (Reddit/X) ride along when present — same dedupe, same brain.
   const sources = state.scanned?.sources?.length ? state.scanned.sources : detectBookmarks();
   const all = [];
   const unreadable = [];
@@ -308,6 +391,17 @@ async function stepDump() {
     try {
       const links = await withSpinner(io, theme, `Reading ${src.name}…`, () => loadBookmarks(src));
       all.push(...links);
+    } catch (e) {
+      unreadable.push(`${src.name}: ${e.message}`);
+    }
+  }
+  let socialCount = 0;
+  const socialSources = state.socialSources?.length ? state.socialSources : [];
+  for (const src of socialSources) {
+    try {
+      const links = await withSpinner(io, theme, `Reading ${src.name}…`, () => loadSocialLinks(src));
+      all.push(...links);
+      socialCount += links.length;
     } catch (e) {
       unreadable.push(`${src.name}: ${e.message}`);
     }
@@ -322,7 +416,8 @@ async function stepDump() {
   await renderHeader(false);
   const providerTxt = state.provider ? theme.dim(` · ${state.provider}`) : '';
   const where = target === 'personal' ? 'personal brain' : `community "${state.community_name || state.community_id}"`;
-  stderr(center(theme.bold(`Dump ${clean.length} bookmarks → ${where}`) + providerTxt, columns()) + '\n\n');
+  const what = socialCount ? `${clean.length} links (${clean.length - socialCount} bookmarks + ${socialCount} social)` : `${clean.length} bookmarks`;
+  stderr(center(theme.bold(`Dump ${what} → ${where}`) + providerTxt, columns()) + '\n\n');
   if (excluded) stderr(theme.dim(`${excluded} test/synthetic bookmarks excluded (example.*, *.test, localhost)\n`));
   if (unreadable.length) stderr(theme.danger(`${unreadable.length} source(s) unreadable:\n`) + unreadable.map((f) => theme.dim('  ' + f + '\n')).join(''));
   const ok = await confirm(io, theme, 'Send them now? (y/n)', columns());
@@ -464,6 +559,7 @@ async function stepStatus() {
       `account    ${theme.bold(s.name)} · ${s.rank.style === 'danger' ? theme.danger(s.rank.label) : theme.accent(s.rank.label)}`,
       ...(s.joined ? [`community  ${s.joined.name}${s.joined.role ? ` · ${s.joined.role}` : ''}`] : []),
       ...(state.scanned ? [`bookmarks  ${state.scanned.count} scanned`] : []),
+      ...(state.social ? [`social     ${state.social.count} ready (${(state.social.sources || []).join(', ')})`] : []),
       ...(state.last_dump ? [`last dump  ${state.last_dump.added} added · ${state.last_dump.dupes} dupes · ${state.last_dump.failed} failed${state.last_dump.unconfirmed ? ` · ${state.last_dump.unconfirmed} unconfirmed` : ''}`] : []),
     ];
     stderr(box(lines, theme, { label: 'STATUS' }).join('\n') + '\n');
@@ -490,7 +586,11 @@ async function stepAdvanced() {
   const res = await launchAdvanced(state, io, theme);
   if (res?.error) {
     stderr(theme.danger(`Advanced mode failed: ${res.error}\n`));
-    stderr(theme.dim('Install opencode: npm i -g opencode  (https://github.com/anomalyco/opencode)\n'));
+    stderr(center(theme.dim('Press ↵ to continue'), columns()) + '\n');
+    const keys = await keyStream();
+    await keys.next();
+    keys.close();
+  } else {
     stderr(center(theme.dim('Press ↵ to continue'), columns()) + '\n');
     const keys = await keyStream();
     await keys.next();
@@ -512,8 +612,9 @@ async function mainMenu() {
     { label: 'Connect instance', hint: state.instance || 'not connected' },
     { label: 'Join community', hint: state.community_name || 'not joined' },
     { label: 'Scan bookmarks', hint: state.scanned ? `${state.scanned.count} found` : 'not scanned' },
+    { label: 'Import social (Reddit/X)', hint: state.social ? `${state.social.count} ready` : 'not imported' },
     { label: 'Dump bookmarks', hint: state.last_dump ? `${state.last_dump.added} last time` : '' },
-    { label: 'Advanced (opencode)', hint: isOpencodeAvailable() ? 'any AI via opencode' : 'install opencode' },
+    { label: 'Advanced (MCP)', hint: 'MCP config for any agent' },
     { label: 'Status', hint: '' },
     ...(state.token ? [{ label: 'Logout', hint: '' }] : []),
     { label: 'Quit', hint: '' },
@@ -528,13 +629,13 @@ async function mainMenu() {
   const pick = await menu(io, theme, { title: 'ATHENA SEARCH', items, width: columns(), header: head, label: 'actions', allowTab: true });
   if (pick === null) return false;
   if (pick === 'tab') return stepAdvanced();
-  const fns = [stepLogin, stepConnectInstance, stepJoinCommunity, stepScan, stepDump, stepAdvanced, stepStatus, ...(state.token ? [stepLogout] : []), () => false];
+  const fns = [stepLogin, stepConnectInstance, stepJoinCommunity, stepScan, stepSocial, stepDump, stepAdvanced, stepStatus, ...(state.token ? [stepLogout] : []), () => false];
   return fns[pick]();
 }
 
 async function main() {
   if (process.argv.includes('--diagnose')) {
-    console.log(scanDiagnose().join('\n'));
+    console.log([...scanDiagnose(), '', ...socialScanDiagnose()].join('\n'));
     process.exit(0);
   }
   if (!io.stderrIsTTY || !process.stdin.isTTY) {

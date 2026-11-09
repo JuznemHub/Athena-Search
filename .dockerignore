@@ -1,0 +1,16 @@
+node_modules
+tui/node_modules
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.log
+npm-debug.log*
+/tmp
+.opencode
+.agents
+skills-lock.json
+screenshots
+coverage
+.freebuff

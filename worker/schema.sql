@@ -107,7 +107,13 @@ CREATE TABLE IF NOT EXISTS links (
     image_url TEXT,
     site_name TEXT,
     metadata_version INTEGER NOT NULL DEFAULT 0,
+    manual_edited_at INTEGER,
+    last_edited_by TEXT,
+    last_edited_by_name TEXT,
     search_blob TEXT,
+    source_chat_id TEXT,
+    source_message_id TEXT,
+    transfer_id TEXT,
     FOREIGN KEY(community_id) REFERENCES communities(id)
 );
 
@@ -157,7 +163,13 @@ CREATE TABLE IF NOT EXISTS personal_links (
     image_url TEXT,
     site_name TEXT,
     metadata_version INTEGER NOT NULL DEFAULT 0,
-    search_blob TEXT
+    manual_edited_at INTEGER,
+    last_edited_by TEXT,
+    last_edited_by_name TEXT,
+    search_blob TEXT,
+    source_chat_id TEXT,
+    source_message_id TEXT,
+    transfer_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_personal_user ON personal_links(user_id);
@@ -197,6 +209,10 @@ CREATE INDEX IF NOT EXISTS idx_documents_personal
   ON uploaded_documents(scope, user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_documents_community
   ON uploaded_documents(scope, community_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_documents_personal_source
+  ON uploaded_documents(scope, user_id, source_chat_id, source_message_id);
+CREATE INDEX IF NOT EXISTS idx_documents_community_source
+  ON uploaded_documents(scope, community_id, source_chat_id, source_message_id);
 
 -- Short-lived server-side state for Telegram /search pagination. The query and
 -- scope stay here instead of in callback_data, which is size-limited and user-editable.
@@ -267,3 +283,21 @@ CREATE TABLE IF NOT EXISTS pending_clones (
   expires_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pending_clones_expiry ON pending_clones(expires_at);
+
+-- Shareable public wiki links (Owner rank only)
+CREATE TABLE IF NOT EXISTS wiki_share_links (
+  id TEXT PRIMARY KEY,
+  token TEXT UNIQUE NOT NULL,
+  created_by TEXT NOT NULL,
+  scope TEXT NOT NULL DEFAULT 'community',
+  community_id TEXT,
+  duration_label TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  revoked_at INTEGER,
+  views INTEGER NOT NULL DEFAULT 0,
+  FOREIGN KEY(created_by) REFERENCES users(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wiki_share_links_token ON wiki_share_links(token);
+CREATE INDEX IF NOT EXISTS idx_wiki_share_links_expires ON wiki_share_links(expires_at);
+

@@ -13,7 +13,7 @@ else
   grep -v 'SLOP_REGEX' "$TARGET" > /tmp/anti-slop-target.filtered 2>/dev/null || true
   TARGET=/tmp/anti-slop-target.filtered
 fi
-SLOP_REGEX='(delve|crucial|robust|seamless|leverage|tapestry|meticulous(ly)?|unveil|embark|game-changer|cutting-edge|state-of-the-art|empower|synergy|granular|comprehensive|holistic|best-of-breed|streamline|innovative|forward-thinking|in today.s fast-paced|in conclusion|it.s important to note|whether you.re a seasoned|supercharge|harness the power|effortlessly|dive into|dive deep|elevate|unleash|let.s unlock|beyond just|not only\.\.\.but also)'
+SLOP_REGEX='(\bdelve\b|\bcrucial\b|\brobust\b|\bseamless\b|\bleverage\b|\btapestry\b|\bmeticulous(ly)?\b|\bunveil\b|\bembark\b|\bgame-changer\b|\bcutting-edge\b|\bstate-of-the-art\b|\bempower\b|\bsynergy\b|\bgranular\b|\bcomprehensive\b|\bholistic\b|\bbest-of-breed\b|\bstreamline\b|\binnovative\b|\bforward-thinking\b|\bin today.s fast-paced\b|\bin conclusion\b|\bit.s important to note\b|\bwhether you.re a seasoned\b|\bsupercharge\b|\bharness the power\b|\beffortlessly\b|\bdive into\b|\bdive deep\b|\belevate\b|\bunleash\b|\blet.s unlock\b|\bbeyond just\b|\bnot only\.\.\.but also\b)'
 if grep -i -E -n "$SLOP_REGEX" "$TARGET" 2>/dev/null | head -n 50; then
   echo "Anti-slop: found AI tells — rewrite with plain language (stop-slop skill) before committing." >&2
   # only fail on non-vendor content

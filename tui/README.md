@@ -22,18 +22,20 @@ bookmark extraction covers Chromium-family browsers and Firefox.
               search your second brain · dump your bookmarks · ai answers
                                  server  not connected
 
-                   ╭─ actions ─────────────────────────────────────╮
-                   │ ❯ 1 Login with Telegram         not logged in │
-                   │   2 Connect instance            not connected │
-                   │   3 Join community              not joined    │
-                   │   4 Scan bookmarks              not scanned   │
-                   │   5 Dump bookmarks                            │
-                   │   6 Status                                    │
-                   │   7 Quit                                      │
-                   ╰───────────────────────────────────────────────╯
-                       ╭────────────────────────────────────────╮
-                       │ ↑↓ move · ↵ select · 1-9 jump · q quit │
-                       ╰────────────────────────────────────────╯
+              ╭─ actions ────────────────────────────────────────────────╮
+              │ ❯ 1 Login with Telegram         not logged in            │
+              │   2 Connect instance            not connected            │
+              │   3 Join community              not joined               │
+              │   4 Scan bookmarks              not scanned              │
+              │   5 Import social (Reddit/X)    not imported             │
+              │   6 Dump bookmarks                                       │
+              │   7 Advanced (MCP)              MCP config for any agent │
+              │   8 Status                                               │
+              │   9 Quit                                                 │
+              ╰──────────────────────────────────────────────────────────╯
+               ╭───────────────────────────────────────────────────────╮
+               │ ↑↓ move · ↵ select · 1-9 jump · Tab advanced · q quit │
+               ╰───────────────────────────────────────────────────────╯
 ```
 
 ## Requirements
@@ -75,7 +77,12 @@ npm install -g athenasearch-tui
 4. **4 Scan bookmarks** — scans every browser profile found locally at once
    (Chrome/Chromium/Edge/Brave/Opera/Vivaldi/Arc/Firefox); if none are found it
    asks for an HTML/JSON export file.
-5. **5 Dump bookmarks** — GODs pick *personal* or *community* brain; others
+5. **5 Import social (Reddit / X.com)** — guided setup that drives the tools for
+   you and remembers the paths, so the next import just works: pick Reddit
+   (finds/writes Reddit-Fetch `.env`, runs the OAuth login once, fetches
+   `saved_posts.json`) or X / x.com (takes your archive ZIP, extracts it, remembers
+   the folder). Afterwards step 5 reuses the stored paths with no prompts.
+6. **6 Dump bookmarks** — GODs pick *personal* or *community* brain; others
    dump to their community. Server-side dedupe is handled (skips reported),
    folder paths become tags.
 
@@ -103,6 +110,13 @@ Or run it directly: `node tui/src/index.js`
   (colon-separated) — scanned one level deep for `Bookmarks`/`places.sqlite`;
   `athena-tui --diagnose` shows every root it checks
 - Non-HTTP(S) bookmarks are skipped; local duplicates collapse before upload
+- Social imports: [Reddit-Fetch](https://github.com/akashpandey/Reddit-Fetch)
+  `saved_posts.json`/`.html` (run `reddit-fetcher` once to create it) and X / x.com
+  archives — an extracted official archive (`data/tweets.js`, …) or
+  [TweetNook](https://github.com/GezerWezer/TweetNook)
+  (`tweetnook import x-archive <zip>`, `tweetnook export json --collection all`).
+  Tweets with outside links dump one entry per link; text-only tweets/likes
+  dump as a link to the tweet itself, tagged `x` (+ `r-<sub>` for Reddit)
 
 ## Env
 
@@ -110,6 +124,9 @@ Or run it directly: `node tui/src/index.js`
 | --- | --- |
 | `ATHENA_INSTANCE` | Skip the instance prompt |
 | `ATHENA_TOKEN` | Skip Telegram login (scripted use) |
+| `REDDIT_EXPORT_PATH` | Skip the Reddit setup (Reddit-Fetch JSON/HTML) |
+| `X_ARCHIVE_PATH` | Skip the X setup (extracted X archive dir) |
+| `TWEETNOOK_EXPORT_PATH` | Skip the social-import prompt (TweetNook JSON export) |
 | `ATHENA_TUI_NO_ANIMATION` | Disable intro/spinner |
 
 ## Test
@@ -122,29 +139,17 @@ The e2e runs the real TUI in a pseudo-TTY (`script`) against a mock Athena
 API with a fake Chrome profile and asserts the full join → scan → dump → quit
 journey.
 
-## Advanced (opencode)
+## Advanced (MCP)
 
-Press `Tab` or choose `Advanced (opencode)` → full opencode TUI with `athena` MCP.
+Press `Tab` or choose `Advanced (MCP)` → prints a minimal MCP config that any
+agent (Hermes, Claude Code, Codex) can use. No vendor CLI required.
 
-- Any AI via `~/.config/opencode` (not website `user_ai_config`).
+- Works with `ATHENA_INSTANCE` + `ATHENA_TOKEN` only; `DATABASE_URL` optional.
 - Ranks enforced: `personal` GOD-only, `community` member-only.
 - Paragraph search: `what is paragraph 5 of story.pdf` → `athena_get_chunk` with `para_idx`.
-Requires `opencode` (`npm i -g opencode`) + `DATABASE_URL` + `pgvector`.
 
-### Session commands
-
-Each session ships with commands, conventions (`AGENTS.md`), and an
-`athena-researcher` subagent that pulls documents in parallel:
-
-- `/athena` — toggle strict mode (athena_search before any outside search);
-  `/athena <query>` — one-shot strict lookup.
-- `/athena-study <topic>` — deep study from your brain: searches both scopes,
-  reads the full documents, and compiles cross-linked study notes (key
-  concepts, verbatim passages, connections between docs, open questions) with
-  `[#doc_id]` citations — instead of the usual 1–2 line answer.
-- `/athena-ingest <content | file path | instruction>` — ingests into the
-  brain: dedupe check against `athena_list`, verbatim content, tagged metadata
-  header, hyphenated filename, then verifies with a search.
+Use `node src/mcp-athena.js --config` to print the JSON snippet, or
+`node src/mcp-athena.js --help` for Hermes setup.
 
 Rank gates apply to every tool call; a server 401/403 drops the cached rank
 immediately, and community scope without a joined community is rejected before
