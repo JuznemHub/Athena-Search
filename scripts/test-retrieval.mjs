@@ -52,6 +52,10 @@ import {
   telegramRichNotesForSave,
   telegramSearchRowHtml,
   searchRowButtons,
+  parseInlineEditTags,
+  parseInlineEditDraft,
+  searchEditButtons,
+  searchEditFormHtml,
   stripInlineHashtags
 } from '../worker/index.js';
 
@@ -1032,6 +1036,24 @@ console.log('clone attribution tests passed');
   const kept = mergePipelineTags({ manual: ['backfill', 'telegram', 'ai'], generated: ['backfill', 'website'], facts: { platforms: [], software: false, brands: [] }, rawUrl: 'https://example.com/x', title: 'X' });
   assert.ok(!kept.includes('backfill'), 'backfill never auto-added');
   assert.ok(!kept.includes('telegram'), 'telegram dropped without page evidence');
+
+  // Inline editor: same 4 website sections in the same message, staged draft
+  // round-trips, button callbacks fit the Telegram limit.
+  assert.deepEqual(parseInlineEditTags('#ai, open-source  #AI'), ['ai', 'open-source', 'AI'], 'tag entry strips # and splits');
+  assert.deepEqual(parseInlineEditTags('  '), [], 'blank tag entry is empty');
+  const draft = parseInlineEditDraft(JSON.stringify({ title: 'T', url: 'https://example.com/', notes: 'N', tags: ['a'] }));
+  assert.equal(draft.title, 'T', 'draft title parsed');
+  assert.deepEqual(parseInlineEditDraft('broken').tags, [], 'broken draft degrades to empty');
+  const form = searchEditFormHtml({ title: 'T', url: 'https://example.com/', notes: 'N', tags: ['ai'] });
+  for (const section of ['Title:', 'URL:', 'Description:', 'Tags:']) {
+    assert.match(form, new RegExp(section), `edit form shows ${section}`);
+  }
+  assert.match(searchEditFormHtml(draft, 'tags'), /new <b>tags<\/b>/, 'active field hint shown');
+  const ebtn = searchEditButtons('ts_abc123');
+  for (const cb of ['search:ef:ts_abc123:title', 'search:ef:ts_abc123:tags', 'search:esv:ts_abc123', 'search:ecx:ts_abc123']) {
+    assert.ok(ebtn.includes(cb), `editor wires ${cb}`);
+    assert.ok(cb.length <= 64, 'editor callback fits Telegram limit');
+  }
 }
 
 console.log('section layout tests passed');

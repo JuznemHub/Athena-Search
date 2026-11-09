@@ -6803,6 +6803,18 @@ async function ensureTelegramSearchTable(env) {
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_tg_search_sessions_expiry ON telegram_search_sessions(expires_at)').run().catch(() => {});
   await env.DB.prepare('DELETE FROM telegram_search_sessions WHERE expires_at < ?').bind(Date.now()).run().catch(() => {});
   await env.DB.prepare('ALTER TABLE telegram_search_sessions ADD COLUMN hit_ids TEXT').run().catch(() => {});
+  // Inline per-result editor state: which row is open, which field awaits a
+  // value, the staged draft, and the message holding the form (edited in
+  // place — never a new message).
+  for (const sql of [
+    'ALTER TABLE telegram_search_sessions ADD COLUMN edit_hit_id TEXT',
+    'ALTER TABLE telegram_search_sessions ADD COLUMN edit_idx INTEGER',
+    'ALTER TABLE telegram_search_sessions ADD COLUMN edit_field TEXT',
+    'ALTER TABLE telegram_search_sessions ADD COLUMN edit_draft TEXT',
+    'ALTER TABLE telegram_search_sessions ADD COLUMN edit_msg_id INTEGER',
+  ]) {
+    try { await env.DB.prepare(sql).run(); } catch (_) {}
+  }
 }
 
 /** Resolve one search page hit for Edit/Delete callbacks (by stored id,
@@ -6845,6 +6857,59 @@ function searchRowButtons(sessionId, idx) {
     { label: '✏️ Edit', data: `search:edit:${sessionId}:${idx}` },
     { label: '🗑 Delete', data: `search:del:${sessionId}:${idx}` },
   ]);
+}
+
+/** Manual tag entry, same rule as the website editor: strip #s, keep order,
+ *  drop empties. Case is preserved; the row gets the manual lock on save. */
+function parseInlineEditTags(text) {
+  const out = [];
+  for (const raw of String(text || '').split(/[\s,]+/)) {
+    const t = raw.trim().replace(/^#+/, '').slice(0, 40);
+    if (t && !out.includes(t)) out.push(t);
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+
+function parseInlineEditDraft(raw) {
+  let d;
+  try { d = JSON.parse(raw || '{}') || {}; } catch (_) { d = {}; }
+  return {
+    title: String(d.title ?? ''),
+    url: String(d.url ?? ''),
+    notes: String(d.notes ?? ''),
+    tags: Array.isArray(d.tags) ? d.tags.map((t) => String(t)) : [],
+  };
+}
+
+/** Inline editor buttons: one per website section, plus Save/Cancel.
+ *  search:ef:<sid>:<field> stages the field, esv saves, ecx cancels. */
+function searchEditButtons(sessionId) {
+  return richButtonRow([
+    { label: '📝 Title', data: `search:ef:${sessionId}:title` },
+    { label: '🔗 URL', data: `search:ef:${sessionId}:url` },
+    { label: '📄 Description', data: `search:ef:${sessionId}:notes` },
+    { label: '🏷️ Tags', data: `search:ef:${sessionId}:tags` },
+  ]) + '\n' + richButtonRow([
+    { label: '✅ Save', data: `search:esv:${sessionId}` },
+    { label: '✖ Cancel', data: `search:ecx:${sessionId}` },
+  ]);
+}
+
+/** The edit form: the same 4 website sections with staged values, edited in
+ *  place. activeField marks the field awaiting the user's next message. */
+function searchEditFormHtml(draft, activeField = null, error = '') {
+  const tags = (draft.tags || []).map((t) => '#' + t).join(' ') || '(untagged)';
+  const hint = error
+    ? `<b>${escHtml(error)}</b>`
+    : activeField
+      ? `Send the new <b>${escHtml({ title: 'title', url: 'URL', notes: 'description', tags: 'tags' }[activeField] || activeField)}</b> — as a message here, or reply to this form.`
+      : 'Tap a field above, then send the new value. Save writes the same database row the website edits.';
+  return [
+    richHeading(3, '✏️ Edit link'),
+    richParagraph(`${boldHtml('Title:')} ${escHtml(draft.title || '(empty)')}<br>${boldHtml('URL:')} ${escHtml(draft.url || '(none)')}<br>${boldHtml('Description:')} ${escHtml(draft.notes ? String(draft.notes).slice(0, 500) : '(empty)')}<br>${boldHtml('Tags:')} ${escHtml(tags)}`),
+    richParagraph(`<i>${hint}</i>`),
+  ].join('\n');
 }
 
 function telegramSearchRowHtml(row, botUsername = '') {
@@ -9394,15 +9459,12 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
     }
-    // ---- Per-result Edit / Delete (same DB rows the website edits) ----
-    if (action === 'edit' || action === 'del') {
+    // ---- Per-result Edit / Delete (same DB rows the website edits).
+    //  The editor lives in THIS message: Edit opens the 4-section form here,
+    //  field buttons stage values from the user's next message, Save writes
+    //  the row exactly like the website editor (manual lock included).
+    if (action === 'edit' || action === 'del' || action === 'ef' || action === 'esv' || action === 'ecx') {
       const parts = data.split(':');
-      const idx = Number(parts[3]);
-      const hit = await resolveSearchHit(env, session, idx);
-      if (!hit) {
-        await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'That result is gone — refresh the search', show_alert: true }).catch(() => {});
-        return new Response('OK', { status: 200, headers: corsHeaders });
-      }
       if (session.scope === 'personal') {
         if (!isGodTgId(tgUserId, env)) {
           await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Personal edit is GOD-only', show_alert: true }).catch(() => {});
@@ -9415,7 +9477,25 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
           return new Response('OK', { status: 200, headers: corsHeaders });
         }
       }
+      const clearEditState = async () => {
+        await env.DB.prepare(
+          'UPDATE telegram_search_sessions SET edit_hit_id = NULL, edit_idx = NULL, edit_field = NULL, edit_draft = NULL, edit_msg_id = NULL WHERE id = ?'
+        ).bind(session.id).run().catch(() => {});
+      };
+      const renderSearchPage = async (toast = '') => {
+        const view = await getTelegramSearchPage(env, session);
+        await editTelegramRichMessage(token, chatId, msgId, view.html, threadId, searchRichButtonRow(session.id, view.page, view.total));
+        await env.DB.prepare('UPDATE telegram_search_sessions SET page = ? WHERE id = ?').bind(view.page, session.id).run().catch(() => {});
+        if (toast) await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: toast }).catch(() => {});
+        else await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
+      };
       if (action === 'del') {
+        const idx = Number(parts[3]);
+        const hit = await resolveSearchHit(env, session, idx);
+        if (!hit) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'That result is gone — refresh the search', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
         try {
           if (session.scope === 'personal') {
             await env.DB.prepare('DELETE FROM personal_links WHERE id = ?').bind(hit.id).run();
@@ -9428,27 +9508,92 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
           await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Delete failed', show_alert: true }).catch(() => {});
           return new Response('OK', { status: 200, headers: corsHeaders });
         }
-        await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Deleted from the database' }).catch(() => {});
+        await clearEditState();
         try { session.hit_ids = null; } catch (_) {}
         const view = await getTelegramSearchPage(env, session);
         await editTelegramRichMessage(token, chatId, msgId, view.html, threadId, searchRichButtonRow(session.id, view.page, view.total));
         await env.DB.prepare('UPDATE telegram_search_sessions SET page = ? WHERE id = ?').bind(view.page, session.id).run().catch(() => {});
+        await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Deleted from the database' }).catch(() => {});
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
-      // Edit: send the 4 website sections prefilled; reply to that message
-      // with `/edit | title: … | notes: …` to write back to the same DB row.
-      await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
-      let tags = hit.tags;
-      try { tags = typeof tags === 'string' ? JSON.parse(tags || '[]') : (tags || []); } catch (_) { tags = []; }
-      const editHelp = [
-        richHeading(3, '✏️ Edit link'),
-        richParagraph(`<b>${escHtml(hit.title || hit.url || 'Untitled')}</b>`),
-        richParagraph(`${boldHtml('Title:')} ${escHtml(hit.title || '(empty)')}<br>${boldHtml('URL:')} ${escHtml(hit.url || '(none)')}<br>${boldHtml('Description:')} ${escHtml(String(hit.notes || '(empty)').slice(0, 500))}<br>${boldHtml('Tags:')} ${escHtml(Array.isArray(tags) && tags.length ? tags.map((t) => '#' + t).join(' ') : '(untagged)')}`),
-        richParagraph(`Reply to THIS message with:<br>${codeHtml(`/edit | title: New Title | notes: New description`)}<br><i>It edits the same database row the website shows — /structure will not touch it afterwards (manual lock).</i>`),
-        richParagraph(`${boldHtml('Link:')} ${escHtml(hit.url || hit.id)}`),
-      ].join('\n');
-      await sendTelegramRichMessage(token, chatId, editHelp, threadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
+      if (action === 'edit') {
+        const idx = Number(parts[3]);
+        const hit = await resolveSearchHit(env, session, idx);
+        if (!hit) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'That result is gone — refresh the search', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        let tags = hit.tags;
+        try { tags = typeof tags === 'string' ? JSON.parse(tags || '[]') : (tags || []); } catch (_) { tags = []; }
+        const draft = { title: hit.title || '', url: hit.url || '', notes: hit.notes || '', tags: Array.isArray(tags) ? tags.map((t) => String(t)) : [] };
+        await env.DB.prepare(
+          'UPDATE telegram_search_sessions SET edit_hit_id = ?, edit_idx = ?, edit_field = NULL, edit_draft = ?, edit_msg_id = ? WHERE id = ?'
+        ).bind(String(hit.id || ''), idx, JSON.stringify(draft), msgId, session.id).run().catch(() => {});
+        await editTelegramRichMessage(token, chatId, msgId, searchEditFormHtml(draft), threadId, searchEditButtons(session.id));
+        await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      // Field buttons and Save/Cancel operate on the staged draft in place.
+      const draft = parseInlineEditDraft(session.edit_draft);
+      if (!session.edit_hit_id && action !== 'ecx') {
+        await renderSearchPage('Start with Edit first');
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      if (action === 'ecx') {
+        await clearEditState();
+        await renderSearchPage();
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      if (action === 'ef') {
+        const field = parts[3];
+        if (!['title', 'url', 'notes', 'tags'].includes(field)) {
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        await env.DB.prepare('UPDATE telegram_search_sessions SET edit_field = ? WHERE id = ?').bind(field, session.id).run().catch(() => {});
+        await editTelegramRichMessage(token, chatId, msgId, searchEditFormHtml(draft, field), threadId, searchEditButtons(session.id));
+        await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      if (action === 'esv') {
+        const url = String(draft.url || '').trim();
+        if (!/^https?:\/\//i.test(url)) {
+          await editTelegramRichMessage(token, chatId, msgId, searchEditFormHtml(draft, session.edit_field, 'URL must start with http(s) — fix it before saving.'), threadId, searchEditButtons(session.id));
+          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Fix the URL first', show_alert: true }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        const title = String(draft.title || '').slice(0, 300);
+        const notes = String(draft.notes || '').slice(0, 2500);
+        const tags = (draft.tags || []).map((t) => String(t).trim().replace(/^#+/, '')).filter(Boolean).slice(0, 10);
+        const editedAt = Date.now();
+        await ensureLinkMetaColumns(env);
+        await ensureSearchColumns(env);
+        const editorId = callbackUser?.id ? String(callbackUser.id) : null;
+        const editorName = callbackUser ? String(callbackUser.username || callbackUser.first_name || '') : null;
+        try {
+          if (session.scope === 'personal') {
+            await env.DB.prepare(
+              `UPDATE personal_links SET title = ?, notes = ?, tags = ?, manual_edited_at = ?, last_edited_by = ?, last_edited_by_name = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ? AND user_id = ?`
+            ).bind(title, notes, JSON.stringify(tags), editedAt, editorId, editorName, String(session.edit_hit_id), String(session.scope_key)).run();
+          } else {
+            await env.DB.prepare(
+              `UPDATE links SET title = ?, notes = ?, tags = ?, manual_edited_at = ?, last_edited_by = ?, last_edited_by_name = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
+            ).bind(title, notes, JSON.stringify(tags), editedAt, editorId, editorName, String(session.edit_hit_id)).run();
+          }
+        } catch (_) {
+          if (session.scope === 'personal') {
+            await env.DB.prepare('UPDATE personal_links SET title = ?, notes = ?, tags = ? WHERE id = ? AND user_id = ?')
+              .bind(title, notes, JSON.stringify(tags), String(session.edit_hit_id), String(session.scope_key)).run();
+          } else {
+            await env.DB.prepare('UPDATE links SET title = ?, notes = ?, tags = ? WHERE id = ?')
+              .bind(title, notes, JSON.stringify(tags), String(session.edit_hit_id)).run();
+          }
+        }
+        markMeiliScopeDirty(env, session.scope, session.scope_key);
+        await clearEditState();
+        await renderSearchPage('Saved — locked from /structure');
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
     }
     const currentPage = Number(session.page || 0);
     session.page = action === 'prev' ? Math.max(0, currentPage - 1) : currentPage + 1;
@@ -13442,6 +13587,43 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
   let athenaUser = await resolveAthenaUserFromTg(env, tgUserId);
+  // Pending inline search-edit value: same chat + same user, non-command
+  // text stages into the open form (replied to it, or plain text with no
+  // URL so link dumps are never swallowed). The form message is edited in
+  // place; the user's value message is removed to keep the chat tidy.
+  if (tgUserId && text && !text.startsWith('/') && !(msg.from && msg.from.is_bot)) {
+    try {
+      await ensureTelegramSearchTable(env);
+      const pend = await env.DB.prepare(
+        'SELECT * FROM telegram_search_sessions WHERE chat_id = ? AND tg_user_id = ? AND edit_field IS NOT NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 1'
+      ).bind(chatId, String(tgUserId), Date.now()).first();
+      if (pend) {
+        const replyId = msg.reply_to_message?.message_id;
+        const isReplyToForm = replyId && pend.edit_msg_id && Number(replyId) === Number(pend.edit_msg_id);
+        const hasUrl = /https?:\/\//i.test(text);
+        if (isReplyToForm || !hasUrl) {
+          const draft = parseInlineEditDraft(pend.edit_draft);
+          let error = '';
+          if (pend.edit_field === 'tags') draft.tags = parseInlineEditTags(text);
+          else if (pend.edit_field === 'title') draft.title = text.slice(0, 300);
+          else if (pend.edit_field === 'notes') draft.notes = text.slice(0, 2500);
+          else if (pend.edit_field === 'url') {
+            if (/^https?:\/\//i.test(text.trim())) draft.url = text.trim();
+            else error = 'That does not look like a URL — try again, or Cancel.';
+          }
+          const keepField = error ? pend.edit_field : null;
+          await env.DB.prepare('UPDATE telegram_search_sessions SET edit_draft = ?, edit_field = ? WHERE id = ?')
+            .bind(JSON.stringify(draft), keepField, pend.id).run().catch(() => {});
+          await editTelegramRichMessage(token, chatId, pend.edit_msg_id,
+            searchEditFormHtml(draft, keepField, error), forumThreadId, searchEditButtons(pend.id));
+          await telegramApi(token, 'deleteMessage', { chat_id: chatId, message_id: msg.message_id }).catch(() => {});
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+      }
+    } catch (e) {
+      console.error('inline search-edit capture failed:', e?.message || e);
+    }
+  }
   // Pending clone textual yes/no (reply yes after preview)
   if(!cmd.startsWith('/') && /^(yes|y|no|n)$/i.test(text.trim()) && tgUserId){
     try{
@@ -19075,6 +19257,10 @@ export {
   telegramSearchRowHtml,
   searchRowButtons,
   resolveSearchHit,
+  parseInlineEditTags,
+  parseInlineEditDraft,
+  searchEditButtons,
+  searchEditFormHtml,
   stripInlineHashtags,
   handleSearchLinks,
   generateUrlHash,
