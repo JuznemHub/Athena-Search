@@ -289,7 +289,7 @@ async function stepSocial() {
     width: columns(),
   });
   if (pick === null) return false;
-  const ctx = { prompt, say, state };
+  const ctx = { prompt, say, state, confirm: (q) => confirm(io, theme, q, columns()) };
   const wanted = pick === 0 ? ['reddit'] : pick === 1 ? ['x'] : ['reddit', 'x'];
   for (const kind of wanted) {
     try {
