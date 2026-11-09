@@ -266,6 +266,14 @@ for (const [threadId, expected] of [[1, 3], [30, 2]]) {
   assert.equal(result.counters.messages, expected);
 }
 
+const singlePassResult = await scanCloneHistory({ async getMessages(_chat, options) {
+  return options.offsetId ? [] : forumHistory;
+} }, '-100fixture', { trackTopics: true });
+assert.equal(singlePassResult.counters.messages, 6);
+assert.equal(singlePassResult.topicCounters.get('1')?.messages, 3);
+assert.equal(singlePassResult.topicCounters.get('30')?.messages, 2);
+assert.equal(singlePassResult.topicCounters.get('40')?.messages, 1);
+
 let attempts = 0;
 let gates = 0;
 let floodReported = false;

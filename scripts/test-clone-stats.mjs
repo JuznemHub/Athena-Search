@@ -194,10 +194,10 @@ try {
     manager: 'uclone', stage: 'error', revision: 3, label: 'alpha', target: 'personal', sourceType: 'channel',
     sourceName: 'Stats Channel', isForum: false, destinationName: 'Personal brain', counters: countersB,
   }, Date.now() - 86400000);
-  sql.prepare(`INSERT INTO personal_links (id,user_id,url,url_hash,title,notes,tags,created_at)
-    VALUES (?,?,?,?,?,?,?,?)`).run('ix_fresh1', 'u_stats', 'https://example.com/fresh', 'freshhash1', 'Fresh', '', '[]', Date.now() - 3600000);
-  sql.prepare(`INSERT INTO personal_links (id,user_id,url,url_hash,title,notes,tags,created_at)
-    VALUES (?,?,?,?,?,?,?,?)`).run('ix_stale1', 'u_stats', 'https://example.com/stale', 'stalehash1', 'Stale', '', '[]', Date.now() - 90000000);
+  sql.prepare(`INSERT INTO personal_links (id,user_id,url,url_hash,title,notes,tags,created_at,source_chat_id)
+    VALUES (?,?,?,?,?,?,?,?,?)`).run('ix_fresh1', 'u_stats', 'https://example.com/fresh', 'freshhash1', 'Fresh', '', '[]', Date.now() - 3600000, '-1008888888888');
+  sql.prepare(`INSERT INTO personal_links (id,user_id,url,url_hash,title,notes,tags,created_at,source_chat_id)
+    VALUES (?,?,?,?,?,?,?,?,?)`).run('ix_stale1', 'u_stats', 'https://example.com/stale', 'stalehash1', 'Stale', '', '[]', Date.now() - 90000000, '-1008888888888');
   // Abandoned wizard shells (expired, no child jobs) are not runs either.
   insertParent('pc_wiz', 'accounts', '123456789', 'u_stats', {
     manager: 'uclone', stage: 'preview', revision: 1, label: 'alpha', target: 'personal',
@@ -281,7 +281,7 @@ try {
   // Drill-down: source page carries topics + the absolute latest links.
   const drill = formatStatsRichReport(report, { src: 0 });
   assert.match(telegramText(drill.html), /Latest links \(24h\)/);
-  assert.match(drill.buttons, /stats:dashboard/, 'drill-down links back to the dashboard');
+  assert.match(drill.buttons, /stats:dash/, 'drill-down links back to the dashboard');
 
   // Topic pages must fit the classic fallback and preserve every topic.
   const bigTopics = Array.from({ length: 120 }, (_, i) => ({ threadId: String(i + 1), title: 'Topic ' + (i + 1), total: { links: 1, files: 0, other: 0 }, percent: 0, done: false, stateMark: '⏳ PENDING' }));

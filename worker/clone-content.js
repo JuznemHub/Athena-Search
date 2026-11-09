@@ -249,7 +249,7 @@ async function delay(milliseconds, signal) {
  * No completion is reported for aborted, inaccessible or broken pagination. */
 export async function scanCloneHistory(client, chatId, {
   threadId = null, onProgress = async () => {}, beforeRequest = async () => {},
-  onFlood = async () => {}, signal, maxId = null,
+  onFlood = async () => {}, signal, maxId = null, trackTopics = false,
 } = {}) {
   const thread = threadId == null ? null : positiveId(threadId);
   if (threadId != null && !thread) throw scanError('CLONE_INVALID_TOPIC', 'Invalid forum topic identifier.');
@@ -259,6 +259,7 @@ export async function scanCloneHistory(client, chatId, {
   let snapshot = maxId == null ? null : Number(maxId);
   let offsetId = snapshot == null ? 0 : snapshot + 1;
   const counters = emptyCloneCounters();
+  const topicCounters = trackTopics ? new Map() : null;
   const progress = async (complete) => {
     checkAbort(signal);
     await abortable(() => onProgress({ counters: { ...counters }, maxId: snapshot, complete, measurement: 'accessible-history', offsetId }), signal);
@@ -314,9 +315,17 @@ export async function scanCloneHistory(client, chatId, {
       nextOffset = Math.min(nextOffset, id);
       if (seen.has(id)) continue;
       seen.add(id);
-      const topicId = topicOf(message);
-      if (thread && (thread === 1 ? topicId != null && topicId !== '1' : topicId !== String(thread))) continue;
+      const topicId = topicOf(message) || '1';
+      if (thread && (thread === 1 ? topicId !== '1' : topicId !== String(thread))) continue;
       countCloneMessage(counters, message);
+      if (topicCounters) {
+        let tc = topicCounters.get(topicId);
+        if (!tc) {
+          tc = emptyCloneCounters();
+          topicCounters.set(topicId, tc);
+        }
+        countCloneMessage(tc, message);
+      }
     }
     if (!Number.isFinite(nextOffset) || (offsetId && nextOffset >= offsetId)) {
       throw scanError('CLONE_PAGINATION_STALLED', 'History pagination did not advance; the scan is incomplete.');
@@ -329,5 +338,5 @@ export async function scanCloneHistory(client, chatId, {
   }
   if (snapshot == null) snapshot = 0;
   await progress(true);
-  return { counters, maxId: snapshot, complete: true, measurement: 'accessible-history' };
+  return { counters, maxId: snapshot, complete: true, measurement: 'accessible-history', topicCounters };
 }

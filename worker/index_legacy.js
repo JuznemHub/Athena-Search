@@ -189,7 +189,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.64',
+          version: '1.0.65',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -10616,6 +10616,9 @@ async function capturePostIntoSinks(env, sinks, ctx) {
     for (const url of classification.urls) await component('url:' + generateUrlHash(url), () => saveBackfillLink(env, job, sink, msg, url, classification));
     const media = classification.media;
     if (media && media.kind !== 'video') await component('media', async () => {
+      const isDoc = media.kind === 'document' && (DOCUMENT_EXTENSIONS.has(media.ext) || CONVERTIBLE_EXTENSIONS.has(media.ext));
+      if (!isDoc && !MEDIA_VAULT_DIR) throw new Error('FILE_NOT_INDEXABLE');
+      if (media.size > MAX_CLONE_DOWNLOAD_BYTES) throw new Error('FILE_SIZE_LIMIT');
       if (!downloaded) {
         if (ctx.downloadMedia) downloaded = await ctx.downloadMedia();
         else {
@@ -10631,7 +10634,7 @@ async function capturePostIntoSinks(env, sinks, ctx) {
       }
       const filename = media.filename || `${media.kind}_${mid}${media.ext ? '.' + media.ext : ''}`;
       const path = await vaultSave(`${sink}_${sink === 'personal' ? personalOwner : communityId}_${chatId}`, mid, filename, downloaded);
-      if (media.kind === 'document' && (DOCUMENT_EXTENSIONS.has(media.ext) || CONVERTIBLE_EXTENSIONS.has(media.ext))) {
+      if (isDoc) {
         const save = sink === 'personal' ? savePersonalIndexedDocument : saveIndexedDocument;
         const result = await save(env, sink === 'personal' ? personalOwner : communityId, filename, media.ext, downloaded, `channel:${chatId}`, { chatId, messageId: mid }, job.id);
         if (result?.error) throw new Error(result.error);
@@ -12047,6 +12050,22 @@ const INDEX_BATCH_DELAY_MS = 1500; // ~40 req/min ceiling — well under Telegra
 // wait. One gap per downloaded file keeps the sustained rate at the same
 // ~40 req/min ceiling the page delay targets.
 const MEDIA_DOWNLOAD_GAP_MS = 1500;
+const MAX_CLONE_DOWNLOAD_BYTES = 20 * 1024 * 1024; // 20 MiB ceiling — prevents GramJS memory exhaustion and multi-GB file downloads
+const MEDIA_DOWNLOAD_TIMEOUT_MS = 30000; // 30s timeout — hanging DC connections never block the process
+
+function withTimeout(promise, ms, message = 'TIMEOUT') {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const err = new Error(message);
+        err.name = 'TimeoutError';
+        reject(err);
+      }, ms);
+    })
+  ]).finally(() => clearTimeout(timer));
+}
 
 /**
  * Flood-wait retry policy for one operation (a download, a link save, a page
@@ -12097,8 +12116,9 @@ async function ubWaitForRelease(label) {
 }
 function ubReportFlood(label, seconds) {
   if (!label || !(seconds > 0)) return;
-  try { console.info(`[userbot:${label}] flood wait ${seconds}s`); } catch (_) {}
-  const until = Date.now() + seconds * 1000;
+  const capped = Math.min(seconds, 300);
+  try { console.info(`[userbot:${label}] flood wait ${seconds}s (wait capped at ${capped}s)`); } catch (_) {}
+  const until = Date.now() + capped * 1000;
   const k = String(label);
   const w = UB_FLOOD_WAIT.get(k);
   if (!w || w.until < until) UB_FLOOD_WAIT.set(k, { until });
@@ -12747,9 +12767,10 @@ async function persistCloneComponent(env, { job, sink, message, classification, 
     else recordCloneFailure(item, category);
     return true;
   } catch (error) {
-    if (error.name === 'AbortError' || ['session', 'permission'].includes(cloneFailure(error).category)) throw error;
-    recordCloneFailure(item, error.cloneDatabaseFailure ? 'database' : cloneFailure(error).category);
-    console.error('Clone association failed', { jobId: job.id, messageId: mid, destination, category: 'database' });
+    const failureCat = cloneFailure(error).category;
+    if (error.name === 'AbortError' || ['session', 'permission'].includes(failureCat) || (stopOnFlood && failureCat === 'flood')) throw error;
+    recordCloneFailure(item, error.cloneDatabaseFailure ? 'database' : failureCat);
+    console.error('Clone association failed', { jobId: job.id, messageId: mid, destination, category: error.cloneDatabaseFailure ? 'database' : failureCat, error: error?.message || error });
     return false;
   }
 }
@@ -12988,15 +13009,20 @@ async function runHistoryIndexJob(env, initialJob, token, runtime = {}) {
               const media = classification.media;
               for (const url of classification.urls) await component(sink, 'url:' + generateUrlHash(url), () => saveBackfillLink(env, job, sink, message, url, classification));
               if (media && media.kind !== 'video') await component(sink, 'media', async () => {
+                const isDoc = media.kind === 'document' && (DOCUMENT_EXTENSIONS.has(media.ext) || CONVERTIBLE_EXTENSIONS.has(media.ext));
+                if (!isDoc && !MEDIA_VAULT_DIR) throw new Error('FILE_NOT_INDEXABLE');
+                if (media.size > MAX_CLONE_DOWNLOAD_BYTES) throw new Error('FILE_SIZE_LIMIT');
                 if (!downloaded) {
-                  if (media.size > 2 * 1024 * 1024 * 1024) throw new Error('FILE_SIZE_LIMIT');
-                  try { downloaded = await request(() => client.downloadMedia(message, {})); }
-                  finally { await wait(MEDIA_DOWNLOAD_GAP_MS); }
+                  try {
+                    downloaded = await request(() => withTimeout(client.downloadMedia(message, {}), MEDIA_DOWNLOAD_TIMEOUT_MS, 'MEDIA_DOWNLOAD_TIMEOUT'));
+                  } finally {
+                    await wait(MEDIA_DOWNLOAD_GAP_MS);
+                  }
                   if (!downloaded?.length) throw new Error('EMPTY_DOWNLOAD');
                 }
                 const filename = media.filename || `${media.kind}_${mid}${media.ext ? '.' + media.ext : ''}`;
                 const path = await vaultSave(`${sink}_${sink === 'personal' ? job.user_id : job.community_id}_${job.chat_id}`, mid, filename, downloaded);
-                if (media.kind === 'document' && (DOCUMENT_EXTENSIONS.has(media.ext) || CONVERTIBLE_EXTENSIONS.has(media.ext))) {
+                if (isDoc) {
                   const save = sink === 'personal' ? savePersonalIndexedDocument : saveIndexedDocument;
                   const result = await save(env, sink === 'personal' ? job.user_id : job.community_id, filename, media.ext, downloaded, `backfill:${job.chat_id}`, { chatId: job.chat_id, messageId: mid }, job.id);
                   if (result?.error) throw new Error('CONVERSION_FAILED');
@@ -18746,7 +18772,7 @@ async function captureGramjsMessage(env, follow, message) {
     downloadMedia: async () => {
       for (;;) {
         await ubWaitForRelease(follow.label);
-        try { return await acc.client.downloadMedia(message, {}); }
+        try { return await withTimeout(acc.client.downloadMedia(message, {}), MEDIA_DOWNLOAD_TIMEOUT_MS, 'MEDIA_DOWNLOAD_TIMEOUT'); }
         catch (error) {
           if (!(Number(error?.seconds) > 0)) throw error;
           ubReportFlood(follow.label, Number(error.seconds));

@@ -18,7 +18,7 @@ export function cloneFailure(error) {
   if (/input entity|Could not find|ENTITY_NOT_FOUND|PEER_ID_INVALID|USERNAME_INVALID|USERNAME_NOT_OCCUPIED/i.test(text)) return { category: 'permission', message: 'The selected account has never seen this chat. Open it once in that account (join if private), or run the clone with an account that already has it.' };
   if (/FLOOD|429/i.test(text) || Number(error?.seconds) > 0) return { category: 'flood', message: 'Telegram requested a pause. This clone will wait before retrying.' };
   if (/timeout|ECONN|network|disconnect/i.test(text)) return { category: 'network', message: 'Telegram connection failed after bounded retries. Retry the clone when the connection is restored.' };
-  if (/CONVERSION|convert/i.test(text)) return { category: 'conversion', message: 'The original file could not be converted. Its failure is recorded; other items continue.' };
+  if (/CONVERSION|convert|NOT_INDEXABLE|unsupported/i.test(text)) return { category: 'conversion', message: 'The original file could not be converted. Its failure is recorded; other items continue.' };
   if (/SIZE_LIMIT|exceeds/i.test(text)) return { category: 'size', message: 'The file exceeds the configured storage or converter limit.' };
   if (/VAULT|ENOSPC|EACCES|storage/i.test(text)) return { category: 'storage', message: 'Original-file storage is unavailable. Configure ATHENA_MEDIA_DIR and retry failed files.' };
   if (/constraint|SQL|database|column|relation/i.test(text)) return { category: 'database', message: 'A database write failed. The item was not reported as saved.' };
@@ -247,30 +247,31 @@ export function createUcloneManager(env, deps) {
           run.state.chosen = [onlyTopic];
           await destinations(run, token);
         } else {
-        const result = await scanCloneHistory(client, run.chat_id, {
-          beforeRequest: async () => { await checkCancelled(); await deps.beforeRequest(run.state.label); }, onFlood: (seconds) => floodNote(seconds),
-          onProgress: (progress) => { lastCounters = progress.counters || progress; scanning(lastCounters); },
-        });
-        run.state.snapshot = result.maxId;
-        run.state.counters = result.counters;
-        if (run.state.isForum) {
-          for (const topic of run.state.topics) {
-            const current = await load(run.id);
-            if (current?.state.cancelled) throw new Error('CANCELLED');
-            const scan = await scanCloneHistory(client, run.chat_id, {
-              threadId: topic.id, maxId: result.maxId,
-              beforeRequest: async () => { await checkCancelled(); await deps.beforeRequest(run.state.label); }, onFlood: (seconds) => floodNote(seconds, topic, topic.name),
-              onProgress: (progress) => { lastCounters = progress.counters || progress; scanning(lastCounters, topic, `Measuring topic ${topic.name}`); },
-            });
-            topic.counters = scan.counters;
+          const result = await scanCloneHistory(client, run.chat_id, {
+            trackTopics: run.state.isForum,
+            beforeRequest: async () => { await checkCancelled(); await deps.beforeRequest(run.state.label); }, onFlood: (seconds) => floodNote(seconds),
+            onProgress: (progress) => { lastCounters = progress.counters || progress; scanning(lastCounters); },
+          });
+          run.state.snapshot = result.maxId;
+          run.state.counters = result.counters;
+          if (run.state.isForum) {
+            const tcMap = result.topicCounters || new Map();
+            for (const topic of run.state.topics) {
+              const tc = tcMap.get?.(String(topic.id)) || tcMap[String(topic.id)];
+              topic.counters = tc || emptyCloneCounters();
+            }
+            if (run.state.commandSource === '/clone') {
+              run.state.chosen = run.state.topics;
+              await destinations(run, token);
+            } else {
+              run.state.stage = 'topics';
+              run.state.page = 0;
+              await topicMenu(run, token);
+            }
+          } else {
+            run.state.chosen = [{ id: null, name: run.state.sourceName, counters: result.counters }];
+            await destinations(run, token);
           }
-          run.state.stage = 'topics';
-          run.state.page = 0;
-          await topicMenu(run, token);
-        } else {
-          run.state.chosen = [{ id: null, name: run.state.sourceName, counters: result.counters }];
-          await destinations(run, token);
-        }
         } // end prescribed-topic shortcut else-branch
       } catch (error) {
         const cancelled = (await load(run.id))?.state.cancelled;
