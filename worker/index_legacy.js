@@ -92,8 +92,10 @@ const PUBLIC_API = new Set([
  */
 function securityHeaders() {
   return {
-    'Referrer-Policy': 'no-referrer',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
     'X-Content-Type-Options': 'nosniff',
+    'X-DNS-Prefetch-Control': 'off',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
     'Content-Security-Policy': "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' https://telegram.org 'unsafe-inline'; connect-src 'self' https:; frame-ancestors https://web.telegram.org https://telegram.org; base-uri 'self'",
   };
 }
@@ -715,7 +717,7 @@ export default {
       return new Response('Athena API', { status: 200, headers: corsHeaders });
     } catch (err) {
       console.error('[athena] worker fetch failed:', err?.stack || err);
-      return Response.json({ success: false, error: err.message }, { status: 500, headers: corsHeaders });
+      return Response.json({ success: false, error: 'Internal server error' }, { status: 500, headers: corsHeaders });
     }
   }
 };
@@ -749,9 +751,16 @@ function safeEqual(a, b) {
   return diff === 0;
 }
 
+let shimInternalToken = null;
+function setShimToken(token) { shimInternalToken = token; }
+function getShimToken() { return shimInternalToken; }
+
 async function webhookRequestIsAuthentic(request, env) {
-  // Internal shim (worker/index.js -> legacy) uses athena.internal without Telegram header
-  try { if (new URL(request.url).hostname === 'athena.internal') return true; } catch {}
+  // Internal shim (worker/index.js -> legacy) uses athena.internal with internal token
+  const shimToken = request.headers.get('x-athena-shim-token');
+  if (shimToken && shimInternalToken && safeEqual(shimToken, shimInternalToken)) {
+    try { if (new URL(request.url).hostname === 'athena.internal') return true; } catch {}
+  }
   const expected = await webhookSecret(env);
   if (!expected) return false;
   const got = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
@@ -1889,8 +1898,8 @@ async function handleTelegramBotLoginPoll(url, env, corsHeaders) {
   if (typeof row.code_verifier === 'string' && row.code_verifier.startsWith('auth:')) {
     const sessionToken = row.code_verifier.slice(5);
     await env.DB.prepare('DELETE FROM oauth_states WHERE state = ?').bind(token).run();
-    const sessionRow = await env.DB.prepare('SELECT user_id FROM sessions WHERE id = ?').bind(sessionToken).first();
-    if (!sessionRow) {
+    const sessionRow = await env.DB.prepare('SELECT user_id, expires_at FROM sessions WHERE token = ?').bind(sessionToken).first();
+    if (!sessionRow || (sessionRow.expires_at && Number(sessionRow.expires_at) < Date.now())) {
       return Response.json({ success: false, status: 'invalid_session' }, { headers: corsHeaders });
     }
     const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(sessionRow.user_id).first();
@@ -5444,12 +5453,12 @@ async function handleGetAiConfig(user, env, corsHeaders) {
   return Response.json({
     success: true,
     configured: true,
-    baseUrl: row.base_url,
+    baseUrl: isGod ? row.base_url : undefined,
     model: row.model,
     mode: row.mode,
     hasKey: !!row.api_key,
-    decrypt_failed: decryptFailed,
-    error: decryptFailed ? 'API key decryption failed — STORAGE_KEY missing or rotated. GOD must re-save credentials.' : undefined,
+    decrypt_failed: isGod ? decryptFailed : false,
+    error: isGod && decryptFailed ? 'API key decryption failed — STORAGE_KEY missing or rotated. GOD must re-save credentials.' : undefined,
     updatedAt: row.updated_at,
     read_only: !isGod
   }, { headers: corsHeaders });
@@ -5763,11 +5772,16 @@ async function getWebsiteDisplayUrl(env) {
 }
 
 async function handleGetInstanceConfig(env, corsHeaders) {
+  const selfHosted = isSelfHosted(env);
+  let backend = await getInstanceSetting(env, 'default_backend');
+  if (selfHosted) {
+    backend = '';
+  }
   return Response.json({
     success: true,
-    default_backend: await getInstanceSetting(env, 'default_backend'),
+    default_backend: backend || '',
     steroid: await getSteroidMode(env),
-    runtime: isSelfHosted(env) ? 'selfhost' : 'cloudflare',
+    runtime: selfHosted ? 'selfhost' : 'cloudflare',
   }, { headers: corsHeaders });
 }
 
@@ -5784,6 +5798,14 @@ async function handleSetInstanceConfig(request, env, corsHeaders, siteOrigin) {
       // The site is served over HTTPS; a plain-HTTP backend is blocked by the
       // browser as mixed content, which would lock every member out at once.
       return Response.json({ success: false, error: 'Backend must be https://' }, { status: 400, headers: corsHeaders });
+    }
+    const host = origin.hostname.toLowerCase();
+    const isPrivate = host === 'localhost' || host === '::1' ||
+      /^127\./.test(host) || /^10\./.test(host) ||
+      /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+      /\.hstgr\.cloud$/i.test(host) || /\.internal$/i.test(host) || /\.local$/i.test(host);
+    if (isPrivate) {
+      return Response.json({ success: false, error: 'default_backend cannot be an internal or private address' }, { status: 400, headers: corsHeaders });
     }
     backend = origin.origin;
 
@@ -6524,7 +6546,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
           const nextLimit = Math.floor(effectiveSize * 0.6);
           if (nextLimit < 1000 || nextLimit >= effectiveSize) {
             recordAiError({ model, status: err.status || 400, endpoint, message: err.message || String(err), source: 'proxy-context' });
-            return Response.json({ success: false, error: err.message || String(err), status: err.status || 400, endpoint, model }, { status: 502, headers: corsHeaders });
+            return Response.json({ success: false, error: err.message || String(err), status: err.status || 400, model }, { status: 502, headers: corsHeaders });
           }
           contextLimit = nextLimit;
           console.warn(`AI context too large (${currentSize} chars), retrying with ${nextLimit} chars`);
@@ -6534,7 +6556,7 @@ async function handleAiChatProxy(request, user, env, corsHeaders) {
       }
     }
   } catch (err) {
-    return Response.json({ success: false, error: err.message || 'Proxy request failed', endpoint, model }, { status: 502, headers: corsHeaders });
+    return Response.json({ success: false, error: err.message || 'Proxy request failed', model }, { status: 502, headers: corsHeaders });
   }
 }
 
@@ -19780,4 +19802,6 @@ export {
   isWeakTitle,
   statsRecentLinks,
   validateWikiShareToken,
+  setShimToken,
+  getShimToken,
 };

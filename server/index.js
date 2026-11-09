@@ -159,10 +159,11 @@ const server = http.createServer(async (req, res) => {
     const response = await worker.fetch(request, env, ctx);
 
     res.statusCode = response.status;
+    res.removeHeader('X-Powered-By');
     response.headers.forEach((v, k) => {
       // set-cookie must not be folded into one header
       if (k.toLowerCase() === 'set-cookie') res.appendHeader('set-cookie', v);
-      else res.setHeader(k, v);
+      else if (k.toLowerCase() !== 'x-powered-by') res.setHeader(k, v);
     });
 
     // Streamed, not buffered: AI token streaming / SSE depends on it.
@@ -192,7 +193,9 @@ const server = http.createServer(async (req, res) => {
     console.error('[athena] request failed:', err?.stack || err);
     if (!res.headersSent) {
       res.statusCode = 500;
+      res.removeHeader('X-Powered-By');
       res.setHeader('content-type', 'application/json');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
     }
     res.end(JSON.stringify({ success: false, error: 'Internal error' }));
   }
