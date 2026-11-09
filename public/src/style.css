@@ -1065,7 +1065,7 @@ body, .g-result, .side-drawer, .search-bar-box, .modal, #toast { transition: bac
 }
 
 /* ==========================================================================
-   FMHY-Style Wiki View
+   Wiki View
    ========================================================================== */
 
 .wiki-nav-btn {
@@ -1324,7 +1324,7 @@ body.public-wiki-only #wikiCloseBtn {
   padding: 0 12px;
 }
 
-/* Responsive 2-Column FMHY Layout */
+/* Responsive 2-Column Wiki Layout */
 .wiki-layout {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);
@@ -1595,7 +1595,7 @@ body.public-wiki-only #wikiCloseBtn {
   }
 }
 
-/* FMHY Link Card */
+/* Wiki Link Card */
 .wiki-link-card {
   display: flex;
   flex-direction: column;

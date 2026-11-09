@@ -3465,7 +3465,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // ---- FMHY-Style Wiki View ----
+  // ---- Wiki View ----
 
   const wikiState = {
     scope: 'community',

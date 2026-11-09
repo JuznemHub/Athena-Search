@@ -77,10 +77,10 @@ npm install -g athenasearch-tui
 4. **4 Scan bookmarks** — scans every browser profile found locally at once
    (Chrome/Chromium/Edge/Brave/Opera/Vivaldi/Arc/Firefox); if none are found it
    asks for an HTML/JSON export file.
-5. **5 Import social (Reddit/X)** — guided setup that drives the tools for
+5. **5 Import social (Reddit / X.com)** — guided setup that drives the tools for
    you and remembers the paths, so the next import just works: pick Reddit
    (finds/writes Reddit-Fetch `.env`, runs the OAuth login once, fetches
-   `saved_posts.json`) or X (takes your archive ZIP, extracts it, remembers
+   `saved_posts.json`) or X / x.com (takes your archive ZIP, extracts it, remembers
    the folder). Afterwards step 5 reuses the stored paths with no prompts.
 6. **6 Dump bookmarks** — GODs pick *personal* or *community* brain; others
    dump to their community. Server-side dedupe is handled (skips reported),
@@ -111,7 +111,7 @@ Or run it directly: `node tui/src/index.js`
   `athena-tui --diagnose` shows every root it checks
 - Non-HTTP(S) bookmarks are skipped; local duplicates collapse before upload
 - Social imports: [Reddit-Fetch](https://github.com/akashpandey/Reddit-Fetch)
-  `saved_posts.json`/`.html` (run `reddit-fetcher` once to create it) and X
+  `saved_posts.json`/`.html` (run `reddit-fetcher` once to create it) and X / x.com
   archives — an extracted official archive (`data/tweets.js`, …) or
   [TweetNook](https://github.com/GezerWezer/TweetNook)
   (`tweetnook import x-archive <zip>`, `tweetnook export json --collection all`).

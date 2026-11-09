@@ -42,9 +42,9 @@ Athena is a self-hostable bookmark and document archive. Save from the web UI, T
 ## Juznem's favourite features
 
 - **📚 Dump all your browser bookmarks straight into Athena via the TUI** — Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Arc and Firefox are detected automatically; scan, pick folders, and dump everything into your personal or community brain from the terminal. No export-file gymnastics.
-- **🐦 Reddit & X (Twitter) bookmark imports** — Import saved posts, bookmarks, and likes from Reddit (via [Reddit-Fetch](https://github.com/akashpandey/Reddit-Fetch)) and X / Twitter (official archive or [TweetNook](https://github.com/GezerWezer/TweetNook) export) directly into your brain. Outside links in posts become distinct bookmarks, and the TUI setup remembers your paths for future syncs.
+- **🐦 Reddit & X (x.com) bookmark imports** — Import saved posts, bookmarks, and likes from Reddit (via [Reddit-Fetch](https://github.com/akashpandey/Reddit-Fetch)) and X (x.com / Twitter official archive or [TweetNook](https://github.com/GezerWezer/TweetNook) export) directly into your brain. Outside links in posts become distinct bookmarks, and the TUI setup remembers your paths for future syncs.
 - **🧠 Model Context Protocol (MCP) server for any agent** — Wire your second brain into Claude Code, Hermes, Codex, Cursor, or any MCP host: grounded semantic search, paragraph-level chunk lookups (`para_idx`), citations with `[#n]`, and rank-scoped access. Press `Tab` in the TUI or run `node tui/src/mcp-athena.js --config`.
-- **🗂️ FMHY-style wiki directory & database explorer** — Browse your collection as an interactive catalog with auto-grouped categories, global tag clouds, and public shareable wiki links. Administer the database directly with inline editing, `#notags` filtering, and audit history.
+- **🗂️ Wiki directory & database explorer** — Browse your collection as an interactive catalog with auto-grouped categories, global tag clouds, and public shareable wiki links. Administer the database directly with inline editing, `#notags` filtering, and audit history.
 - **🏠 Self-host it for yourself — or run your own Telegram community** — full control end-to-end: PostgreSQL storage, your own bot, rank hierarchy (GOD / owner / admin / member), approve whom to add, kick/ban with automatic sync to Telegram group presence, per-community brains, backups to Telegram, and GOD-only switches like AI credentials and channel targets.
 - **📡 Live cloning of any Telegram channel, group — even a single forum topic** — powered by a userbot session or a linked bot: links, documents (pdf/epub/docx/…), button links, and text posts land in your brain automatically, with GOD-rank targets (community / personal / both), one-command history backfill by id range or topic, a VPS media vault, per-session rollback, and honest live progress bars.
 - *…and much more:* pgvector paragraph search, multi-agent MCP memory, streaming AI answers grounded in your own sources, themes, accent colors, and a zero-build frontend.
@@ -56,8 +56,8 @@ Athena is a self-hostable bookmark and document archive. Save from the web UI, T
 - Answers questions with retrieval-augmented context and source links.
 - Supports OpenAI-compatible gateways, Anthropic, OpenRouter, Groq, and local routers such as [OmniRoute](https://github.com/df4p/omniroute).
 - Exposes a native Model Context Protocol (MCP) server so AI agents (Claude Code, Hermes, Codex, Cursor) can query your saved collection.
-- Imports bookmarks from 8+ desktop browsers, Reddit saved posts, and X (Twitter) archives via a zero-dependency terminal UI.
-- Interactive FMHY-style wiki directory layout with live database synchronization and public shareable links.
+- Imports bookmarks from 8+ desktop browsers, Reddit saved posts, and X (x.com) archives via a zero-dependency terminal UI.
+- Interactive wiki directory layout with live database synchronization and public shareable links.
 - Database explorer view with inline editing, tag aggregation, and `#notags` filtering.
 - Provides personal and community brains with rank-aware permissions, voting, reports, and Telegram group membership gates.
 - Clones Telegram channels, groups, and individual forum topics into your brain — links, documents (pdf/epub/docx/…), and text posts — with GOD-rank targets (community / personal / both) and one-time history backfill.
@@ -135,7 +135,7 @@ Local HTTP endpoints are allowed only by the self-hosted server and are restrict
 
 Athena includes an interactive frontend that serves as both a curated knowledge directory and an administrative database manager:
 
-- **FMHY-style wiki directory**: an interactive directory catalog inspired by free-media knowledge wikis. It dynamically groups your links by category (Dev, Media, Tools, Reading) and ecosystem based on the taxonomy classifier, updating as new links land. Public shareable links can be generated for community brains.
+- **Wiki directory**: an interactive directory catalog that dynamically groups your links by category (Dev, Media, Tools, Reading) and ecosystem based on the taxonomy classifier, updating as new links land. Public shareable links can be generated for community brains.
 - **Database explorer**: an administrative interface to search, filter, and inspect links across the entire database. Features include global tag frequency clouds, `#notags` filtering to locate unclassified items, inline title/description/tag editing, and a manual tag lock (`manual_edited_at`) to preserve custom changes from automated scrapers.
 
 ## Telegram bot
@@ -349,7 +349,7 @@ athena-tui
 
 - **Browser bookmarks**: auto-detects profiles across Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Arc, and Firefox (`places.sqlite` read via `node:sqlite`), including Flatpak and Snap installations. Custom roots can be supplied via `ATHENA_BOOKMARK_ROOTS`.
 - **Reddit saved posts**: guided setup integrates with [Reddit-Fetch](https://github.com/akashpandey/Reddit-Fetch), handling OAuth and parsing `saved_posts.json` or `.html`. Posts are automatically tagged `#reddit` and `#r-<subreddit>`.
-- **X (Twitter) archives**: reads official Twitter archive directories (`data/tweets.js`, `data/like.js`) or [TweetNook](https://github.com/GezerWezer/TweetNook) JSON exports. External links in tweets are saved as distinct entries, while text-only posts and likes save as links to the tweet tagged `#x`.
+- **X (x.com / Twitter) archives**: reads official Twitter archive directories (`data/tweets.js`, `data/like.js`) or [TweetNook](https://github.com/GezerWezer/TweetNook) JSON exports. External links in tweets are saved as distinct entries, while text-only posts and likes save as links to the tweet tagged `#x`.
 - **Path persistence**: verified paths are saved in `~/.config/athena-tui/config.json` so subsequent syncs run without re-prompting. Headless or scripted environments can set `REDDIT_EXPORT_PATH`, `X_ARCHIVE_PATH`, or `TWEETNOOK_EXPORT_PATH`.
 
 ## Model Context Protocol (MCP)
