@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 import {
   parseRedditFetchJson,
@@ -12,6 +13,13 @@ import {
   parseTweetNookJson,
   loadSocialLinks,
   detectSocialSources,
+  socialSourceFor,
+  findRedditCheckout,
+  writeRedditEnv,
+  savedPostsPath,
+  runTool,
+  extractZip,
+  toolStatus,
 } from './src/social-import.js';
 
 // Reddit-Fetch JSON: posts + comments
@@ -93,6 +101,62 @@ try {
 } finally {
   delete process.env.REDDIT_EXPORT_PATH;
   fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// guided setup helpers
+const fix = fs.mkdtempSync(path.join(os.tmpdir(), 'athena-social-setup-'));
+try {
+  const co = path.join(fix, 'Reddit-Fetch');
+  fs.mkdirSync(path.join(co, 'reddit_fetch'), { recursive: true });
+  fs.writeFileSync(path.join(co, 'reddit_fetch', 'api.py'), '# stub');
+  assert.equal(findRedditCheckout(['/nope', co]), co);
+  assert.equal(findRedditCheckout(['/nope']), null);
+  const envFile = writeRedditEnv(co, { clientId: 'id 1', clientSecret: 's3cr3t', username: 'bob' });
+  const envText = fs.readFileSync(envFile, 'utf8');
+  assert.match(envText, /^CLIENT_ID=id 1$/m);
+  assert.match(envText, /^REDDIT_USERNAME=bob$/m);
+  assert.match(envText, /by \/u\/bob/);
+  const st = fs.statSync(envFile);
+  assert.ok((st.mode & 0o777) === 0o600);
+  fs.writeFileSync(path.join(co, 'saved_posts.json'), '[]');
+  assert.equal(savedPostsPath(co), path.join(co, 'saved_posts.json'));
+  assert.equal(savedPostsPath(fix), null);
+  assert.deepEqual(socialSourceFor(path.join(co, 'saved_posts.json')).kind, 'reddit-json');
+  assert.deepEqual(socialSourceFor(co, 'X').kind, 'x-archive');
+  const echo = await runTool(process.execPath, ['-e', 'process.stdout.write("hi")']);
+  assert.equal(echo.status, 0);
+  assert.equal(echo.output, 'hi');
+  const fail = await runTool(process.execPath, ['-e', 'process.exit(3)']);
+  assert.equal(fail.status, 3);
+  const tools = toolStatus();
+  assert.equal(typeof tools.python, 'boolean');
+  assert.equal(typeof tools.redditFetcher, 'boolean');
+} finally {
+  fs.rmSync(fix, { recursive: true, force: true });
+}
+
+// extractZip round-trip (needs python3 or unzip)
+try {
+  const zd = fs.mkdtempSync(path.join(os.tmpdir(), 'athena-social-zip-'));
+  try {
+    const srcDir = path.join(zd, 'src');
+    fs.mkdirSync(path.join(srcDir, 'data'), { recursive: true });
+    fs.writeFileSync(path.join(srcDir, 'data', 't.js'), 'window.YTD.t.part0 = []');
+    const zipFile = path.join(zd, 'a.zip');
+    const mk = spawnSync('python3', ['-c', 'import sys,zipfile,os; z=zipfile.ZipFile(sys.argv[1],"w"); z.write(sys.argv[2], "data/t.js"); z.close()', zipFile, path.join(srcDir, 'data', 't.js')]).status;
+    if (mk === 0 && fs.existsSync(zipFile)) {
+      const dest = path.join(zd, 'out');
+      const r = extractZip(zipFile, dest);
+      assert.equal(r.ok, true);
+      assert.ok(fs.existsSync(path.join(dest, 'data', 't.js')));
+    } else {
+      console.log('INFO zip round-trip skipped (no python3 zip support)');
+    }
+  } finally {
+    fs.rmSync(zd, { recursive: true, force: true });
+  }
+} catch (e) {
+  throw e;
 }
 
 console.log('PASS social imports (reddit + x/tweetnook)');

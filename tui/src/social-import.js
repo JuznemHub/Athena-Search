@@ -237,6 +237,222 @@ export async function loadSocialLinks(source) {
   throw new Error(`Unknown social source kind: ${source.kind}`);
 }
 
+// ---- Guided setup: drive the tools, remember the paths ----------------------
+// After one guided run the TUI stores the export/archive paths in its config,
+// so the next import just works with no prompts.
+
+import { spawn } from 'node:child_process';
+
+export function which(cmd) {
+  try {
+    const args = process.platform === 'win32' ? ['where', cmd] : ['which', cmd];
+    const exe = process.platform === 'win32' ? args.shift() : args.shift();
+    const r = spawnSync(exe, args, { timeout: 10_000, stdio: 'ignore' });
+    return r.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+export function toolStatus() {
+  return {
+    python: which('python3') || which('python'),
+    git: which('git'),
+    unzip: which('unzip'),
+    redditFetcher: which('reddit-fetcher'),
+    tweetnook: which('tweetnook'),
+  };
+}
+
+/** Run a tool with live stderr (user watches progress); resolves {status}. */
+export function runTool(cmd, args, { cwd, timeout = 900_000, stdin = 'ignore' } = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(cmd, args, { cwd, stdio: [stdin, 'pipe', 'inherit'] });
+    } catch (e) {
+      resolve({ status: 1, error: e.message });
+      return;
+    }
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    const kill = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, timeout);
+    child.on('error', (e) => { clearTimeout(kill); resolve({ status: 1, output: out, error: e.message }); });
+    child.on('close', (code) => { clearTimeout(kill); resolve({ status: code ?? 1, output: out }); });
+  });
+}
+
+export function redditCheckoutCandidates() {
+  const home = os.homedir();
+  const cwd = process.cwd();
+  return [
+    process.env.REDDIT_FETCH_DIR || '',
+    path.join(cwd, 'Reddit-Fetch'),
+    path.join(home, 'Reddit-Fetch'),
+    path.join(home, 'src', 'Reddit-Fetch'),
+  ].filter(Boolean);
+}
+
+/** A Reddit-Fetch checkout holds reddit_fetch/api.py. */
+export function findRedditCheckout(dirs) {
+  for (const d of dirs || []) {
+    if (exists(path.join(d, 'reddit_fetch', 'api.py'))) return d;
+  }
+  return null;
+}
+
+export function writeRedditEnv(dir, { clientId, clientSecret, username }) {
+  const lines = [
+    `CLIENT_ID=${String(clientId).trim()}`,
+    `CLIENT_SECRET=${String(clientSecret).trim()}`,
+    'REDIRECT_URI=http://localhost:8080',
+    `USER_AGENT=linux:athena-tui-reddit:v1.0 (by /u/${String(username).trim()})`,
+    `REDDIT_USERNAME=${String(username).trim()}`,
+  ];
+  const file = path.join(dir, '.env');
+  fs.writeFileSync(file, lines.join('\n') + '\n', { mode: 0o600 });
+  try { fs.chmodSync(file, 0o600); } catch {}
+  return file;
+}
+
+export function savedPostsPath(dir) {
+  for (const f of ['saved_posts.json', 'data/saved_posts.json']) {
+    if (exists(path.join(dir, f))) return path.join(dir, f);
+  }
+  for (const f of ['saved_posts.html', 'data/saved_posts.html']) {
+    if (exists(path.join(dir, f))) return path.join(dir, f);
+  }
+  return null;
+}
+
+/** Name a file/dir as a social source the loader understands. */
+export function socialSourceFor(file, name = 'Social import') {
+  const isDir = (() => { try { return fs.statSync(file).isDirectory(); } catch { return false; } })();
+  const ext = /\.([a-z0-9]+)$/i.exec(file)?.[1]?.toLowerCase();
+  if (isDir) return { name, file, kind: 'x-archive' };
+  if (ext === 'html') return { name, file, kind: 'reddit-html' };
+  // TweetNook's own export is posts.json (or has tweetnook in the name);
+  // Reddit-Fetch's saved_posts.json stays reddit-json.
+  if (ext === 'json' && (/tweetnook/i.test(file) || /(^|\/)posts\.json$/i.test(file))) {
+    return { name, file, kind: 'tweetnook-json' };
+  }
+  return { name, file, kind: 'reddit-json' };
+}
+
+export function extractZip(zip, dest) {
+  fs.mkdirSync(dest, { recursive: true });
+  const py = spawnSync('python3',
+    ['-c', 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])', zip, dest],
+    { timeout: 300_000, stdio: 'ignore' });
+  if (py.status === 0 && fs.existsSync(dest)) return { ok: true };
+  const uz = spawnSync('unzip', ['-q', zip, '-d', dest], { timeout: 300_000, stdio: 'ignore' });
+  if (uz.status === 0) return { ok: true };
+  return { ok: false, error: 'need python3 or unzip to extract the archive' };
+}
+
+/**
+ * Guided Reddit setup. Reuses the stored path when it still exists, otherwise
+ * walks: checkout → .env → OAuth tokens → fetch. Returns a source or null.
+ * `ctx` = { prompt, say, state } from the TUI.
+ */
+export async function ensureRedditExport({ prompt, say, state }) {
+  if (state.redditExportPath && exists(state.redditExportPath)) {
+    return socialSourceFor(state.redditExportPath, 'Reddit saved posts');
+  }
+  const tools = toolStatus();
+  say('Reddit setup — your saves are fetched with Reddit-Fetch (OAuth, stays on your machine).');
+  let checkout = state.redditCheckout && exists(state.redditCheckout)
+    ? state.redditCheckout
+    : findRedditCheckout(redditCheckoutCandidates());
+  if (!checkout) {
+    say(`Clone it first: git clone https://github.com/akashpandey/Reddit-Fetch "${path.join(os.homedir(), 'Reddit-Fetch')}"`);
+    if (!tools.git) say('git is not installed — install it, or download the ZIP from GitHub.');
+    const given = await prompt('Path to Reddit-Fetch checkout', { hint: '~/Reddit-Fetch' });
+    if (!given) return null;
+    const resolved = given.startsWith('~/') ? path.join(os.homedir(), given.slice(2)) : path.resolve(given);
+    if (!exists(path.join(resolved, 'reddit_fetch', 'api.py'))) {
+      say('That folder has no reddit_fetch/api.py — cancelled.');
+      return null;
+    }
+    checkout = resolved;
+    state.redditCheckout = checkout;
+  }
+  const envFile = path.join(checkout, '.env');
+  if (!exists(envFile)) {
+    say('Create a Reddit app (https://www.reddit.com/prefs/apps, type script, redirect http://localhost:8080), then:');
+    const clientId = await prompt('Reddit CLIENT_ID', {});
+    const clientSecret = await prompt('Reddit CLIENT_SECRET', {});
+    const username = await prompt('Reddit username', { hint: 'without u/' });
+    if (!clientId || !clientSecret || !username) { say('Cancelled — need all three.'); return null; }
+    writeRedditEnv(checkout, { clientId, clientSecret, username });
+    say(`Wrote ${envFile} (mode 600).`);
+  }
+  const tokensFile = path.join(checkout, 'tokens.json');
+  if (!exists(tokensFile)) {
+    say('One-time login: a URL prints below — open it, approve, done.');
+    const py = tools.python ? (which('python3') ? 'python3' : 'python') : null;
+    if (!py) { say('python3 is not installed — cannot run the login.'); return null; }
+    const res = await runTool(py, ['-m', 'reddit_fetch.generate_tokens'], { cwd: checkout, stdin: 'inherit' });
+    if (res.status !== 0 || !exists(tokensFile)) {
+      say('Login did not finish — run Import social again when ready.');
+      return null;
+    }
+  }
+  const runCmd = tools.redditFetcher ? ['reddit-fetcher'] : null;
+  if (!runCmd) {
+    say(`Install the fetcher once: cd "${checkout}" && pip install -e .`);
+    return null;
+  }
+  say('Fetching your saves (can take a while on big accounts)…');
+  const res = await runTool(runCmd[0], [], { cwd: checkout });
+  if (res.status !== 0) {
+    say('Fetch failed — re-run Import social to retry.');
+    return null;
+  }
+  const out = savedPostsPath(checkout);
+  if (!out) { say('Fetch finished but no saved_posts file found.'); return null; }
+  state.redditExportPath = out;
+  return socialSourceFor(out, 'Reddit saved posts');
+}
+
+/**
+ * Guided X setup. Reuses the stored archive dir, otherwise takes a ZIP (or
+ * folder), extracts it, and remembers it. Returns a source or null.
+ */
+export async function ensureXArchive({ prompt, say, state }) {
+  if (state.xArchivePath && exists(state.xArchivePath)) {
+    return socialSourceFor(state.xArchivePath, 'X archive');
+  }
+  const tools = toolStatus();
+  say('X setup — request your archive in X → Settings → Your account → Download an archive of your data.');
+  if (tools.tweetnook) say('tweetnook CLI found: you can also run `tweetnook import x-archive <zip>` yourself any time.');
+  const given = await prompt('Path to X archive (.zip or extracted folder)', { hint: '~/Downloads/twitter-archive.zip' });
+  if (!given) return null;
+  const resolved = given.startsWith('~/') ? path.join(os.homedir(), given.slice(2)) : path.resolve(given);
+  if (!exists(resolved)) { say('Cannot read that path.'); return null; }
+  let dir = resolved;
+  try {
+    if (fs.statSync(resolved).isFile()) {
+      if (!/\.zip$/i.test(resolved)) { say('Only .zip files or extracted folders, please.'); return null; }
+      dir = resolved.replace(/\.zip$/i, '');
+      if (!exists(path.join(dir, 'data'))) {
+        say(`Extracting to ${dir}…`);
+        const r = extractZip(resolved, dir);
+        if (!r.ok) { say(r.error); return null; }
+      }
+    }
+  } catch {
+    say('Cannot read that path.');
+    return null;
+  }
+  const hasData = (() => {
+    try { return fs.readdirSync(path.join(dir, 'data')).some((f) => f.endsWith('.js')); } catch { return false; }
+  })();
+  if (!hasData) say('Warning: no data/*.js in there — continuing anyway, may find nothing.');
+  state.xArchivePath = dir;
+  return socialSourceFor(dir, 'X archive');
+}
+
 // ---- detection --------------------------------------------------------------
 
 function exists(p) {

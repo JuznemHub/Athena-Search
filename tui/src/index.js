@@ -13,7 +13,7 @@ import { playIntro, withSpinner } from './anim.js';
 import { keyStream } from './keys.js';
 import { makeClient, ApiError, STORAGE_LABELS, rankOf } from './api.js';
 import { detectBookmarks, loadBookmarks, dedupe, scanDiagnose, filterSynthetic } from './browsers.js';
-import { detectSocialSources, loadSocialLinks, socialScanDiagnose, socialToolStatus } from './social-import.js';
+import { detectSocialSources, loadSocialLinks, socialScanDiagnose, socialSourceFor, ensureRedditExport, ensureXArchive } from './social-import.js';
 import { loadConfig, saveConfig } from './config.js';
 import { parseSessionToken } from './session.js';
 import { launchAdvanced } from './opencode-launcher.js';
@@ -145,6 +145,9 @@ async function stepConnectInstance() {
         scanned: undefined,
         social: undefined,
         socialSources: undefined,
+        redditExportPath: undefined,
+        redditCheckout: undefined,
+        xArchivePath: undefined,
         last_dump: undefined,
       });
     }
@@ -273,26 +276,42 @@ async function stepScan() {
 
 async function stepSocial() {
   if (!state.token) { stderr(theme.danger('Login first.\n')); return false; }
-  let sources = detectSocialSources();
-  if (sources.length === 0) {
-    const tools = socialToolStatus();
-    stderr(theme.dim('No Reddit/X sources detected.\n'));
-    stderr(theme.dim('Reddit: run `reddit-fetcher` (https://github.com/akashpandey/Reddit-Fetch) to create saved_posts.json, or point REDDIT_EXPORT_PATH at it.\n'));
-    stderr(theme.dim(`(reddit-fetcher CLI here: ${tools.redditFetcher ? 'yes' : 'no'})\n`));
-    stderr(theme.dim('X: request your archive from X, unzip it, or run `tweetnook import x-archive <zip>` (https://github.com/GezerWezer/TweetNook), then point X_ARCHIVE_PATH at the folder.\n'));
-    stderr(theme.dim(`(tweetnook CLI here: ${tools.tweetnook ? 'yes' : 'no'})\n\n`));
-    await renderHeader(false);
-    const file = await prompt('Path to social export file or X archive dir', { hint: 'saved_posts.json / twitter-archive/' });
-    if (!file) { stderr(theme.dim('Cancelled.\n')); return false; }
+  await renderHeader(false);
+  stderr(center(theme.bold('Import social'), columns()) + '\n\n');
+  const say = (s) => stderr(theme.dim(s + '\n'));
+  const pick = await menu(io, theme, {
+    title: 'Import what?',
+    items: [
+      { label: 'Reddit saves', hint: state.redditExportPath ? 'ready' : 'guided setup' },
+      { label: 'X posts', hint: state.xArchivePath ? 'ready' : 'guided setup' },
+      { label: 'Both', hint: '' },
+    ],
+    width: columns(),
+  });
+  if (pick === null) return false;
+  const ctx = { prompt, say, state };
+  const wanted = pick === 0 ? ['reddit'] : pick === 1 ? ['x'] : ['reddit', 'x'];
+  for (const kind of wanted) {
     try {
-      const st = fsStat(file);
-      const isDir = st?.isDirectory();
-      const ext = /\.([a-z0-9]+)$/i.exec(file)?.[1]?.toLowerCase();
-      sources = [{ name: 'Social import', file, kind: isDir ? 'x-archive' : ext === 'html' ? 'reddit-html' : ext === 'json' && /tweetnook|posts\.json$/i.test(file) ? 'tweetnook-json' : 'reddit-json' }];
-    } catch {
-      stderr(theme.danger('Cannot read that path.\n'));
-      return false;
+      const src = kind === 'reddit' ? await ensureRedditExport(ctx) : await ensureXArchive(ctx);
+      if (!src) say(`${kind === 'reddit' ? 'Reddit' : 'X'} skipped.`);
+    } catch (e) {
+      say(`${kind === 'reddit' ? 'Reddit' : 'X'} setup failed: ${e.message}`);
     }
+  }
+  saveConfig(state);
+  // Everything with a good stored path loads with no further prompts.
+  let sources = [];
+  if (state.redditExportPath) {
+    try { if (fsStat(state.redditExportPath)?.isFile()) sources.push(socialSourceFor(state.redditExportPath, 'Reddit saved posts')); } catch {}
+  }
+  if (state.xArchivePath) {
+    try { if (fsStat(state.xArchivePath)) sources.push(socialSourceFor(state.xArchivePath, 'X archive')); } catch {}
+  }
+  if (!sources.length) sources = detectSocialSources();
+  if (sources.length === 0) {
+    say('Nothing to import yet — set a path up above, then come back.');
+    return false;
   }
   const all = [];
   const failed = [];
