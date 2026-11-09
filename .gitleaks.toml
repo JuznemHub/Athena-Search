@@ -5,6 +5,15 @@ title = "Athena-Search gitleaks config"
 
 [allowlist]
   description = "Global allowlist"
+  commits = [
+    "19113af7ec3357fb8ecfa3b42b10292fe481c911",
+    "5d538865c3bb378fa068e5e3a8fa6a8bb1cf5b0c",
+    "4c714e36353d2d05779c118e69e4695029c54bb7",
+    "ac8e52f5c1592adfb6d0d244fefab3142277d345",
+    "f4eee8506e7a2bfa51cf38e78fb07e604f376ee7",
+    "2889be46bf1e3e86c0716cf9b9dd632ba9f2e32f",
+    "0b4b8acc7da9b213159938b8206191b7d5bf8283",
+  ]
   paths = [
     '''\.env\.example$''',
     '''server/\.env\.example$''',
@@ -12,3 +21,13 @@ title = "Athena-Search gitleaks config"
     '''package-lock\.json$''',
     '''\.git/''',
   ]
+
+[[rules]]
+  id = "hostinger-server-hostname"
+  description = "Internal server hostname exposure"
+  regex = '''(?i)[a-z0-9_.-]+\.hstgr\.cloud'''
+
+[[rules]]
+  id = "root-server-author"
+  description = "Root email on internal server exposure"
+  regex = '''(?i)root@[a-z0-9_.-]+'''

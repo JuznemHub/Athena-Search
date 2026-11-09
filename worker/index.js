@@ -1,6 +1,11 @@
-import legacy from './index_legacy.js';
+import legacy, { setShimToken } from './index_legacy.js';
 export * from './index_legacy.js';
 const _WORKER_VERSION = "version: '1.0.65'";
+
+const SHIM_INTERNAL_TOKEN = 'shim-' + (globalThis.crypto?.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2));
+if (typeof setShimToken === 'function') {
+  setShimToken(SHIM_INTERNAL_TOKEN);
+}
 
 function parts(text) { return String(text || '').trim().split(/\s+/).filter(Boolean); }
 function command(text) { return parts(text)[0]?.split('@')[0]?.toLowerCase() || ''; }
@@ -29,7 +34,7 @@ async function tg(token,method,body){ const r=await fetch(`${shimApiBase}/bot${t
 async function reply(token,chatId,text,threadId){ const body={chat_id:chatId,text}; if(threadId!=null) body.message_thread_id=threadId; await tg(token,'sendMessage',body).catch(()=>{}); return new Response('OK'); }
 async function legacyFetch(update,env){
   const secret = String(env.TELEGRAM_WEBHOOK_SECRET||'').trim() || await legacy.webhookSecret?.(env).catch(()=>null) || '';
-  const headers = {'content-type':'application/json'};
+  const headers = {'content-type':'application/json', 'x-athena-shim-token': SHIM_INTERNAL_TOKEN};
   if(secret) headers['X-Telegram-Bot-Api-Secret-Token'] = secret;
   return legacy.fetch(new Request('https://athena.internal/api/telegram-webhook',{method:'POST',headers,body:JSON.stringify(update)}),env,{});
 }

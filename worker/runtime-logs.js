@@ -1,5 +1,5 @@
 // Shared by the worker logger and the self-host console. Only real producers append.
-const SECRET_NAME = /(?:token|secret|password|passwd|api[_-]?key|api[_-]?hash|string[_-]?session|session|storage[_-]?key|database[_-]?url|private[_-]?key)/i;
+const SECRET_NAME = /(?:token|secret|password|passwd|api[_-]?key|api[_-]?hash|string[_-]?session|session|storage[_-]?key|database[_-]?url|private[_-]?key|dokploy_url|dokploy_api)/i;
 let secretValues = [];
 export function configureLogSecrets(env = {}) {
   secretValues = [...new Set([...secretValues, ...Object.entries(env)
@@ -14,6 +14,8 @@ export function redactLog(value) {
   for (const secret of secretValues) text = text.split(secret).join('[REDACTED]');
   return text
     .replace(/\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis):\/\/[^\s"'<>]+/gi, '[REDACTED_DATABASE_URL]')
+    .replace(/\b[a-z0-9_.-]+\.hstgr\.cloud\b/gi, '[REDACTED_HOST]')
+    .replace(/\broot@[a-z0-9_.-]+\b/gi, '[REDACTED_USER]')
     .replace(/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*/gi, '[REDACTED_AUTH]')
     .replace(/\b\d{5,}:[A-Za-z0-9_-]{20,}\b/g, '[REDACTED_BOT_TOKEN]')
     .replace(/\b[a-f0-9]{32}\b/gi, '[REDACTED_HASH]')
