@@ -22,18 +22,20 @@ bookmark extraction covers Chromium-family browsers and Firefox.
               search your second brain · dump your bookmarks · ai answers
                                  server  not connected
 
-                   ╭─ actions ─────────────────────────────────────╮
-                   │ ❯ 1 Login with Telegram         not logged in │
-                   │   2 Connect instance            not connected │
-                   │   3 Join community              not joined    │
-                   │   4 Scan bookmarks              not scanned   │
-                   │   5 Dump bookmarks                            │
-                   │   6 Status                                    │
-                   │   7 Quit                                      │
-                   ╰───────────────────────────────────────────────╯
-                       ╭────────────────────────────────────────╮
-                       │ ↑↓ move · ↵ select · 1-9 jump · q quit │
-                       ╰────────────────────────────────────────╯
+              ╭─ actions ────────────────────────────────────────────────╮
+              │ ❯ 1 Login with Telegram         not logged in            │
+              │   2 Connect instance            not connected            │
+              │   3 Join community              not joined               │
+              │   4 Scan bookmarks              not scanned              │
+              │   5 Import social (Reddit/X)    not imported             │
+              │   6 Dump bookmarks                                       │
+              │   7 Advanced (MCP)              MCP config for any agent │
+              │   8 Status                                               │
+              │   9 Quit                                                 │
+              ╰──────────────────────────────────────────────────────────╯
+               ╭───────────────────────────────────────────────────────╮
+               │ ↑↓ move · ↵ select · 1-9 jump · Tab advanced · q quit │
+               ╰───────────────────────────────────────────────────────╯
 ```
 
 ## Requirements

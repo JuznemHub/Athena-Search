@@ -20,11 +20,6 @@ Athena is a self-hostable bookmark and document archive. Save from the web UI, T
 <p align="center">
   <em>Live captures — public pages only; no accounts, tokens, or private brains shown.</em>
 </p>
-<p align="center">
-  <img src="screenshots/screenshot-2026-08-21_14-28-39.png" width="32%" alt="Athena app view">
-  <img src="screenshots/screenshot-2026-08-21_14-28-56.png" width="32%" alt="Athena app view">
-  <img src="screenshots/screenshot-2026-08-21_14-29-24.png" width="32%" alt="Athena app view">
-</p>
 
 > ⭐ **Like Athena?** [Star the repo](https://github.com/JuznemHub/Athena-Search/stargazers) and test it out extensively — real usage is what makes it better.
 >
@@ -35,7 +30,8 @@ Athena is a self-hostable bookmark and document archive. Save from the web UI, T
 ## Juznem's favourite features
 
 - **📚 Dump all your browser bookmarks straight into Athena via the TUI** — Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Arc and Firefox are detected automatically; scan, pick folders, and dump everything into your personal or community brain from the terminal. No export-file gymnastics.
-- **🧠 Advanced (MCP) mode for any agent** — press `Tab` in the TUI and you get a minimal `athena` MCP config for Hermes, Claude Code, Codex, or any MCP host: grounded search, citations with `[#n]`, paragraph-level document lookup (`para_idx`).
+- **🐦 Reddit & X (Twitter) bookmark imports** — Import saved posts, bookmarks, and likes from Reddit (via [Reddit-Fetch](https://github.com/akashpandey/Reddit-Fetch)) and X / Twitter (official archive or [TweetNook](https://github.com/GezerWezer/TweetNook) export) directly into your brain. Outside links in posts become distinct bookmarks, and the TUI setup remembers your paths for future syncs.
+- **🧠 Model Context Protocol (MCP) server for any agent** — Wire your second brain into Claude Code, Hermes, Codex, Cursor, or any MCP host: grounded semantic search, paragraph-level chunk lookups (`para_idx`), citations with `[#n]`, and rank-scoped access. Press `Tab` in the TUI or run `node tui/src/mcp-athena.js --config`.
 - **🏠 Self-host it for yourself — or run your own Telegram community** — full control end-to-end: PostgreSQL storage, your own bot, rank hierarchy (GOD / owner / admin / member), approve whom to add, kick/ban with automatic sync to Telegram group presence, per-community brains, backups to Telegram, and GOD-only switches like AI credentials and channel targets.
 - **📡 Live cloning of any Telegram channel, group — even a single forum topic** — powered by a userbot session or a linked bot: links, documents (pdf/epub/docx/…), button links, and text posts land in your brain automatically, with GOD-rank targets (community / personal / both), one-command history backfill by id range or topic, a VPS media vault, per-session rollback, and honest live progress bars.
 - *…and much more:* Meilisearch acceleration, pgvector paragraph search, multi-agent MCP memory, streaming AI answers grounded in your own sources, themes, accent colors, and a zero-build frontend.
@@ -46,11 +42,12 @@ Athena is a self-hostable bookmark and document archive. Save from the web UI, T
 - Searches titles, URLs, notes, tags, and document content across the complete PostgreSQL corpus.
 - Uses optional [Meilisearch](https://www.meilisearch.com/) as a fast derived index; PostgreSQL remains the source of truth and the fallback.
 - Answers questions with retrieval-augmented context and source links.
-- Supports OpenAI-compatible gateways, Anthropic, OpenRouter, OpenCode Zen, Groq, and local routers such as [OmniRoute](https://github.com/df4p/omniroute).
+- Supports OpenAI-compatible gateways, Anthropic, OpenRouter, Groq, and local routers such as [OmniRoute](https://github.com/df4p/omniroute).
+- Exposes a native Model Context Protocol (MCP) server so AI agents (Claude Code, Hermes, Codex, Cursor) can query your saved collection.
+- Imports bookmarks from 8+ desktop browsers, Reddit saved posts, and X (Twitter) archives via a zero-dependency terminal UI.
 - Provides personal and community brains with rank-aware permissions, voting, reports, and Telegram group membership gates.
 - Clones Telegram channels, groups, and individual forum topics into your brain — links, documents (pdf/epub/docx/…), and text posts — with GOD-rank targets (community / personal / both) and one-time history backfill.
 - Grounds every AI answer in retrieved sources and rejects responses containing URLs outside your saved set.
-- Includes a zero-build terminal UI for bookmark import and MCP-powered AI sessions.
 
 ## Quick start
 
@@ -309,14 +306,76 @@ Chromium is optional. If it is missing, disabled, or fails, Athena keeps the saf
 
 ## Terminal UI
 
-[`athena-tui`](tui/README.md) imports browser bookmarks and export files without requiring a browser session on the server.
+[`athena-tui`](tui/README.md) is a zero-dependency CLI client for scanning and importing your bookmarks and archives directly into Athena.
 
 ```bash
 npm install -g athena-tui
 athena-tui
 ```
 
-It supports Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Arc, Firefox, and explicit export files. `Tab` opens the advanced AI/MCP view when configured; the website and database can stay on a VPS while the TUI runs locally.
+```text
+                                    ✦
+                   █▀█ ▀█▀ █ █ █▀▀ █▄ █ █▀█  ▄▀▀ █▀▀ █▀█ █▀▄ ▄▀▀ █ █
+                   █▄█  █  █▀█ █▀  █ ▀█ █▄█  █▄▄ █▀  █▄█ █▀▄ █   █▀█
+                   ▀ ▀  ▀  ▀ ▀ ▀▀▀ ▀  ▀ ▀ ▀  ▀▀▀ ▀▀▀ ▀ ▀ ▀▀  ▀▀▀ ▀ ▀
+              search your second brain · dump your bookmarks · ai answers
+                                 server  not connected
+
+              ╭─ actions ────────────────────────────────────────────────╮
+              │ ❯ 1 Login with Telegram         not logged in            │
+              │   2 Connect instance            not connected            │
+              │   3 Join community              not joined               │
+              │   4 Scan bookmarks              not scanned              │
+              │   5 Import social (Reddit/X)    not imported             │
+              │   6 Dump bookmarks                                       │
+              │   7 Advanced (MCP)              MCP config for any agent │
+              │   8 Status                                               │
+              │   9 Quit                                                 │
+              ╰──────────────────────────────────────────────────────────╯
+               ╭───────────────────────────────────────────────────────╮
+               │ ↑↓ move · ↵ select · 1-9 jump · Tab advanced · q quit │
+               ╰───────────────────────────────────────────────────────╯
+```
+
+### Browser and social imports
+
+- **Browser bookmarks**: auto-detects profiles across Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Arc, and Firefox (`places.sqlite` read via `node:sqlite`), including Flatpak and Snap installations. Custom roots can be supplied via `ATHENA_BOOKMARK_ROOTS`.
+- **Reddit saved posts**: guided setup integrates with [Reddit-Fetch](https://github.com/akashpandey/Reddit-Fetch), handling OAuth and parsing `saved_posts.json` or `.html`. Posts are automatically tagged `#reddit` and `#r-<subreddit>`.
+- **X (Twitter) archives**: reads official Twitter archive directories (`data/tweets.js`, `data/like.js`) or [TweetNook](https://github.com/GezerWezer/TweetNook) JSON exports. External links in tweets are saved as distinct entries, while text-only posts and likes save as links to the tweet tagged `#x`.
+- **Path persistence**: verified paths are saved in `~/.config/athena-tui/config.json` so subsequent syncs run without re-prompting. Headless or scripted environments can set `REDDIT_EXPORT_PATH`, `X_ARCHIVE_PATH`, or `TWEETNOOK_EXPORT_PATH`.
+
+## Model Context Protocol (MCP)
+
+Athena runs a native Model Context Protocol (MCP) stdio server, connecting your brain directly to AI agent hosts like Claude Code, Hermes, Codex, Cursor, and Antigravity.
+
+### Capabilities and tools
+
+- `athena_search` — search personal and community collections using hybrid full-text and semantic matching, with domain and tag filters.
+- `athena_get_chunk` — paragraph-level retrieval (`para_idx`) to pull exact context blocks from long-form documents and PDFs.
+- `athena_list_sources` — inspect indexed channels, groups, and collections.
+
+### Agent configuration
+
+Run `node tui/src/mcp-athena.js --config` or select **Advanced (MCP)** (or press `Tab`) in the TUI to print your configuration snippet.
+
+Example configuration for Claude Code or desktop MCP clients:
+
+```json
+{
+  "mcpServers": {
+    "athena": {
+      "command": "node",
+      "args": ["/path/to/Athena-Search/tui/src/mcp-athena.js"],
+      "env": {
+        "ATHENA_INSTANCE": "https://athena.example.org",
+        "ATHENA_TOKEN": "your_session_token"
+      }
+    }
+  }
+}
+```
+
+Ranks apply: `personal` collection access requires GOD rank, while community collections are accessible to active members.
 
 ## Permissions
 
@@ -364,10 +423,6 @@ npm run test:unit
 
 The repository’s CI also runs the TUI test suite and secret scanning. PostgreSQL is required for runtime integration checks; the unit retrieval test is self-contained.
 
-## Note on Discord
-
-You will see a **Discord login** option in the UI. It is **not tested and not supported yet** — do not use it. Telegram login is the supported auth path.
-
 ## Roadmap
 
 - [ ] **RSS support** — live indexing of RSS/Atom feeds with change tracking: new items land automatically, and edits/removals on the source site are reflected (content updated or removed from the DB) instead of leaving stale copies.
@@ -379,9 +434,11 @@ You will see a **Discord login** option in the UI. It is **not tested and not su
 
 Athena stands on the shoulders of these projects — their code and ideas are part of this codebase:
 
-- [OpenCode](https://github.com/anomalyco/opencode) — the CLI agent harness; Athena's MCP integration and TUI advanced mode build on its patterns.
+- [modelcontextprotocol](https://modelcontextprotocol.io/) — open specification for AI agent context and memory.
 - [@firecrawl/anydoc](https://github.com/firecrawl/anydoc) — Rust document converter (pdf/docx/pptx/xlsx/odt/rtf/epub → Markdown).
 - [binthere](https://github.com/nxfu/binthere) — the TUI app whose wordmark, box menus, cursor, and spinner `athena-tui` is based on.
+- [Reddit-Fetch](https://github.com/akashpandey/Reddit-Fetch) — Reddit saved post extraction for terminal imports.
+- [TweetNook](https://github.com/GezerWezer/TweetNook) — X archive export format and parsing.
 - [gramjs](https://github.com/gram-js/gramjs) — Telegram user-session client for history backfill.
 - [Meilisearch](https://www.meilisearch.com/) — optional derived search index.
 - [pgvector](https://github.com/pgvector/pgvector) — embedding similarity for paragraph-level document search.
