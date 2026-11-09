@@ -505,6 +505,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 showLoggedIn();
                 updateUserUI();
                 await bootstrapAppData();
+              } else if (pd.status === 'banned') {
+                clearInterval(pollInterval);
+                telegramWebLoginBtn.disabled = false;
+                telegramWebLoginBtn.textContent = 'Log in with Telegram Web';
+                showAuthError(pd.error || 'You are not in any community Telegram group (or banned from all).');
               } else if (pd.status === 'expired' || pd.status === 'invalid') {
                 clearInterval(pollInterval);
                 telegramWebLoginBtn.disabled = false;

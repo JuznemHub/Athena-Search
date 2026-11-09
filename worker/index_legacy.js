@@ -1012,6 +1012,18 @@ async function syncLivePresenceForUser(env, user, tgUserId) {
         platformUserId: String(tid),
         userId: user?.id || null
       });
+      if (user?.id) {
+        try {
+          const mem = await env.DB.prepare(
+            'SELECT role FROM community_members WHERE community_id = ? AND user_id = ?'
+          ).bind(p.id, user.id).first();
+          if (!mem) {
+            await env.DB.prepare(
+              'INSERT INTO community_members (community_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)'
+            ).bind(p.id, user.id, 'member', Date.now()).run();
+          }
+        } catch (_) {}
+      }
     } else if (p.inGroup === PRESENCE_UNKNOWN) {
       // Telegram did not answer. Leave existing state untouched: no ban, no unban.
       anyUnknown = true;
@@ -1037,30 +1049,41 @@ async function syncLivePresenceForUser(env, user, tgUserId) {
 }
 
 /**
- * Fully site-banned ONLY if user is not in ANY community Telegram group right now
- * AND has at least one ban (left/kicked everywhere).
- * First-time users (no bans, not in groups yet) can always login.
- * Banned from PZP but still in Athoo TG group → can login.
+ * Gatekeeper for website login and access:
+ * Only users who are in at least one community Telegram group/channel (verified via /community_verify)
+ * or have an active unbanned community membership may log in to Athena.
+ * Instance owners (GOD rank) are exempt.
  */
 async function isUserFullySiteBanned(env, user) {
-  if (!user) return false;
+  if (!user) return true;
   if (await isGodUserAsync(user, env)) return false;
   await ensureBanTable(env);
   await ensureCommunityMembersColumns(env);
 
   const tgId = await resolveTgApiIdForUser(user);
-  // No Bot API id yet → allow login (they need to auth first)
-  if (!tgId) return false;
+  if (!tgId) {
+    // Non-Telegram login (e.g. Discord): must have an active unbanned community membership
+    if (user.id) {
+      const alive = await env.DB.prepare(
+        `SELECT 1 FROM community_members m
+         INNER JOIN communities c ON c.id = m.community_id
+         WHERE m.user_id = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM community_bans b
+             WHERE b.community_id = m.community_id AND b.user_id = m.user_id
+           )
+         LIMIT 1`
+      ).bind(user.id).first().catch(() => null);
+      if (alive) return false;
+    }
+    return true;
+  }
 
   const { inAnyGroup, anyUnknown } = await syncLivePresenceForUser(env, user, tgId);
   if (inAnyGroup) return false;
-  // Telegram was unreachable for at least one community — we cannot prove the user
-  // is out of everything, so we must not lock them out of the whole site.
-  if (anyUnknown) return false;
 
-  // The documented rule is "fully banned only when no unbanned membership remains".
-  // Communities without a linked TG group never appear in the presence scan, so a
-  // membership there must still count as access.
+  // Check if they are an active unbanned member in DB (e.g. creator or web-only community)
+  let hasActiveMembership = false;
   try {
     if (user.id) {
       const alive = await env.DB.prepare(
@@ -1073,28 +1096,17 @@ async function isUserFullySiteBanned(env, user) {
            )
          LIMIT 1`
       ).bind(user.id).first();
-      if (alive) return false;
+      if (alive) hasActiveMembership = true;
     }
   } catch (_) {}
 
-  // Not in any group and no unbanned membership left — block only if a ban exists.
-  try {
-    if (user.id) {
-      const b = await env.DB.prepare(
-        `SELECT 1 FROM community_bans b
-         INNER JOIN communities c ON c.id = b.community_id
-         WHERE b.user_id = ? LIMIT 1`
-      ).bind(user.id).first();
-      if (b) return true;
-    }
-    const b2 = await env.DB.prepare(
-      `SELECT 1 FROM community_bans b
-       INNER JOIN communities c ON c.id = b.community_id
-       WHERE b.platform = 'telegram' AND b.platform_user_id = ? LIMIT 1`
-    ).bind(String(tgId)).first();
-    if (b2) return true;
-  } catch (_) {}
-  return false;
+  // If user has an active membership and live presence check was temporarily unknown, allow access
+  if (hasActiveMembership && anyUnknown) return false;
+  if (hasActiveMembership) return false;
+
+  // User is NOT in any community group/channel and has no active community membership:
+  // DENY access!
+  return true;
 }
 
 /**
@@ -1415,58 +1427,60 @@ function isInstanceOwnerTgId(tgUserId, env) {
  */
 const PRESENCE_UNKNOWN = 'unknown';
 
-/** true | false | PRESENCE_UNKNOWN — is this Telegram user currently in the linked group? */
+/** true | false | PRESENCE_UNKNOWN — is this Telegram user currently in any linked group or channel of this community? */
 async function isTelegramUserInCommunityGroup(env, communityId, tgUserId) {
   if (!communityId || !tgUserId) return false;
-  // Prefer real group chat ids (negative); ignore personal DM bindings (positive user ids)
-  let bot = await env.DB.prepare(
-    `SELECT group_id, bot_token FROM community_bots
-     WHERE community_id = ? AND platform = 'telegram' AND group_id IS NOT NULL
-       AND CAST(group_id AS TEXT) LIKE '-%'
-     ORDER BY created_at DESC LIMIT 1`
-  ).bind(communityId).first();
-  if (!bot?.group_id) {
-    bot = await env.DB.prepare(
+  let bots;
+  try {
+    const { results } = await env.DB.prepare(
       `SELECT group_id, bot_token FROM community_bots
        WHERE community_id = ? AND platform = 'telegram' AND group_id IS NOT NULL
-       ORDER BY created_at DESC LIMIT 1`
-    ).bind(communityId).first();
+         AND CAST(group_id AS TEXT) LIKE '-%'
+       ORDER BY created_at DESC`
+    ).bind(communityId).all();
+    bots = results || [];
+  } catch (_) {
+    bots = [];
   }
-  if (!bot?.group_id) {
-    // No group linked — allow join by id only (web-only communities)
-    return true;
-  }
-  // Personal DM id is not a community group
-  if (!String(bot.group_id).startsWith('-')) {
+  // No linked Telegram group or channel -> not in Telegram group
+  if (!bots.length) {
     return false;
   }
-  const token = (await decryptBotToken(env, bot.bot_token)) || env.TELEGRAM_BOT_TOKEN;
-  if (!token) return PRESENCE_UNKNOWN;
-  let data;
-  try {
-    data = await telegramApi(token, 'getChatMember', {
-      chat_id: bot.group_id,
-      user_id: Number(tgUserId) || tgUserId
-    });
-  } catch (_) {
-    // Network/DNS/TLS failure — we learned nothing about this user.
-    return PRESENCE_UNKNOWN;
-  }
-  if (!data || !data.ok) {
-    const desc = String(data?.description || '').toLowerCase();
-    // Only a definitive "this user is not in this chat" may cost someone their access.
-    if (desc.includes('user not found') || desc.includes('participant')) {
-      return false;
+
+  let anyIn = false;
+  let allUnknown = true;
+  for (const bot of bots) {
+    const gid = String(bot.group_id || '');
+    if (!gid.startsWith('-')) continue;
+    const token = (await decryptBotToken(env, bot.bot_token)) || env.TELEGRAM_BOT_TOKEN;
+    if (!token) continue;
+    let data;
+    try {
+      data = await telegramApi(token, 'getChatMember', {
+        chat_id: gid,
+        user_id: Number(tgUserId) || tgUserId
+      });
+    } catch (_) {
+      continue;
     }
-    // Everything else (429 rate limit, 5xx, "chat not found", "Unauthorized",
-    // "bot was kicked", unparseable body) is an infrastructure problem, NOT evidence
-    // about the user. Failing closed here mass-bans real members. See PRESENCE_UNKNOWN.
-    return PRESENCE_UNKNOWN;
+    if (data?.ok) {
+      allUnknown = false;
+      const st = data.result?.status || '';
+      if (['creator', 'administrator', 'member', 'restricted'].includes(st)) {
+        anyIn = true;
+        break;
+      }
+    } else {
+      const desc = String(data?.description || '').toLowerCase();
+      if (desc.includes('user not found') || desc.includes('participant')) {
+        allUnknown = false;
+      }
+    }
   }
-  const st = data.result?.status || '';
-  if (['left', 'kicked'].includes(st)) return false;
-  if (['creator', 'administrator', 'member', 'restricted'].includes(st)) return true;
-  return PRESENCE_UNKNOWN;
+
+  if (anyIn) return true;
+  if (allUnknown) return PRESENCE_UNKNOWN;
+  return false;
 }
 
 async function resolveTgApiIdForUser(user) {
@@ -1904,6 +1918,10 @@ async function handleTelegramBotLoginPoll(url, env, corsHeaders) {
     }
     const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(sessionRow.user_id).first();
     const owner = await isInstanceOwnerUserAsync(user, env);
+    if (!owner && (await isUserFullySiteBanned(env, user))) {
+      await destroyUserSessions(env, user.id);
+      return Response.json({ success: false, status: 'banned', error: BANNED_SITE_MSG }, { status: 403, headers: corsHeaders });
+    }
     const elevated = owner || (await isElevatedUser(user, env));
     const cookieMaxAge = Math.floor(SESSION_TTL_MS / 1000);
     return Response.json({
@@ -14565,7 +14583,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         user.telegram_api_id = tgId;
       } catch (_) {}
       if (await isUserFullySiteBanned(env, user)) {
-        await sendTelegramFormatted(token, chatId, '🚫 You are banned from all communities.', forumThreadId);
+        await sendTelegramFormatted(token, chatId, `🚫 ${boldHtml('Access Denied:')} You are not a member of any community Telegram group or channel (or banned). Join a verified group or channel first, then log in.`, forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
       const sessionToken = await createSession(user.id, env);
