@@ -6,9 +6,11 @@ const {
   buildStatsReport,
   formatStatsRichReport,
   statsExtractThreadKey,
+  statsRecentLinks,
   STATS_DASH_PAGE_SIZE,
   hideSourceFromStats,
   ensureUcloneTables,
+  ensureCloneSources,
   ensureIndexTables,
 } = await import('../worker/index.js');
 
@@ -50,6 +52,7 @@ const env = { DB, ATHENA_RUNTIME: 'selfhost', TELEGRAM_BOT_TOKEN: '123:fixture',
 
 await ensureUcloneTables(env);
 await ensureIndexTables(env);
+await ensureCloneSources(env);
 
 // 1. Test statsExtractThreadKey helper
 {
@@ -144,6 +147,30 @@ await ensureIndexTables(env);
   assert.ok(!reportAfterHide.sources.some(s => s.thread_id === '554738'), 'topic 554738 hidden');
   assert.ok(reportAfterHide.sources.some(s => s.thread_id === '634673'), 'topic 634673 still present');
   assert.ok(reportAfterHide.sources.some(s => s.name === 'PIRATEZPARTY'), 'whole chat PIRATEZPARTY still present');
+
+  // 6. Test statsRecentLinks isolation: each source displays only its own links
+  sql.prepare("INSERT OR IGNORE INTO users (id, username, provider, provider_id, created_at) VALUES ('tester', 'tester', 'system', '1', ?)").run(now);
+  sql.prepare("INSERT OR IGNORE INTO communities (id, name, creator_id, created_at) VALUES ('comm_1', 'Test Comm', 'tester', ?)").run(now);
+
+  sql.prepare(`INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, created_at, source_chat_id, source_message_id, added_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    'l_1', 'comm_1', 'https://topic554738.example/link', 'h1', 'Topic 554738 Link', 'notes', '[]', now - 10000, '-1001574965898:554738', '101', 'tester'
+  );
+  sql.prepare(`INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, created_at, source_chat_id, source_message_id, added_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    'l_2', 'comm_1', 'https://channel1.example/link', 'h2', 'Channel 1 Link', 'notes', '[]', now - 10000, '-1002000000001', '201', 'tester'
+  );
+
+  const recentTopic1 = await statsRecentLinks(env, 'community', 'comm_1', '-1001574965898', 5, '554738');
+  assert.equal(recentTopic1.length, 1, 'topic 554738 has 1 recent link');
+  assert.equal(recentTopic1[0].url, 'https://topic554738.example/link');
+
+  const recentChannel1 = await statsRecentLinks(env, 'community', 'comm_1', '-1002000000001', 5);
+  assert.equal(recentChannel1.length, 1, 'channel 1 has 1 recent link');
+  assert.equal(recentChannel1[0].url, 'https://channel1.example/link');
+
+  const recentChannel2 = await statsRecentLinks(env, 'community', 'comm_1', '-1002000000002', 5);
+  assert.equal(recentChannel2.length, 0, 'channel 2 has no links and does not leak other channels links');
 }
 
 console.log('stats pagination and multi-topic isolation tests passed.');

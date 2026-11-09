@@ -1,6 +1,6 @@
 import legacy from './index_legacy.js';
 export * from './index_legacy.js';
-const _WORKER_VERSION = "version: '1.0.63'";
+const _WORKER_VERSION = "version: '1.0.64'";
 
 function parts(text) { return String(text || '').trim().split(/\s+/).filter(Boolean); }
 function command(text) { return parts(text)[0]?.split('@')[0]?.toLowerCase() || ''; }

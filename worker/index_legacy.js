@@ -189,7 +189,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.63',
+          version: '1.0.64',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -11696,51 +11696,62 @@ async function statsRecentLinks(env, target, owner, chatId, limit = 8, threadId 
       created_at: Number(x.created_at || 0),
       thread: String(x.thread || ''),
     }));
+
     if (target === 'personal') {
+      const topicVariants = thr ? [norm + ':' + thr, String(norm).replace(/^-100/, '') + ':' + thr] : [];
+      const allVariants = [...variants, ...topicVariants];
+      const chatPh = allVariants.map(() => '?').join(',');
       const r = await env.DB.prepare(
-        `SELECT title, url, created_at, '' AS thread FROM personal_links WHERE user_id=? AND created_at>? ORDER BY created_at DESC LIMIT ${cap}`
-      ).bind(String(owner), since).all().catch(() => null);
+        `SELECT title, url, created_at, '' AS thread FROM personal_links
+         WHERE user_id=? AND (source_chat_id IN (${chatPh}) OR source_chat_id LIKE ?) AND created_at>?
+         ORDER BY created_at DESC LIMIT ${cap}`
+      ).bind(String(owner), ...allVariants, norm + ':%', since).all().catch(() => null);
       return mapRows(r?.results || r || []).slice(0, cap);
     }
-    try {
-      const dest = `community:${owner}`;
-      // Post-level recency: a re-post of a known URL creates no new links row
-      // (dedupe), but it IS the channel's latest activity — read the post
-      // ledger so re-posts show up instead of vanishing. message_date is
-      // Telegram seconds; links.created_at is ms.
-      const sinceSec = Math.floor(since / 1000);
-      const pr = await env.DB.prepare(
-        `SELECT DISTINCT s.snippet AS title, s.url AS url, s.mdate AS created_at, s.thread AS thread, s.linktitle AS linktitle FROM (
-           SELECT cp.message_text AS snippet, elem->>'url' AS url, cp.message_date * 1000 AS mdate, cp.topic_id AS thread, l.title AS linktitle
-           FROM (SELECT message_text, urls_json, message_date, topic_id FROM clone_posts
-                 WHERE destination = ? AND chat_id IN (${ph}) AND message_date > ? AND (? IS NULL OR topic_id = ?)) cp
-           CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN cp.urls_json IS NULL OR cp.urls_json = '' THEN '[]'::jsonb ELSE cp.urls_json::jsonb END) AS elem
-           LEFT JOIN links l ON l.community_id = ? AND l.url = (elem->>'url')
-         ) s WHERE s.url IS NOT NULL AND s.url != '' ORDER BY s.mdate DESC LIMIT ${cap}`
-      ).bind(dest, ...variants, sinceSec, thr, thr, String(owner)).all().catch(() => null);
-      const prows = pr?.results || pr || [];
-      if (prows.length) {
-        return prows.slice(0, cap).map((x) => ({
-          title: String(x.linktitle || x.title || x.url || 'untitled').slice(0, 80),
-          url: String(x.url || ''),
-          created_at: Number(x.created_at || 0),
-          thread: String(x.thread || ''),
-        }));
-      }
-      const r = await env.DB.prepare(
-        `SELECT l.title AS title, l.url AS url, l.created_at AS created_at, MAX(cs.topic_id) AS thread FROM links l
-         LEFT JOIN clone_sources cs ON cs.destination=? AND cs.chat_id IN (${ph}) AND cs.message_id=l.source_message_id AND cs.content_key LIKE 'url:%'
-         WHERE l.community_id=? AND l.source_chat_id IN (${ph}) AND l.created_at>? AND (? IS NULL OR cs.topic_id = ?)
-         GROUP BY l.id, l.title, l.url, l.created_at ORDER BY l.created_at DESC LIMIT ${cap}`
-      ).bind(dest, ...variants, String(owner), ...variants, since, thr, thr).all().catch(() => null);
-      if (r) return mapRows(r.results || r || []).slice(0, cap);
-    } catch (_) {}
-    // Older databases without source_chat_id: community-wide fallback.
+
+    const dest = `community:${owner}`;
+    const sinceSec = Math.floor(since / 1000);
+
+    // 1. Post-level recency from clone_posts
+    const cpTopicSql = thr ? 'AND topic_id = ?' : '';
+    const cpTopicParams = thr ? [thr] : [];
+    const pr = await env.DB.prepare(
+      `SELECT DISTINCT s.snippet AS title, s.url AS url, s.mdate AS created_at, s.thread AS thread, s.linktitle AS linktitle FROM (
+         SELECT cp.message_text AS snippet, elem->>'url' AS url, cp.message_date * 1000 AS mdate, cp.topic_id AS thread, l.title AS linktitle
+         FROM (SELECT message_text, urls_json, message_date, topic_id FROM clone_posts
+               WHERE destination = ? AND chat_id IN (${ph}) AND message_date > ? ${cpTopicSql}) cp
+         CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN cp.urls_json IS NULL OR cp.urls_json = '' THEN '[]'::jsonb ELSE cp.urls_json::jsonb END) AS elem
+         LEFT JOIN links l ON l.community_id = ? AND l.url = (elem->>'url')
+       ) s WHERE s.url IS NOT NULL AND s.url != '' ORDER BY s.mdate DESC LIMIT ${cap}`
+    ).bind(dest, ...variants, sinceSec, ...cpTopicParams, String(owner)).all().catch(() => null);
+
+    const prows = pr?.results || pr || [];
+    if (prows.length) {
+      return prows.slice(0, cap).map((x) => ({
+        title: String(x.linktitle || x.title || x.url || 'untitled').slice(0, 80),
+        url: String(x.url || ''),
+        created_at: Number(x.created_at || 0),
+        thread: String(x.thread || ''),
+      }));
+    }
+
+    // 2. Direct links table query scoped strictly to source_chat_id
+    const topicVariants = thr ? [norm + ':' + thr, String(norm).replace(/^-100/, '') + ':' + thr] : [];
+    const allVariants = [...variants, ...topicVariants];
+    const chatPh = allVariants.map(() => '?').join(',');
+    const lTopicSql = thr ? 'AND (cs.topic_id = ? OR l.source_chat_id LIKE ?)' : '';
+    const lTopicParams = thr ? [thr, '%:' + thr] : [];
+
     const r = await env.DB.prepare(
-      `SELECT title, url, created_at, '' AS thread FROM links WHERE community_id=? AND created_at>? ORDER BY created_at DESC LIMIT ${cap}`
-    ).bind(String(owner), since).all().catch(() => null);
-    return mapRows(r?.results || r || []).slice(0, cap);
-  } catch (_) { return out; }
+      `SELECT l.title AS title, l.url AS url, l.created_at AS created_at, MAX(cs.topic_id) AS thread FROM links l
+       LEFT JOIN clone_sources cs ON cs.destination=? AND cs.chat_id IN (${ph}) AND cs.message_id=l.source_message_id AND cs.content_key LIKE 'url:%'
+       WHERE l.community_id=? AND (l.source_chat_id IN (${chatPh}) OR l.source_chat_id LIKE ?) AND l.created_at>? ${lTopicSql}
+       GROUP BY l.id, l.title, l.url, l.created_at ORDER BY l.created_at DESC LIMIT ${cap}`
+    ).bind(dest, ...variants, String(owner), ...allVariants, norm + ':%', since, ...lTopicParams).all().catch(() => null);
+
+    if (r) return mapRows(r.results || r || []).slice(0, cap);
+  } catch (_) {}
+  return out;
 }
 
 function statsAgo(ts) {
@@ -19535,6 +19546,7 @@ export {
   handleSearchLinks,
   generateUrlHash,
   ensureUcloneTables,
+  ensureCloneSources,
   cloneFailure,
   withCloneAccount,
   scrapeViaChromium,
@@ -19593,5 +19605,6 @@ export {
   handleRevokeWikiShareLink,
   extractTitleFromNoteText,
   isWeakTitle,
+  statsRecentLinks,
   validateWikiShareToken,
 };
