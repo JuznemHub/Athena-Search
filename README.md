@@ -156,7 +156,7 @@ Bot API mode is the default and safest mode:
 
 Userbot mode is optional and self-host-only. It uses a saved Telegram user session (see `/userbot_add`) to backfill older history and keep indexing new posts. Treat a session string like a password: it can grant access to the Telegram account that created it.
 
-Athena accepts compatible Telethon/Pyrogram-style StringSession values for this bridge. It does not vendor or execute the full [Ultroid](https://github.com/TeamUltroid/Ultroid) userbot; Ultroid can remain a separate session generator/client if you already use one.
+Athena accepts compatible Telethon/Pyrogram-style StringSession values for this bridge. It does not vendor or execute an external userbot framework; any standard session generator works.
 
 ### Channels: full-copy indexing with rank-aware targets
 
@@ -240,17 +240,27 @@ The destination picker is intentionally explicit: `Personal` is the private brai
 - `/stats` reads persisted run and per-message checkpoints and shows dashboard totals before the per-run detail. Preview counts describe encountered content; saved counters describe successful writes.
 - URL search returns the original source post, including the other URLs in that message. Source bodies, entity offsets and reply metadata are preserved separately from canonical URL rows.
 
-### Runtime logs and agent access
+### Dokploy control and runtime logs
 
-GOD-only commands: `/log [n]`, `/log --json [n]`, `/log dokploy [app] [n]`, `/log buildlogs [app] [n]`. The JSON command returns whole records within Telegram's message limit and reports truncation; use HTTP for continuous consumption.
+GOD users can manage Dokploy applications and inspect logs directly from Telegram:
 
-Configure `DOKPLOY_URL`, `DOKPLOY_API_KEY` and optionally `DOKPLOY_APP_ID` for container/build logs. Application logs come from Athena's bounded process buffer. Container logs and deployment build logs are distinct sources.
+```text
+/dok apps                # list Dokploy applications (project.all)
+/dok status [app]        # container state and last deployment status
+/dok logs [app] [n]      # live container runtime logs
+/dok buildlogs [app] [n] # last deployment build output
+/dok deploy [app]        # queue fresh deployment of latest commit
+/dok redeploy [app]      # rebuild and redeploy
+/dok restart [app]       # restart container without rebuilding
+/dok stop [app]          # stop container
+/dok start [app]         # start container
+/log [n]                 # process buffer log tail
+/log --json [n]          # structured JSON records
+```
 
-Use an authenticated GOD session with `GET /api/logs?source=app&tail=100&follow=1`. A session cookie or `Authorization: Bearer <session-token>` is accepted. For Dokploy, select `source=container` or `source=deployment` and `app=<application_id>`.
+Configure `DOKPLOY_URL`, `DOKPLOY_API_KEY` and optionally `DOKPLOY_APP_ID` in `.env`. Deploy and redeploy requests confirm acceptance; follow `/dok buildlogs` and verify `/dok status` to confirm completion.
 
-The response is NDJSON. Save each `checkpoint.cursor`; reconnect with the URL-encoded `cursor` parameter after an `end` event or disconnect. Streams end after five minutes. A `reset` event reports a possible history gap after process restart, rotation or cursor expiry. Container resumption uses best-effort overlapping log tails, not a durable log archive.
-
-`/dok` supports `apps`, `status`, `logs`, `buildlogs`, `deploy`, `redeploy`, `restart`, `stop` and `start`. Deployment acceptance means the job was queued; inspect status and build logs to establish completion.
+For continuous agent consumption, use an authenticated GOD session with `GET /api/logs?source=app&tail=100&follow=1`. For Dokploy, select `source=container` or `source=deployment` and `app=<application_id>`.
 
 ### Local Bot API server (2 GB files)
 
@@ -289,6 +299,8 @@ Useful commands:
 | `/uclone <chat_id>` | GOD: clone a channel/group via the account wizard (personal/community/both); confirming the destination subscribes the live follow, and switching accounts later moves it along. |
 | `/personal` / `/community` | Switch the GOD user’s dump target. |
 | `/delete` | Picker (one link, one cloned chat, one backfill session — each with confirm); `/delete <url>` removes a link, `/delete <chat_id> [thread_id]` a whole clone. |
+| `/dok <command> [app]` | GOD: Dokploy control (`apps`, `status`, `logs`, `buildlogs`, `deploy`, `redeploy`, `restart`, `stop`, `start`). |
+| `/log [n]` | GOD: inspect runtime process buffer logs; add `dokploy` or `buildlogs` for container logs. |
 
 `/search` is deliberately scoped: every page contains only results matching the query, and **Next page** loads the next matching slice before the close button. Unrelated recent bookmarks are never appended to the result list.
 
