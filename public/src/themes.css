@@ -87,8 +87,8 @@
   --hairline: rgba(20, 24, 40, 0.1);
   --hairline-strong: rgba(20, 24, 40, 0.18);
   --text: #141826;
-  --text-dim: #5c6478;
-  --text-mute: #8b92a8;
+  --text-dim: #383f52;
+  --text-mute: #5c6478;
   --primary-purple: var(--accent);
   --primary-blue: #2563eb;
   --bg-dark: var(--ink);
@@ -337,6 +337,7 @@ body::before {
   background: var(--surface);
   border: 1px solid var(--hairline);
   flex-shrink: 0;
+  white-space: nowrap;
 }
 .theme-bar .theme-chip {
   flex: 0 0 auto;
@@ -345,12 +346,13 @@ body::before {
   border-radius: 10px;
   border: none;
   background: transparent;
-  color: var(--text-mute);
-  font-size: 0.7rem;
+  color: var(--text-dim);
+  font-size: 0.72rem;
   font-weight: 600;
   font-family: var(--font-sans);
   cursor: pointer;
   line-height: 1;
+  white-space: nowrap;
   transition: color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
 }
 .theme-bar .theme-chip:hover { color: var(--text); background: var(--surface-2); }
@@ -375,6 +377,7 @@ body::before {
   font-weight: 600;
   font-family: var(--font-sans);
   cursor: pointer;
+  white-space: nowrap;
   transition: color var(--dur-1) var(--ease), background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
 }
 .theme-switcher .theme-chip:hover {
@@ -388,6 +391,43 @@ body::before {
 }
 .auth-theme-switcher { margin-top: 18px; }
 .auth-theme-switcher .theme-chip { flex: 1 1 calc(50% - 8px); }
+
+/* Light theme overrides for theme bar & switcher */
+[data-theme="light"] .theme-bar {
+  background: var(--surface-2);
+  border-color: var(--hairline-strong);
+}
+[data-theme="light"] .theme-bar .theme-chip {
+  color: var(--text);
+}
+[data-theme="light"] .theme-bar .theme-chip:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+[data-theme="light"] .theme-bar .theme-chip.active {
+  color: var(--accent-fg, #08080f);
+  background: var(--accent-gradient);
+}
+[data-theme="light"] .theme-switcher .theme-chip {
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--hairline-strong);
+  box-shadow: 0 1px 3px rgba(20, 24, 40, 0.05);
+}
+[data-theme="light"] .theme-switcher .theme-chip:hover {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--accent);
+}
+[data-theme="light"] .theme-switcher .theme-chip.active {
+  color: var(--accent-fg, #08080f);
+  background: var(--accent-gradient);
+  border-color: transparent;
+}
+[data-theme="light"] .drawer-section {
+  background: var(--surface-2);
+  border-color: var(--hairline);
+}
 
 /* ========== Glass surfaces ========== */
 .search-bar-box,
