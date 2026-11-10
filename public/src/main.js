@@ -3895,6 +3895,9 @@ document.addEventListener('DOMContentLoaded', () => {
         wikiState.links = data.links;
         wikiState.totalPages = data.totalPages || 1;
         wikiState.totalCategoryLinks = data.total || 0;
+        wikiState.fallbackFromCategory = data.fallbackFromCategory || null;
+        wikiState.categoryTotal = typeof data.categoryTotal === 'number' ? data.categoryTotal : null;
+        wikiState.globalTotal = typeof data.globalTotal === 'number' ? data.globalTotal : null;
         renderWikiContent();
       } else {
         if (blocksEl) blocksEl.innerHTML = '<div class="wiki-empty">Could not load wiki links.</div>';
@@ -3922,7 +3925,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const heroCount = $('wikiHeroCount');
     if (heroIcon) heroIcon.textContent = curCat.icon || '📁';
     if (heroTitle) heroTitle.textContent = curCat.title;
-    if (heroDesc) heroDesc.textContent = curCat.description || '';
+    if (heroDesc) {
+      if (wikiState.fallbackFromCategory) {
+        heroDesc.textContent = `Showing results across all categories for “${wikiState.q}”`;
+      } else {
+        heroDesc.textContent = curCat.description || '';
+      }
+    }
     if (heroCount) heroCount.textContent = `${(wikiState.totalCategoryLinks || curCat.count || 0).toLocaleString()} links`;
 
     // 2. Subheading Scroll-down Selection & Pills
@@ -4003,12 +4012,23 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!blocksEl) return;
 
     if (!wikiState.links.length) {
+      const emptyMsg = wikiState.q
+        ? `<p>No links found for “<strong>${escapeHtml(wikiState.q)}</strong>” in this category or across Athena Wiki.</p>`
+        : '<p>No links found matching your current filter.</p>';
       blocksEl.innerHTML = `
         <div class="wiki-empty">
-          <p>No links found matching your current filter.</p>
+          ${emptyMsg}
         </div>`;
       $('wikiPagination')?.classList.add('hidden');
       return;
+    }
+
+    const allCatMap = new Map((wikiState.categories || []).map(c => [c.id, c]));
+    const allSubMetaLookup = new Map();
+    for (const cat of (wikiState.categories || [])) {
+      for (const s of (cat.subheadings || [])) {
+        allSubMetaLookup.set(s.id, { ...s, categoryTitle: cat.title });
+      }
     }
 
     // Group links by subheading
@@ -4018,8 +4038,6 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!subMap.has(subKey)) subMap.set(subKey, []);
       subMap.get(subKey).push(l);
     }
-
-    const subMetaLookup = new Map((curCat.subheadings || []).map(s => [s.id, s]));
 
     // Canonical order: taxonomy subheadings first, followed by any extras
     const orderedSubIds = [];
@@ -4031,9 +4049,23 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     let blocksHtml = '';
+    if (wikiState.fallbackFromCategory) {
+      const fallbackCat = allCatMap.get(wikiState.fallbackFromCategory);
+      const fallbackTitle = fallbackCat ? fallbackCat.title : wikiState.fallbackFromCategory;
+      blocksHtml += `
+        <div class="wiki-search-fallback-banner">
+          <span class="wiki-search-fallback-icon">💡</span>
+          <span class="wiki-search-fallback-text">
+            No matches in <strong>${escapeHtml(fallbackTitle)}</strong> for “<strong>${escapeHtml(wikiState.q)}</strong>”.
+            Showing <strong>${wikiState.totalCategoryLinks.toLocaleString()}</strong> results across all categories.
+          </span>
+        </div>
+      `;
+    }
+
     for (const subId of orderedSubIds) {
       const subLinks = subMap.get(subId) || [];
-      const meta = subMetaLookup.get(subId) || {
+      const meta = allSubMetaLookup.get(subId) || {
         title: subId.replace(/^[a-z]+-/, '').replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
         description: ''
       };
@@ -4060,6 +4092,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 ? `<span class="admin-edit-badge" title="Manually edited">✏️ ${escapeHtml(l.last_edited_by_name || 'Admin')} · ${escapeHtml(formatDateTime(l.manual_edited_at))}</span>`
                 : '';
 
+              const linkCat = allCatMap.get(l.category);
+              const showCatBadge = linkCat && (wikiState.fallbackFromCategory || (wikiState.q && l.category !== wikiState.activeCategory) || wikiState.activeCategory === 'all');
+              const catBadge = showCatBadge
+                ? `<span class="wiki-cat-chip" title="Category: ${escapeHtml(linkCat.title)}">${escapeHtml(linkCat.icon || '📁')} ${escapeHtml(linkCat.title)}</span>`
+                : '';
+
               return `
                 <article class="wiki-link-card" data-id="${escapeHtml(l.id)}">
                   <div class="wiki-card-head">
@@ -4069,6 +4107,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         <span class="wiki-card-ext-icon">↗</span>
                       </a>
                       ${host ? `<span class="wiki-domain-chip">${escapeHtml(host)}</span>` : ''}
+                      ${catBadge}
                     </div>
                     ${l.url ? `<button type="button" class="wiki-copy-url-btn" data-url="${escapeHtml(l.url)}" title="Copy URL" aria-label="Copy URL"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>` : ''}
                   </div>

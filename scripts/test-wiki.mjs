@@ -7,7 +7,8 @@ import {
   classifyLink
 } from '../worker/wiki-taxonomy.js';
 import {
-  validateWikiShareToken
+  validateWikiShareToken,
+  isInternalTelegramMessageUrl
 } from '../worker/index.js';
 
 // 1. Verify taxonomy schema
@@ -173,5 +174,20 @@ assert(jsContent.includes('wiki-cat-sub-list'), 'main.js must render wiki-cat-su
 assert(cssContent.includes('.wiki-cat-sub-list'), 'style.css must style .wiki-cat-sub-list');
 assert(cssContent.includes('.wiki-sub-select'), 'style.css must style .wiki-sub-select');
 assert(cssContent.includes('.wiki-sub-block-highlight'), 'style.css must define .wiki-sub-block-highlight');
+assert(cssContent.includes('.wiki-cat-chip'), 'style.css must define .wiki-cat-chip');
+assert(cssContent.includes('.wiki-search-fallback-banner'), 'style.css must define .wiki-search-fallback-banner');
+assert(jsContent.includes('wiki-search-fallback-banner'), 'main.js must render .wiki-search-fallback-banner');
+assert(jsContent.includes('fallbackFromCategory'), 'main.js must handle fallbackFromCategory');
+
+// 6. Verify internal Telegram message link rejection
+assert.equal(isInternalTelegramMessageUrl('https://t.me/c/1574965898/922304/922925'), true);
+assert.equal(isInternalTelegramMessageUrl('https://telegram.me/c/1574965898/922304'), true);
+assert.equal(isInternalTelegramMessageUrl('http://t.me/c/12345/678'), true);
+assert.equal(isInternalTelegramMessageUrl('https://t.me/m/abc_123'), true);
+assert.equal(isInternalTelegramMessageUrl('tg://privatepost?channel=1574965898&post=922304'), true);
+assert.equal(isInternalTelegramMessageUrl('https://t.me/AthenaSearchBot'), false);
+assert.equal(isInternalTelegramMessageUrl('https://t.me/durov'), false);
+assert.equal(isInternalTelegramMessageUrl('https://t.me/+AbCdEfGhIj'), false);
+assert.equal(isInternalTelegramMessageUrl('https://example.com/test'), false);
 
 console.log('FMHY wiki taxonomy and classification tests passed.');

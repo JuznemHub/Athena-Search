@@ -1861,6 +1861,18 @@ body.public-wiki-only #wikiCloseBtn {
   color: var(--text-muted);
   white-space: nowrap;
 }
+.wiki-cat-chip {
+  font-size: 0.72rem;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(138, 180, 248, 0.12);
+  border: 1px solid rgba(138, 180, 248, 0.25);
+  color: var(--brand-blue, #8ab4f8);
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
 .wiki-copy-url-btn {
   background: none;
   border: none;
@@ -1919,6 +1931,27 @@ body.public-wiki-only #wikiCloseBtn {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.wiki-search-fallback-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  border-radius: 8px;
+  background: rgba(255, 171, 64, 0.08);
+  border: 1px solid rgba(255, 171, 64, 0.25);
+  color: var(--text-main);
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+.wiki-search-fallback-icon {
+  font-size: 1.1rem;
+  flex-shrink: 0;
+}
+.wiki-search-fallback-text {
+  flex: 1;
 }
 
 /* Pagination & Loading */
