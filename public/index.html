@@ -356,6 +356,12 @@
               <label for="wikiCommunitySelect">Community</label>
               <select id="wikiCommunitySelect" class="input input-sm"></select>
             </div>
+            <div class="wiki-ctrl-group wiki-ctrl-subheading-group" id="wikiCtrlSubWrap">
+              <label for="wikiCtrlSubSelect">Subheading</label>
+              <select id="wikiCtrlSubSelect" class="input input-sm wiki-sub-dropdown" aria-label="Jump to Subheading">
+                <option value="">All Subheadings</option>
+              </select>
+            </div>
             <div class="wiki-search-wrap">
               <svg class="search-mini-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
               <input type="text" id="wikiSearchInput" placeholder="Filter wiki links, tags, descriptions, titles…" autocomplete="off">
@@ -393,7 +399,21 @@
                 </div>
                 <span class="wiki-hero-badge" id="wikiHeroCount">0 links</span>
               </div>
-              <div class="wiki-sub-pills" id="wikiSubPills"></div>
+              <div class="wiki-sub-nav" id="wikiSubNav">
+                <div class="wiki-sub-select-row">
+                  <div class="wiki-sub-select-wrap">
+                    <label for="wikiSubSelect" class="wiki-sub-select-label">
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h10M4 18h6"/></svg>
+                      <span>Subheading</span>
+                    </label>
+                    <select id="wikiSubSelect" class="input input-sm wiki-sub-select" aria-label="Scroll-down selection of subheadings">
+                      <option value="">All Subheadings</option>
+                    </select>
+                  </div>
+                  <span id="wikiSubCountBadge" class="wiki-sub-count-badge">…</span>
+                </div>
+                <div class="wiki-sub-pills" id="wikiSubPills"></div>
+              </div>
             </div>
 
             <!-- Links Sections Container -->

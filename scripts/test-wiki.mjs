@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_FMHY_CATEGORIES,
   classifyLink
@@ -156,5 +159,19 @@ assert.equal(revokedResult, null, 'Revoked token should return null');
 
 const shortResult = await validateWikiShareToken('short', mockEnv);
 assert.equal(shortResult, null, 'Short or invalid token should return null');
+
+// 5. Verify Subheading scroll-down selection UI contract
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const htmlContent = fs.readFileSync(path.join(__dirname, '../public/index.html'), 'utf-8');
+const jsContent = fs.readFileSync(path.join(__dirname, '../public/src/main.js'), 'utf-8');
+const cssContent = fs.readFileSync(path.join(__dirname, '../public/src/style.css'), 'utf-8');
+
+assert(htmlContent.includes('id="wikiSubSelect"'), 'HTML must include wikiSubSelect');
+assert(htmlContent.includes('id="wikiCtrlSubSelect"'), 'HTML must include wikiCtrlSubSelect');
+assert(jsContent.includes('selectWikiSubheading'), 'main.js must implement selectWikiSubheading');
+assert(jsContent.includes('wiki-cat-sub-list'), 'main.js must render wiki-cat-sub-list');
+assert(cssContent.includes('.wiki-cat-sub-list'), 'style.css must style .wiki-cat-sub-list');
+assert(cssContent.includes('.wiki-sub-select'), 'style.css must style .wiki-sub-select');
+assert(cssContent.includes('.wiki-sub-block-highlight'), 'style.css must define .wiki-sub-block-highlight');
 
 console.log('FMHY wiki taxonomy and classification tests passed.');
