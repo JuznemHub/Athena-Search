@@ -16012,19 +16012,9 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       ).bind(adminId, binding.community_id, targetTg, targetName, athenaUser?.id || binding.created_by, Date.now()).run();
     }
     // if they have Athena account, set member role admin
-    let targetUser = await env.DB.prepare(
+    const targetUser = await env.DB.prepare(
       `SELECT id FROM users WHERE provider = 'telegram' AND (provider_id = ? OR telegram_api_id = ?)`
     ).bind(targetTg, targetTg).first();
-    if (!targetUser && target.username) {
-      targetUser = await env.DB.prepare(
-        `SELECT id FROM users WHERE provider = 'telegram' AND LOWER(username) = LOWER(?)`
-      ).bind(target.username).first();
-      if (targetUser) {
-        try {
-          await env.DB.prepare('UPDATE users SET telegram_api_id = ? WHERE id = ?').bind(targetTg, targetUser.id).run();
-        } catch (_) {}
-      }
-    }
     if (targetUser) {
       const mem = await env.DB.prepare(
         'SELECT role FROM community_members WHERE community_id = ? AND user_id = ?'
