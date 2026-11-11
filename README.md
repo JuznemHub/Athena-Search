@@ -3,7 +3,7 @@
 Your second brain for links, documents, Telegram messages, and grounded AI answers.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.66-blueviolet?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-1.0.67-blueviolet?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/license-CC_BY--NC_4.0-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/PostgreSQL-14%2B-336791?style=flat-square&logo=postgresql" alt="PostgreSQL">
   <img src="https://img.shields.io/badge/Node.js-%3E%3D22-339933?style=flat-square&logo=node.js" alt="Node.js">

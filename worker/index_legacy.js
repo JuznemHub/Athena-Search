@@ -193,7 +193,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.66',
+          version: '1.0.67',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -829,6 +829,81 @@ async function isInstanceOwnerUserAsync(user, env) {
   return false;
 }
 
+function resolveUserPlatformTgId(user) {
+  if (!user) return null;
+  if (user.telegram_api_id && isLikelyTelegramBotApiId(user.telegram_api_id)) {
+    return String(user.telegram_api_id);
+  }
+  if (isLikelyTelegramBotApiId(user.provider_id)) {
+    return String(user.provider_id);
+  }
+  const match = String(user.id || '').match(/^telegram_(\d+)$/);
+  if (match) return match[1];
+  return null;
+}
+
+async function ensureCommunityAdminsTable(env) {
+  if (!env?.DB) return;
+  try {
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS community_admins (
+        id TEXT PRIMARY KEY,
+        community_id TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        platform_user_id TEXT NOT NULL,
+        label TEXT,
+        created_by TEXT,
+        created_at INTEGER NOT NULL
+      )`
+    ).run();
+  } catch (_) {}
+}
+
+async function syncUserCommunityAdminRoles(env, user) {
+  if (!user?.id || !env?.DB) return;
+  await ensureCommunityMembersColumns(env);
+  await ensureCommunityAdminsTable(env);
+  const tgId = resolveUserPlatformTgId(user);
+  const adminCommunities = new Set();
+  if (tgId) {
+    try {
+      const rows = await env.DB.prepare(
+        `SELECT community_id FROM community_admins WHERE platform = 'telegram' AND platform_user_id = ?`
+      ).bind(String(tgId)).all();
+      for (const r of rows?.results || []) {
+        if (r?.community_id) adminCommunities.add(r.community_id);
+      }
+    } catch (_) {}
+  }
+  if (user.provider === 'discord' && user.provider_id) {
+    try {
+      const rows = await env.DB.prepare(
+        `SELECT community_id FROM community_admins WHERE platform = 'discord' AND platform_user_id = ?`
+      ).bind(String(user.provider_id)).all();
+      for (const r of rows?.results || []) {
+        if (r?.community_id) adminCommunities.add(r.community_id);
+      }
+    } catch (_) {}
+  }
+
+  for (const cid of adminCommunities) {
+    try {
+      const mem = await env.DB.prepare(
+        'SELECT role FROM community_members WHERE community_id = ? AND user_id = ?'
+      ).bind(cid, user.id).first();
+      if (!mem) {
+        await env.DB.prepare(
+          'INSERT INTO community_members (community_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)'
+        ).bind(cid, user.id, 'admin', Date.now()).run();
+      } else if (mem.role !== 'owner' && mem.role !== 'admin') {
+        await env.DB.prepare(
+          'UPDATE community_members SET role = ? WHERE community_id = ? AND user_id = ?'
+        ).bind('admin', cid, user.id).run();
+      }
+    } catch (_) {}
+  }
+}
+
 /**
  * Elevated = instance owner OR community admin (role admin/owner in members,
  * or community_admins platform id set via /admin). Regular members are not elevated.
@@ -837,6 +912,7 @@ async function isInstanceOwnerUserAsync(user, env) {
 async function isCommunityAdminUser(user, env) {
   if (!user?.id) return false;
   await ensureCommunityMembersColumns(env);
+  try { await syncUserCommunityAdminRoles(env, user); } catch (_) {}
   try {
     const m = await env.DB.prepare(
       `SELECT 1 FROM community_members
@@ -852,7 +928,7 @@ async function isCommunityAdminUser(user, env) {
     if (creator) return true;
   } catch (_) {}
   // Platform admin IDs from /admin (telegram user id)
-  const tgId = user.telegram_api_id || (isLikelyTelegramBotApiId(user.provider_id) ? user.provider_id : null);
+  const tgId = resolveUserPlatformTgId(user);
   if (tgId) {
     try {
       const a = await env.DB.prepare(
@@ -905,6 +981,23 @@ async function getCommunityMemberRole(env, communityId, user) {
     ).bind(communityId, user.id).first();
     if (m?.role) return m.role;
   } catch (_) {}
+  const tgId = resolveUserPlatformTgId(user);
+  if (tgId) {
+    try {
+      const a = await env.DB.prepare(
+        `SELECT 1 FROM community_admins WHERE community_id = ? AND platform = 'telegram' AND platform_user_id = ? LIMIT 1`
+      ).bind(communityId, String(tgId)).first();
+      if (a) return 'admin';
+    } catch (_) {}
+  }
+  if (user.provider === 'discord' && user.provider_id) {
+    try {
+      const a = await env.DB.prepare(
+        `SELECT 1 FROM community_admins WHERE community_id = ? AND platform = 'discord' AND platform_user_id = ? LIMIT 1`
+      ).bind(communityId, String(user.provider_id)).first();
+      if (a) return 'admin';
+    } catch (_) {}
+  }
   return null;
 }
 
@@ -923,17 +1016,31 @@ async function resolveUserRank(env, user, tgUserId, communityId = null) {
       ).bind(user.id).first();
       communityRole = m?.role || null;
     } catch (_) {}
+    if (!communityRole) {
+      const tgId = resolveUserPlatformTgId(user) || tgUserId;
+      if (tgId) {
+        try {
+          const a = await env.DB.prepare(
+            `SELECT 1 FROM community_admins WHERE platform = 'telegram' AND platform_user_id = ? LIMIT 1`
+          ).bind(String(tgId)).first();
+          if (a) communityRole = 'admin';
+        } catch (_) {}
+      }
+    }
   }
   if (communityRole === 'owner') return { rank: 'owner', label: 'owner', communityRole };
   if (communityRole === 'admin') return { rank: 'admin', label: 'admin', communityRole };
   // platform admin table counts as admin for that community
-  if (communityId && tgUserId) {
-    try {
-      const a = await env.DB.prepare(
-        `SELECT 1 FROM community_admins WHERE community_id = ? AND platform = 'telegram' AND platform_user_id = ?`
-      ).bind(communityId, String(tgUserId)).first();
-      if (a) return { rank: 'admin', label: 'admin', communityRole: 'admin' };
-    } catch (_) {}
+  if (communityId && (tgUserId || user)) {
+    const checkTg = tgUserId || resolveUserPlatformTgId(user);
+    if (checkTg) {
+      try {
+        const a = await env.DB.prepare(
+          `SELECT 1 FROM community_admins WHERE community_id = ? AND platform = 'telegram' AND platform_user_id = ?`
+        ).bind(communityId, String(checkTg)).first();
+        if (a) return { rank: 'admin', label: 'admin', communityRole: 'admin' };
+      } catch (_) {}
+    }
   }
   if (communityRole === 'member') return { rank: 'member', label: 'member', communityRole };
   return { rank: 'none', label: 'not a member', communityRole: null };
@@ -3329,10 +3436,28 @@ async function ensureOwnerOrAdmin(communityId, userId, env) {
     const m = await env.DB.prepare(
       `SELECT role FROM community_members WHERE community_id = ? AND user_id = ?`
     ).bind(communityId, userId).first();
-    return m && (m.role === 'owner' || m.role === 'admin');
-  } catch (_) {
-    return false;
-  }
+    if (m && (m.role === 'owner' || m.role === 'admin')) return true;
+  } catch (_) {}
+  // Check community_admins via user's platform IDs
+  try {
+    const u = await env.DB.prepare('SELECT id, provider, provider_id, telegram_api_id FROM users WHERE id = ?').bind(userId).first();
+    if (u) {
+      const tgId = resolveUserPlatformTgId(u);
+      if (tgId) {
+        const a = await env.DB.prepare(
+          `SELECT 1 FROM community_admins WHERE community_id = ? AND platform = 'telegram' AND platform_user_id = ? LIMIT 1`
+        ).bind(communityId, String(tgId)).first();
+        if (a) return true;
+      }
+      if (u.provider === 'discord' && u.provider_id) {
+        const a = await env.DB.prepare(
+          `SELECT 1 FROM community_admins WHERE community_id = ? AND platform = 'discord' AND platform_user_id = ? LIMIT 1`
+        ).bind(communityId, String(u.provider_id)).first();
+        if (a) return true;
+      }
+    }
+  } catch (_) {}
+  return false;
 }
 
 async function createNotification(env, { userId, communityId, type, title, body, payload }) {
@@ -4124,6 +4249,7 @@ async function handleAdminGetLinks(url, user, env, corsHeaders) {
   }
 
   await ensureLinkMetaColumns(env);
+  await ensureCommunityAdminsTable(env);
 
   const scope = (url.searchParams.get('scope') || 'community').toLowerCase();
   const rawCommId = (url.searchParams.get('community_id') || '').trim();
@@ -4141,12 +4267,29 @@ async function handleAdminGetLinks(url, user, env, corsHeaders) {
     const commRows = await env.DB.prepare('SELECT id, name FROM communities ORDER BY created_at DESC').all();
     adminCommunities = (commRows?.results || []).map(c => ({ id: c.id, name: c.name || c.id }));
   } else {
-    const commRows = await env.DB.prepare(`
-      SELECT c.id, c.name FROM communities c
-      LEFT JOIN community_members cm ON cm.community_id = c.id AND cm.user_id = ?
-      WHERE c.creator_id = ? OR cm.role IN ('owner', 'admin')
-      ORDER BY c.created_at DESC
-    `).bind(user.id, user.id).all();
+    try { await syncUserCommunityAdminRoles(env, user); } catch (_) {}
+    const tgId = resolveUserPlatformTgId(user);
+    const dcId = user.provider === 'discord' ? String(user.provider_id || '') : '';
+    let commRows;
+    try {
+      commRows = await env.DB.prepare(`
+        SELECT DISTINCT c.id, c.name FROM communities c
+        LEFT JOIN community_members cm ON cm.community_id = c.id AND cm.user_id = ?
+        LEFT JOIN community_admins ca ON ca.community_id = c.id AND (
+          (ca.platform = 'telegram' AND ca.platform_user_id = ?) OR
+          (ca.platform = 'discord' AND ca.platform_user_id = ?)
+        )
+        WHERE c.creator_id = ? OR cm.role IN ('owner', 'admin') OR ca.id IS NOT NULL
+        ORDER BY c.created_at DESC
+      `).bind(user.id, tgId ? String(tgId) : '', dcId, user.id).all();
+    } catch (_) {
+      commRows = await env.DB.prepare(`
+        SELECT c.id, c.name FROM communities c
+        LEFT JOIN community_members cm ON cm.community_id = c.id AND cm.user_id = ?
+        WHERE c.creator_id = ? OR cm.role IN ('owner', 'admin')
+        ORDER BY c.created_at DESC
+      `).bind(user.id, user.id).all();
+    }
     adminCommunities = (commRows?.results || []).map(c => ({ id: c.id, name: c.name || c.id }));
   }
 
@@ -15870,8 +16013,8 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     }
     // if they have Athena account, set member role admin
     const targetUser = await env.DB.prepare(
-      `SELECT id FROM users WHERE provider = 'telegram' AND provider_id = ?`
-    ).bind(targetTg).first();
+      `SELECT id FROM users WHERE provider = 'telegram' AND (provider_id = ? OR telegram_api_id = ?)`
+    ).bind(targetTg, targetTg).first();
     if (targetUser) {
       const mem = await env.DB.prepare(
         'SELECT role FROM community_members WHERE community_id = ? AND user_id = ?'
@@ -19949,6 +20092,9 @@ export {
   statsExtractThreadKey,
   USERBOT_ACCOUNTS,
   handleAdminGetLinks,
+  syncUserCommunityAdminRoles,
+  isCommunityAdminUser,
+  ensureCommunityAdminsTable,
   handleGetTags,
   handleGetWikiCategories,
   handleGetWikiLinks,
