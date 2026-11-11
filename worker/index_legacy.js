@@ -3843,9 +3843,16 @@ async function handleGetWikiLinks(url, user, env, corsHeaders) {
   // but matches exist across other categories, fall back to global matches so users never get nil.
   let matched = categoryMatched;
   let fellBack = false;
-  if (q && categoryMatched.length === 0 && globalMatched.length > 0) {
-    matched = globalMatched;
-    fellBack = true;
+  if (q && targetCategory && targetCategory !== 'all') {
+    const wholeCategoryMatches = globalMatched.filter(m => m.category === targetCategory);
+    if (wholeCategoryMatches.length > 0) {
+      if (categoryMatched.length === 0) {
+        matched = wholeCategoryMatches;
+      }
+    } else if (globalMatched.length > 0) {
+      matched = globalMatched;
+      fellBack = true;
+    }
   }
 
   const total = matched.length;
@@ -9832,8 +9839,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       }
       const isSender = (callbackUser && link.added_by_user_id === callbackUser.id) ||
                        (tgUserId && String(link.added_by_user_id) === String(tgUserId)) ||
-                       (cq.from?.username && link.added_by && (link.added_by === cq.from.username || link.added_by === '@' + cq.from.username)) ||
-                       (cq.from?.first_name && link.added_by === cq.from.first_name);
+                       (cq.from?.username && link.added_by && (link.added_by === cq.from.username || link.added_by === '@' + cq.from.username));
       const staff = isGod || (callbackUser && ((await isElevatedUser(callbackUser, env)) || isInstanceOwnerTgId(tgUserId, env) || await isTgUserCommunityStaff(env, link.community_id, tgUserId, callbackUser)));
       if (!isSender && !staff) {
         await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Only the sender or staff can delete this link', show_alert: true }).catch(() => {});
