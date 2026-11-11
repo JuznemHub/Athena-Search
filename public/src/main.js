@@ -2111,15 +2111,12 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    // Show local matches immediately so typing stays responsive, then replace
-    // them with the server's answer, which searches the WHOLE store rather than
-    // just the slice of links this browser happens to have loaded.
+    // Local matches cover only the loaded slice; the server searches the full store.
     const localMatches = filterLinks(corpus(), q);
     renderGoogleResults(localMatches, q);
     let skeletonTimer = null;
     if (!localMatches.length) {
-      // Big brains: this browser holds a slice, the server holds everything —
-      // show shimmer cards instead of a premature "no results".
+      // Wait briefly before showing placeholders to avoid flashing on fast searches.
       skeletonTimer = setTimeout(() => {
         if (seq !== searchSeq) return;
         emptyState.classList.add('hidden');
