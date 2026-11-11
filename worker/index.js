@@ -1,6 +1,6 @@
 import legacy, { setShimToken } from './index_legacy.js';
 export * from './index_legacy.js';
-const _WORKER_VERSION = "version: '1.0.66'";
+const _WORKER_VERSION = "version: '1.0.67'";
 
 const SHIM_INTERNAL_TOKEN = 'shim-' + (globalThis.crypto?.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2));
 if (typeof setShimToken === 'function') {
