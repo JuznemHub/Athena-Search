@@ -181,6 +181,9 @@ assert(jsContent.includes('fallbackFromCategory'), 'main.js must handle fallback
 
 // 6. Verify internal Telegram message link rejection
 assert.equal(isInternalTelegramMessageUrl('https://t.me/c/1574965898/922304/922925'), true);
+assert.equal(isInternalTelegramMessageUrl('t.me/c/1574965898/922304/922925'), true);
+assert.equal(isInternalTelegramMessageUrl('https://t.me/c/-1001574965898/922304'), true);
+assert.equal(isInternalTelegramMessageUrl('https://telegram.dog/c/1574965898/922304'), true);
 assert.equal(isInternalTelegramMessageUrl('https://telegram.me/c/1574965898/922304'), true);
 assert.equal(isInternalTelegramMessageUrl('http://t.me/c/12345/678'), true);
 assert.equal(isInternalTelegramMessageUrl('https://t.me/m/abc_123'), true);

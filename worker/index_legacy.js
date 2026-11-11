@@ -7708,6 +7708,10 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
     await sendTelegramMessage(token, chatId, 'Group not linked as community. Owner: /community_verify', threadId);
     return;
   }
+  if (isInternalTelegramMessageUrl(rawUrl)) {
+    await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Internal Telegram message links (${codeHtml('t.me/c/...')}) cannot be saved.`, threadId);
+    return;
+  }
   if (!athenaUser) {
     await sendTelegramMessage(token, chatId,
       `Login at ${await getWebsiteDisplayUrl(env)} with Telegram, then /community_join ${communityId}`, threadId);
@@ -7863,8 +7867,8 @@ export function isInternalTelegramMessageUrl(url) {
   if (!url || typeof url !== 'string') return false;
   const s = url.trim();
   // Reject internal group/channel/DM message links: t.me/c/<chat_id>/<msg_id>...
-  if (/^https?:\/\/(?:www\.)?(?:t\.me|telegram\.me)\/c\/\d+/i.test(s)) return true;
-  if (/^https?:\/\/(?:www\.)?(?:t\.me|telegram\.me)\/m\/[a-zA-Z0-9_-]+/i.test(s)) return true;
+  if (/^(?:https?:\/\/)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)\/c\/-?\d+/i.test(s)) return true;
+  if (/^(?:https?:\/\/)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)\/m\/[a-zA-Z0-9_-]+/i.test(s)) return true;
   if (/^tg:\/\/(?:privatepost|resolve)\b/i.test(s)) return true;
   return false;
 }
@@ -13380,8 +13384,17 @@ async function dumpPlainUrls(env, p) {
 let urls = extractUrlsFromTelegramMessage(msg);
 if (!urls.length) urls = extractUrls(text);
 if (!urls.length) {
-  const rawUrlsInMsg = String(text || msg?.caption || '').match(/https?:\/\/[^\s<>"')\]]+/gi) || [];
-  if (rawUrlsInMsg.some(u => isInternalTelegramMessageUrl(u))) {
+  const rawLinks = [];
+  for (const ent of [...(msg?.entities || []), ...(msg?.caption_entities || [])]) {
+    if (ent.type === 'text_link' && ent.url) rawLinks.push(ent.url);
+    if (ent.type === 'url' && typeof ent.offset === 'number') {
+      const src = msg?.entities?.includes(ent) ? (msg?.text || '') : (msg?.caption || '');
+      rawLinks.push(src.substr(ent.offset, ent.length));
+    }
+  }
+  const textMatches = String(text || msg?.caption || '').match(/(?:https?:\/\/)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)\/[^\s<>"')\]]+/gi) || [];
+  rawLinks.push(...textMatches);
+  if (rawLinks.some(u => isInternalTelegramMessageUrl(u))) {
     await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Internal Telegram message links (${codeHtml('t.me/c/...')}) cannot be saved.`, forumThreadId);
     return;
   }
