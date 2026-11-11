@@ -138,7 +138,7 @@ npm test   # smoke tests (mock API + fixture bookmarks) then full TTY e2e
 
 The e2e runs the real TUI in a pseudo-TTY (`script`) against a mock Athena
 API with a fake Chrome profile and asserts the full join → scan → dump → quit
-journey.
+flow.
 macOS skips that TTY e2e because its built-in `script` cannot accept the
 harness's piped interactive input; the other tests still run.
 
