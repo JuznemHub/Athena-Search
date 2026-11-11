@@ -60,6 +60,7 @@ Athena is a self-hostable bookmark and document archive. Save from the web UI, T
 - Interactive wiki directory layout with live database synchronization and public shareable links.
 - Database explorer view with inline editing, tag aggregation, and `#notags` filtering.
 - Provides personal and community brains with rank-aware permissions, voting, reports, and Telegram group membership gates.
+- In community scope, startup restores your saved community or selects the first available one. Tag searches use that selection; missing access or failed searches show an error instead of leaving loading cards on screen.
 - Clones Telegram channels, groups, and individual forum topics into your brain — links, documents (pdf/epub/docx/…), and text posts — with GOD-rank targets (community / personal / both) and one-time history backfill.
 - Grounds every AI answer in retrieved sources and rejects responses containing URLs outside your saved set.
 
