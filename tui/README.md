@@ -3,14 +3,14 @@
 <p>
   <a href="https://www.npmjs.com/package/athena-tui"><img src="https://img.shields.io/npm/v/athena-tui?style=flat-square&label=npm" alt="npm"></a>
   <img src="https://img.shields.io/badge/license_CC_BY--NC_4.0-blue?style=flat-square" alt="license">
-  <img src="https://img.shields.io/badge/dependencies-0-brightgreen?style=flat-square" alt="zero dependencies">
   <img src="https://img.shields.io/badge/node-%3E%3D22.5-339933?style=flat-square&logo=node.js" alt="node >= 22.5">
 </p>
 
 Terminal UI for [Athena Search](https://github.com/JuznemHub/Athena-Search) —
 dump your browser bookmarks into your Athena brain from the command line.
 
-Zero dependencies (Node >= 22 built-ins only). The wordmark, box menus, `❯`
+Node.js built-ins handle bookmark extraction; npm installs the MCP SDK and
+PostgreSQL client used by advanced mode. The wordmark, box menus, `❯`
 cursor, and spinner take after [nxfu/binthere](https://github.com/nxfu/binthere);
 bookmark extraction covers Chromium-family browsers and Firefox.
 
@@ -90,11 +90,12 @@ From the repo checkout (instead of npm):
 
 ```sh
 cd tui
-npm install       # no-op — zero deps, just links the `athena-tui` bin
+npm ci
 npm start
 ```
 
-Or run it directly: `node tui/src/index.js`
+After installing dependencies, you can also run it from the repository root:
+`node tui/src/index.js`.
 
 ## Features
 
@@ -138,6 +139,8 @@ npm test   # smoke tests (mock API + fixture bookmarks) then full TTY e2e
 The e2e runs the real TUI in a pseudo-TTY (`script`) against a mock Athena
 API with a fake Chrome profile and asserts the full join → scan → dump → quit
 journey.
+macOS skips that TTY e2e because its built-in `script` cannot accept the
+harness's piped interactive input; the other tests still run.
 
 ## Advanced (MCP)
 
