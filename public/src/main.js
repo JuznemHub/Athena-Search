@@ -3581,7 +3581,7 @@ document.addEventListener('DOMContentLoaded', () => {
     activeSubheading: '',
     q: '',
     page: 1,
-    limit: 50,
+    limit: 100,
     totalPages: 1,
     categories: [],
     totalLinks: 0,
@@ -3710,40 +3710,155 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    listEl.innerHTML = wikiState.categories.map(c => `
-      <button type="button" class="wiki-cat-item ${c.id === wikiState.activeCategory ? 'active' : ''}" data-cat="${escapeHtml(c.id)}" title="${escapeHtml(c.title)} (${c.count || 0})">
-        <div class="wiki-cat-item-main">
-          <span class="wiki-cat-item-icon">${escapeHtml(c.icon || '📁')}</span>
-          <span>${escapeHtml(c.title)}</span>
+    listEl.innerHTML = wikiState.categories.map(c => {
+      const isActive = c.id === wikiState.activeCategory;
+      const subs = c.subheadings || [];
+      const subHtml = (isActive && subs.length) ? `
+        <div class="wiki-cat-sub-list" role="group" aria-label="${escapeHtml(c.title)} subheadings">
+          <button type="button" class="wiki-cat-sub-item ${!wikiState.activeSubheading ? 'active' : ''}" data-cat="${escapeHtml(c.id)}" data-sub="" title="All Subheadings in ${escapeHtml(c.title)}">
+            <span class="wiki-cat-sub-dot">•</span>
+            <span class="wiki-cat-sub-title">All Subheadings</span>
+            <span class="wiki-cat-sub-count">${(c.count || 0).toLocaleString()}</span>
+          </button>
+          ${subs.map(s => `
+            <button type="button" class="wiki-cat-sub-item ${wikiState.activeSubheading === s.id ? 'active' : ''}" data-cat="${escapeHtml(c.id)}" data-sub="${escapeHtml(s.id)}" title="${escapeHtml(s.title)} (${(s.count || 0).toLocaleString()})">
+              <span class="wiki-cat-sub-dot">•</span>
+              <span class="wiki-cat-sub-title">${escapeHtml(s.title)}</span>
+              <span class="wiki-cat-sub-count">${(s.count || 0).toLocaleString()}</span>
+            </button>
+          `).join('')}
         </div>
-        <span class="wiki-cat-count">${(c.count || 0).toLocaleString()}</span>
-      </button>
-    `).join('');
+      ` : '';
+
+      return `
+        <div class="wiki-cat-group ${isActive ? 'active' : ''}">
+          <button type="button" class="wiki-cat-item ${isActive ? 'active' : ''}" data-cat="${escapeHtml(c.id)}" title="${escapeHtml(c.title)} (${(c.count || 0).toLocaleString()})">
+            <div class="wiki-cat-item-main">
+              <span class="wiki-cat-item-icon">${escapeHtml(c.icon || '📁')}</span>
+              <span>${escapeHtml(c.title)}</span>
+            </div>
+            <div class="wiki-cat-item-meta">
+              <span class="wiki-cat-count">${(c.count || 0).toLocaleString()}</span>
+              <span class="wiki-cat-arrow" aria-hidden="true">${isActive ? '▾' : '▸'}</span>
+            </div>
+          </button>
+          ${subHtml}
+        </div>
+      `;
+    }).join('');
 
     const cur = wikiState.categories.find(c => c.id === wikiState.activeCategory);
     const mobileBtnText = $('wikiMobileCatBtnText');
     if (mobileBtnText && cur) mobileBtnText.textContent = cur.title || 'Categories';
 
+    // Wire Category button clicks
     listEl.querySelectorAll('.wiki-cat-item').forEach(btn => {
       btn.addEventListener('click', () => {
         const catId = btn.dataset.cat;
         if (!catId) return;
+        if (catId === wikiState.activeCategory) {
+          selectWikiSubheading('', true);
+          return;
+        }
         wikiState.activeCategory = catId;
         wikiState.activeSubheading = '';
         wikiState.page = 1;
-        listEl.querySelectorAll('.wiki-cat-item').forEach(b => b.classList.toggle('active', b === btn));
 
         const targetCat = wikiState.categories.find(c => c.id === catId);
         if (mobileBtnText && targetCat) mobileBtnText.textContent = targetCat.title || 'Categories';
+
+        renderWikiSidebar();
+        loadWikiLinks();
+      });
+    });
+
+    // Wire Subheading item clicks (nested navigation)
+    listEl.querySelectorAll('.wiki-cat-sub-item').forEach(subBtn => {
+      subBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const subId = subBtn.dataset.sub || '';
 
         // Close mobile sidebar and backdrop
         $('wikiSidebar')?.classList.remove('mobile-open');
         $('wikiSidebarBackdrop')?.classList.add('hidden');
         document.body.style.overflow = '';
 
-        loadWikiLinks();
+        selectWikiSubheading(subId, true);
       });
     });
+  }
+
+  function selectWikiSubheading(subId, shouldScroll = true) {
+    wikiState.activeSubheading = subId || '';
+
+    // 1. Sync Hero dropdown
+    const subSelect = $('wikiSubSelect');
+    if (subSelect && subSelect.value !== wikiState.activeSubheading) {
+      subSelect.value = wikiState.activeSubheading;
+    }
+
+    // 2. Sync Controls Bar dropdown
+    const ctrlSubSelect = $('wikiCtrlSubSelect');
+    if (ctrlSubSelect && ctrlSubSelect.value !== wikiState.activeSubheading) {
+      ctrlSubSelect.value = wikiState.activeSubheading;
+    }
+
+    // 3. Sync Pills
+    const subPills = $('wikiSubPills');
+    if (subPills) {
+      subPills.querySelectorAll('.wiki-sub-pill').forEach(btn => {
+        const match = (btn.dataset.sub || '') === wikiState.activeSubheading;
+        btn.classList.toggle('active', match);
+      });
+    }
+
+    // 4. Sync Sidebar Sub-items
+    const listEl = $('wikiCatList');
+    if (listEl) {
+      listEl.querySelectorAll('.wiki-cat-sub-item').forEach(btn => {
+        const match = (btn.dataset.sub || '') === wikiState.activeSubheading;
+        btn.classList.toggle('active', match);
+      });
+    }
+
+    // 5. Scroll down to target subheading section
+    if (shouldScroll) {
+      if (!wikiState.activeSubheading) {
+        const curCat = wikiState.categories.find(c => c.id === wikiState.activeCategory);
+        const curSubsWithLinks = new Set(wikiState.links.map(l => l.subheading || 'general'));
+        const totalSubs = (curCat?.subheadings || []).filter(s => s.count > 0).length;
+        if (curSubsWithLinks.size < totalSubs && totalSubs > 1) {
+          wikiState.page = 1;
+          loadWikiLinks().then(() => {
+            $('wikiBlocks')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          });
+        } else {
+          $('wikiBlocks')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      } else {
+        const targetEl = document.getElementById(`sub-${wikiState.activeSubheading}`);
+        if (targetEl) {
+          targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          targetEl.classList.remove('wiki-sub-block-highlight');
+          void targetEl.offsetWidth; // Force CSS reflow for re-triggering animation
+          targetEl.classList.add('wiki-sub-block-highlight');
+          setTimeout(() => {
+            targetEl.classList.remove('wiki-sub-block-highlight');
+          }, 1800);
+        } else {
+          // If section is not currently in the DOM, load it and scroll
+          wikiState.page = 1;
+          loadWikiLinks().then(() => {
+            const el = document.getElementById(`sub-${wikiState.activeSubheading}`);
+            if (el) {
+              el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              el.classList.add('wiki-sub-block-highlight');
+              setTimeout(() => el.classList.remove('wiki-sub-block-highlight'), 1800);
+            }
+          });
+        }
+      }
+    }
   }
 
   async function loadWikiLinks() {
@@ -3780,6 +3895,9 @@ document.addEventListener('DOMContentLoaded', () => {
         wikiState.links = data.links;
         wikiState.totalPages = data.totalPages || 1;
         wikiState.totalCategoryLinks = data.total || 0;
+        wikiState.fallbackFromCategory = data.fallbackFromCategory || null;
+        wikiState.categoryTotal = typeof data.categoryTotal === 'number' ? data.categoryTotal : null;
+        wikiState.globalTotal = typeof data.globalTotal === 'number' ? data.globalTotal : null;
         renderWikiContent();
       } else {
         if (blocksEl) blocksEl.innerHTML = '<div class="wiki-empty">Could not load wiki links.</div>';
@@ -3807,30 +3925,83 @@ document.addEventListener('DOMContentLoaded', () => {
     const heroCount = $('wikiHeroCount');
     if (heroIcon) heroIcon.textContent = curCat.icon || '📁';
     if (heroTitle) heroTitle.textContent = curCat.title;
-    if (heroDesc) heroDesc.textContent = curCat.description || '';
+    if (heroDesc) {
+      if (wikiState.fallbackFromCategory) {
+        heroDesc.textContent = `Showing results across all categories for “${wikiState.q}”`;
+      } else {
+        heroDesc.textContent = curCat.description || '';
+      }
+    }
     if (heroCount) heroCount.textContent = `${(wikiState.totalCategoryLinks || curCat.count || 0).toLocaleString()} links`;
 
-    // 2. Subheading Jump Pills
+    // 2. Subheading Scroll-down Selection & Pills
+    const subSelect = $('wikiSubSelect');
+    const ctrlSubSelect = $('wikiCtrlSubSelect');
     const subPills = $('wikiSubPills');
+    const subBadge = $('wikiSubCountBadge');
+    const subs = curCat.subheadings || [];
+
+    if (subBadge) {
+      subBadge.textContent = subs.length ? `${subs.length} subheadings` : '';
+    }
+
+    // Build scroll-down select options
+    let selectOpts = `<option value="">All Subheadings (${(wikiState.totalCategoryLinks || curCat.count || 0).toLocaleString()})</option>`;
+    for (const s of subs) {
+      const isSel = (wikiState.activeSubheading || '') === s.id;
+      selectOpts += `<option value="${escapeHtml(s.id)}" ${isSel ? 'selected' : ''}>${escapeHtml(s.title)}${s.count ? ` (${s.count.toLocaleString()})` : ''}</option>`;
+    }
+
+    if (subSelect) {
+      if (!subs.length) {
+        subSelect.innerHTML = '<option value="">All Links</option>';
+        subSelect.disabled = true;
+      } else {
+        subSelect.disabled = false;
+        subSelect.innerHTML = selectOpts;
+        subSelect.value = wikiState.activeSubheading || '';
+      }
+      if (!subSelect.dataset.bound) {
+        subSelect.dataset.bound = 'true';
+        subSelect.addEventListener('change', () => {
+          selectWikiSubheading(subSelect.value, true);
+        });
+      }
+    }
+
+    if (ctrlSubSelect) {
+      if (!subs.length) {
+        ctrlSubSelect.innerHTML = '<option value="">All Links</option>';
+        ctrlSubSelect.disabled = true;
+      } else {
+        ctrlSubSelect.disabled = false;
+        ctrlSubSelect.innerHTML = selectOpts;
+        ctrlSubSelect.value = wikiState.activeSubheading || '';
+      }
+      if (!ctrlSubSelect.dataset.bound) {
+        ctrlSubSelect.dataset.bound = 'true';
+        ctrlSubSelect.addEventListener('change', () => {
+          selectWikiSubheading(ctrlSubSelect.value, true);
+        });
+      }
+    }
+
+    // Subheading Pills
     if (subPills) {
-      const subs = curCat.subheadings || [];
       if (!subs.length) {
         subPills.innerHTML = '';
       } else {
         const allActive = !wikiState.activeSubheading;
         let pillsHtml = `<button type="button" class="wiki-sub-pill ${allActive ? 'active' : ''}" data-sub="" title="Show all subheadings in this category">All Subheadings</button>`;
         for (const s of subs) {
-          const isAct = wikiState.activeSubheading === s.id;
-          pillsHtml += `<button type="button" class="wiki-sub-pill ${isAct ? 'active' : ''}" data-sub="${escapeHtml(s.id)}">${escapeHtml(s.title)}${s.count ? ` (${s.count})` : ''}</button>`;
+          const isAct = (wikiState.activeSubheading || '') === s.id;
+          pillsHtml += `<button type="button" class="wiki-sub-pill ${isAct ? 'active' : ''}" data-sub="${escapeHtml(s.id)}">${escapeHtml(s.title)}${s.count ? ` (${s.count.toLocaleString()})` : ''}</button>`;
         }
         subPills.innerHTML = pillsHtml;
 
         subPills.querySelectorAll('.wiki-sub-pill').forEach(btn => {
           btn.addEventListener('click', () => {
-            const subId = btn.dataset.sub;
-            wikiState.activeSubheading = subId;
-            wikiState.page = 1;
-            loadWikiLinks();
+            selectWikiSubheading(btn.dataset.sub || '', true);
           });
         });
       }
@@ -3841,12 +4012,23 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!blocksEl) return;
 
     if (!wikiState.links.length) {
+      const emptyMsg = wikiState.q
+        ? `<p>No links found for “<strong>${escapeHtml(wikiState.q)}</strong>” in this category or across Athena Wiki.</p>`
+        : '<p>No links found matching your current filter.</p>';
       blocksEl.innerHTML = `
         <div class="wiki-empty">
-          <p>No links found matching your current filter.</p>
+          ${emptyMsg}
         </div>`;
       $('wikiPagination')?.classList.add('hidden');
       return;
+    }
+
+    const allCatMap = new Map((wikiState.categories || []).map(c => [c.id, c]));
+    const allSubMetaLookup = new Map();
+    for (const cat of (wikiState.categories || [])) {
+      for (const s of (cat.subheadings || [])) {
+        allSubMetaLookup.set(s.id, { ...s, categoryTitle: cat.title });
+      }
     }
 
     // Group links by subheading
@@ -3857,11 +4039,33 @@ document.addEventListener('DOMContentLoaded', () => {
       subMap.get(subKey).push(l);
     }
 
-    const subMetaLookup = new Map((curCat.subheadings || []).map(s => [s.id, s]));
+    // Canonical order: taxonomy subheadings first, followed by any extras
+    const orderedSubIds = [];
+    for (const s of (curCat.subheadings || [])) {
+      if (subMap.has(s.id)) orderedSubIds.push(s.id);
+    }
+    for (const subId of subMap.keys()) {
+      if (!orderedSubIds.includes(subId)) orderedSubIds.push(subId);
+    }
 
     let blocksHtml = '';
-    for (const [subId, subLinks] of subMap.entries()) {
-      const meta = subMetaLookup.get(subId) || {
+    if (wikiState.fallbackFromCategory) {
+      const fallbackCat = allCatMap.get(wikiState.fallbackFromCategory);
+      const fallbackTitle = fallbackCat ? fallbackCat.title : wikiState.fallbackFromCategory;
+      blocksHtml += `
+        <div class="wiki-search-fallback-banner">
+          <span class="wiki-search-fallback-icon">💡</span>
+          <span class="wiki-search-fallback-text">
+            No matches in <strong>${escapeHtml(fallbackTitle)}</strong> for “<strong>${escapeHtml(wikiState.q)}</strong>”.
+            Showing <strong>${wikiState.totalCategoryLinks.toLocaleString()}</strong> results across all categories.
+          </span>
+        </div>
+      `;
+    }
+
+    for (const subId of orderedSubIds) {
+      const subLinks = subMap.get(subId) || [];
+      const meta = allSubMetaLookup.get(subId) || {
         title: subId.replace(/^[a-z]+-/, '').replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
         description: ''
       };
@@ -3888,6 +4092,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 ? `<span class="admin-edit-badge" title="Manually edited">✏️ ${escapeHtml(l.last_edited_by_name || 'Admin')} · ${escapeHtml(formatDateTime(l.manual_edited_at))}</span>`
                 : '';
 
+              const linkCat = allCatMap.get(l.category);
+              const showCatBadge = linkCat && (wikiState.fallbackFromCategory || (wikiState.q && l.category !== wikiState.activeCategory) || wikiState.activeCategory === 'all');
+              const catBadge = showCatBadge
+                ? `<span class="wiki-cat-chip" title="Category: ${escapeHtml(linkCat.title)}">${escapeHtml(linkCat.icon || '📁')} ${escapeHtml(linkCat.title)}</span>`
+                : '';
+
               return `
                 <article class="wiki-link-card" data-id="${escapeHtml(l.id)}">
                   <div class="wiki-card-head">
@@ -3897,6 +4107,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         <span class="wiki-card-ext-icon">↗</span>
                       </a>
                       ${host ? `<span class="wiki-domain-chip">${escapeHtml(host)}</span>` : ''}
+                      ${catBadge}
                     </div>
                     ${l.url ? `<button type="button" class="wiki-copy-url-btn" data-url="${escapeHtml(l.url)}" title="Copy URL" aria-label="Copy URL"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>` : ''}
                   </div>

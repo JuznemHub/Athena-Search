@@ -193,7 +193,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.65',
+          version: '1.0.66',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -3426,6 +3426,9 @@ async function handlePostCommunityLink(request, user, env, corsHeaders) {
   if (!communityId || !rawUrl) {
     return Response.json({ success: false, error: 'community_id and url required' }, { status: 400, headers: corsHeaders });
   }
+  if (isInternalTelegramMessageUrl(rawUrl)) {
+    return Response.json({ success: false, error: 'Internal Telegram message links (t.me/c/...) cannot be saved', code: 'INVALID_URL' }, { status: 400, headers: corsHeaders });
+  }
   if (!(await isInstanceOwnerUserAsync(user, env))) {
     const presence = await syncCommunityGroupPresence(env, communityId, user);
     if (!presence.inGroup) {
@@ -3797,16 +3800,19 @@ async function handleGetWikiLinks(url, user, env, corsHeaders) {
     `SELECT id, title, url, notes, tags, image_url, site_name, created_at, manual_edited_at, last_edited_by_name FROM ${table} ${scopeWhere} ORDER BY created_at DESC`
   ).bind(scopeKey).all();
 
-  const matched = [];
+  const categoryMatched = [];
+  const globalMatched = [];
+
   for (const row of (allRows || [])) {
     const { categoryId, subheadingId } = classifyLink(row, taxonomy);
-    if (targetCategory && categoryId !== targetCategory) continue;
-    if (targetSubheading && subheadingId !== targetSubheading) continue;
 
     if (q) {
       const tagsStr = Array.isArray(row.tags) ? row.tags.join(' ') : String(row.tags || '');
       const bag = [row.title, row.url, row.notes, tagsStr, categoryId, subheadingId].join(' ').toLowerCase();
       if (!bag.includes(q)) continue;
+    } else {
+      if (targetCategory && targetCategory !== 'all' && categoryId !== targetCategory) continue;
+      if (targetSubheading && targetSubheading !== 'all' && subheadingId !== targetSubheading) continue;
     }
 
     let parsedTags = [];
@@ -3818,12 +3824,35 @@ async function handleGetWikiLinks(url, user, env, corsHeaders) {
       }
     }
 
-    matched.push({
+    const item = {
       ...row,
       tags: parsedTags,
       category: categoryId,
       subheading: subheadingId
-    });
+    };
+
+    globalMatched.push(item);
+    if (!targetCategory || targetCategory === 'all' || categoryId === targetCategory) {
+      if (!targetSubheading || targetSubheading === 'all' || subheadingId === targetSubheading) {
+        categoryMatched.push(item);
+      }
+    }
+  }
+
+  // Cross-category search fallback: if searching with a category filter yielded 0 results,
+  // but matches exist across other categories, fall back to global matches so users never get nil.
+  let matched = categoryMatched;
+  let fellBack = false;
+  if (q && targetCategory && targetCategory !== 'all') {
+    const wholeCategoryMatches = globalMatched.filter(m => m.category === targetCategory);
+    if (wholeCategoryMatches.length > 0) {
+      if (categoryMatched.length === 0) {
+        matched = wholeCategoryMatches;
+      }
+    } else if (globalMatched.length > 0) {
+      matched = globalMatched;
+      fellBack = true;
+    }
   }
 
   const total = matched.length;
@@ -3833,13 +3862,16 @@ async function handleGetWikiLinks(url, user, env, corsHeaders) {
 
   return Response.json({
     success: true,
-    category: targetCategory || 'all',
-    subheading: targetSubheading || 'all',
+    category: fellBack ? 'all' : (targetCategory || 'all'),
+    subheading: fellBack ? 'all' : (targetSubheading || 'all'),
     page,
     limit,
     total,
     totalPages,
-    links: paged
+    links: paged,
+    fallbackFromCategory: fellBack ? targetCategory : null,
+    globalTotal: globalMatched.length,
+    categoryTotal: categoryMatched.length
   }, { headers: corsHeaders });
 }
 
@@ -6706,6 +6738,7 @@ async function handlePostPersonalLinksBatch(request, userId, env, corsHeaders) {
   for (const raw of items) {
     const rawUrl = typeof raw?.url === 'string' ? raw.url.trim() : '';
     if (!/^https?:\/\//i.test(rawUrl)) { failed.push({ url: rawUrl || '(empty)', error: 'BAD_URL' }); continue; }
+    if (isInternalTelegramMessageUrl(rawUrl)) { failed.push({ url: rawUrl, error: 'INTERNAL_TG_LINK' }); continue; }
     const urlHash = generateUrlHash(rawUrl);
     if (seenHashes.has(urlHash)) { dupes.push(rawUrl); continue; }
     seenHashes.add(urlHash);
@@ -6799,6 +6832,7 @@ async function handlePostCommunityLinksBatch(request, user, env, corsHeaders) {
   for (const raw of items) {
     const rawUrl = typeof raw?.url === 'string' ? raw.url.trim() : '';
     if (!/^https?:\/\//i.test(rawUrl)) { failed.push({ url: rawUrl || '(empty)', error: 'BAD_URL' }); continue; }
+    if (isInternalTelegramMessageUrl(rawUrl)) { failed.push({ url: rawUrl, error: 'INTERNAL_TG_LINK' }); continue; }
     const urlHash = generateUrlHash(rawUrl);
     if (seenHashes.has(urlHash)) { dupes.push(rawUrl); continue; }
     seenHashes.add(urlHash);
@@ -6858,6 +6892,9 @@ async function handlePostPersonalLink(request, userId, env, corsHeaders) {
   const rawUrl = body.url;
   if (!rawUrl) {
     return Response.json({ success: false, error: 'url required' }, { status: 400, headers: corsHeaders });
+  }
+  if (isInternalTelegramMessageUrl(rawUrl)) {
+    return Response.json({ success: false, error: 'Internal Telegram message links (t.me/c/...) cannot be saved', code: 'INVALID_URL' }, { status: 400, headers: corsHeaders });
   }
   // notes without real http links skip scrape
   const isNote = rawUrl.startsWith('note://') || !/^https?:\/\//i.test(rawUrl);
@@ -7678,6 +7715,10 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
     await sendTelegramMessage(token, chatId, 'Group not linked as community. Owner: /community_verify', threadId);
     return;
   }
+  if (isInternalTelegramMessageUrl(rawUrl)) {
+    await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Internal Telegram message links (${codeHtml('t.me/c/...')}) cannot be saved.`, threadId);
+    return;
+  }
   if (!athenaUser) {
     await sendTelegramMessage(token, chatId,
       `Login at ${await getWebsiteDisplayUrl(env)} with Telegram, then /community_join ${communityId}`, threadId);
@@ -7771,7 +7812,8 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
     reply = await formatSavedLinkReply(env, 'community', meta.title, rawUrl, null, meta.notes);
   }
   markMeiliScopeDirty(env, 'community', communityId);
-  await sendTelegramRichMessage(token, chatId, reply, threadId);
+  const deleteBtn = richButtonRow([{ label: '🗑 Delete', data: `dellink:c:${id}` }]);
+  await sendTelegramRichMessage(token, chatId, reply, threadId, deleteBtn);
 }
 
 /** Decrypt a stored bot_token (enc:v1:...) for use; plaintext rows pass through.
@@ -7828,9 +7870,19 @@ async function isTgUserCommunityStaff(env, communityId, tgUserId, athenaUser) {
   return false;
 }
 
+export function isInternalTelegramMessageUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  const s = url.trim();
+  // Reject internal group/channel/DM message links: t.me/c/<chat_id>/<msg_id>...
+  if (/^(?:https?:\/\/)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)\/c\/-?\d+/i.test(s)) return true;
+  if (/^(?:https?:\/\/)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)\/m\/[a-zA-Z0-9_-]+/i.test(s)) return true;
+  if (/^tg:\/\/(?:privatepost|resolve)\b/i.test(s)) return true;
+  return false;
+}
+
 function extractUrls(text) {
   const m = String(text || '').match(/https?:\/\/[^\s<>"')\]]+/gi);
-  return m ? m.map(u => u.replace(/[),.;]+$/g, '')) : [];
+  return m ? m.map(u => u.replace(/[),.;]+$/g, '')).filter(u => !isInternalTelegramMessageUrl(u)) : [];
 }
 
 /**
@@ -7877,7 +7929,7 @@ function extractUrlsFromTelegramMessage(msg, { includeReply = false } = {}) {
     for (const u of extractUrls(r.text || r.caption || '')) urls.add(u);
   }
 
-  return [...urls].filter(u => /^https?:\/\//i.test(u));
+  return [...urls].filter(u => /^https?:\/\//i.test(u) && !isInternalTelegramMessageUrl(u));
 }
 
 /** Full caption/body for multi-link posts (keep structure, trim noise) */
@@ -9038,10 +9090,14 @@ async function finalizePersonalSave(env, token, chatId, forumThreadId, athenaUse
   } catch (_) {
     reply = await formatSavedLinkReply(env, 'personal', r.title, rawUrl, null, r.notes);
   }
-  await sendTelegramRichMessage(token, chatId, reply, forumThreadId);
+  const deleteBtn = r?.id ? richButtonRow([{ label: '🗑 Delete', data: `dellink:p:${r.id}` }]) : null;
+  await sendTelegramRichMessage(token, chatId, reply, forumThreadId, deleteBtn);
 }
 
 async function savePersonalUrl(env, userId, rawUrl, senderName, userNotes = '', titleHint = '', forcedTitle = null) {
+  if (isInternalTelegramMessageUrl(rawUrl)) {
+    return { duplicate: true, error: 'Internal Telegram message links (t.me/c/...) cannot be saved' };
+  }
   const urlHash = generateUrlHash(rawUrl);
   const existing = await findExistingLink(env, 'personal_links', 'user_id', userId, rawUrl);
   if (existing) return { duplicate: true, existing };
@@ -9466,7 +9522,7 @@ function richFallbackKeyboard(html) {
       return [];
     });
   }).filter(row => row.length);
-  return { inline_keyboard: rows };
+  return rows.length ? { inline_keyboard: rows } : null;
 }
 
 async function sendRichFallback(token, chatId, richHtml, buttonsHtml, threadId) {
@@ -9474,7 +9530,14 @@ async function sendRichFallback(token, chatId, richHtml, buttonsHtml, threadId) 
   const keyboard = richFallbackKeyboard(body);
   let last;
   for (const text of chunkTelegramHtml(richHtmlToClassic(body))) {
-    const response = await telegramApi(token, 'sendMessage', { chat_id: chatId, text, parse_mode: 'HTML', reply_markup: keyboard, ...(threadId != null ? { message_thread_id: Number(threadId) } : {}) });
+    const payload = {
+      chat_id: chatId,
+      text,
+      parse_mode: 'HTML',
+      ...(threadId != null ? { message_thread_id: Number(threadId) } : {})
+    };
+    if (keyboard) payload.reply_markup = keyboard;
+    const response = await telegramApi(token, 'sendMessage', payload);
     if (!response.ok) { console.error('Rich classic fallback failed:', response.description); return response; }
     last = { ok: true, message_id: response.result?.message_id };
   }
@@ -9758,6 +9821,67 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: cloneFailure(error).message, show_alert: true });
     }
     return new Response('OK', { status: 200, headers: corsHeaders });
+  }
+
+  // ---- Saved link fast delete button (bin icon on "Saved to ..." messages) ----
+  if (data.startsWith('dellink:')) {
+    const parts = data.split(':');
+    const linkScope = parts[1]; // 'c' or 'p'
+    const linkId = parts.slice(2).join(':');
+    const callbackUser = tgUserId ? await resolveAthenaUserFromTg(env, tgUserId) : null;
+    const isGod = isGodTgId(tgUserId, env) || (callbackUser && await isInstanceOwnerUserAsync(callbackUser, env));
+
+    if (linkScope === 'c') {
+      const link = await env.DB.prepare('SELECT * FROM links WHERE id = ?').bind(linkId).first();
+      if (!link) {
+        await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Link is already deleted', show_alert: true }).catch(() => {});
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      const isSender = (callbackUser && link.added_by_user_id === callbackUser.id) ||
+                       (tgUserId && String(link.added_by_user_id) === String(tgUserId)) ||
+                       (cq.from?.username && link.added_by && (link.added_by === cq.from.username || link.added_by === '@' + cq.from.username));
+      const staff = isGod || (callbackUser && ((await isElevatedUser(callbackUser, env)) || isInstanceOwnerTgId(tgUserId, env) || await isTgUserCommunityStaff(env, link.community_id, tgUserId, callbackUser)));
+      if (!isSender && !staff) {
+        await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Only the sender or staff can delete this link', show_alert: true }).catch(() => {});
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(linkId).run();
+      await env.DB.prepare('DELETE FROM link_votes WHERE link_id = ?').bind(linkId).run().catch(() => {});
+      markMeiliScopeDirty(env, 'community', link.community_id);
+
+      const deletedTitle = link.title || link.url || 'Link';
+      const senderName = cq.from?.username ? '@' + cq.from.username : (cq.from?.first_name || 'user');
+      await editTelegramRichMessage(token, chatId, msgId, [
+        richHeading(3, '🗑 Deleted from community'),
+        '',
+        richParagraph(`<b>${escHtml(deletedTitle)}</b>`),
+        richParagraph(`<i>Removed by ${escHtml(senderName)}</i>`)
+      ].join('\n'), threadId);
+      await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Deleted from community' }).catch(() => {});
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    } else if (linkScope === 'p') {
+      const link = await env.DB.prepare('SELECT * FROM personal_links WHERE id = ?').bind(linkId).first();
+      if (!link) {
+        await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Link is already deleted', show_alert: true }).catch(() => {});
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      const isOwner = isGod || (callbackUser && link.user_id === callbackUser.id);
+      if (!isOwner) {
+        await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Only the owner can delete personal links', show_alert: true }).catch(() => {});
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      await env.DB.prepare('DELETE FROM personal_links WHERE id = ?').bind(linkId).run();
+      markMeiliScopeDirty(env, 'personal', link.user_id);
+
+      const deletedTitle = link.title || link.url || 'Link';
+      await editTelegramRichMessage(token, chatId, msgId, [
+        richHeading(3, '🗑 Deleted from personal brain'),
+        '',
+        richParagraph(`<b>${escHtml(deletedTitle)}</b>`)
+      ].join('\n'), threadId);
+      await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Deleted from personal brain' }).catch(() => {});
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
   }
 
   // ---- /forcetags brain picker ----
@@ -13266,6 +13390,20 @@ async function dumpPlainUrls(env, p) {
 let urls = extractUrlsFromTelegramMessage(msg);
 if (!urls.length) urls = extractUrls(text);
 if (!urls.length) {
+  const rawLinks = [];
+  for (const ent of [...(msg?.entities || []), ...(msg?.caption_entities || [])]) {
+    if (ent.type === 'text_link' && ent.url) rawLinks.push(ent.url);
+    if (ent.type === 'url' && typeof ent.offset === 'number') {
+      const src = msg?.entities?.includes(ent) ? (msg?.text || '') : (msg?.caption || '');
+      rawLinks.push(src.substr(ent.offset, ent.length));
+    }
+  }
+  const textMatches = String(text || msg?.caption || '').match(/(?:https?:\/\/)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)\/[^\s<>"')\]]+/gi) || [];
+  rawLinks.push(...textMatches);
+  if (rawLinks.some(u => isInternalTelegramMessageUrl(u))) {
+    await sendTelegramFormatted(token, chatId, `${boldHtml('⚠️')} Internal Telegram message links (${codeHtml('t.me/c/...')}) cannot be saved.`, forumThreadId);
+    return;
+  }
   // Bare "#tag" message → tag search instead of silence.
   const bareTag = (!cmd || cmd.startsWith('#')) && /^#[a-zA-Z0-9][\w-]{0,39}$/.test(String(text || '').trim())
     ? text.trim().slice(1).toLowerCase()
@@ -17076,6 +17214,10 @@ Rules:
         } else {
           // not present → propose as community dump (approve flow) or direct add for staff?
           // User said same as website: if not present add it. Staff can add directly.
+          if (isInternalTelegramMessageUrl(rawUrl)) {
+            await sendTelegramMessage(token, chatId, 'Internal Telegram message links (t.me/c/...) cannot be saved.', forumThreadId);
+            continue;
+          }
           const urlHash = generateUrlHash(rawUrl);
           const id = 'tg_' + Date.now().toString(36);
           const meta = await enrichLinkFields(env, rawUrl, {});
