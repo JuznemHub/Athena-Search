@@ -4,7 +4,7 @@
 /* Accent defaults (JS overrides these). Flat color, no gradient. */
 :root {
   --accent: #8e70f6;
-  --accent-bright: #a78bfa;
+  --accent-bright: var(--serp-link);
   --accent-fg: #08080f;
   --accent-soft: rgba(142, 112, 246, 0.15);
   --accent-gradient: var(--accent);
@@ -35,20 +35,25 @@
   --dur-2: 220ms;
 }
 
-/* ========== Dark theme (default) ========== */
+/* ========== Dark theme: Vercel-inspired, with Athena's blue accent ========== */
 :root,
-[data-theme="dark"] {
-  --ink: #08080f;
-  --ink-2: #0e0e1a;
-  --surface: rgba(255, 255, 255, 0.06);
-  --surface-2: rgba(255, 255, 255, 0.1);
-  --hairline: rgba(255, 255, 255, 0.1);
-  --hairline-strong: rgba(255, 255, 255, 0.18);
-  --text: #eef0f6;
-  --text-dim: #9aa1b8;
-  --text-mute: #8e95b0;
+:root[data-theme="dark"] {
+  --accent: #0072f5;
+  --accent-fg: #000000;
+  --accent-gradient: var(--accent);
+  --accent-soft: rgba(0,114,245,0.18);
+  --accent-border: rgba(0,114,245,0.4);
+  --ink: #0a0a0a;
+  --ink-2: #0a0a0a;
+  --surface: #171717;
+  --surface-2: #262626;
+  --hairline: #333333;
+  --hairline-strong: #666666;
+  --text: #ededed;
+  --text-dim: #bdbdbd;
+  --text-mute: #a8a8a8;
   --primary-purple: var(--accent);
-  --primary-blue: #5b8cff;
+  --primary-blue: #70b2ff;
   --bg-dark: var(--ink);
   --bg-card: var(--surface);
   --bg-card-hover: var(--surface-2);
@@ -56,30 +61,32 @@
   --border-highlight: var(--accent-border);
   --text-main: var(--text);
   --text-muted: var(--text-dim);
-  --danger-color: #e02444;
-  --success-color: #00e676;
-  --warning-color: #ffb74d;
+  --danger-color: #ff8585;
+  --success-color: #70d6aa;
+  --warning-color: #ffc879;
   --radius-lg: 12px;
   --radius-md: 8px;
   --radius-sm: 6px;
-  --shadow-main: 0 1px 2px rgba(0,0,0,0.4);
-  --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
-  --topbar-bg: #0e0e1a;
-  --drawer-bg: #0e0e1a;
-  --input-bg: rgba(255, 255, 255, 0.06);
-  --serp-link: #7aa2ff;
-  --serp-link-hover: #a8c7ff;
-  --serp-snippet: #a0a8c0;
+  --shadow-main: 0 1px 3px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.04);
+  --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --topbar-bg: #0a0a0a;
+  --drawer-bg: #171717;
+  --input-bg: #262626;
+  --serp-link: #70b2ff;
+  --serp-link-hover: #a6cfff;
+  --serp-snippet: #bdbdbd;
   --blur: 0px;
-  --glass-bg: #12121c;
+  --glass-bg: #171717;
   --btn-primary-bg: var(--accent);
   --body-glow-1: transparent;
   color-scheme: dark;
 }
 
 /* ========== Light theme ========== */
-[data-theme="light"] {
+:root[data-theme="light"] {
+  --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
   --ink: #f5f6fa;
   --ink-2: #eaecf4;
   --surface: #ffffff;
@@ -119,7 +126,7 @@
 }
 
 /* ========== Material Design 3 ========== */
-[data-theme="material"] {
+:root[data-theme="material"] {
   --ink: #121212;
   --ink-2: #1e1e1e;
   --surface: #1e1e1e;
@@ -164,16 +171,16 @@
 }
 
 /* ========== Glass UI (iOS/macOS vibrancy) ========== */
-[data-theme="glass"] {
-  --ink: #000000;
-  --ink-2: rgba(28, 28, 30, 0.8);
+:root[data-theme="glass"] {
+  --ink: #080b11;
+  --ink-2: #151b27;
   --surface: rgba(255, 255, 255, 0.1);
   --surface-2: rgba(255, 255, 255, 0.16);
   --hairline: rgba(255, 255, 255, 0.2);
   --hairline-strong: rgba(255, 255, 255, 0.35);
   --text: #ffffff;
-  --text-dim: rgba(235, 235, 245, 0.8);
-  --text-mute: rgba(235, 235, 245, 0.55);
+  --text-dim: #d4d9e3;
+  --text-mute: #bec6d3;
   --primary-purple: var(--accent);
   --primary-blue: #0a84ff;
   --bg-dark: var(--ink);
@@ -192,14 +199,14 @@
   --shadow-main: 0 2px 24px rgba(0,0,0,0.5), inset 0 0.5px 0 rgba(255,255,255,0.12);
   --font-sans: "Outfit", -apple-system, BlinkMacSystemFont, ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
-  --topbar-bg: rgba(28, 28, 30, 0.75);
-  --drawer-bg: rgba(28, 28, 30, 0.88);
+  --topbar-bg: rgba(24, 28, 37, 0.82);
+  --drawer-bg: rgba(24, 28, 37, 0.9);
   --input-bg: rgba(118, 118, 128, 0.24);
-  --serp-link: #0a84ff;
-  --serp-link-hover: #409cff;
-  --serp-snippet: rgba(235, 235, 245, 0.65);
-  --blur: 40px;
-  --glass-bg: rgba(30, 30, 32, 0.6);
+  --serp-link: #9cc5ff;
+  --serp-link-hover: #c5dcff;
+  --serp-snippet: #d0d6e1;
+  --blur: var(--glass-blur, 24px);
+  --glass-bg: #1a1e27;
   --btn-primary-bg: var(--accent-gradient);
   --body-glow-1: color-mix(in srgb, var(--accent) 18%, transparent);
   color-scheme: dark;
@@ -257,8 +264,9 @@ body::before {
 }
 
 [data-theme="glass"] .top-bar {
-  background: rgba(28, 28, 30, 0.75) !important;
-  border-bottom-color: rgba(255,255,255,0.15) !important;
+  background: var(--topbar-bg) !important;
+  border-bottom-color: rgba(255,255,255,0.18) !important;
+  box-shadow: inset 0 1px rgba(255,255,255,0.1), 0 8px 24px rgba(0,0,0,0.22);
 }
 
 .drawer-overlay {
@@ -457,12 +465,19 @@ body::before {
   background: var(--surface) !important;
 }
 
-/* Glass: stronger blur, more visible surfaces */
+/* Glass is reserved for the controls floating above content. */
 [data-theme="glass"] .search-bar-box,
 [data-theme="glass"] .auth-gate-card,
-[data-theme="glass"] .scope-switch {
-  background: rgba(30, 30, 32, 0.7) !important;
+[data-theme="glass"] .scope-switch,
+[data-theme="glass"] .notif-panel,
+[data-theme="glass"] .toast {
+  background: rgba(26, 30, 39, 0.82) !important;
   border-color: rgba(255, 255, 255, 0.2) !important;
+  box-shadow: inset 0 1px rgba(255,255,255,0.12), 0 8px 24px rgba(0,0,0,0.3);
+}
+[data-theme="glass"] .ai-answer-card {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 .search-bar-box {
@@ -772,4 +787,73 @@ body::before {
 /* Large desktops: give the SERP a little more air instead of a stretched column. */
 @media (min-width: 1600px) {
   .main-content { max-width: 820px; }
+}
+
+/* The dark appearance uses quiet, solid surfaces and a clear focus ring. */
+:root[data-theme="dark"] body::before { background: var(--ink); }
+:root[data-theme="dark"] .search-bar-box { border-radius: var(--radius-lg) !important; }
+:root[data-theme="dark"] .hero-title { font-weight: 600 !important; letter-spacing: -0.04em !important; }
+:root[data-theme="dark"] :focus-visible { outline: 2px solid #70b2ff; outline-offset: 3px; }
+:root[data-theme="dark"] .drawer-section h3 { color: var(--text) !important; }
+
+/* Keep all header actions reachable on narrow phones without overlapping the brand. */
+@media (max-width: 480px) {
+  .top-bar { gap: 4px; padding-inline: 8px; }
+  .brand-logo .logo-text { display: none; }
+  .admin-nav-label, .wiki-nav-label { display: none; }
+}
+
+/* Glass controls keep a visible rim while their contents remain high contrast. */
+[data-theme="glass"] .side-drawer {
+  box-shadow: inset -1px 0 rgba(255,255,255,0.1), 8px 0 32px rgba(0,0,0,0.3);
+}
+[data-theme="glass"] .mode-pills {
+  background: rgba(26, 30, 39, 0.82) !important;
+  backdrop-filter: blur(var(--blur)) saturate(130%);
+  -webkit-backdrop-filter: blur(var(--blur)) saturate(130%);
+  box-shadow: inset 0 1px rgba(255,255,255,0.1);
+}
+[data-theme="glass"] .main-tags-card,
+[data-theme="glass"] .admin-db-header,
+[data-theme="glass"] .edit-panel {
+  background: var(--glass-bg);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.glass-blur-control { margin-top: 16px; }
+.glass-blur-heading { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; color: var(--text); font-size: 0.875rem; }
+.glass-blur-heading output { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.glass-blur-control input[type="range"] { display: block; width: 100%; min-height: 44px; accent-color: var(--accent); cursor: pointer; }
+.glass-blur-control .section-desc { margin-top: 0; }
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root[data-theme="glass"] { --topbar-bg: #1a1e27; --drawer-bg: #1a1e27; }
+  [data-theme="glass"] .search-bar-box,
+  [data-theme="glass"] .auth-gate-card,
+  [data-theme="glass"] .scope-switch,
+  [data-theme="glass"] .notif-panel,
+  [data-theme="glass"] .toast,
+  [data-theme="glass"] .mode-pills { background: #1a1e27 !important; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  :root[data-theme="glass"] { --blur: 0px; --topbar-bg: #1a1e27; --drawer-bg: #1a1e27; }
+  [data-theme="glass"] .top-bar,
+  [data-theme="glass"] .side-drawer,
+  [data-theme="glass"] .search-bar-box,
+  [data-theme="glass"] .auth-gate,
+  [data-theme="glass"] .auth-gate-card,
+  [data-theme="glass"] .drawer-overlay,
+  [data-theme="glass"] .scope-switch,
+  [data-theme="glass"] .notif-panel,
+  [data-theme="glass"] .toast,
+  [data-theme="glass"] .mode-pills {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  [data-theme="glass"] .search-bar-box,
+  [data-theme="glass"] .auth-gate-card,
+  [data-theme="glass"] .scope-switch,
+  [data-theme="glass"] .notif-panel,
+  [data-theme="glass"] .toast,
+  [data-theme="glass"] .mode-pills { background: #1a1e27 !important; }
 }

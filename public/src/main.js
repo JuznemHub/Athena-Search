@@ -1290,7 +1290,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return '';
     }
     if (!DOCUMENT_EXTENSIONS.has(ext)) return 'unsupported file type';
-    if (file.size > DOCUMENT_MAX_BYTES) return 'larger than 512 KiB';
+    if (file.size > DOCUMENT_MAX_BYTES) return 'larger than 5 MiB';
     if (content.includes('\0')) return 'appears to be binary';
     const sample = content.slice(0, 8192);
     const controls = [...sample].filter(ch => {
@@ -1439,13 +1439,18 @@ document.addEventListener('DOMContentLoaded', () => {
           showToast(data.error || 'Website is already added', true);
           return;
         }
+        if (!res.ok || !data.success) {
+          showToast(data.error || 'Failed to save', true);
+          return;
+        }
         if (data.id) item.id = data.id;
         if (data.title) item.title = data.title;
         if (data.notes != null) item.notes = data.notes;
         if (data.image_url) item.imageUrl = data.image_url;
         if (data.site_name) item.siteName = data.site_name;
       } catch (err) {
-        if (!err.auth) console.warn(err);
+        if (!err.auth) showToast(err.message || 'Failed to save', true);
+        return;
       }
       state.personalLinks.unshift(item);
       showToast(parsed.type === 'link' ? 'Link saved (metadata scraped)' : 'Note saved to brain');
@@ -1519,14 +1524,18 @@ document.addEventListener('DOMContentLoaded', () => {
     if (found) {
       try {
         if (state.scope === 'personal') {
-          await api('/api/personal-links', { method: 'DELETE', body: JSON.stringify({ id: found.id }) });
+          const { res, data } = await api('/api/personal-links', { method: 'DELETE', body: JSON.stringify({ id: found.id }) });
+          if (!res.ok || !data.success) {
+            showToast(data.error || 'Delete failed', true);
+            return;
+          }
           state.personalLinks = state.personalLinks.filter(l => l.id !== found.id);
         } else {
           const { res, data } = await api('/api/links', {
             method: 'DELETE',
             body: JSON.stringify({ id: found.id, community_id: state.activeCommunity })
           });
-          if (!res.ok) {
+          if (!res.ok || !data.success) {
             showToast(data.error || 'Delete failed', true);
             return;
           }
@@ -1563,6 +1572,7 @@ document.addEventListener('DOMContentLoaded', () => {
     barActionBtn.setAttribute('aria-expanded', 'false');
     document.querySelectorAll('.mode-pill').forEach(p => {
       p.classList.toggle('active', p.dataset.mode === mode);
+      p.setAttribute('aria-pressed', String(p.dataset.mode === mode));
     });
 
     iconSearch.classList.toggle('hidden', mode !== 'search');
@@ -1616,6 +1626,7 @@ document.addEventListener('DOMContentLoaded', () => {
       scopeSubtitle.textContent = 'Answers from your .md / links only';
       emptyState.classList.add('hidden');
     }
+    searchInput.setAttribute('aria-label', searchInput.placeholder.replace(/…$/, ''));
   }
 
   function updateScopeUI() {
@@ -1655,21 +1666,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function filterLinks(links, query) {
     let list = links || [];
-    if (query) {
-      // Prefer Athena fuzzy search (ytdlp ↔ yt-dlp)
-      if (window.AthenaSearch?.searchCorpus) {
-        const limit = window.__athenaSteroid ? 500 : 80;
-        list = window.AthenaSearch.searchCorpus(list, query, limit);
-      } else {
-        const q = query.toLowerCase();
-        const qa = q.replace(/[^a-z0-9]/g, '');
-        list = list.filter(item => {
-          const bag = [item.title, item.url, item.notes, (item.tags || []).join(' ')].join(' ').toLowerCase();
-          const ba = bag.replace(/[^a-z0-9]/g, '');
-          return bag.includes(q) || (qa.length >= 2 && ba.includes(qa));
-        });
-      }
-    }
     if (state.filterTag) {
       const tagLower = state.filterTag.toLowerCase();
       if (tagLower === 'notags') {
@@ -1682,6 +1678,22 @@ document.addEventListener('DOMContentLoaded', () => {
       list = list.filter(item => Boolean(item.manualEditedAt || item.manual_edited_at));
     } else if (state.filterStatus === 'unedited') {
       list = list.filter(item => !item.manualEditedAt && !item.manual_edited_at);
+    }
+    if (query) {
+      // Apply filters before the search limit so matching filtered items are not
+      // discarded by higher-ranked items from other tags or statuses.
+      if (window.AthenaSearch?.searchCorpus) {
+        const limit = window.__athenaSteroid ? 500 : 80;
+        list = window.AthenaSearch.searchCorpus(list, query, limit);
+      } else {
+        const q = query.toLowerCase();
+        const qa = q.replace(/[^a-z0-9]/g, '');
+        list = list.filter(item => {
+          const bag = [item.title, item.url, item.notes, (item.tags || []).join(' ')].join(' ').toLowerCase();
+          const ba = bag.replace(/[^a-z0-9]/g, '');
+          return bag.includes(q) || (qa.length >= 2 && ba.includes(qa));
+        });
+      }
     }
     if (state.filterSort === 'edited_desc') {
       list = [...list].sort((a, b) => Number(b.manualEditedAt || b.manual_edited_at || 0) - Number(a.manualEditedAt || a.manual_edited_at || 0));
@@ -1960,6 +1972,7 @@ document.addEventListener('DOMContentLoaded', () => {
           if (idx >= 0) {
             list[idx] = {
               ...list[idx],
+              __sd: undefined,
               title: data.title != null ? data.title : title,
               url: data.url || url,
               notes: data.notes != null ? data.notes : notes,
@@ -2229,9 +2242,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const isSelected = state.filterTag && state.filterTag.toLowerCase() === t.name.toLowerCase();
       const isNoTags = t.name.toLowerCase() === 'notags';
       return `
-        <button type="button" class="main-tag-chip ${isSelected ? 'active' : ''}" data-tag="${escapeHtml(t.name)}" title="${isNoTags ? 'Untagged links' : `Tag #${escapeHtml(t.name)}`} (${t.count})">
+        <button type="button" class="main-tag-chip ${isSelected ? 'active' : ''}" aria-pressed="${Boolean(isSelected)}" data-tag="${escapeHtml(t.name)}" title="${isNoTags ? 'Untagged links' : `Tag #${escapeHtml(t.name)}`} (${t.count})">
           <span>#${escapeHtml(t.name)}</span>
-          <span class="admin-tag-count" style="opacity:0.8;font-size:0.7rem;">(${t.count.toLocaleString()})</span>
+          <span class="admin-tag-count">(${t.count.toLocaleString()})</span>
         </button>
       `;
     }).join('');
@@ -2735,31 +2748,40 @@ document.addEventListener('DOMContentLoaded', () => {
     e.preventDefault();
     const q = searchInput.value.trim();
     if (!q) return;
-    if (state.mode === 'dump') {
-      await saveDump(q);
-    } else if (state.mode === 'delete') {
-      await runDelete(q);
-    } else if (state.mode === 'ai') {
-      await runAi();
-    } else {
-      runSearch();
+    try {
+      if (state.mode === 'dump') {
+        await saveDump(q);
+      } else if (state.mode === 'delete') {
+        await runDelete(q);
+      } else if (state.mode === 'ai') {
+        await runAi();
+      } else {
+        runSearch();
+      }
+    } catch (err) {
+      if (!err.auth) showToast(err.message || 'Request failed', true);
     }
   }
 
   // ---- Theme (UI only) ----
 
   const THEME_ORDER = ['dark', 'light', 'material', 'glass'];
-  const THEME_META = { dark: '#06070a', light: '#f4f5f9', material: '#121218', glass: '#05060c' };
+  const THEME_META = { dark: '#0a0a0a', light: '#f4f5f9', material: '#121218', glass: '#05060c' };
 
   function applyTheme(theme) {
     const t = THEME_ORDER.includes(theme) ? theme : 'dark';
     document.documentElement.setAttribute('data-theme', t);
     try { localStorage.setItem('athena_theme', t); } catch (_) {}
     const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.content = THEME_META[t] || THEME_META.dark;
+    if (meta) meta.content = THEME_META[t];
     document.querySelectorAll('.theme-chip').forEach(chip => {
-      chip.classList.toggle('active', chip.dataset.theme === t);
+      const selected = chip.dataset.theme === t;
+      chip.classList.toggle('active', selected);
+      chip.setAttribute('aria-pressed', String(selected));
     });
+    let customAccent = null;
+    try { customAccent = localStorage.getItem(ACCENT_LS_KEY); } catch (_) {}
+    applyAccentColor(validAccent(customAccent) ? customAccent : defaultAccent(), false);
   }
 
   function initThemeUI() {
@@ -2771,9 +2793,33 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // ---- Glass appearance ----
+  function initGlassBlur() {
+    const input = $('glassBlurInput');
+    const output = $('glassBlurValue');
+    if (!input || !output) return;
+    let saved = null;
+    try { saved = localStorage.getItem('athena_glass_blur'); } catch (_) {}
+    const value = saved !== null && /^-?\d+$/.test(saved) ? Math.max(0, Math.min(40, Number(saved))) : 24;
+    function applyBlur(blur, persist) {
+      const amount = Math.max(0, Math.min(40, Math.round(Number(blur))));
+      input.value = String(amount);
+      output.textContent = `${amount} px`;
+      input.setAttribute('aria-valuetext', `${amount} pixels`);
+      document.documentElement.style.setProperty('--glass-blur', `${amount}px`);
+      if (persist) {
+        try { localStorage.setItem('athena_glass_blur', String(amount)); } catch (_) {}
+      }
+    }
+    applyBlur(value, false);
+    input.addEventListener('input', () => applyBlur(input.value, true));
+  }
+
   // ---- Accent color system ----
   const ACCENT_DEFAULT = '#8e70f6';
   const ACCENT_LS_KEY = 'athena_accent_color';
+  const validAccent = hex => /^#[0-9a-f]{6}$/i.test(hex || '');
+  const defaultAccent = () => document.documentElement.dataset.theme === 'dark' ? '#0072f5' : ACCENT_DEFAULT;
 
   function hexToHsl(hex) {
     let r = 0, g = 0, b = 0;
@@ -2800,23 +2846,26 @@ document.addEventListener('DOMContentLoaded', () => {
     return { h: Math.round(h * 360), s: Math.round(s * 100), l: Math.round(l * 100) };
   }
 
-  function applyAccentColor(hex) {
+  function applyAccentColor(hex, persist = true) {
     const root = document.documentElement;
     const hsl = hexToHsl(hex);
     const h = hsl.h, s = hsl.s, l = hsl.l;
 
     root.style.setProperty('--accent', hex);
-    const fg = l > 50 ? '#08080f' : '#ffffff';
+    const rgb = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255);
+    const luminance = rgb.map(c => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2)
+      .reduce((sum, c, i) => sum + c * [0.2126, 0.7152, 0.0722][i], 0);
+    const fg = (luminance + 0.05) / 0.05 >= 1.05 / (luminance + 0.05) ? '#000000' : '#ffffff';
     root.style.setProperty('--accent-fg', fg);
     root.style.setProperty('--accent-soft', `hsla(${h}, ${s}%, ${l}%, 0.22)`);
-    root.style.setProperty('--accent-gradient', `linear-gradient(135deg, hsl(${h}, ${s}%, ${Math.min(l + 15, 80)}%), hsl(${h}, ${s}%, ${Math.max(l - 15, 15)}%))`);
+    root.style.setProperty('--accent-gradient', hex);
     root.style.setProperty('--accent-hover', `hsl(${h}, ${Math.min(s + 5, 100)}%, ${Math.min(l + 8, 85)}%)`);
     root.style.setProperty('--accent-surface', `hsla(${h}, ${s}%, ${l}%, 0.08)`);
     root.style.setProperty('--accent-border', `hsla(${h}, ${s}%, ${l}%, 0.35)`);
     root.style.setProperty('--primary-purple', hex);
     root.style.setProperty('--border-highlight', `hsla(${h}, ${s}%, ${l}%, 0.35)`);
 
-    try { localStorage.setItem(ACCENT_LS_KEY, hex); } catch (_) {}
+    if (persist) { try { localStorage.setItem(ACCENT_LS_KEY, hex); } catch (_) {} }
 
     const input = $('accentColorInput');
     const label = $('accentCurrentLabel');
@@ -2829,9 +2878,10 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function initAccentColor() {
-    let saved = ACCENT_DEFAULT;
-    try { saved = localStorage.getItem(ACCENT_LS_KEY) || ACCENT_DEFAULT; } catch (_) {}
-    applyAccentColor(saved);
+    let saved = null;
+    try { saved = localStorage.getItem(ACCENT_LS_KEY); } catch (_) {}
+    saved = validAccent(saved) ? saved : defaultAccent();
+    applyAccentColor(saved, false);
 
     const colorInput = $('accentColorInput');
     if (colorInput) {
@@ -2844,7 +2894,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const resetBtn = $('accentResetBtn');
     if (resetBtn) {
       resetBtn.addEventListener('click', () => {
-        applyAccentColor(ACCENT_DEFAULT);
+        try { localStorage.removeItem(ACCENT_LS_KEY); } catch (_) {}
+        applyAccentColor(defaultAccent(), false);
       });
     }
 
@@ -2898,32 +2949,18 @@ document.addEventListener('DOMContentLoaded', () => {
       let newFace;
       do { newFace = Math.floor(Math.random() * 6) + 1; } while (newFace === currentFace);
 
-      svg.classList.add('rolling');
+      const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (!reduceMotion) svg.classList.add('rolling');
 
       setTimeout(() => {
         svg.classList.remove('rolling');
         renderDicePips(newFace);
         currentFace = newFace;
         rolling = false;
-      }, 600);
+      }, reduceMotion ? 0 : 600);
     }
 
     mark.addEventListener('click', rollDice);
-
-    // Idle rolls
-    let idleTimer = setInterval(() => {
-      if (!rolling && document.visibilityState === 'visible') rollDice();
-    }, 6000);
-
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') {
-        clearInterval(idleTimer);
-      } else {
-        idleTimer = setInterval(() => {
-          if (!rolling && document.visibilityState === 'visible') rollDice();
-        }, 6000);
-      }
-    });
   }
 
   // ---- Admin & Owner Database Explorer ----
@@ -2998,6 +3035,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     searchWrap.classList.add('hidden');
     if (scopeSwitch) scopeSwitch.classList.add('hidden');
+    $('wikiView')?.classList.add('hidden');
+    $('wikiSidebar')?.classList.remove('mobile-open');
+    $('wikiSidebarBackdrop')?.classList.add('hidden');
+    document.body.classList.remove('wiki-active');
+    document.body.style.overflow = '';
     adminView.classList.remove('hidden');
 
     const badge = $('modeBadgeText');
@@ -3047,6 +3089,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     adminView.classList.add('hidden');
     searchWrap.classList.remove('hidden');
+    $('resultsContainer')?.classList.remove('hidden');
     if (scopeSwitch) scopeSwitch.classList.remove('hidden');
 
     const badge = $('modeBadgeText');
@@ -3651,7 +3694,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const tagsCard = $('mainTagsCard');
     if (tagsToggleBtn && tagsCard) {
       tagsToggleBtn.addEventListener('click', () => {
-        tagsCard.classList.toggle('hidden');
+        const isHidden = tagsCard.classList.toggle('hidden');
+        tagsToggleBtn.setAttribute('aria-expanded', String(!isHidden));
       });
     }
 
@@ -3695,6 +3739,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (searchWrapper) searchWrapper.classList.add('hidden');
     if (resultsContainer) resultsContainer.classList.add('hidden');
     wikiView.classList.remove('hidden');
+    document.querySelector('.scope-switch-container')?.classList.add('hidden');
+    if (modeBadgeText) modeBadgeText.textContent = 'Wiki';
     document.body.classList.add('wiki-active');
 
     if (window.location.hash !== '#wiki') {
@@ -3752,6 +3798,8 @@ document.addEventListener('DOMContentLoaded', () => {
     document.body.style.overflow = '';
     if (searchWrapper) searchWrapper.classList.remove('hidden');
     if (resultsContainer) resultsContainer.classList.remove('hidden');
+    document.querySelector('.scope-switch-container')?.classList.remove('hidden');
+    if (modeBadgeText) modeBadgeText.textContent = state.mode ? state.mode.charAt(0).toUpperCase() + state.mode.slice(1) : 'Search';
     if (window.location.hash === '#wiki') {
       history.pushState('', document.title, window.location.pathname + window.location.search);
     }
@@ -4639,6 +4687,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function setupEventListeners() {
     initThemeUI();
+    initGlassBlur();
     initAccentColor();
     initDice();
     setupAdminDbEvents();
