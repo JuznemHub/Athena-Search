@@ -321,5 +321,14 @@
     return out.slice(0, maxResults);
   }
 
-  window.AthenaSearch = { searchCorpus, scoreItem, retrieveForQuestion, alnum, soft, expandQueryTerms };
+  function searchResponseError(res, data) {
+    if (res.ok && data?.success && Array.isArray(data.links)) return null;
+    const message = String(data?.error || data?.message || `Search failed (${res.status})`);
+    if (res.status === 403) {
+      return `${message}. Select a community you can access or ask its admin to check your membership.`;
+    }
+    return `${message}. Try the search again.`;
+  }
+
+  window.AthenaSearch = { searchCorpus, scoreItem, retrieveForQuestion, searchResponseError, alnum, soft, expandQueryTerms };
 })();
