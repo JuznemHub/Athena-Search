@@ -1117,6 +1117,14 @@ document.addEventListener('DOMContentLoaded', () => {
   async function loadCommunities() {
     const { data } = await api('/api/communities');
     state.communities = data.communities || [];
+    if (state.activeCommunity && !state.communities.find(c => c.id === state.activeCommunity)) {
+      state.activeCommunity = '';
+      localStorage.removeItem('athena_active_community');
+    }
+    if (!state.activeCommunity && state.scope === 'community' && state.communities.length) {
+      state.activeCommunity = state.communities[0].id;
+      localStorage.setItem('athena_active_community', state.activeCommunity);
+    }
     if (communitySelect) {
       communitySelect.innerHTML = '<option value="">None (personal)</option>';
       state.communities.forEach(c => {
@@ -1129,10 +1137,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if (c.id === state.activeCommunity) opt.selected = true;
         communitySelect.appendChild(opt);
       });
-    }
-    if (state.activeCommunity && !state.communities.find(c => c.id === state.activeCommunity)) {
-      state.activeCommunity = '';
-      localStorage.removeItem('athena_active_community');
     }
     const mainCommSel = $('mainCommunitySelect');
     if (mainCommSel) {
@@ -2092,6 +2096,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let enrichmentRefreshKey = '';
 
   async function runSearch() {
+    const seq = ++searchSeq;
     const q = searchInput.value.trim();
     state.hasSearched = true;
     aiAnswerCard.classList.add('hidden');
@@ -2103,17 +2108,21 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    // Show local matches immediately so typing stays responsive, then replace
-    // them with the server's answer, which searches the WHOLE store rather than
-    // just the slice of links this browser happens to have loaded.
+    if (state.scope === 'community' && !state.activeCommunity) {
+      renderGoogleResults([], q);
+      emptyStateText.textContent = 'Select a community before searching its links.';
+      showToast(emptyStateText.textContent, true);
+      return;
+    }
+
+    // Local matches cover only the loaded slice; the server searches the full store.
     const localMatches = filterLinks(corpus(), q);
     renderGoogleResults(localMatches, q);
     let skeletonTimer = null;
     if (!localMatches.length) {
-      // Big brains: this browser holds a slice, the server holds everything —
-      // show shimmer cards instead of a premature "no results".
+      // Wait briefly before showing placeholders to avoid flashing on fast searches.
       skeletonTimer = setTimeout(() => {
-        if (skSeq !== searchSeq) return;
+        if (seq !== searchSeq) return;
         emptyState.classList.add('hidden');
         resultsMeta.classList.add('hidden');
         resultsList.innerHTML = Array.from({ length: 3 }).map(() => `
@@ -2126,8 +2135,6 @@ document.addEventListener('DOMContentLoaded', () => {
       }, 120);
     }
 
-    const seq = ++searchSeq;
-    const skSeq = seq;
     try {
       const params = new URLSearchParams({ scope: state.scope });
       if (q) params.set('q', q);
@@ -2135,27 +2142,40 @@ document.addEventListener('DOMContentLoaded', () => {
       if (state.filterStatus && state.filterStatus !== 'all') params.set('edited', state.filterStatus);
       if (state.filterSort) params.set('sort', state.filterSort);
       if (state.scope === 'community') {
-        if (!state.activeCommunity) return;
         params.set('community_id', state.activeCommunity);
       }
       const { res, data } = await api(`/api/links/search?${params.toString()}`);
       if (seq !== searchSeq) return;              // a newer query already ran
       if (searchInput.value.trim() !== q) return; // input moved on
       if (skeletonTimer) clearTimeout(skeletonTimer);
-      if (res.ok && data.success && Array.isArray(data.links)) {
-        const documents = filterLinks(corpus().filter(item => item.isDocument), q);
-        renderGoogleResults([...data.links.map(normalizeLink), ...documents], q, data.total);
-        if (data.enrichment_pending && enrichmentRefreshKey !== q) {
-          enrichmentRefreshKey = q;
-          setTimeout(() => {
-            if (searchInput.value.trim() === q) runSearch();
-          }, 1800);
+      const responseError = window.AthenaSearch.searchResponseError(res, data);
+      if (responseError) {
+        if (!resultsList.children.length || resultsList.querySelector('.g-result-skeleton')) {
+          renderGoogleResults([], q);
+          emptyStateText.textContent = responseError;
         }
+        showToast(responseError, true);
+        return;
       }
-    } catch (_) {
-      // Offline or denied — the local results already on screen stand.
+
+      const documents = filterLinks(corpus().filter(item => item.isDocument), q);
+      renderGoogleResults([...data.links.map(normalizeLink), ...documents], q, data.total);
+      if (data.enrichment_pending && enrichmentRefreshKey !== q) {
+        enrichmentRefreshKey = q;
+        setTimeout(() => {
+          if (searchInput.value.trim() === q) runSearch();
+        }, 1800);
+      }
+    } catch (err) {
+      if (seq !== searchSeq || searchInput.value.trim() !== q || err.auth) return;
+      const message = 'Could not load search results. Check your connection and try again.';
+      if (!resultsList.children.length || resultsList.querySelector('.g-result-skeleton')) {
+        renderGoogleResults([], q);
+        emptyStateText.textContent = message;
+      }
+      showToast(message, true);
+    } finally {
       if (skeletonTimer) clearTimeout(skeletonTimer);
-      if (!resultsList.children.length || resultsList.querySelector('.g-result-skeleton')) renderGoogleResults([], q);
     }
   }
 

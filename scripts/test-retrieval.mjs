@@ -317,6 +317,21 @@ vm.runInNewContext(
   fs.readFileSync(new URL('../public/src/lib/search.js', import.meta.url), 'utf8'),
   { window: searchWindow }
 );
+assert.equal(typeof searchWindow.AthenaSearch.searchResponseError, 'function');
+assert.equal(
+  searchWindow.AthenaSearch.searchResponseError(
+    { ok: false, status: 403 },
+    { success: false, error: 'Forbidden' }
+  ),
+  'Forbidden. Select a community you can access or ask its admin to check your membership.'
+);
+assert.equal(
+  searchWindow.AthenaSearch.searchResponseError(
+    { ok: true, status: 200 },
+    { success: true, links: [] }
+  ),
+  null
+);
 const retrieved = searchWindow.AthenaSearch.retrieveForQuestion('ytdlp', rows);
 assert.equal(retrieved.length, rows.length);
 searchWindow.__athenaSteroid = false;

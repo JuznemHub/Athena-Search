@@ -27,7 +27,7 @@ Athena is a self-hostable bookmark and document archive. Save from the web UI, T
   <img src="screenshots/web-dark.png" width="70%" alt="Athena web — search, dump, and AI in one bar">
 </p>
 <p align="center">
-  <img src="screenshots/tui-menu.png" width="55%" alt="athena-tui — zero-dependency terminal client">
+  <img src="screenshots/tui-menu.png" width="55%" alt="athena-tui terminal client">
 </p>
 <p align="center">
   <em>Live captures — public pages only; no accounts, tokens, or private brains shown.</em>
@@ -56,10 +56,11 @@ Athena is a self-hostable bookmark and document archive. Save from the web UI, T
 - Answers questions with retrieval-augmented context and source links.
 - Supports OpenAI-compatible gateways, Anthropic, OpenRouter, Groq, and local routers such as [OmniRoute](https://github.com/df4p/omniroute).
 - Exposes a native Model Context Protocol (MCP) server so AI agents (Claude Code, Hermes, Codex, Cursor) can query your saved collection.
-- Imports bookmarks from 8+ desktop browsers, Reddit saved posts, and X (x.com) archives via a zero-dependency terminal UI.
+- Imports bookmarks from 8+ desktop browsers, Reddit saved posts, and X (x.com) archives via a terminal UI.
 - Interactive wiki directory layout with live database synchronization and public shareable links.
 - Database explorer view with inline editing, tag aggregation, and `#notags` filtering.
 - Provides personal and community brains with rank-aware permissions, voting, reports, and Telegram group membership gates.
+- In community scope, startup restores your saved community or selects the first available one. Tag searches use that selection; missing access or failed searches show an error instead of leaving loading cards on screen.
 - Clones Telegram channels, groups, and individual forum topics into your brain — links, documents (pdf/epub/docx/…), and text posts — with GOD-rank targets (community / personal / both) and one-time history backfill.
 - Grounds every AI answer in retrieved sources and rejects responses containing URLs outside your saved set.
 
@@ -326,7 +327,7 @@ Chromium is optional. If it is missing, disabled, or fails, Athena keeps the saf
 
 ## Terminal UI
 
-[`athena-tui`](tui/README.md) is a zero-dependency CLI client for scanning and importing your bookmarks and archives directly into Athena.
+[`athena-tui`](tui/README.md) is a CLI client for scanning and importing your bookmarks and archives directly into Athena. npm installs its MCP SDK and PostgreSQL client dependencies.
 
 ```bash
 npm install -g athena-tui
@@ -446,7 +447,7 @@ The repository’s CI also runs the TUI test suite and secret scanning. PostgreS
 ## Roadmap
 
 - [ ] **RSS support** — live indexing of RSS/Atom feeds with change tracking: new items land automatically, and edits/removals on the source site are reflected (content updated or removed from the DB) instead of leaving stale copies.
-- [ ] **Android app** — fully based on `athena-tui`: the same menu-driven flows (login, connect instance, scan/dump bookmarks, search, AI) wrapped in a native mobile shell, sharing the TUI's zero-dependency logic.
+- [ ] **Android app**: fully based on `athena-tui`, with the same menu-driven flows (login, connect instance, scan/dump bookmarks, search, AI) wrapped in a native mobile shell, sharing the TUI's logic.
 - [ ] **Frontend polish** — further beautification of the web UI: richer result cards, smoother transitions, better mobile ergonomics, and more theme refinement.
 - [ ] **Extensions (as needed)** — browser Web Clipper for one-click saves, and other integrations where they earn their place.
 
