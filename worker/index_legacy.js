@@ -9511,7 +9511,7 @@ function richFallbackKeyboard(html) {
       return [];
     });
   }).filter(row => row.length);
-  return { inline_keyboard: rows };
+  return rows.length ? { inline_keyboard: rows } : null;
 }
 
 async function sendRichFallback(token, chatId, richHtml, buttonsHtml, threadId) {
@@ -9519,7 +9519,14 @@ async function sendRichFallback(token, chatId, richHtml, buttonsHtml, threadId) 
   const keyboard = richFallbackKeyboard(body);
   let last;
   for (const text of chunkTelegramHtml(richHtmlToClassic(body))) {
-    const response = await telegramApi(token, 'sendMessage', { chat_id: chatId, text, parse_mode: 'HTML', reply_markup: keyboard, ...(threadId != null ? { message_thread_id: Number(threadId) } : {}) });
+    const payload = {
+      chat_id: chatId,
+      text,
+      parse_mode: 'HTML',
+      ...(threadId != null ? { message_thread_id: Number(threadId) } : {})
+    };
+    if (keyboard) payload.reply_markup = keyboard;
+    const response = await telegramApi(token, 'sendMessage', payload);
     if (!response.ok) { console.error('Rich classic fallback failed:', response.description); return response; }
     last = { ok: true, message_id: response.result?.message_id };
   }
