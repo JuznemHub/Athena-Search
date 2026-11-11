@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { handleAdminGetLinks, handleGetTags } from '../worker/index.js';
+import { handleAdminGetLinks, handleGetTags, syncUserCommunityAdminRoles, isCommunityAdminUser } from '../worker/index.js';
 
 function makeMockDb() {
   const db = new DatabaseSync(':memory:');
@@ -16,6 +16,23 @@ function makeMockDb() {
       user_id TEXT,
       role TEXT,
       joined_at INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      username TEXT,
+      provider TEXT,
+      provider_id TEXT,
+      telegram_api_id TEXT,
+      created_at INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS community_admins (
+      id TEXT PRIMARY KEY,
+      community_id TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      platform_user_id TEXT NOT NULL,
+      label TEXT,
+      created_by TEXT,
+      created_at INTEGER NOT NULL
     );
     CREATE TABLE links (
       id TEXT PRIMARY KEY,
@@ -170,6 +187,41 @@ async function runTests() {
   assert.equal(dataTags.success, true);
   assert.ok(dataTags.tags.some(t => t.name === 'notags'));
   assert.ok(dataTags.tags.some(t => t.name === 'tool'));
+
+  // Test 7: User promoted via Telegram bot /admin (community_admins record)
+  // Simulate bot /admin command inserting into community_admins
+  await db.prepare(`
+    INSERT INTO community_admins (id, community_id, platform, platform_user_id, label, created_by, created_at)
+    VALUES (?, ?, 'telegram', ?, ?, ?, ?)
+  `).bind('adm_bot_1', 'comm_1', '55512345', 'Bob promoted', 'admin_user_456', Date.now()).run();
+
+  const botAdminUser = {
+    id: 'telegram_55512345',
+    username: 'bob',
+    provider: 'telegram',
+    provider_id: '55512345',
+    telegram_api_id: '55512345'
+  };
+
+  // Explicitly test syncUserCommunityAdminRoles
+  await syncUserCommunityAdminRoles(env, botAdminUser);
+
+  // Verify isCommunityAdminUser recognizes bot admin
+  const isAdm = await isCommunityAdminUser(botAdminUser, env);
+  assert.equal(isAdm, true, 'Bot promoted admin in community_admins must be recognized');
+
+  // Verify handleAdminGetLinks loads database links for promoted bot admin
+  const resBotAdmin = await handleAdminGetLinks(new URL('https://athena.test/api/admin/links?community_id=comm_1'), botAdminUser, env, corsHeaders);
+  const dataBotAdmin = await resBotAdmin.json();
+  assert.equal(resBotAdmin.status, 200, 'Promoted admin must receive 200');
+  assert.equal(dataBotAdmin.success, true);
+  assert.equal(dataBotAdmin.total, 3);
+  assert.equal(dataBotAdmin.links.length, 3);
+  assert.ok(dataBotAdmin.communities.some(c => c.id === 'comm_1'), 'Admin communities list must include comm_1');
+
+  // Verify community_members sync
+  const memRow = await db.prepare('SELECT role FROM community_members WHERE community_id = ? AND user_id = ?').bind('comm_1', botAdminUser.id).first();
+  assert.equal(memRow?.role, 'admin', 'community_members must be synced with admin role');
 
   console.log('admin database explorer tests passed');
 }

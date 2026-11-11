@@ -866,6 +866,62 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .admin-db-pagination { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 12px; }
 .admin-page-info { font-size: 0.85rem; color: var(--text-muted); font-weight: 500; }
 
+/* Admin Locked State */
+.admin-locked-card {
+  text-align: center;
+  padding: 44px 20px;
+  background: var(--surface, rgba(255, 255, 255, 0.025));
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+  border-radius: var(--radius-lg, 16px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  max-width: 500px;
+  margin: 24px auto;
+  box-shadow: 0 10px 30px -6px rgba(0, 0, 0, 0.4);
+  animation: athena-fade-in 0.18s ease-out;
+}
+.admin-locked-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: var(--accent-surface, rgba(142, 112, 246, 0.1));
+  border: 1px solid var(--accent-border, rgba(142, 112, 246, 0.3));
+  color: var(--accent, #8e70f6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 4px;
+}
+.admin-locked-card h3 {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text-main, #eef0f6);
+  letter-spacing: -0.01em;
+}
+.admin-locked-desc {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  color: var(--text-muted, #8e95b0);
+  max-width: 400px;
+}
+.admin-locked-back-btn {
+  margin-top: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.nav-btn-locked {
+  opacity: 0.72;
+}
+.nav-btn-locked:hover {
+  opacity: 1;
+}
+
 /* Empty state */
 .empty-state { text-align: center; padding: 48px 16px; color: var(--text-muted, #8e95b0); }
 .empty-state strong { color: var(--text-dim, #b8bdd0); }

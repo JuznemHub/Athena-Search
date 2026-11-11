@@ -763,9 +763,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const aiCfg = canEditAiConfig();
 
     const adminNavBtn = $('adminDbNavBtn');
-    if (adminNavBtn) adminNavBtn.classList.toggle('hidden', !isStaff);
+    if (adminNavBtn) {
+      adminNavBtn.classList.remove('hidden');
+      adminNavBtn.classList.toggle('nav-btn-locked', !isStaff);
+      adminNavBtn.title = isStaff ? 'Database Manager (Admin & Owner)' : 'Database Manager (Admin Only)';
+    }
     const adminDrawer = $('adminDrawerSection');
-    if (adminDrawer) adminDrawer.classList.toggle('hidden', !isStaff);
+    if (adminDrawer) adminDrawer.classList.remove('hidden');
 
     const wikiShareBtn = $('wikiShareBtn');
     if (wikiShareBtn) wikiShareBtn.classList.toggle('hidden', !god);
@@ -877,7 +881,7 @@ document.addEventListener('DOMContentLoaded', () => {
       renderHome();
       startLiveSync();
       if (window.location.hash === '#db' || window.location.hash === '#admin') {
-        if (isStaffRank()) openAdminDb();
+        openAdminDb();
       } else if (window.location.hash === '#wiki') {
         openWiki();
       }
@@ -2941,11 +2945,52 @@ document.addEventListener('DOMContentLoaded', () => {
     loading: false
   };
 
-  function openAdminDb() {
-    if (!isStaffRank()) {
-      showToast('Admin or Owner rank required', true);
-      return;
+  function renderAdminDbLockedView(customMsg = null) {
+    const adminView = $('adminDbView');
+    if (!adminView) return;
+    const listEl = $('adminDbList');
+    const countBadge = $('adminDbCountBadge');
+    const rankBadge = $('adminDbRankBadge');
+    const headerControls = adminView.querySelector('.admin-db-controls');
+    const searchBar = adminView.querySelector('.admin-db-search-bar');
+    const tagsContainer = adminView.querySelector('.admin-tags-container');
+    const summary = adminView.querySelector('.admin-db-summary');
+    const pager = $('adminDbPagination');
+
+    if (headerControls) headerControls.style.display = 'none';
+    if (searchBar) searchBar.style.display = 'none';
+    if (tagsContainer) tagsContainer.style.display = 'none';
+    if (summary) summary.style.display = 'none';
+    if (pager) pager.classList.add('hidden');
+
+    if (countBadge) countBadge.textContent = 'Access restricted';
+    if (rankBadge) {
+      rankBadge.textContent = 'Admin Only';
+      rankBadge.style.opacity = '0.75';
     }
+
+    if (listEl) {
+      listEl.innerHTML = `
+        <div class="admin-locked-card" id="adminDbLockedCard">
+          <div class="admin-locked-icon" aria-hidden="true">
+            <svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+              <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+            </svg>
+          </div>
+          <h3>Only for Admin</h3>
+          <p class="admin-locked-desc">${escapeHtml(customMsg || 'Database management is restricted to community administrators and owners. If you were recently granted admin rank via Telegram, verify you are logged in with that Telegram account.')}</p>
+          <button type="button" id="adminLockedBackBtn" class="btn btn-primary btn-sm admin-locked-back-btn">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:6px;"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+            <span>Back to Search</span>
+          </button>
+        </div>
+      `;
+      $('adminLockedBackBtn')?.addEventListener('click', closeAdminDb);
+    }
+  }
+
+  function openAdminDb() {
     const adminView = $('adminDbView');
     const searchWrap = $('searchWrapper');
     const scopeSwitch = document.querySelector('.scope-switch-container');
@@ -2958,6 +3003,29 @@ document.addEventListener('DOMContentLoaded', () => {
     const badge = $('modeBadgeText');
     if (badge) badge.textContent = 'Database';
 
+    if (window.location.hash !== '#db') {
+      window.history.pushState(null, '', '#db');
+    }
+
+    if (!isStaffRank()) {
+      renderAdminDbLockedView();
+      return;
+    }
+
+    const headerControls = adminView.querySelector('.admin-db-controls');
+    if (headerControls) headerControls.style.display = '';
+    const searchBar = adminView.querySelector('.admin-db-search-bar');
+    if (searchBar) searchBar.style.display = '';
+    const tagsContainer = adminView.querySelector('.admin-tags-container');
+    if (tagsContainer) tagsContainer.style.display = '';
+    const summary = adminView.querySelector('.admin-db-summary');
+    if (summary) summary.style.display = '';
+    const rankBadge = $('adminDbRankBadge');
+    if (rankBadge) {
+      rankBadge.textContent = isGod() ? 'GOD' : 'Admin & Owner';
+      rankBadge.style.opacity = '1';
+    }
+
     if (adminDbState.scope === 'personal' && !isGod()) {
       adminDbState.scope = 'community';
       const scopeSel = $('adminDbScope');
@@ -2966,10 +3034,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (!adminDbState.communityId && state.activeCommunity) {
       adminDbState.communityId = state.activeCommunity;
-    }
-
-    if (window.location.hash !== '#db') {
-      window.history.pushState(null, '', '#db');
     }
 
     loadAdminDbLinks();
@@ -2989,7 +3053,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (badge) badge.textContent = state.mode ? state.mode.charAt(0).toUpperCase() + state.mode.slice(1) : 'Search';
 
     if (window.location.hash === '#db' || window.location.hash === '#admin') {
-      window.history.pushState(null, '', window.location.pathname);
+      window.history.pushState(null, '', window.location.pathname + window.location.search);
     }
   }
 
@@ -3019,7 +3083,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const { res, data } = await api(`/api/admin/links?${qParams.toString()}`);
       if (!res.ok || !data.success) {
+        if (res.status === 403 || data?.code === 'ADMIN_ONLY') {
+          renderAdminDbLockedView(data?.error);
+          return;
+        }
         showToast(data.error || 'Failed to load database links', true);
+        if (countBadge) countBadge.textContent = 'Failed to load records';
         if (listEl) listEl.innerHTML = `<div class="empty-state"><p>${escapeHtml(data.error || 'Access denied or failed to load.')}</p></div>`;
         return;
       }
@@ -3047,6 +3116,7 @@ document.addEventListener('DOMContentLoaded', () => {
       renderAdminDbPagination();
     } catch (err) {
       showToast(err.message || 'Error fetching database records', true);
+      if (countBadge) countBadge.textContent = 'Failed to load records';
       if (listEl) listEl.innerHTML = `<div class="empty-state"><p>${escapeHtml(err.message || 'Failed to load.')}</p></div>`;
     } finally {
       adminDbState.loading = false;
@@ -3132,8 +3202,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const listEl = $('adminDbList');
     if (!listEl) return;
     if (!adminDbState.links.length) {
+      const emptyMsg = (adminDbState.scope === 'community' && !adminDbState.communities.length)
+        ? 'No communities found where you have admin permissions.'
+        : 'No links matched your query or filters.';
       listEl.innerHTML = `<div class="empty-state">
-        <p>No links matched your query or filters.</p>
+        <p>${escapeHtml(emptyMsg)}</p>
       </div>`;
       return;
     }
@@ -3502,7 +3575,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
       if (window.location.hash === '#db' || window.location.hash === '#admin') {
-        if (isStaffRank()) openAdminDb();
+        openAdminDb();
       } else if (window.location.hash === '#wiki') {
         openWiki();
       } else {
