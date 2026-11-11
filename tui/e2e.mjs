@@ -6,6 +6,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+if (process.platform === 'darwin') {
+  await new Promise((resolve) => {
+    process.stdout.write('SKIP TUI e2e: macOS script cannot accept piped interactive input.\n', resolve);
+  });
+  process.exit(0);
+}
+
 const server = http.createServer((req, res) => {
   const body = [];
   req.on('data', (c) => body.push(c));
