@@ -179,8 +179,8 @@
   --hairline: rgba(255, 255, 255, 0.2);
   --hairline-strong: rgba(255, 255, 255, 0.35);
   --text: #ffffff;
-  --text-dim: #d4d9e3;
-  --text-mute: #bec6d3;
+  --text-dim: #eef1f5;
+  --text-mute: #e3e8ef;
   --primary-purple: var(--accent);
   --primary-blue: #0a84ff;
   --bg-dark: var(--ink);
@@ -826,6 +826,104 @@ body::before {
 .glass-blur-control input[type="range"] { display: block; width: 100%; min-height: 44px; accent-color: var(--accent); cursor: pointer; }
 .glass-blur-control .section-desc { margin-top: 0; }
 
+/* A tonal backdrop gives the glass something to refract without obscuring content. */
+:root[data-theme="glass"] body::before {
+  background:
+    linear-gradient(rgba(5, 8, 13, 0.62), rgba(5, 8, 13, 0.68)),
+    url("./assets/glass-atrium.jpg") center / cover no-repeat,
+    #11161e;
+}
+
+/* The floating search, filters and navigation share one translucent material. */
+:root[data-theme="glass"] {
+  --topbar-bg: rgba(25, 30, 39, 0.48);
+  --drawer-bg: rgba(24, 29, 38, 0.74);
+  --glass-bg: rgba(30, 35, 43, 0.66);
+}
+[data-theme="glass"] .top-bar,
+[data-theme="glass"] .side-drawer,
+[data-theme="glass"] .search-bar-box,
+[data-theme="glass"] .scope-switch,
+[data-theme="glass"] .mode-pills,
+[data-theme="glass"] .auth-gate-card,
+[data-theme="glass"] .notif-panel,
+[data-theme="glass"] .toast,
+[data-theme="glass"] .main-tags-card,
+[data-theme="glass"] .admin-db-header,
+[data-theme="glass"] .edit-panel,
+[data-theme="glass"] .g-result {
+  background-image: linear-gradient(155deg, rgba(255,255,255,0.13), rgba(255,255,255,0.025) 45%, rgba(255,255,255,0.07)) !important;
+  border-color: rgba(255,255,255,0.28) !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.32), inset 0 -1px 0 rgba(255,255,255,0.09), 0 14px 34px rgba(0,0,0,0.26);
+  backdrop-filter: blur(var(--blur)) saturate(145%);
+  -webkit-backdrop-filter: blur(var(--blur)) saturate(145%);
+}
+[data-theme="glass"] .search-bar-box,
+[data-theme="glass"] .scope-switch,
+[data-theme="glass"] .mode-pills,
+[data-theme="glass"] .auth-gate-card,
+[data-theme="glass"] .notif-panel,
+[data-theme="glass"] .toast {
+  background-color: rgba(72, 78, 88, 0.48) !important;
+}
+[data-theme="glass"] .main-tags-card,
+[data-theme="glass"] .admin-db-header,
+[data-theme="glass"] .edit-panel,
+[data-theme="glass"] .g-result {
+  background-color: rgba(52, 59, 68, 0.56);
+}
+[data-theme="glass"] .search-bar-box input::placeholder { opacity: 1; }
+[data-theme="glass"] .g-result:hover {
+  background-color: rgba(76, 84, 96, 0.62);
+  border-color: rgba(255,255,255,0.44);
+}
+[data-theme="glass"] .theme-bar,
+[data-theme="glass"] .theme-switcher .theme-chip,
+[data-theme="glass"] .btn-secondary,
+[data-theme="glass"] .main-tag-chip {
+  background-image: linear-gradient(160deg, rgba(255,255,255,0.13), rgba(255,255,255,0.025));
+  border-color: rgba(255,255,255,0.22);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.2);
+}
+[data-theme="glass"] .theme-chip.active,
+[data-theme="glass"] .main-tag-chip.active { background-image: none; }
+[data-theme="glass"] .mode-pill,
+[data-theme="glass"] .theme-chip,
+[data-theme="glass"] .btn-secondary {
+  transition: background-color 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
+}
+[data-theme="glass"] .mode-pill:hover,
+[data-theme="glass"] .theme-chip:hover,
+[data-theme="glass"] .btn-secondary:hover {
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.45), inset 0 0 18px rgba(255,255,255,0.08);
+}
+
+/* A short specular glint suggests the curved edge of a glass control. */
+[data-theme="glass"] .mode-pill,
+[data-theme="glass"] .theme-chip {
+  position: relative;
+  overflow: hidden;
+}
+[data-theme="glass"] .mode-pill::after,
+[data-theme="glass"] .theme-chip::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(110deg, transparent 30%, rgba(255,255,255,0.28) 50%, transparent 70%);
+  transform: translateX(-125%);
+  transition: transform 500ms ease;
+}
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  [data-theme="glass"] .mode-pill:hover::after,
+  [data-theme="glass"] .theme-chip:hover::after { transform: translateX(125%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-theme="glass"] .mode-pill::after,
+  [data-theme="glass"] .theme-chip::after { transition: none; }
+}
+
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   :root[data-theme="glass"] { --topbar-bg: #1a1e27; --drawer-bg: #1a1e27; }
   [data-theme="glass"] .search-bar-box,
@@ -833,7 +931,11 @@ body::before {
   [data-theme="glass"] .scope-switch,
   [data-theme="glass"] .notif-panel,
   [data-theme="glass"] .toast,
-  [data-theme="glass"] .mode-pills { background: #1a1e27 !important; }
+  [data-theme="glass"] .mode-pills,
+  [data-theme="glass"] .main-tags-card,
+  [data-theme="glass"] .admin-db-header,
+  [data-theme="glass"] .edit-panel,
+  [data-theme="glass"] .g-result { background: #1a1e27 !important; }
 }
 @media (prefers-reduced-transparency: reduce) {
   :root[data-theme="glass"] { --blur: 0px; --topbar-bg: #1a1e27; --drawer-bg: #1a1e27; }
@@ -846,7 +948,11 @@ body::before {
   [data-theme="glass"] .scope-switch,
   [data-theme="glass"] .notif-panel,
   [data-theme="glass"] .toast,
-  [data-theme="glass"] .mode-pills {
+  [data-theme="glass"] .mode-pills,
+  [data-theme="glass"] .main-tags-card,
+  [data-theme="glass"] .admin-db-header,
+  [data-theme="glass"] .edit-panel,
+  [data-theme="glass"] .g-result {
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
   }
@@ -855,5 +961,9 @@ body::before {
   [data-theme="glass"] .scope-switch,
   [data-theme="glass"] .notif-panel,
   [data-theme="glass"] .toast,
-  [data-theme="glass"] .mode-pills { background: #1a1e27 !important; }
+  [data-theme="glass"] .mode-pills,
+  [data-theme="glass"] .main-tags-card,
+  [data-theme="glass"] .admin-db-header,
+  [data-theme="glass"] .edit-panel,
+  [data-theme="glass"] .g-result { background: #1a1e27 !important; }
 }
