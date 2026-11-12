@@ -15,6 +15,7 @@ import {
   getWikiTaxonomy,
   saveWikiTaxonomy,
 } from './wiki-taxonomy.js';
+import { parseFeed, parseOpml, generateOpml } from './rss-parser.js';
 
 function cloneDisplayName(chatTitle, chatType, flowThread, topicTitle) {
   const base = String(chatTitle || '');
@@ -193,7 +194,7 @@ export default {
         return Response.json({
           status: 'ok',
           worker: 'athena-worker',
-          version: '1.0.67',
+          version: '1.0.68',
           runtime: selfHosted ? 'selfhost' : 'cloudflare',
           database: engine,
           // true once a webhook secret is resolvable; false means the bot endpoint
@@ -417,6 +418,35 @@ export default {
 
       if (pathname === '/api/wiki/share-links/revoke' && request.method === 'POST') {
         return await handleRevokeWikiShareLink(request, user, env, corsHeaders);
+      }
+
+      // RSS Feed (FreshRSS integration & article ingestion)
+      if (pathname === '/api/feed/sources' && request.method === 'GET') {
+        return await handleGetFeedSources(url, user, env, corsHeaders);
+      }
+      if (pathname === '/api/feed/streams' && request.method === 'GET') {
+        return await handleGetFeedStreams(url, user, env, corsHeaders);
+      }
+      if (pathname === '/api/feed/add' && request.method === 'POST') {
+        return await handleAddFeed(request, user, env, corsHeaders);
+      }
+      if (pathname === '/api/feed/refresh' && request.method === 'POST') {
+        return await handleRefreshFeeds(request, user, env, corsHeaders);
+      }
+      if (pathname === '/api/feed' && request.method === 'DELETE') {
+        return await handleDeleteFeed(request, user, env, corsHeaders);
+      }
+      if (pathname === '/api/feed/article' && request.method === 'PATCH') {
+        return await handlePatchFeedArticle(request, user, env, corsHeaders);
+      }
+      if (pathname === '/api/feed/mark-all-read' && request.method === 'POST') {
+        return await handleMarkAllArticlesRead(request, user, env, corsHeaders);
+      }
+      if (pathname === '/api/feed/opml/import' && request.method === 'POST') {
+        return await handleOpmlImport(request, user, env, corsHeaders);
+      }
+      if (pathname === '/api/feed/opml/export' && request.method === 'GET') {
+        return await handleOpmlExport(url, user, env, corsHeaders);
       }
 
       // Community links — members only (join required before dump)
@@ -4239,6 +4269,703 @@ async function handleRevokeWikiShareLink(request, user, env, corsHeaders) {
   ).bind(Date.now(), id).run();
 
   return Response.json({ success: true, revoked: true }, { headers: corsHeaders });
+}
+
+let _feedTablesReady = false;
+async function ensureFeedTables(env) {
+  if (_feedTablesReady) return;
+  try {
+    if (typeof env.DB.exec === 'function') {
+      await env.DB.exec(`
+        CREATE TABLE IF NOT EXISTS rss_feeds (
+          id TEXT PRIMARY KEY,
+          community_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          url TEXT NOT NULL,
+          url_hash TEXT NOT NULL,
+          title TEXT NOT NULL,
+          description TEXT,
+          site_url TEXT,
+          category TEXT NOT NULL DEFAULT 'General',
+          icon_url TEXT,
+          last_fetched_at BIGINT NOT NULL DEFAULT 0,
+          fetch_status TEXT NOT NULL DEFAULT 'ok',
+          error_message TEXT,
+          created_at BIGINT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_rss_feeds_comm ON rss_feeds(community_id);
+        CREATE INDEX IF NOT EXISTS idx_rss_feeds_url_hash ON rss_feeds(community_id, url_hash);
+
+        CREATE TABLE IF NOT EXISTS rss_articles (
+          id TEXT PRIMARY KEY,
+          feed_id TEXT NOT NULL,
+          community_id TEXT NOT NULL,
+          guid TEXT NOT NULL,
+          url TEXT NOT NULL,
+          url_hash TEXT NOT NULL,
+          title TEXT NOT NULL,
+          author TEXT,
+          summary TEXT,
+          content TEXT,
+          image_url TEXT,
+          published_at BIGINT NOT NULL,
+          created_at BIGINT NOT NULL,
+          link_id TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_rss_articles_feed ON rss_articles(feed_id, published_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_rss_articles_comm ON rss_articles(community_id, published_at DESC);
+
+        CREATE TABLE IF NOT EXISTS rss_article_states (
+          article_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          is_read INTEGER NOT NULL DEFAULT 0,
+          is_starred INTEGER NOT NULL DEFAULT 0,
+          updated_at BIGINT NOT NULL,
+          PRIMARY KEY(article_id, user_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_rss_states_user ON rss_article_states(user_id, is_read, is_starred);
+      `);
+    }
+  } catch (_) {}
+  _feedTablesReady = true;
+}
+
+async function autoIngestRssArticle(env, article, feed, user) {
+  if (!article.url || !/^https?:\/\//i.test(article.url)) {
+    return null;
+  }
+
+  const communityId = feed.community_id;
+  const rawUrl = article.url;
+
+  try {
+    const existing = await findExistingLink(env, 'links', 'community_id', communityId, rawUrl);
+    if (existing) {
+      return existing.id;
+    }
+
+    await ensureLinkMetaColumns(env);
+    const linkId = 'link_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    const urlHash = generateUrlHash(rawUrl);
+    const displayName = user?.display_name || user?.username || feed.title || 'RSS Ingest';
+    const now = Date.now();
+    const createdAt = article.publishedAt && article.publishedAt > 0 ? article.publishedAt : now;
+    const catTag = (feed.category || 'general').toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+    const tags = JSON.stringify(['rss', catTag].filter(Boolean));
+    const notes = article.summary || (article.content ? article.content.slice(0, 280) : '') || `From RSS feed: ${feed.title}`;
+
+    try {
+      await env.DB.prepare(
+        `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
+          added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at, image_url, site_name)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`
+      ).bind(
+        linkId, communityId, rawUrl, urlHash, article.title, notes,
+        tags, displayName, user?.id || feed.user_id, user?.provider || 'rss', displayName,
+        createdAt, article.imageUrl || null, feed.title || null
+      ).run();
+    } catch (_) {
+      await env.DB.prepare(
+        `INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, added_by,
+          added_by_user_id, added_by_provider, added_by_name, upvotes, downvotes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)`
+      ).bind(
+        linkId, communityId, rawUrl, urlHash, article.title, notes,
+        tags, displayName, user?.id || feed.user_id, user?.provider || 'rss', displayName, createdAt
+      ).run();
+    }
+
+    markMeiliScopeDirty(env, 'community', communityId);
+    return linkId;
+  } catch (err) {
+    console.warn(`[rss] autoIngest failed for "${article.title}":`, err.message);
+    return null;
+  }
+}
+
+async function fetchAndParseFeed(feedUrl, env) {
+  const parsedUrl = new URL(feedUrl);
+  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+    throw new Error('Only HTTP and HTTPS URLs are allowed');
+  }
+
+  const isSafe = await isSafeExternalUrl(parsedUrl, env);
+  if (!isSafe) {
+    const err = new Error(`Blocked by SSRF filter: ${parsedUrl.hostname} is not a public host`);
+    err.code = 'SSRF_BLOCKED';
+    throw err;
+  }
+
+  const res = await fetchWithTimeout(feedUrl, {
+    env,
+    headers: {
+      'User-Agent': 'FreshRSS-Athena/1.0 (+https://athena.juznem.eu.org)',
+      'Accept': 'application/rss+xml, application/atom+xml, application/xml, text/xml, application/json, text/html'
+    }
+  }, 15_000);
+
+  if (!res.ok) {
+    throw new Error(`Feed HTTP request failed with status ${res.status}`);
+  }
+
+  const text = await res.text();
+  return parseFeed(text);
+}
+
+async function handleGetFeedSources(url, user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  await ensureFeedTables(env);
+
+  const communityId = url.searchParams.get('community_id') || '';
+  if (!communityId) {
+    return Response.json({ success: true, categories: [], total_unread: 0, total_starred: 0 }, { headers: corsHeaders });
+  }
+
+  const feedsRes = await env.DB.prepare(
+    `SELECT f.*,
+       (SELECT COUNT(*) FROM rss_articles a
+        LEFT JOIN rss_article_states s ON s.article_id = a.id AND s.user_id = ?
+        WHERE a.feed_id = f.id AND (s.is_read IS NULL OR s.is_read = 0)) AS unread_count,
+       (SELECT COUNT(*) FROM rss_articles a WHERE a.feed_id = f.id) AS total_count
+     FROM rss_feeds f
+     WHERE f.community_id = ?
+     ORDER BY f.category ASC, f.title ASC`
+  ).bind(user.id, communityId).all();
+
+  const feeds = feedsRes.results || [];
+
+  const totalsRes = await env.DB.prepare(
+    `SELECT
+       (SELECT COUNT(*) FROM rss_articles a
+        JOIN rss_feeds f ON a.feed_id = f.id
+        LEFT JOIN rss_article_states s ON s.article_id = a.id AND s.user_id = ?
+        WHERE f.community_id = ? AND (s.is_read IS NULL OR s.is_read = 0)) AS total_unread,
+       (SELECT COUNT(*) FROM rss_articles a
+        JOIN rss_feeds f ON a.feed_id = f.id
+        JOIN rss_article_states s ON s.article_id = a.id AND s.user_id = ?
+        WHERE f.community_id = ? AND s.is_starred = 1) AS total_starred`
+  ).bind(user.id, communityId, user.id, communityId).first();
+
+  const categoryMap = new Map();
+  for (const f of feeds) {
+    const catName = f.category || 'General';
+    if (!categoryMap.has(catName)) {
+      categoryMap.set(catName, { name: catName, unread_count: 0, feeds: [] });
+    }
+    const cat = categoryMap.get(catName);
+    cat.unread_count += Number(f.unread_count || 0);
+    cat.feeds.push({
+      id: f.id,
+      title: f.title,
+      description: f.description,
+      url: f.url,
+      site_url: f.site_url,
+      icon_url: f.icon_url,
+      category: f.category,
+      last_fetched_at: f.last_fetched_at,
+      fetch_status: f.fetch_status,
+      error_message: f.error_message,
+      unread_count: Number(f.unread_count || 0),
+      total_count: Number(f.total_count || 0)
+    });
+  }
+
+  const categories = Array.from(categoryMap.values());
+
+  return Response.json({
+    success: true,
+    categories,
+    total_unread: Number(totalsRes?.total_unread || 0),
+    total_starred: Number(totalsRes?.total_starred || 0)
+  }, { headers: corsHeaders });
+}
+
+async function handleGetFeedStreams(url, user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  await ensureFeedTables(env);
+
+  const communityId = url.searchParams.get('community_id') || '';
+  if (!communityId) {
+    return Response.json({ success: true, articles: [], total: 0, page: 1, limit: 30, total_pages: 0 }, { headers: corsHeaders });
+  }
+
+  const stream = url.searchParams.get('stream') || 'all';
+  const category = url.searchParams.get('category') || '';
+  const search = (url.searchParams.get('search') || '').trim();
+  const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10));
+  const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '30', 10)));
+  const offset = (page - 1) * limit;
+
+  const whereClauses = ['f.community_id = ?'];
+  const params = [communityId];
+
+  if (stream === 'unread') {
+    whereClauses.push('(s.is_read IS NULL OR s.is_read = 0)');
+  } else if (stream === 'starred') {
+    whereClauses.push('s.is_starred = 1');
+  } else if (stream !== 'all' && stream.length > 0) {
+    whereClauses.push('a.feed_id = ?');
+    params.push(stream);
+  }
+
+  if (category) {
+    whereClauses.push('f.category = ?');
+    params.push(category);
+  }
+
+  if (search) {
+    whereClauses.push('(a.title LIKE ? OR a.summary LIKE ? OR a.author LIKE ?)');
+    const term = `%${search}%`;
+    params.push(term, term, term);
+  }
+
+  const whereSql = whereClauses.join(' AND ');
+
+  const countSql = `
+    SELECT COUNT(*) as total
+    FROM rss_articles a
+    JOIN rss_feeds f ON a.feed_id = f.id
+    LEFT JOIN rss_article_states s ON s.article_id = a.id AND s.user_id = ?
+    WHERE ${whereSql}
+  `;
+  const countRes = await env.DB.prepare(countSql).bind(user.id, ...params).first();
+  const total = Number(countRes?.total || 0);
+
+  const selectSql = `
+    SELECT
+      a.id, a.feed_id, a.guid, a.url, a.title, a.author, a.summary, a.content,
+      a.image_url, a.published_at, a.created_at, a.link_id,
+      f.title AS feed_title, f.site_url AS feed_site_url, f.icon_url AS feed_icon_url, f.category AS feed_category,
+      COALESCE(s.is_read, 0) AS is_read,
+      COALESCE(s.is_starred, 0) AS is_starred
+    FROM rss_articles a
+    JOIN rss_feeds f ON a.feed_id = f.id
+    LEFT JOIN rss_article_states s ON s.article_id = a.id AND s.user_id = ?
+    WHERE ${whereSql}
+    ORDER BY a.published_at DESC
+    LIMIT ? OFFSET ?
+  `;
+
+  const articlesRes = await env.DB.prepare(selectSql).bind(user.id, ...params, limit, offset).all();
+  const articles = (articlesRes.results || []).map(row => ({
+    id: row.id,
+    feed_id: row.feed_id,
+    feed_title: row.feed_title,
+    feed_site_url: row.feed_site_url,
+    feed_icon_url: row.feed_icon_url,
+    feed_category: row.feed_category,
+    guid: row.guid,
+    url: row.url,
+    title: row.title,
+    author: row.author,
+    summary: row.summary,
+    content: row.content,
+    image_url: row.image_url,
+    published_at: Number(row.published_at),
+    created_at: Number(row.created_at),
+    link_id: row.link_id,
+    is_read: Number(row.is_read) === 1,
+    is_starred: Number(row.is_starred) === 1
+  }));
+
+  const totalPages = Math.ceil(total / limit) || 1;
+
+  return Response.json({
+    success: true,
+    articles,
+    total,
+    page,
+    limit,
+    total_pages: totalPages
+  }, { headers: corsHeaders });
+}
+
+async function handleAddFeed(request, user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  await ensureFeedTables(env);
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ success: false, error: 'Invalid JSON payload' }, { status: 400, headers: corsHeaders });
+  }
+
+  const { url: feedUrl, category = 'General', title: customTitle, community_id: communityId } = body;
+  if (!feedUrl || !communityId) {
+    return Response.json({ success: false, error: 'url and community_id are required' }, { status: 400, headers: corsHeaders });
+  }
+
+  const urlHash = generateUrlHash(feedUrl);
+
+  const existing = await env.DB.prepare(
+    'SELECT id, title FROM rss_feeds WHERE community_id = ? AND (url_hash = ? OR url = ?)'
+  ).bind(communityId, urlHash, feedUrl).first();
+
+  if (existing) {
+    return Response.json({
+      success: false,
+      duplicate: true,
+      error: `Feed is already added (${existing.title})`,
+      code: 'DUPLICATE_FEED',
+      existing_id: existing.id
+    }, { status: 409, headers: corsHeaders });
+  }
+
+  let parsed;
+  try {
+    parsed = await fetchAndParseFeed(feedUrl, env);
+  } catch (err) {
+    return Response.json({
+      success: false,
+      error: `Failed to fetch or parse feed: ${err.message}`,
+      code: err.code || 'FEED_FETCH_ERROR'
+    }, { status: 400, headers: corsHeaders });
+  }
+
+  const feedId = 'feed_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const now = Date.now();
+  const feedTitle = (customTitle && customTitle.trim()) || parsed.title || 'Untitled Feed';
+  const siteUrl = parsed.siteUrl || '';
+  const iconUrl = parsed.iconUrl || `https://www.google.com/s2/favicons?domain=${encodeURIComponent(siteUrl || feedUrl)}&sz=64`;
+
+  await env.DB.prepare(
+    `INSERT INTO rss_feeds (id, community_id, user_id, url, url_hash, title, description, site_url, category, icon_url, last_fetched_at, fetch_status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?)`
+  ).bind(
+    feedId, communityId, user.id, feedUrl, urlHash, feedTitle,
+    parsed.description || '', siteUrl, category.trim() || 'General', iconUrl, now, now
+  ).run();
+
+  const feedMeta = {
+    id: feedId,
+    community_id: communityId,
+    user_id: user.id,
+    title: feedTitle,
+    category: category.trim() || 'General'
+  };
+
+  let newArticlesCount = 0;
+  const initialArticles = (parsed.articles || []).slice(0, 50);
+
+  for (const art of initialArticles) {
+    const artId = 'art_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    const artUrlHash = generateUrlHash(art.url || art.guid);
+    const linkId = await autoIngestRssArticle(env, art, feedMeta, user);
+
+    try {
+      await env.DB.prepare(
+        `INSERT INTO rss_articles (id, feed_id, community_id, guid, url, url_hash, title, author, summary, content, image_url, published_at, created_at, link_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        artId, feedId, communityId, art.guid, art.url, artUrlHash, art.title,
+        art.author || null, art.summary || null, art.content || null, art.imageUrl || null,
+        art.publishedAt || now, now, linkId || null
+      ).run();
+      newArticlesCount++;
+    } catch (_) {}
+  }
+
+  return Response.json({
+    success: true,
+    feed: {
+      id: feedId,
+      title: feedTitle,
+      url: feedUrl,
+      category: category.trim() || 'General',
+      articles_count: newArticlesCount
+    }
+  }, { headers: corsHeaders });
+}
+
+async function handleRefreshFeeds(request, user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  await ensureFeedTables(env);
+
+  let body = {};
+  try { body = await request.json(); } catch (_) {}
+
+  const { feed_id: feedId, community_id: communityId } = body;
+  let feedsToRefresh = [];
+
+  if (feedId) {
+    const f = await env.DB.prepare('SELECT * FROM rss_feeds WHERE id = ?').bind(feedId).first();
+    if (f) feedsToRefresh.push(f);
+  } else if (communityId) {
+    const res = await env.DB.prepare('SELECT * FROM rss_feeds WHERE community_id = ?').bind(communityId).all();
+    feedsToRefresh = res.results || [];
+  } else {
+    const res = await env.DB.prepare('SELECT * FROM rss_feeds').all();
+    feedsToRefresh = res.results || [];
+  }
+
+  let totalNewArticles = 0;
+  const now = Date.now();
+
+  for (const f of feedsToRefresh) {
+    try {
+      const parsed = await fetchAndParseFeed(f.url, env);
+      for (const art of (parsed.articles || [])) {
+        const exists = await env.DB.prepare(
+          'SELECT id FROM rss_articles WHERE feed_id = ? AND guid = ?'
+        ).bind(f.id, art.guid).first();
+
+        if (!exists) {
+          const artId = 'art_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+          const artUrlHash = generateUrlHash(art.url || art.guid);
+          const linkId = await autoIngestRssArticle(env, art, f, user);
+
+          await env.DB.prepare(
+            `INSERT INTO rss_articles (id, feed_id, community_id, guid, url, url_hash, title, author, summary, content, image_url, published_at, created_at, link_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(
+            artId, f.id, f.community_id, art.guid, art.url, artUrlHash, art.title,
+            art.author || null, art.summary || null, art.content || null, art.imageUrl || null,
+            art.publishedAt || now, now, linkId || null
+          ).run();
+
+          totalNewArticles++;
+        }
+      }
+
+      await env.DB.prepare(
+        'UPDATE rss_feeds SET last_fetched_at = ?, fetch_status = ?, error_message = NULL WHERE id = ?'
+      ).bind(now, 'ok', f.id).run();
+    } catch (err) {
+      console.warn(`[rss] refresh error for feed ${f.id} (${f.url}):`, err.message);
+      try {
+        await env.DB.prepare(
+          'UPDATE rss_feeds SET last_fetched_at = ?, fetch_status = ?, error_message = ? WHERE id = ?'
+        ).bind(now, 'error', err.message || 'Fetch failed', f.id).run();
+      } catch (_) {}
+    }
+  }
+
+  return Response.json({
+    success: true,
+    updated_feeds: feedsToRefresh.length,
+    new_articles_count: totalNewArticles
+  }, { headers: corsHeaders });
+}
+
+async function handleDeleteFeed(request, user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  await ensureFeedTables(env);
+
+  let body;
+  try { body = await request.json(); } catch {
+    return Response.json({ success: false, error: 'Invalid JSON payload' }, { status: 400, headers: corsHeaders });
+  }
+
+  const { feed_id: feedId } = body;
+  if (!feedId) {
+    return Response.json({ success: false, error: 'feed_id is required' }, { status: 400, headers: corsHeaders });
+  }
+
+  try {
+    await env.DB.prepare(
+      'DELETE FROM rss_article_states WHERE article_id IN (SELECT id FROM rss_articles WHERE feed_id = ?)'
+    ).bind(feedId).run();
+  } catch (_) {}
+
+  await env.DB.prepare('DELETE FROM rss_articles WHERE feed_id = ?').bind(feedId).run();
+  await env.DB.prepare('DELETE FROM rss_feeds WHERE id = ?').bind(feedId).run();
+
+  return Response.json({ success: true, deleted_feed_id: feedId }, { headers: corsHeaders });
+}
+
+async function handlePatchFeedArticle(request, user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  await ensureFeedTables(env);
+
+  let body;
+  try { body = await request.json(); } catch {
+    return Response.json({ success: false, error: 'Invalid JSON payload' }, { status: 400, headers: corsHeaders });
+  }
+
+  const { article_id: articleId, is_read, is_starred } = body;
+  if (!articleId) {
+    return Response.json({ success: false, error: 'article_id is required' }, { status: 400, headers: corsHeaders });
+  }
+
+  const now = Date.now();
+  const existing = await env.DB.prepare(
+    'SELECT is_read, is_starred FROM rss_article_states WHERE article_id = ? AND user_id = ?'
+  ).bind(articleId, user.id).first();
+
+  const newRead = is_read !== undefined ? (is_read ? 1 : 0) : (existing ? existing.is_read : 0);
+  const newStarred = is_starred !== undefined ? (is_starred ? 1 : 0) : (existing ? existing.is_starred : 0);
+
+  await env.DB.prepare(
+    `INSERT OR REPLACE INTO rss_article_states (article_id, user_id, is_read, is_starred, updated_at)
+     VALUES (?, ?, ?, ?, ?)`
+  ).bind(articleId, user.id, newRead, newStarred, now).run();
+
+  return Response.json({
+    success: true,
+    article_id: articleId,
+    is_read: newRead === 1,
+    is_starred: newStarred === 1
+  }, { headers: corsHeaders });
+}
+
+async function handleMarkAllArticlesRead(request, user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  await ensureFeedTables(env);
+
+  let body = {};
+  try { body = await request.json(); } catch (_) {}
+
+  const { feed_id: feedId, category, community_id: communityId } = body;
+  if (!communityId) {
+    return Response.json({ success: false, error: 'community_id is required' }, { status: 400, headers: corsHeaders });
+  }
+
+  let sql = `
+    SELECT a.id FROM rss_articles a
+    JOIN rss_feeds f ON a.feed_id = f.id
+    LEFT JOIN rss_article_states s ON s.article_id = a.id AND s.user_id = ?
+    WHERE f.community_id = ? AND (s.is_read IS NULL OR s.is_read = 0)
+  `;
+  const params = [user.id, communityId];
+
+  if (feedId) {
+    sql += ' AND a.feed_id = ?';
+    params.push(feedId);
+  } else if (category) {
+    sql += ' AND f.category = ?';
+    params.push(category);
+  }
+
+  const unreadRes = await env.DB.prepare(sql).bind(...params).all();
+  const unreadIds = (unreadRes.results || []).map(r => r.id);
+  const now = Date.now();
+
+  for (const id of unreadIds) {
+    await env.DB.prepare(
+      `INSERT OR REPLACE INTO rss_article_states (article_id, user_id, is_read, is_starred, updated_at)
+       VALUES (?, ?, 1, COALESCE((SELECT is_starred FROM rss_article_states WHERE article_id = ? AND user_id = ?), 0), ?)`
+    ).bind(id, user.id, id, user.id, now).run();
+  }
+
+  return Response.json({ success: true, marked_count: unreadIds.length }, { headers: corsHeaders });
+}
+
+async function handleOpmlImport(request, user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  await ensureFeedTables(env);
+
+  let body;
+  try { body = await request.json(); } catch {
+    return Response.json({ success: false, error: 'Invalid JSON payload' }, { status: 400, headers: corsHeaders });
+  }
+
+  const { opml_text: opmlText, community_id: communityId } = body;
+  if (!opmlText || !communityId) {
+    return Response.json({ success: false, error: 'opml_text and community_id are required' }, { status: 400, headers: corsHeaders });
+  }
+
+  const outlines = parseOpml(opmlText);
+  let importedCount = 0;
+
+  for (const out of outlines) {
+    const urlHash = generateUrlHash(out.xmlUrl);
+    const existing = await env.DB.prepare(
+      'SELECT id FROM rss_feeds WHERE community_id = ? AND (url_hash = ? OR url = ?)'
+    ).bind(communityId, urlHash, out.xmlUrl).first();
+
+    if (!existing) {
+      const feedId = 'feed_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      const now = Date.now();
+      const siteUrl = out.htmlUrl || '';
+      const iconUrl = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(siteUrl || out.xmlUrl)}&sz=64`;
+
+      await env.DB.prepare(
+        `INSERT INTO rss_feeds (id, community_id, user_id, url, url_hash, title, description, site_url, category, icon_url, last_fetched_at, fetch_status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'ok', ?)`
+      ).bind(
+        feedId, communityId, user.id, out.xmlUrl, urlHash, out.title,
+        '', siteUrl, out.category || 'General', iconUrl, now
+      ).run();
+
+      importedCount++;
+    }
+  }
+
+  return Response.json({
+    success: true,
+    imported_count: importedCount,
+    total_outlines: outlines.length
+  }, { headers: corsHeaders });
+}
+
+async function handleOpmlExport(url, user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  await ensureFeedTables(env);
+
+  const communityId = url.searchParams.get('community_id') || '';
+  const feedsRes = await env.DB.prepare(
+    'SELECT * FROM rss_feeds WHERE community_id = ? ORDER BY category, title'
+  ).bind(communityId).all();
+
+  const feeds = feedsRes.results || [];
+  const xml = generateOpml(feeds, 'Athena RSS Subscriptions');
+
+  return new Response(xml, {
+    status: 200,
+    headers: {
+      ...corsHeaders,
+      'Content-Type': 'application/xml; charset=utf-8',
+      'Content-Disposition': 'attachment; filename="athena-subscriptions.opml"'
+    }
+  });
+}
+
+async function refreshAllFeedsJob(env) {
+  await ensureFeedTables(env);
+  try {
+    const feedsRes = await env.DB.prepare('SELECT * FROM rss_feeds').all();
+    const feeds = feedsRes.results || [];
+    let newTotal = 0;
+    const now = Date.now();
+
+    for (const f of feeds) {
+      try {
+        const parsed = await fetchAndParseFeed(f.url, env);
+        for (const art of (parsed.articles || []).slice(0, 30)) {
+          const exists = await env.DB.prepare(
+            'SELECT id FROM rss_articles WHERE feed_id = ? AND guid = ?'
+          ).bind(f.id, art.guid).first();
+
+          if (!exists) {
+            const artId = 'art_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+            const artUrlHash = generateUrlHash(art.url || art.guid);
+            const linkId = await autoIngestRssArticle(env, art, f, { id: f.user_id, display_name: f.title });
+
+            await env.DB.prepare(
+              `INSERT INTO rss_articles (id, feed_id, community_id, guid, url, url_hash, title, author, summary, content, image_url, published_at, created_at, link_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ).bind(
+              artId, f.id, f.community_id, art.guid, art.url, artUrlHash, art.title,
+              art.author || null, art.summary || null, art.content || null, art.imageUrl || null,
+              art.publishedAt || now, now, linkId || null
+            ).run();
+            newTotal++;
+          }
+        }
+
+        await env.DB.prepare('UPDATE rss_feeds SET last_fetched_at = ?, fetch_status = ? WHERE id = ?')
+          .bind(now, 'ok', f.id).run();
+      } catch (err) {
+        console.warn(`[rss-job] feed refresh failed for ${f.id}:`, err.message);
+      }
+    }
+    if (newTotal > 0) {
+      console.log(`[rss-job] ingested ${newTotal} new RSS articles into Athena.`);
+    }
+  } catch (err) {
+    console.error('[rss-job] background refresh error:', err.message);
+  }
 }
 
 async function handleAdminGetLinks(url, user, env, corsHeaders) {
@@ -20110,4 +20837,16 @@ export {
   validateWikiShareToken,
   setShimToken,
   getShimToken,
+  ensureFeedTables,
+  refreshAllFeedsJob,
+  handleGetFeedSources,
+  handleGetFeedStreams,
+  handleAddFeed,
+  handleRefreshFeeds,
+  handleDeleteFeed,
+  handlePatchFeedArticle,
+  handleMarkAllArticlesRead,
+  handleOpmlImport,
+  handleOpmlExport,
+  autoIngestRssArticle,
 };

@@ -29,8 +29,8 @@
       }
     })();
   </script>
-<link rel="stylesheet" href="./src/style.css?v=1.0.67">
-<link rel="stylesheet" href="./src/themes.css?v=1.0.67">
+<link rel="stylesheet" href="./src/style.css?v=1.0.68">
+<link rel="stylesheet" href="./src/themes.css?v=1.0.68">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -88,6 +88,11 @@
       <button type="button" id="wikiNavBtn" class="icon-btn wiki-nav-btn" title="Wiki Directory" aria-label="Wiki Directory">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
         <span class="wiki-nav-label">Wiki</span>
+      </button>
+      <button type="button" id="feedNavBtn" class="icon-btn feed-nav-btn" title="Feed Reader (FreshRSS)" aria-label="Feed Reader">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 11a9 9 0 0 1 9 9"></path><path d="M4 4a16 16 0 0 1 16 16"></path><circle cx="5" cy="19" r="1.5"></circle></svg>
+        <span class="feed-nav-label">Feed</span>
+        <span id="feedNavBadge" class="feed-nav-badge hidden">0</span>
       </button>
       <div class="mode-badge" id="modeBadge">
         <span class="pulse-dot" id="modePulse"></span>
@@ -430,6 +435,216 @@
           </div>
         </div>
       </section>
+
+      <!-- FreshRSS 1:1 Feed Section -->
+      <section id="feedView" class="freshrss-view hidden" aria-label="FreshRSS Feed Reader">
+        <!-- FreshRSS Top Navigation Bar -->
+        <header class="freshrss-header">
+          <div class="freshrss-header-left">
+            <button type="button" id="freshrssToggleSidebarBtn" class="icon-btn freshrss-icon-btn" title="Toggle Feeds Sidebar" aria-label="Toggle Feeds Sidebar">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+            </button>
+            <div class="freshrss-brand">
+              <span class="freshrss-brand-badge" aria-hidden="true">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#ff7700" stroke-width="2.5"><path d="M4 11a9 9 0 0 1 9 9"></path><path d="M4 4a16 16 0 0 1 16 16"></path><circle cx="5" cy="19" r="1.5" fill="#ff7700"></circle></svg>
+              </span>
+              <div class="freshrss-title-block">
+                <span class="freshrss-brand-name">FreshRSS</span>
+                <h2 id="freshrssStreamTitle" class="freshrss-stream-title">Main stream</h2>
+              </div>
+            </div>
+          </div>
+
+          <div class="freshrss-header-center">
+            <!-- View Mode Selector -->
+            <div class="freshrss-view-modes" role="group" aria-label="View Mode">
+              <button type="button" id="freshrssViewNormalBtn" class="freshrss-mode-btn active" title="Normal View (Expanded Cards)" aria-label="Normal View">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+                <span>Normal</span>
+              </button>
+              <button type="button" id="freshrssViewReaderBtn" class="freshrss-mode-btn" title="Reader View (Full Reading Mode)" aria-label="Reader View">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+                <span>Reader</span>
+              </button>
+              <button type="button" id="freshrssViewListBtn" class="freshrss-mode-btn" title="List View (Compact)" aria-label="List View">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                <span>List</span>
+              </button>
+            </div>
+
+            <!-- State Filter -->
+            <div class="freshrss-filter-wrap">
+              <select id="freshrssStateFilter" class="input input-sm freshrss-select" aria-label="Filter status">
+                <option value="all">All articles</option>
+                <option value="unread" selected>Unread only</option>
+                <option value="starred">Favorites (Starred)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="freshrss-header-right">
+            <!-- Search -->
+            <div class="freshrss-search-wrap">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+              <input type="text" id="freshrssSearchInput" placeholder="Filter stream…" autocomplete="off">
+              <button type="button" id="freshrssClearSearchBtn" class="clear-btn hidden" aria-label="Clear search">&times;</button>
+            </div>
+
+            <!-- Actions -->
+            <button type="button" id="freshrssMarkAllReadBtn" class="icon-btn freshrss-icon-btn" title="Mark all as read" aria-label="Mark all as read">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="20 6 9 17 4 12"/></svg>
+            </button>
+            <button type="button" id="freshrssRefreshBtn" class="icon-btn freshrss-icon-btn" title="Refresh feeds &amp; ingest new articles" aria-label="Refresh feeds">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+            </button>
+            <button type="button" id="freshrssAddFeedBtn" class="btn btn-secondary btn-sm freshrss-add-btn" title="Subscribe to RSS / Atom feed">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+              <span>Add Feed</span>
+            </button>
+            <button type="button" id="freshrssCloseBtn" class="icon-btn freshrss-icon-btn" title="Back to Search" aria-label="Close Feed Reader">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
+          </div>
+        </header>
+
+        <!-- FreshRSS Layout Body -->
+        <div class="freshrss-layout">
+          <!-- Left Sidebar -->
+          <aside id="freshrssSidebar" class="freshrss-sidebar">
+            <div class="freshrss-sidebar-inner">
+              <div class="freshrss-nav-section">
+                <button type="button" class="freshrss-nav-item active" data-stream="all" id="freshrssNavMain">
+                  <span class="freshrss-nav-icon">🔥</span>
+                  <span class="freshrss-nav-label">Main stream</span>
+                  <span id="freshrssMainUnreadCount" class="freshrss-badge">0</span>
+                </button>
+                <button type="button" class="freshrss-nav-item" data-stream="starred" id="freshrssNavStarred">
+                  <span class="freshrss-nav-icon">⭐</span>
+                  <span class="freshrss-nav-label">Favorites</span>
+                  <span id="freshrssStarredCount" class="freshrss-badge freshrss-badge-muted">0</span>
+                </button>
+              </div>
+
+              <!-- Community Selector in Sidebar -->
+              <div class="freshrss-community-selector-wrap">
+                <label for="freshrssCommunitySelect">Community Feeds</label>
+                <select id="freshrssCommunitySelect" class="input input-sm"></select>
+              </div>
+
+              <div class="freshrss-categories-heading">
+                <span>Categories &amp; Feeds</span>
+              </div>
+
+              <!-- Tree -->
+              <div id="freshrssCategoriesTree" class="freshrss-categories-tree">
+                <div class="freshrss-loading-feeds">Loading subscriptions…</div>
+              </div>
+
+              <!-- Sidebar Footer -->
+              <div class="freshrss-sidebar-footer">
+                <button type="button" id="freshrssSidebarAddBtn" class="btn btn-secondary btn-sm btn-block">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                  <span>Add subscription</span>
+                </button>
+                <div class="freshrss-opml-btns">
+                  <button type="button" id="freshrssOpmlImportBtn" class="btn-text-sm" title="Import OPML subscriptions">Import OPML</button>
+                  <span class="freshrss-opml-divider">·</span>
+                  <button type="button" id="freshrssOpmlExportBtn" class="btn-text-sm" title="Export subscriptions as OPML">Export OPML</button>
+                </div>
+              </div>
+            </div>
+          </aside>
+          <div id="freshrssSidebarBackdrop" class="freshrss-sidebar-backdrop hidden"></div>
+
+          <!-- Main Stream Area -->
+          <main class="freshrss-stream-container">
+            <div class="freshrss-stream-meta-bar">
+              <div class="freshrss-stream-meta-left">
+                <span id="freshrssStreamBreadcrumb" class="freshrss-breadcrumb">Main stream</span>
+                <span id="freshrssArticleCounts" class="freshrss-counts-pill">0 articles</span>
+              </div>
+              <div class="freshrss-stream-meta-right">
+                <span class="freshrss-sync-indicator" id="freshrssSyncIndicator">
+                  <span class="freshrss-sync-dot"></span>
+                  <span>Auto-sync with Athena brain</span>
+                </span>
+              </div>
+            </div>
+
+            <!-- Articles List -->
+            <div id="freshrssArticlesList" class="freshrss-articles-list view-normal">
+              <div class="freshrss-loading-articles">
+                <div class="freshrss-spinner"></div>
+                <p>Loading articles…</p>
+              </div>
+            </div>
+
+            <!-- Pagination / Load more -->
+            <div id="freshrssPagination" class="freshrss-pagination hidden">
+              <button type="button" id="freshrssLoadMoreBtn" class="btn btn-secondary btn-sm">Load more articles</button>
+              <span id="freshrssPageInfo" class="freshrss-page-info">Page 1 of 1</span>
+            </div>
+          </main>
+        </div>
+
+        <!-- Add Feed Modal Dialog -->
+        <div id="freshrssAddModal" class="freshrss-modal-overlay hidden">
+          <div class="freshrss-modal-card">
+            <div class="freshrss-modal-header">
+              <h3>Add Feed Subscription</h3>
+              <button type="button" id="freshrssCloseAddModalBtn" class="icon-btn">&times;</button>
+            </div>
+            <form id="freshrssAddFeedForm" class="freshrss-modal-form">
+              <div class="form-group">
+                <label for="freshrssFeedUrlInput">Feed URL (RSS, Atom, or JSON Feed) *</label>
+                <input type="url" id="freshrssFeedUrlInput" class="input" placeholder="https://example.com/feed.xml" required autocomplete="off">
+                <span class="form-hint">Supports RSS 2.0, Atom 1.0, and JSON Feed formats.</span>
+              </div>
+              <div class="form-group">
+                <label for="freshrssCategoryInput">Category</label>
+                <input type="text" id="freshrssCategoryInput" class="input" placeholder="e.g. Technology, News, AI" list="freshrssCategoryList" autocomplete="off">
+                <datalist id="freshrssCategoryList"></datalist>
+              </div>
+              <div class="form-group">
+                <label for="freshrssCustomTitleInput">Custom Title (optional)</label>
+                <input type="text" id="freshrssCustomTitleInput" class="input" placeholder="Leave empty to use feed title" autocomplete="off">
+              </div>
+              <div class="freshrss-ingest-note">
+                <span class="note-icon">💡</span>
+                <p>New articles will automatically be ingested into Athena's link archive and tagged for search &amp; AI retrieval.</p>
+              </div>
+              <div id="freshrssAddFeedError" class="auth-error hidden"></div>
+              <div class="freshrss-modal-actions">
+                <button type="button" id="freshrssCancelAddBtn" class="btn btn-secondary">Cancel</button>
+                <button type="submit" id="freshrssSubmitAddBtn" class="btn btn-primary">Subscribe</button>
+              </div>
+            </form>
+          </div>
+        </div>
+
+        <!-- OPML Import Modal Dialog -->
+        <div id="freshrssOpmlModal" class="freshrss-modal-overlay hidden">
+          <div class="freshrss-modal-card">
+            <div class="freshrss-modal-header">
+              <h3>Import OPML Subscriptions</h3>
+              <button type="button" id="freshrssCloseOpmlModalBtn" class="icon-btn">&times;</button>
+            </div>
+            <div class="freshrss-modal-form">
+              <p class="section-desc">Upload an OPML export file from FreshRSS, Feedly, Inoreader, or any standard RSS reader.</p>
+              <div class="form-group">
+                <label for="freshrssOpmlFileInput">Choose .opml or .xml file</label>
+                <input type="file" id="freshrssOpmlFileInput" class="input" accept=".opml,.xml">
+              </div>
+              <div id="freshrssOpmlError" class="auth-error hidden"></div>
+              <div id="freshrssOpmlStatus" class="upload-status"></div>
+              <div class="freshrss-modal-actions">
+                <button type="button" id="freshrssCancelOpmlBtn" class="btn btn-secondary">Cancel</button>
+                <button type="button" id="freshrssSubmitOpmlBtn" class="btn btn-primary">Import Feeds</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
     </main>
 
     <div class="scope-switch-container">
@@ -710,9 +925,9 @@
     </div>
   </div>
 
-  <script src="./src/lib/dedupe.js?v=1.0.67"></script>
-  <script src="./src/lib/search.js?v=1.0.67"></script>
-  <script src="./src/lib/ai.js?v=1.0.67"></script>
-  <script src="./src/main.js?v=1.0.67"></script>
+  <script src="./src/lib/dedupe.js?v=1.0.68"></script>
+  <script src="./src/lib/search.js?v=1.0.68"></script>
+  <script src="./src/lib/ai.js?v=1.0.68"></script>
+  <script src="./src/main.js?v=1.0.68"></script>
 </body>
 </html>
