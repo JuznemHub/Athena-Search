@@ -4,7 +4,11 @@ import {
   notifyCommunityStaff,
   handlePatchCommunityLink,
   handlePatchPersonalLink,
-  handleDeletePersonalLink
+  handleDeletePersonalLink,
+  structureDatabase,
+  urlQualityScore,
+  pickBestFormattedRow,
+  generateUrlHash
 } from '../worker/index.js';
 
 function makeMockDb() {
@@ -108,15 +112,15 @@ function makeMockDb() {
   return {
     prepare(sql) {
       const execute = (...args) => ({
-        first() {
+        async first() {
           const stmt = db.prepare(sql);
           return stmt.get(...args) || null;
         },
-        all() {
+        async all() {
           const stmt = db.prepare(sql);
           return { results: stmt.all(...args) };
         },
-        run() {
+        async run() {
           const stmt = db.prepare(sql);
           const info = stmt.run(...args);
           return { changes: info.changes };
@@ -126,9 +130,9 @@ function makeMockDb() {
         bind(...args) {
           return execute(...args);
         },
-        first() { return execute().first(); },
-        all() { return execute().all(); },
-        run() { return execute().run(); }
+        async first() { return execute().first(); },
+        async all() { return execute().all(); },
+        async run() { return execute().run(); }
       };
     }
   };
@@ -309,7 +313,123 @@ async function runTests() {
     const deletedRow = await mockDb.prepare('SELECT * FROM personal_links WHERE id = ?').bind('plink_1').first();
     assert.equal(deletedRow, null, 'GOD must be able to delete personal link');
 
-    console.log('reporting and editing tests passed');
+    // Test 6: URL Quality Scoring
+    assert.ok(urlQualityScore('https://github.com/jaywcjlove/key-clicker') >= 100, 'GitHub repository should have high content score');
+    assert.equal(urlQualityScore('https://telegra.ph/file/0123456789.png'), 10, 'Direct image asset should have low score');
+    assert.equal(urlQualityScore('https://t.me/c/12345678/90'), 15, 'Internal telegram link should have low score');
+    assert.equal(urlQualityScore('https://t.me/channelname/123'), 25, 'Telegram channel post should have post score');
+    assert.equal(urlQualityScore('https://example.com/test'), 5, 'Example placeholder host should have lowest score');
+
+    // Test 7: pickBestFormattedRow prefers content destination over image asset and dead links
+    const contentRow = { url: 'https://github.com/jaywcjlove/key-clicker', title: 'key-clicker', created_at: 1000 };
+    const imageRow = { url: 'https://telegra.ph/file/keyclicker.png', title: 'Screenshot', created_at: 900 };
+    const bestRes = pickBestFormattedRow(contentRow, imageRow);
+    assert.equal(bestRes.keep.url, 'https://github.com/jaywcjlove/key-clicker', 'Content URL must be kept over image asset');
+
+    // Test 8: Structure database duplicate consolidation for https://github.com/jaywcjlove/key-clicker
+    await mockDb.prepare(`
+      INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, image_url, added_by, upvotes, downvotes, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      'link_kc_main',
+      'comm_test',
+      'https://github.com/jaywcjlove/key-clicker',
+      generateUrlHash('https://github.com/jaywcjlove/key-clicker'),
+      'key-clicker',
+      'Keyboard key clicker test tool',
+      JSON.stringify(['github', 'keyboard']),
+      null,
+      'member_alice',
+      4,
+      0,
+      2000
+    ).run();
+
+    await mockDb.prepare(`
+      INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, image_url, added_by, upvotes, downvotes, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      'link_kc_img',
+      'comm_test',
+      'https://telegra.ph/file/keyclicker_snap.png',
+      generateUrlHash('https://telegra.ph/file/keyclicker_snap.png'),
+      'Key Clicker Screenshot',
+      'Preview snapshot for https://github.com/jaywcjlove/key-clicker',
+      JSON.stringify(['screenshot']),
+      'https://telegra.ph/file/keyclicker_snap.png',
+      'member_bob',
+      2,
+      1,
+      2100
+    ).run();
+
+    await mockDb.prepare(`
+      INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, image_url, added_by, upvotes, downvotes, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      'link_kc_tg',
+      'comm_test',
+      'https://t.me/c/123456789/456',
+      generateUrlHash('https://t.me/c/123456789/456'),
+      'Key Clicker Message',
+      'Download here https://github.com/jaywcjlove/key-clicker',
+      JSON.stringify(['tools']),
+      null,
+      'member_alice',
+      1,
+      0,
+      2200
+    ).run();
+
+    const structStats = await structureDatabase(env, { scope: 'community', scopeId: 'comm_test' });
+    assert.ok(structStats.merged >= 2, 'Structure pass must merge the two duplicate rows');
+
+    const remainingKcRows = (await mockDb.prepare(
+      `SELECT * FROM links WHERE community_id = 'comm_test' AND (url LIKE '%key-clicker%' OR notes LIKE '%key-clicker%')`
+    ).all()).results;
+
+    assert.equal(remainingKcRows.length, 1, 'Only one link must remain for key-clicker');
+    const survivor = remainingKcRows[0];
+    assert.equal(survivor.id, 'link_kc_main', 'Primary content link must be the surviving record');
+    assert.equal(survivor.url, 'https://github.com/jaywcjlove/key-clicker', 'Surviving URL must be the proper repository URL');
+    assert.equal(survivor.image_url, 'https://telegra.ph/file/keyclicker_snap.png', 'Artwork from image asset must be preserved on survivor');
+    assert.equal(survivor.upvotes, 7, 'Upvotes from merged rows must be folded into survivor (4 + 2 + 1 = 7)');
+    assert.equal(survivor.downvotes, 1, 'Downvotes from merged rows must be folded into survivor (0 + 1 + 0 = 1)');
+    const survivorTags = JSON.parse(survivor.tags || '[]');
+    assert.ok(survivorTags.includes('github') && survivorTags.includes('screenshot') && survivorTags.includes('tool'), 'Tags must be combined across merged links');
+
+    const deletedImg = await mockDb.prepare('SELECT id FROM links WHERE id = ?').bind('link_kc_img').first();
+    assert.equal(deletedImg, null, 'Inferior image link must be deleted');
+    const deletedTg = await mockDb.prepare('SELECT id FROM links WHERE id = ?').bind('link_kc_tg').first();
+    assert.equal(deletedTg, null, 'Inferior telegram link must be deleted');
+
+    // Test 9: Standalone row promotion
+    await mockDb.prepare(`
+      INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, image_url, added_by, upvotes, downvotes, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      'link_standalone_promo',
+      'comm_test',
+      'https://telegra.ph/file/standalone_tool.png',
+      generateUrlHash('https://telegra.ph/file/standalone_tool.png'),
+      'Standalone Tool',
+      'Source code available at https://github.com/testorg/standalone-app',
+      JSON.stringify(['utility']),
+      null,
+      'member_alice',
+      1,
+      0,
+      3000
+    ).run();
+
+    await structureDatabase(env, { scope: 'community', scopeId: 'comm_test' });
+
+    const promotedRow = await mockDb.prepare('SELECT * FROM links WHERE id = ?').bind('link_standalone_promo').first();
+    assert.equal(promotedRow.url, 'https://github.com/testorg/standalone-app', 'Standalone link must be promoted to the content destination URL');
+    assert.equal(promotedRow.image_url, 'https://telegra.ph/file/standalone_tool.png', 'Original image asset URL becomes image_url');
+    assert.equal(promotedRow.notes.includes('https://github.com/testorg/standalone-app'), false, 'Redundant bare URL must be cleaned from notes');
+
+    console.log('reporting, editing, and structure duplicate tests passed');
   } finally {
     globalThis.fetch = originalFetch;
   }

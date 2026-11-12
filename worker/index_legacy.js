@@ -14969,23 +14969,101 @@ function canonicalStoredUrl(urlStr) {
   try { return canonicalUrlForHash(s); } catch (_) { return s; }
 }
 
+function twinHashFor(rawUrl) {
+  try {
+    const twin = /^https:\/\//i.test(rawUrl)
+      ? String(rawUrl).replace(/^https:\/\//i, 'http://')
+      : String(rawUrl).replace(/^http:\/\//i, 'https://');
+    if (twin !== rawUrl) return generateUrlHash(twin);
+  } catch (_) {}
+  return null;
+}
+
+export function urlQualityScore(urlStr) {
+  if (!urlStr || typeof urlStr !== 'string') return 0;
+  const s = urlStr.trim();
+  if (!/^https?:\/\//i.test(s)) return 0;
+  let parsed;
+  try {
+    parsed = new URL(s);
+  } catch (_) {
+    return 0;
+  }
+  const host = (parsed.hostname || '').toLowerCase();
+  const path = (parsed.pathname || '').toLowerCase();
+
+  if (/^(?:localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|example\.(?:com|org|net)|test\.com|invalid)$/i.test(host)) {
+    return 5;
+  }
+  if (isDirectImageUrl(s)) {
+    return 10;
+  }
+  if (isInternalTelegramMessageUrl(s)) {
+    return 15;
+  }
+  if (/^(?:t\.me|telegram\.me|telegram\.dog)\/[^/]+\/\d+/i.test(host + path)) {
+    return 25;
+  }
+  if (/^(?:t\.me|telegram\.me|telegram\.dog)\//i.test(host + path)) {
+    return 40;
+  }
+  if (/^(?:bit\.ly|tinyurl\.com|t\.co|goo\.gl|ow\.ly|is\.gd|buff\.ly|adf\.ly|rb\.gy)$/i.test(host)) {
+    return 50;
+  }
+
+  let score = 100;
+  if (parsed.protocol === 'https:') score += 5;
+  if (path.length > 1 && path !== '/') score += 5;
+  return score;
+}
+
+export function pickBestFormattedRow(a, b) {
+  if (a.manual_edited_at && !b.manual_edited_at) return { keep: a, drop: b };
+  if (b.manual_edited_at && !a.manual_edited_at) return { keep: b, drop: a };
+
+  const scoreA = urlQualityScore(a.url);
+  const scoreB = urlQualityScore(b.url);
+  if (scoreA !== scoreB) {
+    return scoreA > scoreB ? { keep: a, drop: b } : { keep: b, drop: a };
+  }
+
+  const aGoodTitle = a.title && !isWeakTitle(a.title, a.url);
+  const bGoodTitle = b.title && !isWeakTitle(b.title, b.url);
+  if (aGoodTitle !== bGoodTitle) {
+    return aGoodTitle ? { keep: a, drop: b } : { keep: b, drop: a };
+  }
+
+  if (Boolean(a.image_url) !== Boolean(b.image_url)) {
+    return a.image_url ? { keep: a, drop: b } : { keep: b, drop: a };
+  }
+
+  const timeA = Number(a.created_at || 0);
+  const timeB = Number(b.created_at || 0);
+  if (timeA && timeB && timeA !== timeB) {
+    return timeA <= timeB ? { keep: a, drop: b } : { keep: b, drop: a };
+  }
+
+  return { keep: a, drop: b };
+}
+
 async function structureDatabase(env, { onProgress = null, scope = null, scopeId = null } = {}) {
   const stats = { scanned: 0, urlNormalized: 0, merged: 0, notesCleaned: 0, titlesCleaned: 0, tagsCleaned: 0, descFilled: 0, manualSkipped: 0, errors: 0 };
   const dirtyScopes = new Set();
   const markScopeDirty = (table, rowScopeId) => {
     if (rowScopeId != null && rowScopeId !== '') dirtyScopes.add(`${table === 'links' ? 'community' : 'personal'}:${rowScopeId}`);
   };
-  const nameRe = await loadLinkNamePattern(env);
+  const nameRe = await loadLinkNamePattern(env).catch(() => null);
   const aiCfg = await getInstanceAiConfig(env).catch(() => null);
   const tables = [
-    { name: 'links', scopeCol: 'community_id', cols: 'url, url_hash, title, notes, tags, created_at, upvotes, downvotes, manual_edited_at', want: !scope || scope === 'community' },
-    { name: 'personal_links', scopeCol: 'user_id', cols: 'url, url_hash, title, notes, tags, created_at, 0 AS upvotes, 0 AS downvotes, manual_edited_at', want: !scope || scope === 'personal' }
+    { name: 'links', scopeCol: 'community_id', cols: 'url, url_hash, title, notes, tags, image_url, created_at, upvotes, downvotes, manual_edited_at', want: !scope || scope === 'community' },
+    { name: 'personal_links', scopeCol: 'user_id', cols: 'url, url_hash, title, notes, tags, image_url, created_at, 0 AS upvotes, 0 AS downvotes, manual_edited_at', want: !scope || scope === 'personal' }
   ];
   for (const t of tables) {
     if (!t.want) continue;
     const scopeFilter = scope ? ` AND ${t.scopeCol} = ?` : '';
     const scopeParams = scope ? [scopeId] : [];
     let cursor = null;
+    const handledRowIds = new Set();
     for (;;) {
       let rows;
       try {
@@ -14996,85 +15074,218 @@ async function structureDatabase(env, { onProgress = null, scope = null, scopeId
       if (!rows.length) break;
       cursor = rows[rows.length - 1].id;
       for (let row of rows) {
+        if (handledRowIds.has(row.id)) continue;
         stats.scanned++;
-        // Hand-edited rows (/edit, website editor, admin DB) are never
-        // restructured — same lock as /forcetags. URL, title, notes and
-        // tags all stay exactly as the owner/admin left them.
         if (row.manual_edited_at) { stats.manualSkipped++; continue; }
         try {
           const originalUrl = row.url;
-          const normUrl = canonicalStoredUrl(row.url);
-          // Collision check on the normalized identity (unless this row already has it)
-          if (normUrl && normUrl !== row.url) {
-            const normHash = generateUrlHash(normUrl);
-            const legacy = legacyUrlHash(normUrl);
-            // personal_links has no vote columns — select neutral zeroes so
-            // the merge math below stays uniform across both tables.
-            const voteCols = t.name === 'links' ? 'upvotes, downvotes' : '0 AS upvotes, 0 AS downvotes';
-            const dup = await env.DB.prepare(
-              `SELECT id, url, title, notes, tags, ${voteCols}, created_at, manual_edited_at FROM ${t.name} WHERE ${t.scopeCol} = ? AND id != ? AND (url_hash = ? OR url_hash = ? OR url = ?) LIMIT 1`
-            ).bind(row.scope_id, row.id, normHash, legacy, normUrl).first();
-            if (dup) {
-              // A hand-edited row always survives a merge untouched: the
-              // other row is deleted, its votes folded in, fields kept.
-              if (dup.manual_edited_at || row.manual_edited_at) {
-                const keep = row.manual_edited_at ? row : dup;
-                const drop = keep.id === row.id ? dup : row;
-                if (t.name === 'links' && (drop.upvotes || drop.downvotes)) {
-                  await env.DB.prepare(
-                    `UPDATE ${t.name} SET upvotes = COALESCE(upvotes,0) + COALESCE(?,0), downvotes = COALESCE(downvotes,0) + COALESCE(?,0) WHERE id = ?`
-                  ).bind(Number(drop.upvotes || 0), Number(drop.downvotes || 0), keep.id).run().catch(() => {});
-                }
-                await env.DB.prepare(`DELETE FROM ${t.name} WHERE id = ?`).bind(drop.id).run();
-                stats.merged++;
-                markScopeDirty(t.name, row.scope_id);
-                row = { ...keep, url: keep.url, url_hash: keep.url_hash || generateUrlHash(keep.url) };
-                continue;
-              }
-              // Merge into the older row; the survivor is cleaned below like
-              // every other row, so merges never reintroduce junk tags and the
-              // survivor's own title/notes get cleaned too.
-              const rowOlder = Number(row.created_at || 0) <= Number(dup.created_at || 0);
-              const keep = rowOlder ? row : dup;
-              const drop = rowOlder ? dup : row;
-              const mergedTags = cleanTagsForStructure(
-                [...rowTagCandidates(dup), ...rowTagCandidates(row)],
-                keep.url, keep.title, keep.notes);
-              const keepUrl = canonicalStoredUrl(keep.url) || keep.url;
-              const keepTitle = cleanTitleText(keep.title)
-                || cleanTitleText(rowOlder ? dup.title : row.title);
-              const keepNotes = cleanAllNotes(keep.notes, keepUrl, keep.title, nameRe)
-                || cleanAllNotes(rowOlder ? dup.notes : row.notes, keepUrl, keep.title, nameRe);
-              // Delete first: the keeper takes the normalized hash, which the
-              // drop row still holds (unique index would reject the update).
-              await env.DB.prepare(`DELETE FROM ${t.name} WHERE id = ?`).bind(drop.id).run();
-              if (t.name === 'links') {
-                await env.DB.prepare(
-                  `UPDATE ${t.name} SET tags = ?, upvotes = COALESCE(upvotes,0) + COALESCE(?,0), downvotes = COALESCE(downvotes,0) + COALESCE(?,0), notes = ?, title = ?, url = ?, url_hash = ?, search_blob = NULL WHERE id = ?`
-                ).bind(JSON.stringify(mergedTags),
-                  Number(rowOlder ? (dup.upvotes || 0) : (row.upvotes || 0)),
-                  Number(rowOlder ? (dup.downvotes || 0) : (row.downvotes || 0)),
-                  keepNotes, keepTitle, keepUrl, generateUrlHash(keepUrl), keep.id).run();
-              } else {
-                await env.DB.prepare(
-                  `UPDATE ${t.name} SET tags = ?, notes = ?, title = ?, url = ?, url_hash = ?, search_blob = NULL WHERE id = ?`
-                ).bind(JSON.stringify(mergedTags), keepNotes, keepTitle, keepUrl, generateUrlHash(keepUrl), keep.id).run();
-              }
-              stats.merged++;
-              if (keepNotes !== String(keep.notes || '')) stats.notesCleaned++;
-              if (keepTitle !== String(keep.title || '').trim()) stats.titlesCleaned++;
-              markScopeDirty(t.name, row.scope_id);
-              row = { ...keep, url: keepUrl, url_hash: generateUrlHash(keepUrl), tags: JSON.stringify(mergedTags), notes: keepNotes, title: keepTitle };
-            } else {
-              row = { ...row, url: normUrl, url_hash: normHash };
-              stats.urlNormalized++;
+          const normUrl = canonicalStoredUrl(row.url) || row.url;
+          const normHash = generateUrlHash(normUrl);
+          const legacy = legacyUrlHash(normUrl);
+          const twin = twinHashFor(normUrl);
+          const rowScore = urlQualityScore(row.url);
+
+          const rawNoteUrls = extractUrls(row.notes);
+          const contentNoteUrls = [];
+          for (const u of rawNoteUrls) {
+            const canonicalNote = canonicalStoredUrl(u) || u;
+            if (urlQualityScore(canonicalNote) >= 60 && !contentNoteUrls.includes(canonicalNote)) {
+              contentNoteUrls.push(canonicalNote);
             }
           }
-          // Shared cleaning for survivors and untouched rows alike: titles,
-          // notes AND tags. Empty descriptions are filled by scraping the
-          // link (AI polishes when a key is configured). search_blob resets
-          // so AI/search re-read the row; scopes are marked dirty so the
-          // index cannot serve stale rows.
+
+          const candidateHashes = new Set([normHash, legacy, twin].filter(Boolean));
+          const candidateUrls = new Set([row.url, normUrl].filter(Boolean));
+
+          if (rowScore < 60) {
+            for (const cUrl of contentNoteUrls) {
+              candidateUrls.add(cUrl);
+              candidateHashes.add(generateUrlHash(cUrl));
+              candidateHashes.add(legacyUrlHash(cUrl));
+              const tw = twinHashFor(cUrl);
+              if (tw) candidateHashes.add(tw);
+            }
+          }
+
+          const voteCols = t.name === 'links' ? 'upvotes, downvotes' : '0 AS upvotes, 0 AS downvotes';
+          const selectCols = `id, url, url_hash, title, notes, tags, image_url, ${voteCols}, created_at, manual_edited_at`;
+
+          const hashArr = [...candidateHashes];
+          const urlArr = [...candidateUrls];
+          const hashPlaceholders = hashArr.map(() => 'url_hash = ?').join(' OR ');
+          const urlPlaceholders = urlArr.map(() => 'url = ?').join(' OR ');
+          const whereOr = [hashPlaceholders, urlPlaceholders].filter(Boolean).join(' OR ');
+
+          let dupsFound = [];
+          if (whereOr) {
+            const dupQuery = `SELECT ${selectCols} FROM ${t.name} WHERE ${t.scopeCol} = ? AND id != ? AND (${whereOr})`;
+            const dupParams = [row.scope_id, row.id, ...hashArr, ...urlArr];
+            try {
+              dupsFound = (await env.DB.prepare(dupQuery).bind(...dupParams).all())?.results || [];
+            } catch (_) {}
+          }
+
+          const targetContentUrls = [];
+          if (rowScore >= 60 && normUrl && normUrl.length >= 10) {
+            targetContentUrls.push(normUrl);
+          }
+          for (const cUrl of contentNoteUrls) {
+            if (!targetContentUrls.includes(cUrl)) targetContentUrls.push(cUrl);
+          }
+
+          for (const tUrl of targetContentUrls) {
+            try {
+              const likeRows = (await env.DB.prepare(
+                `SELECT ${selectCols} FROM ${t.name} WHERE ${t.scopeCol} = ? AND id != ? AND notes LIKE ? LIMIT 10`
+              ).bind(row.scope_id, row.id, `%${tUrl}%`).all())?.results || [];
+              for (const lr of likeRows) {
+                if (!dupsFound.some(d => d.id === lr.id)) {
+                  if (urlQualityScore(lr.url) < 60 || canonicalStoredUrl(lr.url) === tUrl) {
+                    dupsFound.push(lr);
+                  }
+                }
+              }
+            } catch (_) {}
+          }
+
+          if (dupsFound.length > 0) {
+            const cluster = [row, ...dupsFound];
+            let keeper = cluster[0];
+            for (let i = 1; i < cluster.length; i++) {
+              const res = pickBestFormattedRow(keeper, cluster[i]);
+              keeper = res.keep;
+            }
+            const drops = cluster.filter(c => c.id !== keeper.id);
+
+            handledRowIds.add(keeper.id);
+            for (const drop of drops) handledRowIds.add(drop.id);
+            handledRowIds.add(row.id);
+
+            if (keeper.manual_edited_at) {
+              let addUp = 0;
+              let addDown = 0;
+              let fallbackImage = null;
+              for (const drop of drops) {
+                addUp += Number(drop.upvotes || 0);
+                addDown += Number(drop.downvotes || 0);
+                const dropImg = drop.image_url || (isDirectImageUrl(drop.url) ? drop.url : null);
+                if (!fallbackImage && dropImg) fallbackImage = dropImg;
+                await env.DB.prepare(`DELETE FROM ${t.name} WHERE id = ?`).bind(drop.id).run();
+                if (t.name === 'links') {
+                  await env.DB.prepare(`DELETE FROM link_votes WHERE link_id = ?`).bind(drop.id).run().catch(() => {});
+                }
+                stats.merged++;
+              }
+              if (t.name === 'links' && (addUp || addDown)) {
+                await env.DB.prepare(
+                  `UPDATE ${t.name} SET upvotes = COALESCE(upvotes,0) + ?, downvotes = COALESCE(downvotes,0) + ?, image_url = COALESCE(image_url, ?) WHERE id = ?`
+                ).bind(addUp, addDown, fallbackImage, keeper.id).run().catch(() => {});
+              } else if (fallbackImage && !keeper.image_url) {
+                await env.DB.prepare(`UPDATE ${t.name} SET image_url = ? WHERE id = ?`).bind(fallbackImage, keeper.id).run().catch(() => {});
+              }
+              markScopeDirty(t.name, row.scope_id);
+              continue;
+            }
+
+            let totalUpvotes = Number(keeper.upvotes || 0);
+            let totalDownvotes = Number(keeper.downvotes || 0);
+            let resolvedImage = keeper.image_url || (isDirectImageUrl(keeper.url) ? keeper.url : null);
+            let allTagCandidates = [...rowTagCandidates(keeper)];
+            let candidateNotes = [keeper.notes];
+            let candidateTitles = [keeper.title];
+
+            for (const drop of drops) {
+              totalUpvotes += Number(drop.upvotes || 0);
+              totalDownvotes += Number(drop.downvotes || 0);
+              const dropImg = drop.image_url || (isDirectImageUrl(drop.url) ? drop.url : null);
+              if (!resolvedImage && dropImg) resolvedImage = dropImg;
+              for (const tc of rowTagCandidates(drop)) {
+                if (!allTagCandidates.includes(tc)) allTagCandidates.push(tc);
+              }
+              if (drop.notes) candidateNotes.push(drop.notes);
+              if (drop.title) candidateTitles.push(drop.title);
+
+              await env.DB.prepare(`DELETE FROM ${t.name} WHERE id = ?`).bind(drop.id).run();
+              if (t.name === 'links') {
+                await env.DB.prepare(`DELETE FROM link_votes WHERE link_id = ?`).bind(drop.id).run().catch(() => {});
+              }
+              stats.merged++;
+            }
+
+            let keepUrl = canonicalStoredUrl(keeper.url) || keeper.url;
+            if (urlQualityScore(keepUrl) < 60 && contentNoteUrls.length > 0) {
+              if (!resolvedImage && isDirectImageUrl(keepUrl)) resolvedImage = keepUrl;
+              keepUrl = contentNoteUrls[0];
+              stats.urlNormalized++;
+            }
+            const keepHash = generateUrlHash(keepUrl);
+
+            let keepTitle = candidateTitles.find(ti => ti && !isWeakTitle(ti, keepUrl)) || candidateTitles[0] || '';
+            keepTitle = cleanTitleText(keepTitle);
+
+            let rawNotes = candidateNotes.find(n => n && !isHashtagOnlyNotes(n)) || candidateNotes[0] || '';
+            let keepNotes = cleanAllNotes(rawNotes, keepUrl, keepTitle, nameRe);
+
+            if (isWeakTitle(keepTitle, keepUrl) && rawNotes) {
+              const hint = extractTitleFromNoteText(rawNotes, keepUrl);
+              if (hint) keepTitle = hint;
+            }
+
+            const keepTags = cleanTagsForStructure(allTagCandidates, keepUrl, keepTitle, keepNotes);
+
+            if (!keepNotes) {
+              try {
+                const filled = await describeAndTagLink(env, keepUrl,
+                  { title: keepTitle, notes: '', content: '' },
+                  { config: aiCfg, maxTags: 8, scrape: true });
+                const desc = String(filled?.description || '').replace(/\s+/g, ' ').trim().slice(0, 600);
+                if (desc) {
+                  keepNotes = cleanAllNotes(desc, keepUrl, keepTitle, nameRe) || desc.slice(0, 600);
+                  if (keepNotes) stats.descFilled++;
+                }
+              } catch (_) {}
+            }
+
+            if (isDirectImageUrl(keepUrl) && !resolvedImage) resolvedImage = keepUrl;
+
+            if (t.name === 'links') {
+              await env.DB.prepare(
+                `UPDATE ${t.name} SET tags = ?, upvotes = ?, downvotes = ?, notes = ?, title = ?, url = ?, url_hash = ?, image_url = ?, search_blob = NULL WHERE id = ?`
+              ).bind(JSON.stringify(keepTags), totalUpvotes, totalDownvotes, keepNotes, keepTitle, keepUrl, keepHash, resolvedImage, keeper.id).run();
+            } else {
+              await env.DB.prepare(
+                `UPDATE ${t.name} SET tags = ?, notes = ?, title = ?, url = ?, url_hash = ?, image_url = ?, search_blob = NULL WHERE id = ?`
+              ).bind(JSON.stringify(keepTags), keepNotes, keepTitle, keepUrl, keepHash, resolvedImage, keeper.id).run();
+            }
+
+            if (keepNotes !== String(keeper.notes || '')) stats.notesCleaned++;
+            if (keepTitle !== String(keeper.title || '').trim()) stats.titlesCleaned++;
+            markScopeDirty(t.name, row.scope_id);
+
+            continue;
+          }
+
+          if (rowScore < 60 && contentNoteUrls.length > 0) {
+            const oldImg = row.url;
+            const targetUrl = contentNoteUrls[0];
+            const targetHash = generateUrlHash(targetUrl);
+            const collision = await env.DB.prepare(
+              `SELECT id FROM ${t.name} WHERE ${t.scopeCol} = ? AND id != ? AND (url_hash = ? OR url = ?) LIMIT 1`
+            ).bind(row.scope_id, row.id, targetHash, targetUrl).first();
+            if (!collision) {
+              row.url = targetUrl;
+              row.url_hash = targetHash;
+              if (!row.image_url && isDirectImageUrl(oldImg)) {
+                row.image_url = oldImg;
+              }
+              stats.urlNormalized++;
+            }
+          } else if (normUrl && normUrl !== row.url) {
+            row.url = normUrl;
+            row.url_hash = normHash;
+            stats.urlNormalized++;
+          }
+
           let updTitle = cleanTitleText(row.title);
           let updNotes = cleanAllNotes(row.notes, row.url, row.title, nameRe);
           if (isWeakTitle(updTitle, row.url) && row.notes) {
@@ -15095,10 +15306,10 @@ async function structureDatabase(env, { onProgress = null, scope = null, scopeId
               }
             } catch (_) {}
           }
-          const isDirectImg = isDirectImageUrl(row.url);
-          const updImage = isDirectImg ? row.url : null;
-          if (updTitle !== row.title || updNotes !== row.notes || tagsChanged || row.url !== originalUrl || row.url_hash !== generateUrlHash(row.url) || (isDirectImg && !row.image_url)) {
-            await env.DB.prepare(`UPDATE ${t.name} SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, image_url = COALESCE(image_url, ?), search_blob = NULL WHERE id = ?`)
+          const isDirectImgFinal = isDirectImageUrl(row.url);
+          const updImage = row.image_url || (isDirectImgFinal ? row.url : null);
+          if (updTitle !== row.title || updNotes !== row.notes || tagsChanged || row.url !== originalUrl || row.url_hash !== generateUrlHash(row.url) || (isDirectImgFinal && !row.image_url)) {
+            await env.DB.prepare(`UPDATE ${t.name} SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, image_url = ?, search_blob = NULL WHERE id = ?`)
               .bind(row.url, generateUrlHash(row.url), updTitle, updNotes, JSON.stringify(updTags), updImage, row.id).run();
             if (updTitle !== row.title) stats.titlesCleaned++;
             if (updNotes !== row.notes) stats.notesCleaned++;
