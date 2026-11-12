@@ -26,7 +26,7 @@
     "eslint": "^10.8.0",
     "globals": "^17.8.0"
   },
-  "version": "1.0.68",
+  "version": "1.0.69",
   "overrides": {
     "minimatch": "^11.0.5"
   }
