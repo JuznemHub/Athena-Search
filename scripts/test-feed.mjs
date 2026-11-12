@@ -153,6 +153,18 @@ function createMockDb() {
       image_url TEXT,
       site_name TEXT
     );
+    CREATE TABLE IF NOT EXISTS personal_links (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      url TEXT NOT NULL,
+      url_hash TEXT NOT NULL,
+      title TEXT,
+      notes TEXT,
+      tags TEXT,
+      created_at INTEGER NOT NULL,
+      image_url TEXT,
+      site_name TEXT
+    );
   `);
 
   return {
@@ -285,5 +297,86 @@ assert(delData.success);
 
 const checkFeed = await mockDb.prepare('SELECT * FROM rss_feeds WHERE id = ?').bind('feed_1').first();
 assert.equal(checkFeed, null, 'Feed should be deleted');
+
+// --- 7. Personal Feeds & Ingestion to personal_links ---
+const personalFeed = {
+  id: 'feed_pers_1',
+  community_id: 'personal',
+  user_id: 'usr_1',
+  title: 'My Private Research RSS',
+  category: 'AI Research'
+};
+
+const personalArticle = {
+  guid: 'pers_art_202',
+  url: 'https://arxiv.org/abs/2611.12345',
+  title: 'Autonomous Multi-Agent Orchestration in Practice',
+  summary: 'Breakthroughs in distributed agent collaboration.',
+  publishedAt: Date.now() - 3600000,
+  imageUrl: 'https://arxiv.org/img.png'
+};
+
+const personalLinkId = await autoIngestRssArticle(env, personalArticle, personalFeed, testUser);
+assert(personalLinkId, 'Auto-ingest should return linkId for personal article');
+
+// Verify it exists in personal_links, NOT links
+const savedPersonalLink = await mockDb.prepare('SELECT * FROM personal_links WHERE id = ?').bind(personalLinkId).first();
+assert(savedPersonalLink, 'Article must be in personal_links');
+assert.equal(savedPersonalLink.user_id, 'usr_1');
+assert.equal(savedPersonalLink.title, 'Autonomous Multi-Agent Orchestration in Practice');
+assert(savedPersonalLink.tags.includes('rss'));
+
+const notInLinks = await mockDb.prepare('SELECT * FROM links WHERE id = ?').bind(personalLinkId).first();
+assert.equal(notInLinks, null, 'Personal feed article must NOT be stored in community links');
+
+// Insert personal feed & article in DB
+await env.DB.prepare(
+  `INSERT INTO rss_feeds (id, community_id, user_id, url, url_hash, title, category, created_at)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+).bind('feed_pers_1', 'personal', 'usr_1', 'https://arxiv.org/rss/cs.AI', 'arxiv_hash', 'My Private Research RSS', 'AI Research', Date.now()).run();
+
+await env.DB.prepare(
+  `INSERT INTO rss_articles (id, feed_id, community_id, guid, url, url_hash, title, author, summary, published_at, created_at, link_id)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+).bind('art_pers_1', 'feed_pers_1', 'personal', personalArticle.guid, personalArticle.url, 'arxiv_art_hash', personalArticle.title, 'Researchers', personalArticle.summary, Date.now(), Date.now(), personalLinkId).run();
+
+// Verify user 1 sees personal feed
+const user1SourcesUrl = new URL('https://athena.test/api/feed/sources?community_id=personal');
+const user1SourcesRes = await handleGetFeedSources(user1SourcesUrl, testUser, env, corsHeaders);
+const user1SourcesData = await user1SourcesRes.json();
+assert(user1SourcesData.success);
+assert.equal(user1SourcesData.categories.length, 1);
+assert.equal(user1SourcesData.categories[0].name, 'AI Research');
+assert.equal(user1SourcesData.total_unread, 1);
+
+// Verify user 2 (different user) sees 0 feeds in personal scope
+const otherUser = { id: 'usr_2', display_name: 'Other User' };
+const user2SourcesRes = await handleGetFeedSources(user1SourcesUrl, otherUser, env, corsHeaders);
+const user2SourcesData = await user2SourcesRes.json();
+assert(user2SourcesData.success);
+assert.equal(user2SourcesData.categories.length, 0, 'User 2 must not see User 1 personal feeds');
+assert.equal(user2SourcesData.total_unread, 0);
+
+// Verify user 2 cannot delete user 1's personal feed
+const unauthorizedDelReq = new Request('https://athena.test/api/feed', {
+  method: 'DELETE',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ feed_id: 'feed_pers_1' })
+});
+const unauthorizedDelRes = await handleDeleteFeed(unauthorizedDelReq, otherUser, env, corsHeaders);
+assert.equal(unauthorizedDelRes.status, 403, 'Unauthorized user must receive 403 when deleting another user personal feed');
+
+// Verify user 1 CAN delete own personal feed
+const authorizedDelReq = new Request('https://athena.test/api/feed', {
+  method: 'DELETE',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ feed_id: 'feed_pers_1' })
+});
+const authorizedDelRes = await handleDeleteFeed(authorizedDelReq, testUser, env, corsHeaders);
+const authorizedDelData = await authorizedDelRes.json();
+assert(authorizedDelData.success);
+
+const checkPersonalFeed = await mockDb.prepare('SELECT * FROM rss_feeds WHERE id = ?').bind('feed_pers_1').first();
+assert.equal(checkPersonalFeed, null, 'Personal feed should be deleted');
 
 console.log('All RSS Feed and FreshRSS integration tests passed successfully.');

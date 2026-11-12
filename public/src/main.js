@@ -4648,15 +4648,17 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // =========================================================================
-  // FreshRSS 1:1 Feed Reader Module
+  // FreshRSS 1:1 Feed Reader & Knowledge Ingest Module
   // =========================================================================
 
   const feedState = {
     communityId: '',
     stream: 'all',
-    streamTitle: 'Main stream',
     category: '',
+    streamTitle: 'Main stream',
     search: '',
+    sort: 'id',
+    order: 'DESC',
     page: 1,
     limit: 30,
     totalPages: 1,
@@ -4665,10 +4667,12 @@ document.addEventListener('DOMContentLoaded', () => {
     totalStarred: 0,
     categories: [],
     articles: [],
+    labels: [],
     viewMode: localStorage.getItem('freshrss_view_mode') || 'normal',
     stateFilter: 'unread',
     loading: false,
-    expandedIds: new Set()
+    expandedIds: new Set(),
+    activeArticleIndex: -1
   };
 
   function sanitizeFeedHtml(html) {
@@ -4719,14 +4723,29 @@ document.addEventListener('DOMContentLoaded', () => {
       window.location.hash = '#feed';
     }
 
-    feedState.communityId = state.activeCommunity || (state.communities?.[0]?.id) || '';
+    if (!feedState.communityId) {
+      if (state.scope === 'personal' && state.user) {
+        feedState.communityId = 'personal';
+      } else {
+        feedState.communityId = state.activeCommunity || (state.communities?.[0]?.id) || '';
+      }
+    }
 
-    // Populate community selector in feed sidebar
+    // Populate community selector in header
     const commSel = $('freshrssCommunitySelect');
-    if (commSel && state.communities) {
-      commSel.innerHTML = state.communities.map((c) =>
-        `<option value="${escapeHtml(c.id)}" ${c.id === feedState.communityId ? 'selected' : ''}>${escapeHtml(c.name || c.id)}</option>`
-      ).join('');
+    if (commSel) {
+      const opts = [];
+      if (state.user) {
+        opts.push(`<option value="personal" ${feedState.communityId === 'personal' ? 'selected' : ''}>👤 Personal Second Brain</option>`);
+      }
+      if (state.communities && state.communities.length > 0) {
+        opts.push(...state.communities.map((c) =>
+          `<option value="${escapeHtml(c.id)}" ${c.id === feedState.communityId ? 'selected' : ''}>🌐 ${escapeHtml(c.name || c.id)}</option>`
+        ));
+      } else if (!state.user && !opts.length) {
+        opts.push('<option value="" disabled selected>No communities available</option>');
+      }
+      commSel.innerHTML = opts.join('');
     }
 
     // Apply saved view mode
@@ -4746,7 +4765,7 @@ document.addEventListener('DOMContentLoaded', () => {
     feedView.classList.add('hidden');
     document.body.classList.remove('feed-active');
 
-    $('freshrssSidebar')?.classList.remove('mobile-open');
+    $('aside_feed')?.classList.remove('mobile-open');
     $('freshrssSidebarBackdrop')?.classList.add('hidden');
     document.body.style.overflow = '';
 
@@ -4767,14 +4786,26 @@ document.addEventListener('DOMContentLoaded', () => {
     localStorage.setItem('freshrss_view_mode', mode);
 
     $('freshrssViewNormalBtn')?.classList.toggle('active', mode === 'normal');
+    $('freshrssViewGlobalBtn')?.classList.toggle('active', mode === 'global');
     $('freshrssViewReaderBtn')?.classList.toggle('active', mode === 'reader');
-    $('freshrssViewListBtn')?.classList.toggle('active', mode === 'list');
 
     const listEl = $('freshrssArticlesList');
-    if (listEl) {
-      listEl.className = `freshrss-articles-list view-${mode}`;
+    const globalGrid = $('freshrssGlobalGrid');
+    const paginationEl = $('freshrssPagination');
+
+    if (mode === 'global') {
+      if (listEl) listEl.classList.add('hidden');
+      if (globalGrid) globalGrid.classList.remove('hidden');
+      if (paginationEl) paginationEl.classList.add('hidden');
+      renderFeedGlobalView();
+    } else {
+      if (listEl) {
+        listEl.classList.remove('hidden');
+        listEl.className = `freshrss-articles-container view-${mode}`;
+      }
+      if (globalGrid) globalGrid.classList.add('hidden');
+      renderFeedArticles();
     }
-    renderFeedArticles();
   }
 
   async function loadFeedSources() {
@@ -4795,16 +4826,18 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       const mainBadge = $('freshrssMainUnreadCount');
-      if (mainBadge) {
-        mainBadge.textContent = feedState.totalUnread;
-      }
+      if (mainBadge) mainBadge.textContent = feedState.totalUnread;
 
-      const starredBadge = $('freshrssStarredCount');
-      if (starredBadge) {
-        starredBadge.textContent = feedState.totalStarred;
-      }
+      const starBadge = $('freshrssStarredCount');
+      if (starBadge) starBadge.textContent = feedState.totalStarred;
+
+      const importantBadge = $('freshrssImportantUnreadCount');
+      if (importantBadge) importantBadge.textContent = feedState.totalUnread;
 
       renderFeedSidebar();
+      if (feedState.viewMode === 'global') {
+        renderFeedGlobalView();
+      }
     } catch (err) {
       console.warn('[feed] loadFeedSources failed:', err);
     }
@@ -4813,12 +4846,13 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderFeedSidebar() {
     const tree = $('freshrssCategoriesTree');
     const datalist = $('freshrssCategoryList');
+    const labelsTree = $('freshrssLabelsList');
     if (!tree) return;
 
     if (!feedState.categories.length) {
       tree.innerHTML = `
         <div class="freshrss-loading-feeds">
-          No subscriptions yet. Click <strong>+ Add Feed</strong> below to add your first RSS feed.
+          No subscriptions yet. Click <strong>+ Add subscription</strong> above to add your first RSS feed.
         </div>
       `;
       return;
@@ -4830,83 +4864,153 @@ document.addEventListener('DOMContentLoaded', () => {
       ).join('');
     }
 
+    // Render Labels from categories
+    if (labelsTree) {
+      const allLabels = [...new Set(feedState.categories.map((c) => c.name).filter(Boolean))];
+      labelsTree.innerHTML = allLabels.map((lbl) => `
+        <li class="item feed" data-filter-tag="${escapeHtml(lbl)}">
+          <span class="title">#${escapeHtml(lbl)}</span>
+        </li>
+      `).join('');
+
+      labelsTree.querySelectorAll('[data-filter-tag]').forEach((el) => {
+        el.addEventListener('click', () => {
+          const tag = el.getAttribute('data-filter-tag');
+          const searchInput = $('freshrssSearchInput');
+          if (searchInput) {
+            searchInput.value = '#' + tag;
+            $('freshrssClearSearchBtn')?.classList.remove('hidden');
+          }
+          feedState.search = '#' + tag;
+          feedState.page = 1;
+          loadFeedArticles();
+        });
+      });
+    }
+
+    // Render Categories & Feeds Tree
     tree.innerHTML = feedState.categories.map((cat) => {
       const isCatActive = feedState.category === cat.name && feedState.stream === 'all';
       return `
-        <div class="freshrss-cat-group" data-category="${escapeHtml(cat.name)}">
-          <button type="button" class="freshrss-cat-header ${isCatActive ? 'active' : ''}">
-            <span class="freshrss-cat-header-left">
-              <span class="freshrss-chevron">▼</span>
-              <span>📁 ${escapeHtml(cat.name)}</span>
-            </span>
-            ${cat.unread_count > 0 ? `<span class="freshrss-badge">${cat.unread_count}</span>` : ''}
-          </button>
-          <div class="freshrss-cat-feeds">
+        <li class="tree-folder category ${isCatActive ? 'active' : ''}" data-category="${escapeHtml(cat.name)}">
+          <a class="tree-folder-title">
+            <button type="button" class="dropdown-toggle" title="Expand category"><img class="icon" src="/assets/freshrss/down.svg" loading="lazy" alt="🔽"></button>
+            <span class="title">${escapeHtml(cat.name)}</span>
+            ${cat.unread_count > 0 ? `<span class="badge has-unread">${cat.unread_count}</span>` : ''}
+          </a>
+          <ul class="tree-folder-items">
             ${cat.feeds.map((feed) => {
               const isFeedActive = feedState.stream === feed.id;
               const icon = feed.icon_url || `https://www.google.com/s2/favicons?domain=${encodeURIComponent(feed.site_url || feed.url)}&sz=32`;
               return `
-                <div class="freshrss-feed-item ${isFeedActive ? 'active' : ''}" data-feed-id="${escapeHtml(feed.id)}" data-feed-title="${escapeHtml(feed.title)}">
-                  <div class="freshrss-feed-item-left">
-                    <img class="freshrss-favicon" src="${escapeHtml(icon)}" alt="" onerror="this.src='https://www.google.com/s2/favicons?domain=example.com&sz=16'">
-                    <span class="freshrss-feed-name" title="${escapeHtml(feed.title)}">${escapeHtml(feed.title)}</span>
+                <li class="item feed ${isFeedActive ? 'active' : ''}" data-feed-id="${escapeHtml(feed.id)}" data-feed-title="${escapeHtml(feed.title)}">
+                  <div class="feed-gear-wrap" style="position:relative;display:inline-flex;">
+                    <button type="button" class="feed-gear-btn" title="Feed options" data-gear-btn="${escapeHtml(feed.id)}">
+                      <img class="icon" src="/assets/freshrss/configure.svg" alt="⚙️">
+                    </button>
+                    <ul class="feed-dropdown-menu hidden" data-gear-menu="${escapeHtml(feed.id)}">
+                      <li><button type="button" data-feed-action="filter" data-feed-id="${escapeHtml(feed.id)}" data-feed-title="${escapeHtml(feed.title)}">Filter stream</button></li>
+                      <li><a href="${escapeHtml(feed.site_url || feed.url)}" target="_blank" rel="noopener noreferrer">See website</a></li>
+                      <li><button type="button" data-feed-action="edit" data-feed-id="${escapeHtml(feed.id)}" data-feed-title="${escapeHtml(feed.title)}" data-feed-cat="${escapeHtml(cat.name)}">Edit feed</button></li>
+                      <li><button type="button" data-feed-action="delete" data-feed-id="${escapeHtml(feed.id)}" data-feed-title="${escapeHtml(feed.title)}" style="color:#ff5555">Unsubscribe</button></li>
+                    </ul>
                   </div>
-                  <div class="freshrss-feed-actions">
-                    ${feed.unread_count > 0 ? `<span class="freshrss-badge">${feed.unread_count}</span>` : ''}
-                    <button type="button" class="freshrss-feed-delete-btn" title="Unsubscribe feed" data-delete-feed="${escapeHtml(feed.id)}" data-delete-title="${escapeHtml(feed.title)}">&times;</button>
-                  </div>
-                </div>
+                  <a class="item-title" title="Open ${escapeHtml(feed.title)}">
+                    <img class="favicon" src="${escapeHtml(icon)}" alt="" onerror="this.src='https://www.google.com/s2/favicons?domain=example.com&sz=16'">
+                    <span class="title">${escapeHtml(feed.title)}</span>
+                    ${feed.unread_count > 0 ? `<span class="badge has-unread">${feed.unread_count}</span>` : ''}
+                  </a>
+                </li>
               `;
             }).join('')}
-          </div>
-        </div>
+          </ul>
+        </li>
       `;
     }).join('');
 
-    tree.querySelectorAll('.freshrss-cat-header').forEach((btn) => {
-      btn.addEventListener('click', (e) => {
-        const group = btn.closest('.freshrss-cat-group');
-        const catName = group?.getAttribute('data-category');
-        if (e.target.classList.contains('freshrss-chevron')) {
-          group.classList.toggle('collapsed');
-          return;
-        }
+    // Category folder click events
+    tree.querySelectorAll('.tree-folder.category').forEach((folder) => {
+      const titleLink = folder.querySelector('.tree-folder-title');
+      const chevron = folder.querySelector('.dropdown-toggle');
+      const catName = folder.getAttribute('data-category');
+
+      chevron?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        folder.classList.toggle('collapsed');
+      });
+
+      titleLink?.addEventListener('click', (e) => {
+        if (e.target.closest('.dropdown-toggle')) return;
         feedState.stream = 'all';
         feedState.category = catName || '';
-        feedState.streamTitle = `📁 ${catName}`;
+        feedState.streamTitle = catName;
         feedState.page = 1;
         updateActiveSidebarStyles();
-        loadFeedArticles();
+        if (feedState.viewMode === 'global') {
+          setFeedViewMode('normal');
+        } else {
+          loadFeedArticles();
+        }
       });
     });
 
-    tree.querySelectorAll('.freshrss-feed-item').forEach((item) => {
-      item.addEventListener('click', (e) => {
-        if (e.target.closest('.freshrss-feed-delete-btn')) return;
-        const feedId = item.getAttribute('data-feed-id');
-        const feedTitle = item.getAttribute('data-feed-title');
+    // Feed items click events
+    tree.querySelectorAll('.item.feed').forEach((item) => {
+      const feedId = item.getAttribute('data-feed-id');
+      const feedTitle = item.getAttribute('data-feed-title');
+      const titleLink = item.querySelector('.item-title');
+
+      titleLink?.addEventListener('click', () => {
         feedState.stream = feedId;
         feedState.category = '';
         feedState.streamTitle = feedTitle || 'Feed';
         feedState.page = 1;
         updateActiveSidebarStyles();
+        if (feedState.viewMode === 'global') {
+          setFeedViewMode('normal');
+        } else {
+          loadFeedArticles();
+        }
+      });
+
+      // Feed gear popup menu
+      const gearBtn = item.querySelector('[data-gear-btn]');
+      const gearMenu = item.querySelector('[data-gear-menu]');
+
+      gearBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        document.querySelectorAll('.feed-dropdown-menu').forEach((m) => {
+          if (m !== gearMenu) m.classList.add('hidden');
+        });
+        gearMenu?.classList.toggle('hidden');
+      });
+
+      // Menu actions
+      gearMenu?.querySelector('[data-feed-action="filter"]')?.addEventListener('click', () => {
+        gearMenu.classList.add('hidden');
+        feedState.stream = feedId;
+        feedState.category = '';
+        feedState.streamTitle = feedTitle;
+        updateActiveSidebarStyles();
         loadFeedArticles();
       });
-    });
 
-    tree.querySelectorAll('.freshrss-feed-delete-btn').forEach((btn) => {
-      btn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        const feedId = btn.getAttribute('data-delete-feed');
-        const title = btn.getAttribute('data-delete-title');
-        if (!confirm(`Unsubscribe and remove "${title}"?`)) return;
+      gearMenu?.querySelector('[data-feed-action="edit"]')?.addEventListener('click', () => {
+        gearMenu.classList.add('hidden');
+        const catName = gearMenu.querySelector('[data-feed-action="edit"]').getAttribute('data-feed-cat');
+        openEditFeedModal(feedId, feedTitle, catName);
+      });
+
+      gearMenu?.querySelector('[data-feed-action="delete"]')?.addEventListener('click', async () => {
+        gearMenu.classList.add('hidden');
+        if (!confirm(`Unsubscribe from "${feedTitle}" and remove its articles?`)) return;
         try {
           const { res, data } = await api('/api/feed', {
             method: 'DELETE',
             body: JSON.stringify({ feed_id: feedId })
           });
           if (res?.ok && data?.success) {
-            showToast(`Unsubscribed from "${title}"`);
+            showToast(`Unsubscribed from "${feedTitle}"`);
             if (feedState.stream === feedId) {
               feedState.stream = 'all';
               feedState.streamTitle = 'Main stream';
@@ -4914,7 +5018,7 @@ document.addEventListener('DOMContentLoaded', () => {
             loadFeedSources();
             loadFeedArticles();
           } else {
-            showToast(data.error || 'Failed to delete feed', true);
+            showToast(data?.error || 'Failed to unsubscribe feed', true);
           }
         } catch (err) {
           showToast(err.message || 'Network error', true);
@@ -4925,12 +5029,73 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function updateActiveSidebarStyles() {
     $('freshrssNavMain')?.classList.toggle('active', feedState.stream === 'all' && !feedState.category);
+    $('freshrssNavImportant')?.classList.toggle('active', feedState.stream === 'important');
     $('freshrssNavStarred')?.classList.toggle('active', feedState.stream === 'starred');
 
     const titleEl = $('freshrssStreamTitle');
-    const breadcrumbEl = $('freshrssStreamBreadcrumb');
     if (titleEl) titleEl.textContent = feedState.streamTitle;
-    if (breadcrumbEl) breadcrumbEl.textContent = feedState.streamTitle;
+  }
+
+  function renderFeedGlobalView() {
+    const grid = $('freshrssGlobalGrid');
+    if (!grid) return;
+
+    if (!feedState.categories.length) {
+      grid.innerHTML = `
+        <div class="freshrss-empty-state" style="grid-column: 1 / -1;">
+          <div class="freshrss-empty-icon">📖</div>
+          <h3>No Feeds Subscribed</h3>
+          <p>Click "+ Add subscription" to add your favorite RSS or Atom feeds.</p>
+        </div>
+      `;
+      return;
+    }
+
+    grid.innerHTML = feedState.categories.map((cat) => `
+      <div class="box category" data-category="${escapeHtml(cat.name)}">
+        <div class="box-title">
+          <h2>${escapeHtml(cat.name)}</h2>
+          <span class="badge ${cat.unread_count > 0 ? 'has-unread' : ''}">${cat.unread_count}</span>
+        </div>
+        <ul class="box-content scrollbar-thin">
+          ${cat.feeds.map((feed) => {
+            const icon = feed.icon_url || `https://www.google.com/s2/favicons?domain=${encodeURIComponent(feed.site_url || feed.url)}&sz=32`;
+            return `
+              <li class="item feed" data-feed-id="${escapeHtml(feed.id)}" data-feed-title="${escapeHtml(feed.title)}">
+                <img class="favicon" src="${escapeHtml(icon)}" alt="" onerror="this.src='https://www.google.com/s2/favicons?domain=example.com&sz=16'">
+                <span class="title">${escapeHtml(feed.title)}</span>
+                ${feed.unread_count > 0 ? `<span class="badge has-unread">${feed.unread_count}</span>` : ''}
+              </li>
+            `;
+          }).join('')}
+        </ul>
+      </div>
+    `).join('');
+
+    // Global View category headers & feed clicks
+    grid.querySelectorAll('.box.category').forEach((box) => {
+      const catName = box.getAttribute('data-category');
+      box.querySelector('.box-title')?.addEventListener('click', () => {
+        feedState.stream = 'all';
+        feedState.category = catName;
+        feedState.streamTitle = catName;
+        setFeedViewMode('normal');
+        loadFeedArticles();
+      });
+
+      box.querySelectorAll('.item.feed').forEach((feedItem) => {
+        feedItem.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const feedId = feedItem.getAttribute('data-feed-id');
+          const feedTitle = feedItem.getAttribute('data-feed-title');
+          feedState.stream = feedId;
+          feedState.category = '';
+          feedState.streamTitle = feedTitle || 'Feed';
+          setFeedViewMode('normal');
+          loadFeedArticles();
+        });
+      });
+    });
   }
 
   async function loadFeedArticles(append = false) {
@@ -4939,8 +5104,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!append) {
       feedState.page = 1;
       feedState.expandedIds.clear();
+      feedState.activeArticleIndex = -1;
       const listEl = $('freshrssArticlesList');
-      if (listEl) {
+      if (listEl && feedState.viewMode !== 'global') {
         listEl.innerHTML = `
           <div class="freshrss-loading-articles">
             <div class="freshrss-spinner"></div>
@@ -4953,11 +5119,20 @@ document.addEventListener('DOMContentLoaded', () => {
     feedState.loading = true;
 
     try {
+      let streamParam = feedState.stream;
+      if (feedState.stateFilter === 'starred') {
+        streamParam = 'starred';
+      } else if (feedState.stateFilter === 'unread' && feedState.stream === 'all') {
+        streamParam = 'unread';
+      }
+
       const params = new URLSearchParams({
         community_id: feedState.communityId,
-        stream: feedState.stateFilter === 'starred' ? 'starred' : (feedState.stateFilter === 'unread' && feedState.stream === 'all' ? 'unread' : feedState.stream),
+        stream: streamParam,
         page: feedState.page,
-        limit: feedState.limit
+        limit: feedState.limit,
+        sort: feedState.sort,
+        order: feedState.order
       });
 
       if (feedState.category) params.set('category', feedState.category);
@@ -4988,14 +5163,16 @@ document.addEventListener('DOMContentLoaded', () => {
         countsEl.textContent = `${feedState.totalArticles} articles`;
       }
 
-      renderFeedArticles();
+      if (feedState.viewMode !== 'global') {
+        renderFeedArticles();
+      }
 
       // Pagination Controls
       const paginationEl = $('freshrssPagination');
       const pageInfo = $('freshrssPageInfo');
       const loadMoreBtn = $('freshrssLoadMoreBtn');
 
-      if (paginationEl) {
+      if (paginationEl && feedState.viewMode !== 'global') {
         const hasMore = feedState.page < feedState.totalPages;
         paginationEl.classList.toggle('hidden', feedState.totalArticles === 0);
         if (loadMoreBtn) loadMoreBtn.classList.toggle('hidden', !hasMore);
@@ -5023,7 +5200,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    listEl.innerHTML = feedState.articles.map((art) => {
+    listEl.innerHTML = feedState.articles.map((art, idx) => {
       const isExpanded = feedState.viewMode === 'reader' || feedState.expandedIds.has(art.id);
       const isRead = art.is_read;
       const isStarred = art.is_starred;
@@ -5033,75 +5210,91 @@ document.addEventListener('DOMContentLoaded', () => {
       const domain = art.url ? new URL(art.url).hostname : '';
 
       return `
-        <article class="freshrss-article-card ${isRead ? 'is-read' : ''}" data-article-id="${escapeHtml(art.id)}">
-          <div class="freshrss-card-header">
-            <div class="freshrss-card-source">
-              <img class="freshrss-favicon" src="${escapeHtml(icon)}" alt="" onerror="this.src='https://www.google.com/s2/favicons?domain=example.com&sz=16'">
-              <span class="freshrss-card-feed-title" data-feed-filter="${escapeHtml(art.feed_id)}">${escapeHtml(art.feed_title)}</span>
-              ${art.author ? `<span class="freshrss-card-author">by ${escapeHtml(art.author)}</span>` : ''}
-              <span class="freshrss-card-date">· ${escapeHtml(dateStr)}</span>
+        <div class="flux ${!isRead ? 'is-unread' : ''} ${isExpanded ? 'open' : ''}" data-article-id="${escapeHtml(art.id)}" data-article-index="${idx}">
+          <div class="flux_header">
+            <a class="website" data-action="filter-feed" title="Filter: ${escapeHtml(art.feed_title)}">
+              <img class="favicon" src="${escapeHtml(icon)}" alt="" onerror="this.src='https://www.google.com/s2/favicons?domain=example.com&sz=16'">
+              <span class="websiteName">${escapeHtml(art.feed_title)}</span>
+            </a>
+            <div class="titleAuthorSummaryDate" data-action="expand">
+              <span class="title" dir="auto">${escapeHtml(art.title)}</span>
+              <span class="date">${escapeHtml(dateStr)}</span>
             </div>
-
-            <div class="freshrss-card-actions">
-              <span class="freshrss-athena-badge" title="Auto-ingested into Athena Second Brain">
-                <span>🧠</span>
-                <span>Athena</span>
-              </span>
-              <button type="button" class="freshrss-action-btn ${isStarred ? 'is-starred' : ''}" title="${isStarred ? 'Unstar' : 'Star article'}" data-action="star">
-                <svg width="17" height="17" viewBox="0 0 24 24" fill="${isStarred ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+            <div class="quick-actions">
+              <button type="button" class="quick-btn ${isStarred ? 'is-starred' : ''}" title="${isStarred ? 'Unstar' : 'Star'}" data-action="star">
+                <img class="icon" src="/assets/freshrss/starred.svg" alt="⭐">
               </button>
-              <button type="button" class="freshrss-action-btn" title="${isRead ? 'Mark as unread' : 'Mark as read'}" data-action="toggle-read">
-                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/>${isRead ? '<path d="m9 12 2 2 4-4"/>' : ''}</svg>
+              <button type="button" class="quick-btn" title="${isRead ? 'Mark as unread' : 'Mark as read'}" data-action="toggle-read">
+                <img class="icon" src="${isRead ? '/assets/freshrss/read.svg' : '/assets/freshrss/unread.svg'}" alt="✉️">
               </button>
-              <a href="${safeHref(art.url)}" target="_blank" rel="noopener noreferrer" class="freshrss-action-btn" title="Open original link">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+              <a href="${safeHref(art.url)}" target="_blank" rel="noopener noreferrer" class="quick-btn" title="See on original website">
+                <img class="icon" src="/assets/freshrss/link.svg" alt="↗️">
               </a>
             </div>
           </div>
 
-          <h3 class="freshrss-card-title" data-action="expand">${escapeHtml(art.title)}</h3>
-
-          ${feedState.viewMode !== 'list' ? `
-            <div class="freshrss-card-body">
-              ${art.image_url ? `<img class="freshrss-card-thumb" src="${safeHref(art.image_url)}" alt="" loading="lazy" onerror="this.style.display='none'">` : ''}
-              <p class="freshrss-card-summary">${escapeHtml(art.summary || '')}</p>
-            </div>
-          ` : ''}
-
           ${isExpanded ? `
-            <div class="freshrss-card-expanded">
-              <div class="freshrss-card-content">
+            <article class="flux_content" dir="auto">
+              <header>
+                <h2><a href="${safeHref(art.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(art.title)}</a></h2>
+                <div class="subtitle">
+                  <span class="website">
+                    <img class="favicon" src="${escapeHtml(icon)}" alt="">
+                    <span>${escapeHtml(art.feed_title)}</span>
+                  </span>
+                  ${art.author ? `<span class="author">By: ${escapeHtml(art.author)}</span>` : ''}
+                  <span class="date">${escapeHtml(dateStr)}</span>
+                </div>
+              </header>
+              <div class="text">
                 ${cleanContent}
               </div>
-              <div class="freshrss-card-footer">
-                <a href="${safeHref(art.url)}" target="_blank" rel="noopener noreferrer" class="freshrss-original-link">
-                  <span>Read original at ${escapeHtml(domain || 'source')}</span>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-                </a>
-              </div>
-            </div>
+              <footer>
+                <div class="footer-left">
+                  <span class="pzp-brain-badge" title="Auto-ingested into Athena Second Brain knowledge repository">
+                    <span>🧠</span>
+                    <span>In Athena Brain</span>
+                  </span>
+                  <button type="button" class="pzp-ai-summarize-btn" data-action="summarize" title="Generate AI executive summary">
+                    <span>🤖</span>
+                    <span>AI Summarize</span>
+                  </button>
+                  ${art.feed_category ? `<span class="flux-tag-pill" data-action="tag-filter" data-tag="${escapeHtml(art.feed_category)}">#${escapeHtml(art.feed_category)}</span>` : ''}
+                </div>
+                <div class="footer-right">
+                  <button type="button" class="btn btn-secondary btn-sm" data-action="copy-link" title="Copy article URL">
+                    <span>📋 Copy link</span>
+                  </button>
+                  <a href="${safeHref(art.url)}" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-sm" title="Visit source website">
+                    <span>Read on ${escapeHtml(domain || 'website')} ↗</span>
+                  </a>
+                </div>
+              </footer>
+            </article>
           ` : ''}
-        </article>
+        </div>
       `;
     }).join('');
 
-    listEl.querySelectorAll('.freshrss-article-card').forEach((card) => {
-      const artId = card.getAttribute('data-article-id');
+    // Attach article event handlers
+    listEl.querySelectorAll('.flux').forEach((fluxEl) => {
+      const artId = fluxEl.getAttribute('data-article-id');
+      const artIdx = parseInt(fluxEl.getAttribute('data-article-index') || '0', 10);
       const article = feedState.articles.find((a) => a.id === artId);
       if (!article) return;
 
-      card.querySelector('[data-action="expand"]')?.addEventListener('click', async () => {
-        if (feedState.viewMode === 'list') {
-          window.open(article.url, '_blank', 'noopener,noreferrer');
-          return;
-        }
+      // Click on title to expand / collapse
+      fluxEl.querySelector('[data-action="expand"]')?.addEventListener('click', async () => {
+        feedState.activeArticleIndex = artIdx;
+        if (feedState.viewMode === 'reader') return;
+
         if (feedState.expandedIds.has(artId)) {
           feedState.expandedIds.delete(artId);
         } else {
           feedState.expandedIds.add(artId);
           if (!article.is_read) {
             article.is_read = true;
-            card.classList.add('is-read');
+            fluxEl.classList.remove('is-unread');
             api('/api/feed/article', {
               method: 'PATCH',
               body: JSON.stringify({ article_id: artId, is_read: true })
@@ -5113,7 +5306,8 @@ document.addEventListener('DOMContentLoaded', () => {
         renderFeedArticles();
       });
 
-      card.querySelector('[data-feed-filter]')?.addEventListener('click', (e) => {
+      // Filter feed on website click
+      fluxEl.querySelector('[data-action="filter-feed"]')?.addEventListener('click', (e) => {
         e.stopPropagation();
         feedState.stream = article.feed_id;
         feedState.category = '';
@@ -5122,7 +5316,8 @@ document.addEventListener('DOMContentLoaded', () => {
         loadFeedArticles();
       });
 
-      card.querySelector('[data-action="star"]')?.addEventListener('click', async (e) => {
+      // Star / favorite toggle
+      fluxEl.querySelector('[data-action="star"]')?.addEventListener('click', async (e) => {
         e.stopPropagation();
         const nextStarred = !article.is_starred;
         article.is_starred = nextStarred;
@@ -5138,11 +5333,12 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (_) {}
       });
 
-      card.querySelector('[data-action="toggle-read"]')?.addEventListener('click', async (e) => {
+      // Read / unread toggle
+      fluxEl.querySelector('[data-action="toggle-read"]')?.addEventListener('click', async (e) => {
         e.stopPropagation();
         const nextRead = !article.is_read;
         article.is_read = nextRead;
-        card.classList.toggle('is-read', nextRead);
+        fluxEl.classList.toggle('is-unread', !nextRead);
         feedState.totalUnread += nextRead ? -1 : 1;
         updateBadgeCounters();
         renderFeedArticles();
@@ -5153,6 +5349,38 @@ document.addEventListener('DOMContentLoaded', () => {
             body: JSON.stringify({ article_id: artId, is_read: nextRead })
           });
         } catch (_) {}
+      });
+
+      // AI Summarize (PZP feature)
+      fluxEl.querySelector('[data-action="summarize"]')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openAiSummaryModal(article);
+      });
+
+      // Tag filter
+      fluxEl.querySelector('[data-action="tag-filter"]')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const tag = e.currentTarget.getAttribute('data-tag');
+        if (tag) {
+          const searchInput = $('freshrssSearchInput');
+          if (searchInput) {
+            searchInput.value = '#' + tag;
+            $('freshrssClearSearchBtn')?.classList.remove('hidden');
+          }
+          feedState.search = '#' + tag;
+          feedState.page = 1;
+          loadFeedArticles();
+        }
+      });
+
+      // Copy link
+      fluxEl.querySelector('[data-action="copy-link"]')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(article.url).then(() => {
+            showToast('Article link copied to clipboard');
+          });
+        }
       });
     });
   }
@@ -5182,7 +5410,7 @@ document.addEventListener('DOMContentLoaded', () => {
         body: JSON.stringify(payload)
       });
       if (res?.ok && data?.success) {
-        showToast('Marked all as read');
+        showToast('Marked all articles in current view as read');
         loadFeedSources();
         loadFeedArticles();
       }
@@ -5194,7 +5422,7 @@ document.addEventListener('DOMContentLoaded', () => {
   async function refreshFeeds() {
     const refreshBtn = $('freshrssRefreshBtn');
     if (refreshBtn) {
-      refreshBtn.querySelector('svg')?.classList.add('athena-spin');
+      refreshBtn.querySelector('.icon')?.classList.add('athena-spin');
     }
 
     try {
@@ -5204,7 +5432,7 @@ document.addEventListener('DOMContentLoaded', () => {
       });
       if (res?.ok && data?.success) {
         const count = data.new_articles_count || 0;
-        showToast(count > 0 ? `Refreshed: ${count} new articles ingested into Athena!` : 'Feeds up to date');
+        showToast(count > 0 ? `Synced feeds: ${count} new articles ingested into Athena knowledge archive!` : 'All feeds up to date');
         loadFeedSources();
         loadFeedArticles();
       } else {
@@ -5214,82 +5442,265 @@ document.addEventListener('DOMContentLoaded', () => {
       showToast(err.message || 'Network error during refresh', true);
     } finally {
       if (refreshBtn) {
-        refreshBtn.querySelector('svg')?.classList.remove('athena-spin');
+        refreshBtn.querySelector('.icon')?.classList.remove('athena-spin');
       }
     }
+  }
+
+  // Edit Feed Modal Logic
+  function openEditFeedModal(feedId, title, category) {
+    const modal = $('freshrssEditModal');
+    const idInput = $('freshrssEditFeedId');
+    const titleInput = $('freshrssEditTitleInput');
+    const catInput = $('freshrssEditCategoryInput');
+    const err = $('freshrssEditFeedError');
+
+    if (!modal) return;
+    if (idInput) idInput.value = feedId;
+    if (titleInput) titleInput.value = title;
+    if (catInput) catInput.value = category || '';
+    if (err) err.classList.add('hidden');
+
+    modal.classList.remove('hidden');
+    titleInput?.focus();
+  }
+
+  function closeEditFeedModal() {
+    $('freshrssEditModal')?.classList.add('hidden');
+  }
+
+  // AI Summary Modal Logic (PZP Integration)
+  async function openAiSummaryModal(article) {
+    const modal = $('freshrssAiSummaryModal');
+    const titleEl = $('freshrssAiArticleTitle');
+    const contentEl = $('freshrssAiSummaryContent');
+
+    if (!modal) return;
+    modal.classList.remove('hidden');
+    if (titleEl) titleEl.textContent = article.title;
+    if (contentEl) {
+      contentEl.innerHTML = `
+        <div class="freshrss-spinner"></div>
+        <p>Synthesizing key insights from article via Athena AI…</p>
+      `;
+    }
+
+    const cleanText = (article.content || article.summary || article.title)
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    try {
+      const { res, data } = await api('/api/ai/chat', {
+        method: 'POST',
+        body: JSON.stringify({
+          messages: [
+            {
+              role: 'system',
+              content: 'You are an intelligent executive research assistant for the Athena Search Second Brain. Synthesize the given article into a high-signal markdown summary with 3 to 5 concise bullet points.'
+            },
+            {
+              role: 'user',
+              content: `Article Title: ${article.title}\n\nArticle Body:\n${cleanText.slice(0, 3500)}`
+            }
+          ]
+        })
+      });
+
+      const reply = data?.choices?.[0]?.message?.content || data?.reply || data?.answer || '';
+      if (res?.ok && reply) {
+        if (contentEl) {
+          contentEl.innerHTML = sanitizeFeedHtml(reply.replace(/\n/g, '<br>'));
+        }
+      } else {
+        if (contentEl) {
+          contentEl.innerHTML = `<p>${escapeHtml(article.summary || 'Summary unavailable from AI at this time.')}</p>`;
+        }
+      }
+    } catch (_) {
+      if (contentEl) {
+        contentEl.innerHTML = `<p>${escapeHtml(article.summary || 'Summary unavailable.')}</p>`;
+      }
+    }
+  }
+
+  // Floating Navigation & Keyboard Shortcuts
+  function navigateArticle(direction) {
+    if (!feedState.articles.length) return;
+    const newIdx = Math.max(0, Math.min(feedState.articles.length - 1, feedState.activeArticleIndex + direction));
+    feedState.activeArticleIndex = newIdx;
+    const art = feedState.articles[newIdx];
+    if (!art) return;
+
+    feedState.expandedIds.add(art.id);
+    if (!art.is_read) {
+      art.is_read = true;
+      api('/api/feed/article', {
+        method: 'PATCH',
+        body: JSON.stringify({ article_id: art.id, is_read: true })
+      }).catch(() => {});
+      feedState.totalUnread = Math.max(0, feedState.totalUnread - 1);
+      updateBadgeCounters();
+    }
+
+    renderFeedArticles();
+
+    const targetEl = document.querySelector(`.flux[data-article-index="${newIdx}"]`);
+    targetEl?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
   function setupFeedEvents() {
     $('feedNavBtn')?.addEventListener('click', openFeed);
     $('freshrssCloseBtn')?.addEventListener('click', closeFeed);
 
+    // Sidebar navigation streams
     $('freshrssNavMain')?.addEventListener('click', () => {
       feedState.stream = 'all';
       feedState.category = '';
       feedState.streamTitle = 'Main stream';
       updateActiveSidebarStyles();
-      loadFeedArticles();
+      if (feedState.viewMode === 'global') setFeedViewMode('normal');
+      else loadFeedArticles();
+    });
+
+    $('freshrssNavImportant')?.addEventListener('click', () => {
+      feedState.stream = 'important';
+      feedState.category = '';
+      feedState.streamTitle = 'Important feeds';
+      updateActiveSidebarStyles();
+      if (feedState.viewMode === 'global') setFeedViewMode('normal');
+      else loadFeedArticles();
     });
 
     $('freshrssNavStarred')?.addEventListener('click', () => {
       feedState.stream = 'starred';
       feedState.category = '';
-      feedState.streamTitle = 'Favorites';
+      feedState.streamTitle = 'Favourites';
       updateActiveSidebarStyles();
-      loadFeedArticles();
+      if (feedState.viewMode === 'global') setFeedViewMode('normal');
+      else loadFeedArticles();
     });
 
-    const sidebarEl = $('freshrssSidebar');
+    $('freshrssLabelsToggle')?.addEventListener('click', () => {
+      const folder = $('freshrssNavLabelsFolder');
+      const list = $('freshrssLabelsList');
+      folder?.classList.toggle('collapsed');
+      list?.classList.toggle('hidden');
+    });
+
+    // Sidebar Toggle (Mobile and Desktop)
+    const asideEl = $('aside_feed');
     const backdropEl = $('freshrssSidebarBackdrop');
     const toggleBtn = $('freshrssToggleSidebarBtn');
+    const closeSidebarBtn = $('freshrssCloseSidebarBtn');
 
-    function toggleFeedMobileSidebar() {
-      const open = sidebarEl?.classList.toggle('mobile-open');
-      backdropEl?.classList.toggle('hidden', !open);
-      document.body.style.overflow = open ? 'hidden' : '';
+    function toggleSidebar() {
+      if (window.innerWidth <= 860) {
+        const open = asideEl?.classList.toggle('mobile-open');
+        backdropEl?.classList.toggle('hidden', !open);
+        document.body.style.overflow = open ? 'hidden' : '';
+      } else {
+        asideEl?.classList.toggle('collapsed-sidebar');
+        toggleBtn?.classList.toggle('active', !asideEl?.classList.contains('collapsed-sidebar'));
+      }
     }
 
-    toggleBtn?.addEventListener('click', toggleFeedMobileSidebar);
+    toggleBtn?.addEventListener('click', toggleSidebar);
+    closeSidebarBtn?.addEventListener('click', toggleSidebar);
     backdropEl?.addEventListener('click', () => {
-      sidebarEl?.classList.remove('mobile-open');
+      asideEl?.classList.remove('mobile-open');
       backdropEl?.classList.add('hidden');
       document.body.style.overflow = '';
     });
 
+    // View Switchers
     $('freshrssViewNormalBtn')?.addEventListener('click', () => setFeedViewMode('normal'));
+    $('freshrssViewGlobalBtn')?.addEventListener('click', () => setFeedViewMode('global'));
     $('freshrssViewReaderBtn')?.addEventListener('click', () => setFeedViewMode('reader'));
-    $('freshrssViewListBtn')?.addEventListener('click', () => setFeedViewMode('list'));
 
-    $('freshrssStateFilter')?.addEventListener('change', (e) => {
-      feedState.stateFilter = e.target.value;
-      loadFeedArticles();
+    // Sort Dropdown
+    const sortDropdownBtn = $('freshrssSortToggleBtn');
+    const sortMenu = $('freshrssSortMenu');
+
+    sortDropdownBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      sortMenu?.classList.toggle('hidden');
     });
 
+    sortMenu?.querySelectorAll('.item button').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const item = btn.closest('.item');
+        const sortVal = item?.getAttribute('data-sort') || 'id';
+        const orderVal = item?.getAttribute('data-order') || 'DESC';
+        feedState.sort = sortVal;
+        feedState.order = orderVal;
+
+        const sortLabel = $('freshrssSortLabel');
+        if (sortLabel) sortLabel.textContent = btn.textContent;
+
+        sortMenu.querySelectorAll('.item').forEach((i) => i.classList.remove('active'));
+        item?.classList.add('active');
+        sortMenu.classList.add('hidden');
+
+        feedState.page = 1;
+        loadFeedArticles();
+      });
+    });
+
+    // State Filter Tabs
+    document.querySelectorAll('.freshrss-state-tab').forEach((tab) => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.freshrss-state-tab').forEach((t) => t.classList.remove('active'));
+        tab.classList.add('active');
+        feedState.stateFilter = tab.getAttribute('data-filter') || 'all';
+        feedState.page = 1;
+        loadFeedArticles();
+      });
+    });
+
+    // Global Search Input
     const searchInput = $('freshrssSearchInput');
     const clearBtn = $('freshrssClearSearchBtn');
+    const searchBtn = $('freshrssSearchBtn');
     let searchDebounce = null;
+
+    function triggerSearch() {
+      if (!searchInput) return;
+      feedState.search = searchInput.value.trim();
+      feedState.page = 1;
+      loadFeedArticles();
+    }
 
     if (searchInput) {
       searchInput.addEventListener('input', () => {
         clearBtn?.classList.toggle('hidden', !searchInput.value.trim());
         clearTimeout(searchDebounce);
-        searchDebounce = setTimeout(() => {
-          feedState.search = searchInput.value.trim();
-          loadFeedArticles();
-        }, 250);
+        searchDebounce = setTimeout(triggerSearch, 250);
+      });
+      searchInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          clearTimeout(searchDebounce);
+          triggerSearch();
+        }
       });
     }
+
+    searchBtn?.addEventListener('click', triggerSearch);
 
     clearBtn?.addEventListener('click', () => {
       if (searchInput) searchInput.value = '';
       clearBtn.classList.add('hidden');
       feedState.search = '';
+      feedState.page = 1;
       loadFeedArticles();
     });
 
+    // Toolbar Actions
     $('freshrssMarkAllReadBtn')?.addEventListener('click', markAllFeedRead);
     $('freshrssRefreshBtn')?.addEventListener('click', refreshFeeds);
 
+    // Community Selector
     $('freshrssCommunitySelect')?.addEventListener('change', (e) => {
       feedState.communityId = e.target.value;
       feedState.stream = 'all';
@@ -5299,6 +5710,7 @@ document.addEventListener('DOMContentLoaded', () => {
       loadFeedArticles();
     });
 
+    // Pagination Load More
     $('freshrssLoadMoreBtn')?.addEventListener('click', () => {
       if (feedState.page < feedState.totalPages) {
         feedState.page++;
@@ -5306,13 +5718,122 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
 
+    // Floating Nav Buttons
+    $('freshrssPrevEntryBtn')?.addEventListener('click', () => navigateArticle(-1));
+    $('freshrssNextEntryBtn')?.addEventListener('click', () => navigateArticle(1));
+    $('freshrssUpBtn')?.addEventListener('click', () => {
+      const streamEl = $('stream');
+      if (streamEl) streamEl.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+
+    // Keyboard Shortcuts (FreshRSS Standard: j, k, m, s, v, r, Escape)
+    window.addEventListener('keydown', (e) => {
+      const feedView = $('feedView');
+      if (!feedView || feedView.classList.contains('hidden')) return;
+
+      const tag = document.activeElement?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+        if (e.key === 'Escape') {
+          document.activeElement.blur();
+        }
+        return;
+      }
+
+      if (e.key === 'j') {
+        e.preventDefault();
+        navigateArticle(1);
+      } else if (e.key === 'k') {
+        e.preventDefault();
+        navigateArticle(-1);
+      } else if (e.key === 'm') {
+        e.preventDefault();
+        const art = feedState.articles[feedState.activeArticleIndex];
+        if (art) {
+          art.is_read = !art.is_read;
+          api('/api/feed/article', {
+            method: 'PATCH',
+            body: JSON.stringify({ article_id: art.id, is_read: art.is_read })
+          }).catch(() => {});
+          feedState.totalUnread += art.is_read ? -1 : 1;
+          updateBadgeCounters();
+          renderFeedArticles();
+        }
+      } else if (e.key === 's') {
+        e.preventDefault();
+        const art = feedState.articles[feedState.activeArticleIndex];
+        if (art) {
+          art.is_starred = !art.is_starred;
+          api('/api/feed/article', {
+            method: 'PATCH',
+            body: JSON.stringify({ article_id: art.id, is_starred: art.is_starred })
+          }).catch(() => {});
+          feedState.totalStarred += art.is_starred ? 1 : -1;
+          updateBadgeCounters();
+          renderFeedArticles();
+        }
+      } else if (e.key === 'v') {
+        const art = feedState.articles[feedState.activeArticleIndex];
+        if (art?.url) {
+          window.open(art.url, '_blank', 'noopener,noreferrer');
+        }
+      } else if (e.key === 'r') {
+        e.preventDefault();
+        refreshFeeds();
+      } else if (e.key === 'Escape') {
+        document.querySelectorAll('.freshrss-modal-overlay').forEach((m) => m.classList.add('hidden'));
+        document.querySelectorAll('.feed-dropdown-menu').forEach((m) => m.classList.add('hidden'));
+        sortMenu?.classList.add('hidden');
+      }
+    });
+
+    // Close dropdowns on outside click
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('#freshrssSortDropdown')) {
+        sortMenu?.classList.add('hidden');
+      }
+      if (!e.target.closest('.feed-gear-wrap')) {
+        document.querySelectorAll('.feed-dropdown-menu').forEach((m) => m.classList.add('hidden'));
+      }
+    });
+
+    // Add Feed Modal
     const addModal = $('freshrssAddModal');
     const addForm = $('freshrssAddFeedForm');
     const addError = $('freshrssAddFeedError');
 
+    function populateFeedScopeSelect(selectElem, currentScope) {
+      if (!selectElem) return;
+      const opts = [];
+      if (state.user) {
+        opts.push(`<option value="personal" ${currentScope === 'personal' ? 'selected' : ''}>👤 Personal Second Brain (personal_links)</option>`);
+      }
+      if (state.communities && state.communities.length > 0) {
+        opts.push(...state.communities.map((c) =>
+          `<option value="${escapeHtml(c.id)}" ${c.id === currentScope ? 'selected' : ''}>🌐 ${escapeHtml(c.name || c.id)} (Community Archive)</option>`
+        ));
+      }
+      selectElem.innerHTML = opts.join('');
+    }
+
+    function updateFeedIngestNote(scopeVal) {
+      const note = $('freshrssIngestNoteText');
+      if (!note) return;
+      if (scopeVal === 'personal') {
+        note.textContent = 'Articles will be auto-ingested directly into your Personal Second Brain (personal_links) and indexed for private search & AI chat.';
+      } else {
+        note.textContent = 'Articles will be auto-ingested into Athena’s shared community archive (links) and indexed for team search & AI chat.';
+      }
+    }
+
     function openAddModal() {
       addModal?.classList.remove('hidden');
       if (addError) addError.classList.add('hidden');
+      const scopeSel = $('freshrssScopeInput');
+      if (scopeSel) {
+        populateFeedScopeSelect(scopeSel, feedState.communityId);
+        updateFeedIngestNote(scopeSel.value);
+        scopeSel.onchange = () => updateFeedIngestNote(scopeSel.value);
+      }
       $('freshrssFeedUrlInput')?.focus();
     }
 
@@ -5331,6 +5852,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const url = $('freshrssFeedUrlInput')?.value.trim();
       const category = $('freshrssCategoryInput')?.value.trim() || 'General';
       const customTitle = $('freshrssCustomTitleInput')?.value.trim();
+      const targetCommunityId = $('freshrssScopeInput')?.value || feedState.communityId;
       const submitBtn = $('freshrssSubmitAddBtn');
 
       if (!url) return;
@@ -5344,12 +5866,18 @@ document.addEventListener('DOMContentLoaded', () => {
             url,
             category,
             title: customTitle,
-            community_id: feedState.communityId
+            community_id: targetCommunityId
           })
         });
         if (res?.ok && data?.success) {
-          showToast(`Subscribed to "${data.feed.title}" (${data.feed.articles_count} articles added to Athena)`);
+          const targetName = targetCommunityId === 'personal' ? 'Personal Second Brain' : 'Community Archive';
+          showToast(`Subscribed to "${data.feed.title}" (${data.feed.articles_count} articles auto-ingested to ${targetName})`);
           closeAddModal();
+          if (feedState.communityId !== targetCommunityId) {
+            feedState.communityId = targetCommunityId;
+            const commSel = $('freshrssCommunitySelect');
+            if (commSel) commSel.value = targetCommunityId;
+          }
           loadFeedSources();
           loadFeedArticles();
         } else {
@@ -5368,6 +5896,50 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
 
+    // Edit Feed Modal Form
+    const editForm = $('freshrssEditFeedForm');
+    const editError = $('freshrssEditFeedError');
+    $('freshrssCloseEditModalBtn')?.addEventListener('click', closeEditFeedModal);
+    $('freshrssCancelEditBtn')?.addEventListener('click', closeEditFeedModal);
+
+    editForm?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const feedId = $('freshrssEditFeedId')?.value;
+      const title = $('freshrssEditTitleInput')?.value.trim();
+      const category = $('freshrssEditCategoryInput')?.value.trim();
+      const submitBtn = $('freshrssSubmitEditBtn');
+
+      if (!feedId || !title) return;
+      if (submitBtn) submitBtn.disabled = true;
+      if (editError) editError.classList.add('hidden');
+
+      try {
+        const { res, data } = await api('/api/feed', {
+          method: 'PATCH',
+          body: JSON.stringify({ feed_id: feedId, title, category })
+        });
+        if (res?.ok && data?.success) {
+          showToast(`Feed updated successfully`);
+          closeEditFeedModal();
+          loadFeedSources();
+          loadFeedArticles();
+        } else {
+          if (editError) {
+            editError.textContent = data?.error || 'Failed to update feed';
+            editError.classList.remove('hidden');
+          }
+        }
+      } catch (err) {
+        if (editError) {
+          editError.textContent = err.message || 'Network error';
+          editError.classList.remove('hidden');
+        }
+      } finally {
+        if (submitBtn) submitBtn.disabled = false;
+      }
+    });
+
+    // OPML Import Modal
     const opmlModal = $('freshrssOpmlModal');
     const opmlInput = $('freshrssOpmlFileInput');
     const opmlStatus = $('freshrssOpmlStatus');
@@ -5377,6 +5949,10 @@ document.addEventListener('DOMContentLoaded', () => {
       opmlModal?.classList.remove('hidden');
       if (opmlError) opmlError.classList.add('hidden');
       if (opmlStatus) opmlStatus.textContent = '';
+      const opmlScope = $('freshrssOpmlScopeInput');
+      if (opmlScope) {
+        populateFeedScopeSelect(opmlScope, feedState.communityId);
+      }
     }
 
     function closeOpmlModal() {
@@ -5398,7 +5974,8 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
 
-      if (opmlStatus) opmlStatus.textContent = 'Reading and importing subscriptions…';
+      const targetCommunityId = $('freshrssOpmlScopeInput')?.value || feedState.communityId;
+      if (opmlStatus) opmlStatus.textContent = 'Parsing OPML subscriptions and ingesting feeds…';
       if (opmlError) opmlError.classList.add('hidden');
 
       try {
@@ -5407,12 +5984,18 @@ document.addEventListener('DOMContentLoaded', () => {
           method: 'POST',
           body: JSON.stringify({
             opml_text: text,
-            community_id: feedState.communityId
+            community_id: targetCommunityId
           })
         });
         if (res?.ok && data?.success) {
-          showToast(`Imported ${data.imported_count} feeds from OPML`);
+          const targetName = targetCommunityId === 'personal' ? 'Personal Second Brain' : 'Community Archive';
+          showToast(`Successfully imported ${data.imported_count} feeds to ${targetName}`);
           closeOpmlModal();
+          if (feedState.communityId !== targetCommunityId) {
+            feedState.communityId = targetCommunityId;
+            const commSel = $('freshrssCommunitySelect');
+            if (commSel) commSel.value = targetCommunityId;
+          }
           loadFeedSources();
           loadFeedArticles();
         } else {
@@ -5432,6 +6015,11 @@ document.addEventListener('DOMContentLoaded', () => {
     $('freshrssOpmlExportBtn')?.addEventListener('click', () => {
       if (!feedState.communityId) return;
       window.open(`/api/feed/opml/export?community_id=${encodeURIComponent(feedState.communityId)}`, '_blank');
+    });
+
+    // AI Summary Modal Close
+    $('freshrssCloseAiModalBtn')?.addEventListener('click', () => {
+      $('freshrssAiSummaryModal')?.classList.add('hidden');
     });
   }
 

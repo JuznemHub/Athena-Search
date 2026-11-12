@@ -27,4 +27,9 @@ agent/
 .github/hooks/
 .github/skills/
 
+# Session transcripts / exports
+SESSION_HISTORY.md
+scripts/generate_session_history.py
+
+
 

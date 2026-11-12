@@ -438,153 +438,198 @@
 
       <!-- FreshRSS 1:1 Feed Section -->
       <section id="feedView" class="freshrss-view hidden" aria-label="FreshRSS Feed Reader">
-        <!-- FreshRSS Top Navigation Bar -->
-        <header class="freshrss-header">
-          <div class="freshrss-header-left">
-            <button type="button" id="freshrssToggleSidebarBtn" class="icon-btn freshrss-icon-btn" title="Toggle Feeds Sidebar" aria-label="Toggle Feeds Sidebar">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
-            </button>
-            <div class="freshrss-brand">
-              <span class="freshrss-brand-badge" aria-hidden="true">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#ff7700" stroke-width="2.5"><path d="M4 11a9 9 0 0 1 9 9"></path><path d="M4 4a16 16 0 0 1 16 16"></path><circle cx="5" cy="19" r="1.5" fill="#ff7700"></circle></svg>
-              </span>
-              <div class="freshrss-title-block">
-                <span class="freshrss-brand-name">FreshRSS</span>
-                <h2 id="freshrssStreamTitle" class="freshrss-stream-title">Main stream</h2>
-              </div>
+        <!-- FreshRSS Top Navigation Bar (Header) -->
+        <header class="header freshrss-header">
+          <div class="item title">
+            <a href="#feed" class="freshrss-logo-wrap" title="FreshRSS Feed Reader">
+              <img class="logo" src="/assets/freshrss/FreshRSS-logo.svg" alt="FreshRSS" width="160" height="32" loading="eager">
+            </a>
+          </div>
+
+          <div class="item search">
+            <div class="stick freshrss-search-stick">
+              <input type="text" id="freshrssSearchInput" placeholder="Search words or #tags" autocomplete="off" spellcheck="false">
+              <button class="btn freshrss-search-btn" id="freshrssSearchBtn" type="button" title="Search"><img class="icon" src="/assets/freshrss/search.svg" loading="lazy" alt="🔍"></button>
+              <button class="freshrss-clear-search hidden" id="freshrssClearSearchBtn" type="button" title="Clear search">&times;</button>
             </div>
           </div>
 
-          <div class="freshrss-header-center">
-            <!-- View Mode Selector -->
-            <div class="freshrss-view-modes" role="group" aria-label="View Mode">
-              <button type="button" id="freshrssViewNormalBtn" class="freshrss-mode-btn active" title="Normal View (Expanded Cards)" aria-label="Normal View">
-                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
-                <span>Normal</span>
-              </button>
-              <button type="button" id="freshrssViewReaderBtn" class="freshrss-mode-btn" title="Reader View (Full Reading Mode)" aria-label="Reader View">
-                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
-                <span>Reader</span>
-              </button>
-              <button type="button" id="freshrssViewListBtn" class="freshrss-mode-btn" title="List View (Compact)" aria-label="List View">
-                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
-                <span>List</span>
-              </button>
+          <div class="item configure freshrss-header-actions">
+            <div class="freshrss-comm-badge" title="Active Community Feed Archive">
+              <select id="freshrssCommunitySelect" class="freshrss-header-select" aria-label="Switch Community"></select>
             </div>
-
-            <!-- State Filter -->
-            <div class="freshrss-filter-wrap">
-              <select id="freshrssStateFilter" class="input input-sm freshrss-select" aria-label="Filter status">
-                <option value="all">All articles</option>
-                <option value="unread" selected>Unread only</option>
-                <option value="starred">Favorites (Starred)</option>
-              </select>
-            </div>
-          </div>
-
-          <div class="freshrss-header-right">
-            <!-- Search -->
-            <div class="freshrss-search-wrap">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-              <input type="text" id="freshrssSearchInput" placeholder="Filter stream…" autocomplete="off">
-              <button type="button" id="freshrssClearSearchBtn" class="clear-btn hidden" aria-label="Clear search">&times;</button>
-            </div>
-
-            <!-- Actions -->
-            <button type="button" id="freshrssMarkAllReadBtn" class="icon-btn freshrss-icon-btn" title="Mark all as read" aria-label="Mark all as read">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="20 6 9 17 4 12"/></svg>
+            <button type="button" id="freshrssAddFeedBtn" class="btn btn-primary btn-sm freshrss-add-sub-btn" title="Add RSS/Atom subscription">
+              <span>+ Add subscription</span>
             </button>
-            <button type="button" id="freshrssRefreshBtn" class="icon-btn freshrss-icon-btn" title="Refresh feeds &amp; ingest new articles" aria-label="Refresh feeds">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
-            </button>
-            <button type="button" id="freshrssAddFeedBtn" class="btn btn-secondary btn-sm freshrss-add-btn" title="Subscribe to RSS / Atom feed">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-              <span>Add Feed</span>
-            </button>
-            <button type="button" id="freshrssCloseBtn" class="icon-btn freshrss-icon-btn" title="Back to Search" aria-label="Close Feed Reader">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            <button type="button" id="freshrssCloseBtn" class="btn freshrss-close-btn" title="Return to Athena Search" aria-label="Close">
+              <img class="icon" src="/assets/freshrss/close.svg" alt="❌">
             </button>
           </div>
         </header>
 
-        <!-- FreshRSS Layout Body -->
-        <div class="freshrss-layout">
-          <!-- Left Sidebar -->
-          <aside id="freshrssSidebar" class="freshrss-sidebar">
-            <div class="freshrss-sidebar-inner">
-              <div class="freshrss-nav-section">
-                <button type="button" class="freshrss-nav-item active" data-stream="all" id="freshrssNavMain">
-                  <span class="freshrss-nav-icon">🔥</span>
-                  <span class="freshrss-nav-label">Main stream</span>
-                  <span id="freshrssMainUnreadCount" class="freshrss-badge">0</span>
-                </button>
-                <button type="button" class="freshrss-nav-item" data-stream="starred" id="freshrssNavStarred">
-                  <span class="freshrss-nav-icon">⭐</span>
-                  <span class="freshrss-nav-label">Favorites</span>
-                  <span id="freshrssStarredCount" class="freshrss-badge freshrss-badge-muted">0</span>
-                </button>
-              </div>
+        <!-- FreshRSS Subheader Toolbar (nav_menu) -->
+        <nav class="nav_menu freshrss-nav-menu">
+          <div id="nav_menu_toggle_aside" class="group">
+            <button type="button" id="freshrssToggleSidebarBtn" class="btn active" title="Toggle sidebar">
+              <img class="icon" src="/assets/freshrss/category.svg" loading="lazy" alt="🗂️">
+            </button>
+          </div>
 
-              <!-- Community Selector in Sidebar -->
-              <div class="freshrss-community-selector-wrap">
-                <label for="freshrssCommunitySelect">Community Feeds</label>
-                <select id="freshrssCommunitySelect" class="input input-sm"></select>
-              </div>
+          <div id="nav_menu_views" class="group freshrss-views-group">
+            <button type="button" class="view-normal btn active" id="freshrssViewNormalBtn" title="Normal view (📰)">
+              <img class="icon" src="/assets/freshrss/view-normal.svg" loading="lazy" alt="📰">
+            </button>
+            <button type="button" class="view-global btn" id="freshrssViewGlobalBtn" title="Global view (📖)">
+              <img class="icon" src="/assets/freshrss/view-global.svg" loading="lazy" alt="📖">
+            </button>
+            <button type="button" class="view-reader btn" id="freshrssViewReaderBtn" title="Reading view (📜)">
+              <img class="icon" src="/assets/freshrss/view-reader.svg" loading="lazy" alt="📜">
+            </button>
+          </div>
 
-              <div class="freshrss-categories-heading">
-                <span>Categories &amp; Feeds</span>
-              </div>
+          <div id="nav_menu_sort" class="group freshrss-sort-group">
+            <div class="dropdown freshrss-sort-dropdown" id="freshrssSortDropdown">
+              <button type="button" id="freshrssSortToggleBtn" class="dropdown-toggle btn" title="Sorting criterion">
+                <img class="icon" src="/assets/freshrss/sort-down.svg" loading="lazy" alt="⬇️">
+                <span id="freshrssSortLabel" class="sort-label">Freshly received first</span>
+              </button>
+              <ul class="dropdown-menu hidden" id="freshrssSortMenu" role="menu">
+                <li class="item active" data-sort="id" data-order="DESC"><button type="button">Freshly received first</button></li>
+                <li class="item" data-sort="date" data-order="DESC"><button type="button">Publication date 9→1</button></li>
+                <li class="item" data-sort="date" data-order="ASC"><button type="button">Publication date 1→9</button></li>
+                <li class="item" data-sort="title" data-order="ASC"><button type="button">Title A→Z</button></li>
+                <li class="item" data-sort="title" data-order="DESC"><button type="button">Title Z→A</button></li>
+                <li class="item" data-sort="feed" data-order="ASC"><button type="button">Feed title A→Z</button></li>
+                <li class="item" data-sort="feed" data-order="DESC"><button type="button">Feed title Z→A</button></li>
+                <li class="item separator" data-sort="rand" data-order="DESC"><button type="button">Random order</button></li>
+              </ul>
+            </div>
+          </div>
 
-              <!-- Tree -->
-              <div id="freshrssCategoriesTree" class="freshrss-categories-tree">
-                <div class="freshrss-loading-feeds">Loading subscriptions…</div>
-              </div>
+          <div id="nav_menu_state" class="group freshrss-state-tabs">
+            <button type="button" class="btn freshrss-state-tab" data-filter="all">All</button>
+            <button type="button" class="btn freshrss-state-tab active" data-filter="unread">Unread</button>
+            <button type="button" class="btn freshrss-state-tab" data-filter="starred"><img class="icon" src="/assets/freshrss/starred.svg" alt="⭐"> Favourites</button>
+          </div>
 
-              <!-- Sidebar Footer -->
-              <div class="freshrss-sidebar-footer">
-                <button type="button" id="freshrssSidebarAddBtn" class="btn btn-secondary btn-sm btn-block">
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-                  <span>Add subscription</span>
-                </button>
-                <div class="freshrss-opml-btns">
-                  <button type="button" id="freshrssOpmlImportBtn" class="btn-text-sm" title="Import OPML subscriptions">Import OPML</button>
-                  <span class="freshrss-opml-divider">·</span>
-                  <button type="button" id="freshrssOpmlExportBtn" class="btn-text-sm" title="Export subscriptions as OPML">Export OPML</button>
-                </div>
+          <div id="nav_menu_actualize" class="group">
+            <button type="button" id="freshrssRefreshBtn" class="btn" title="Update feeds / Ingest into Athena brain">
+              <img class="icon" src="/assets/freshrss/refresh.svg" loading="lazy" alt="🔃">
+            </button>
+          </div>
+
+          <div id="nav_menu_read_all" class="group">
+            <button type="button" id="freshrssMarkAllReadBtn" class="btn" title="Mark all as read">
+              <img class="icon" src="/assets/freshrss/read.svg" loading="lazy" alt="✓">
+            </button>
+          </div>
+        </nav>
+
+        <!-- FreshRSS Global Body Layout -->
+        <div id="freshrssGlobalBody" class="freshrss-global-layout">
+          <!-- Left Aside Sidebar -->
+          <nav class="nav aside aside_feed" id="aside_feed">
+            <button type="button" class="toggle_aside" id="freshrssCloseSidebarBtn" title="Close sidebar">
+              <img class="icon" src="/assets/freshrss/close.svg" loading="lazy" alt="❌">
+            </button>
+
+            <div class="aside-top-actions">
+              <button type="button" id="freshrssSidebarAddBtn" class="btn btn-secondary btn-sm btn-block">
+                <span>+ Add subscription</span>
+              </button>
+              <div class="aside-opml-links">
+                <button type="button" id="freshrssOpmlImportBtn" class="opml-link">Import OPML</button>
+                <span class="dot">·</span>
+                <button type="button" id="freshrssOpmlExportBtn" class="opml-link">Export OPML</button>
               </div>
             </div>
-          </aside>
+
+            <ul id="sidebar" class="tree scrollbar-thin">
+              <li class="tree-folder category all active" id="freshrssNavMain">
+                <a class="tree-folder-title" href="#feed">
+                  <img class="icon" src="/assets/freshrss/all.svg" loading="lazy" alt="☰">
+                  <span class="title">Main stream</span>
+                  <span class="badge" id="freshrssMainUnreadCount">0</span>
+                </a>
+              </li>
+
+              <li class="tree-folder category important" id="freshrssNavImportant">
+                <a class="tree-folder-title" href="#feed">
+                  <img class="icon" src="/assets/freshrss/important.svg" loading="lazy" alt="📌">
+                  <span class="title">Important feeds</span>
+                  <span class="badge" id="freshrssImportantUnreadCount">0</span>
+                </a>
+              </li>
+
+              <li class="tree-folder category favorites" id="freshrssNavStarred">
+                <a class="tree-folder-title" href="#feed">
+                  <img class="icon" src="/assets/freshrss/starred.svg" loading="lazy" alt="⭐">
+                  <span class="title">Favourites</span>
+                  <span class="badge" id="freshrssStarredCount">0</span>
+                </a>
+              </li>
+
+              <li id="freshrssNavLabelsFolder" class="tree-folder category tags">
+                <a class="tree-folder-title" id="freshrssLabelsToggle" href="#feed">
+                  <button type="button" class="dropdown-toggle" title="Expand category"><img class="icon" src="/assets/freshrss/down.svg" loading="lazy" alt="🔽"></button>
+                  <img class="icon" src="/assets/freshrss/label.svg" loading="lazy" alt="🏷️">
+                  <span class="title">My labels</span>
+                </a>
+                <ul class="tree-folder-items hidden" id="freshrssLabelsList"></ul>
+              </li>
+
+              <li class="freshrss-categories-divider">
+                <span>Categories</span>
+              </li>
+
+              <!-- Dynamic Categories & Feeds Tree -->
+              <div id="freshrssCategoriesTree" class="freshrss-dynamic-tree">
+                <div class="freshrss-loading-feeds">Loading subscriptions…</div>
+              </div>
+            </ul>
+          </nav>
+
           <div id="freshrssSidebarBackdrop" class="freshrss-sidebar-backdrop hidden"></div>
 
-          <!-- Main Stream Area -->
-          <main class="freshrss-stream-container">
-            <div class="freshrss-stream-meta-bar">
-              <div class="freshrss-stream-meta-left">
-                <span id="freshrssStreamBreadcrumb" class="freshrss-breadcrumb">Main stream</span>
-                <span id="freshrssArticleCounts" class="freshrss-counts-pill">0 articles</span>
+          <!-- Main Stream View Area -->
+          <main id="stream" class="normal freshrss-main-stream">
+            <div class="freshrss-stream-banner">
+              <div class="banner-left">
+                <h1 id="freshrssStreamTitle" class="stream-title">Main stream</h1>
+                <span id="freshrssArticleCounts" class="counts-pill">0 articles</span>
               </div>
-              <div class="freshrss-stream-meta-right">
-                <span class="freshrss-sync-indicator" id="freshrssSyncIndicator">
-                  <span class="freshrss-sync-dot"></span>
-                  <span>Auto-sync with Athena brain</span>
+              <div class="banner-right">
+                <span class="pzp-sync-tag" title="Articles are automatically ingested into Athena Second Brain and taxonomy-tagged">
+                  <span class="live-dot"></span>
+                  <span>Athena Knowledge Ingest: Live</span>
                 </span>
               </div>
             </div>
 
-            <!-- Articles List -->
-            <div id="freshrssArticlesList" class="freshrss-articles-list view-normal">
+            <!-- Normal / Reader Articles Stream -->
+            <div id="freshrssArticlesList" class="freshrss-articles-container view-normal">
               <div class="freshrss-loading-articles">
                 <div class="freshrss-spinner"></div>
-                <p>Loading articles…</p>
+                <p>Loading stream…</p>
               </div>
             </div>
 
-            <!-- Pagination / Load more -->
+            <!-- Global View Grid (when view-global is active) -->
+            <div id="freshrssGlobalGrid" class="freshrss-global-grid hidden"></div>
+
+            <!-- Pagination -->
             <div id="freshrssPagination" class="freshrss-pagination hidden">
               <button type="button" id="freshrssLoadMoreBtn" class="btn btn-secondary btn-sm">Load more articles</button>
-              <span id="freshrssPageInfo" class="freshrss-page-info">Page 1 of 1</span>
+              <span id="freshrssPageInfo" class="page-info">Page 1 of 1</span>
             </div>
           </main>
+
+          <!-- Floating Navigation Buttons (Bottom-Right) -->
+          <nav id="nav_entries" class="nav_entries">
+            <button type="button" id="freshrssPrevEntryBtn" class="previous_entry" title="Previous article (k)"><img class="icon" src="/assets/freshrss/prev.svg" loading="lazy" alt="⏪"></button>
+            <button type="button" id="freshrssUpBtn" class="up" title="Scroll to top"><img class="icon" src="/assets/freshrss/up.svg" loading="lazy" alt="🔼"></button>
+            <button type="button" id="freshrssNextEntryBtn" class="next_entry" title="Next article (j)"><img class="icon" src="/assets/freshrss/next.svg" loading="lazy" alt="⏩"></button>
+          </nav>
         </div>
 
         <!-- Add Feed Modal Dialog -->
@@ -595,6 +640,11 @@
               <button type="button" id="freshrssCloseAddModalBtn" class="icon-btn">&times;</button>
             </div>
             <form id="freshrssAddFeedForm" class="freshrss-modal-form">
+              <div class="form-group">
+                <label for="freshrssScopeInput">Destination Archive</label>
+                <select id="freshrssScopeInput" class="input"></select>
+                <span class="form-hint" id="freshrssScopeHint">Articles will be ingested into your chosen knowledge base.</span>
+              </div>
               <div class="form-group">
                 <label for="freshrssFeedUrlInput">Feed URL (RSS, Atom, or JSON Feed) *</label>
                 <input type="url" id="freshrssFeedUrlInput" class="input" placeholder="https://example.com/feed.xml" required autocomplete="off">
@@ -611,12 +661,38 @@
               </div>
               <div class="freshrss-ingest-note">
                 <span class="note-icon">💡</span>
-                <p>New articles will automatically be ingested into Athena's link archive and tagged for search &amp; AI retrieval.</p>
+                <p id="freshrssIngestNoteText">New articles will automatically be ingested into Athena and tagged for search &amp; AI retrieval.</p>
               </div>
               <div id="freshrssAddFeedError" class="auth-error hidden"></div>
               <div class="freshrss-modal-actions">
                 <button type="button" id="freshrssCancelAddBtn" class="btn btn-secondary">Cancel</button>
                 <button type="submit" id="freshrssSubmitAddBtn" class="btn btn-primary">Subscribe</button>
+              </div>
+            </form>
+          </div>
+        </div>
+
+        <!-- Edit Feed Modal Dialog -->
+        <div id="freshrssEditModal" class="freshrss-modal-overlay hidden">
+          <div class="freshrss-modal-card">
+            <div class="freshrss-modal-header">
+              <h3>Edit Feed Subscription</h3>
+              <button type="button" id="freshrssCloseEditModalBtn" class="icon-btn">&times;</button>
+            </div>
+            <form id="freshrssEditFeedForm" class="freshrss-modal-form">
+              <input type="hidden" id="freshrssEditFeedId">
+              <div class="form-group">
+                <label for="freshrssEditTitleInput">Feed Title</label>
+                <input type="text" id="freshrssEditTitleInput" class="input" required autocomplete="off">
+              </div>
+              <div class="form-group">
+                <label for="freshrssEditCategoryInput">Category</label>
+                <input type="text" id="freshrssEditCategoryInput" class="input" list="freshrssCategoryList" autocomplete="off">
+              </div>
+              <div id="freshrssEditFeedError" class="auth-error hidden"></div>
+              <div class="freshrss-modal-actions">
+                <button type="button" id="freshrssCancelEditBtn" class="btn btn-secondary">Cancel</button>
+                <button type="submit" id="freshrssSubmitEditBtn" class="btn btn-primary">Save Changes</button>
               </div>
             </form>
           </div>
@@ -632,6 +708,10 @@
             <div class="freshrss-modal-form">
               <p class="section-desc">Upload an OPML export file from FreshRSS, Feedly, Inoreader, or any standard RSS reader.</p>
               <div class="form-group">
+                <label for="freshrssOpmlScopeInput">Destination Archive</label>
+                <select id="freshrssOpmlScopeInput" class="input"></select>
+              </div>
+              <div class="form-group">
                 <label for="freshrssOpmlFileInput">Choose .opml or .xml file</label>
                 <input type="file" id="freshrssOpmlFileInput" class="input" accept=".opml,.xml">
               </div>
@@ -639,7 +719,31 @@
               <div id="freshrssOpmlStatus" class="upload-status"></div>
               <div class="freshrss-modal-actions">
                 <button type="button" id="freshrssCancelOpmlBtn" class="btn btn-secondary">Cancel</button>
+                <button type="button" id="freshrssSubmitOpmlBtn" class="btn btn-primary">Import OPML</button>
+              </div>
+            </div>
+          </div>
+        </div>
+              <div class="freshrss-modal-actions">
+                <button type="button" id="freshrssCancelOpmlBtn" class="btn btn-secondary">Cancel</button>
                 <button type="button" id="freshrssSubmitOpmlBtn" class="btn btn-primary">Import Feeds</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- AI Summary Drawer / Modal Dialog -->
+        <div id="freshrssAiSummaryModal" class="freshrss-modal-overlay hidden">
+          <div class="freshrss-modal-card freshrss-ai-card">
+            <div class="freshrss-modal-header">
+              <h3>🤖 Athena AI Article Summary</h3>
+              <button type="button" id="freshrssCloseAiModalBtn" class="icon-btn">&times;</button>
+            </div>
+            <div class="freshrss-ai-body">
+              <h4 id="freshrssAiArticleTitle" class="ai-article-title"></h4>
+              <div id="freshrssAiSummaryContent" class="ai-summary-content">
+                <div class="freshrss-spinner"></div>
+                <p>Generating intelligent summary from Athena AI…</p>
               </div>
             </div>
           </div>
