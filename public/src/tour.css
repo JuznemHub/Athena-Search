@@ -1,0 +1,126 @@
+.athena-search-intro {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  column-gap: var(--s-3);
+}
+
+.athena-tour-launch {
+  min-height: 44px;
+  padding: 0 var(--s-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--serp-link);
+  font: 600 var(--fs-sm) / 1.3 var(--font-sans);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+  cursor: pointer;
+}
+
+.athena-tour-launch:hover {
+  background: var(--surface);
+  color: var(--serp-link-hover);
+}
+
+.athena-tour {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  box-sizing: border-box;
+  width: min(30rem, calc(100% - 2rem));
+  max-height: calc(100% - 2rem);
+  max-height: calc(100dvh - 2rem);
+  padding: clamp(var(--s-4), 4vw, var(--s-6));
+  overflow: auto;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(var(--surface), var(--surface)), var(--ink);
+  color: var(--text-main);
+  box-shadow: var(--shadow-main);
+}
+
+.athena-tour:not([open]) {
+  display: none;
+}
+
+.athena-tour::backdrop {
+  background: rgb(0 0 0 / 0.6);
+}
+
+.athena-tour-header,
+.athena-tour-footer,
+.athena-tour-navigation {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.athena-tour-header {
+  justify-content: space-between;
+}
+
+.athena-tour-progress {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+.athena-tour-close {
+  flex: 0 0 44px;
+  min-height: 44px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-main);
+  font: 1.5rem / 1 var(--font-sans);
+  cursor: pointer;
+}
+
+.athena-tour-close:hover {
+  background: var(--surface-2);
+  border-color: var(--hairline);
+}
+
+.athena-tour h2 {
+  margin: var(--s-2) 0;
+  font-size: var(--fs-lg);
+  line-height: 1.3;
+  outline: none;
+}
+
+.athena-tour-description {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.athena-tour-footer {
+  flex-wrap: wrap;
+  justify-content: space-between;
+  row-gap: var(--s-3);
+  margin-top: var(--s-5);
+}
+
+.athena-tour-navigation {
+  margin-inline-start: auto;
+}
+
+.athena-tour-footer .btn {
+  min-height: 44px;
+}
+
+.athena-tour-navigation button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.athena-tour [hidden] {
+  display: none;
+}
+
+.athena-tour-launch:focus-visible,
+.athena-tour button:focus-visible {
+  outline: 2px solid var(--serp-link);
+  outline-offset: 2px;
+}
