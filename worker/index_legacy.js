@@ -4511,7 +4511,7 @@ async function handleGetFeedSources(url, user, env, corsHeaders) {
         WHERE ${scopeWhere} AND COALESCE(f.is_important, 0) = 1 AND (s.is_read IS NULL OR s.is_read = 0)) AS total_important_unread
   `;
   const totalsParams = [user.id, ...scopeArgs, user.id, ...scopeArgs, user.id, ...scopeArgs];
-  let totalsRes = null;
+  let totalsRes;
   try {
     totalsRes = await env.DB.prepare(totalsSql).bind(...totalsParams).first();
   } catch (_) {

@@ -4726,7 +4726,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (scopeId === 'personal') {
       loadPersonalLinks().catch(() => {});
     } else if (scopeId) {
-      loadCommunityLinks(scopeId).catch(() => {});
+      loadCommunityLinksIfAny().catch(() => {});
     }
   }
 
@@ -5393,7 +5393,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const dateStr = formatFeedDate(art.published_at);
       const snippet = stripHtmlSnippet(art.summary || art.content || '', 160);
       const cleanContent = sanitizeFeedHtml(art.content || art.summary || '');
-      let domain = '';
+      let domain;
       try {
         domain = art.url ? new URL(art.url).hostname.replace(/^www\./, '') : '';
       } catch (_) {
