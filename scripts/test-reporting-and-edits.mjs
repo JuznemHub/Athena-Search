@@ -8,8 +8,10 @@ import {
   structureDatabase,
   urlQualityScore,
   pickBestFormattedRow,
-  generateUrlHash
+  generateUrlHash,
+  runForcetagsReview
 } from '../worker/index.js';
+import { classifyTags, validateTags } from '../worker/tag-taxonomy.js';
 
 function makeMockDb() {
   const db = new DatabaseSync(':memory:');
@@ -428,6 +430,85 @@ async function runTests() {
     assert.equal(promotedRow.url, 'https://github.com/testorg/standalone-app', 'Standalone link must be promoted to the content destination URL');
     assert.equal(promotedRow.image_url, 'https://telegra.ph/file/standalone_tool.png', 'Original image asset URL becomes image_url');
     assert.equal(promotedRow.notes.includes('https://github.com/testorg/standalone-app'), false, 'Redundant bare URL must be cleaned from notes');
+
+    // Test 10: Tag taxonomy rejection of generic open-source and classification of Project GLD
+    const vOpenSource = validateTags(['open-source', 'opensource', 'game', 'tool']);
+    assert.deepEqual(vOpenSource.tags, ['game', 'tool'], 'open-source and opensource must be rejected as generic tags');
+    const openSourceRejection = vOpenSource.rejected.find(r => r.tag === 'open-source');
+    assert.ok(openSourceRejection && openSourceRejection.reason === 'generic', 'open-source rejection reason must be generic');
+
+    const gldUrl = 'https://github.com/Y0URD34TH/Project-GLD';
+    const gldMeta = {
+      title: 'Project GLD — Game Library and Download Manager with Lua Script Support',
+      notes: 'Project GLD is a game library and download manager, which supports community made Lua scripts for downloading and searching games.',
+      content: 'Topics: downloader, game, games, library, lua, lua-scripts\n\n### [ ☁️ ] Cloud Saving\n* Back up your games and save them to cloud thanks to Rclone\n* Automatic back up, restore, and cloud sync available\n\n### [🎮] Game Download\n* Download a game from any source via Lua scripts\n\nDownload GLDSetup.exe for Windows.'
+    };
+    const gldClassified = classifyTags(gldUrl, gldMeta);
+    assert.ok(gldClassified.tags.includes('game'), 'Project GLD must include game tag');
+    assert.ok(gldClassified.tags.includes('lua'), 'Project GLD must include lua tag');
+    assert.ok(gldClassified.tags.includes('github'), 'Project GLD must include github ecosystem tag');
+    assert.equal(gldClassified.tags.includes('cloud'), false, 'Project GLD must NOT include cloud tag from incidental cloud save mentions');
+    assert.equal(gldClassified.tags.includes('open-source'), false, 'Project GLD must NOT include open-source tag');
+
+    // Test 11: runForcetagsReview cleans up stale unevidenced tags and adds missing game tag
+    await mockDb.prepare(`
+      INSERT INTO links (id, community_id, url, url_hash, title, notes, tags, image_url, added_by, upvotes, downvotes, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      'link_gld_stale',
+      'comm_test',
+      gldUrl,
+      generateUrlHash(gldUrl),
+      gldMeta.title,
+      gldMeta.notes,
+      JSON.stringify(['cloud', 'open-source', 'github']),
+      null,
+      'member_alice',
+      1,
+      0,
+      4000
+    ).run();
+
+    // Mock fetch for scrapeForgeMetadata inside describeAndTagLink during review
+    const innerFetch = globalThis.fetch;
+    globalThis.fetch = async (url, options = {}) => {
+      const uStr = String(url);
+      if (uStr.includes('api.github.com/repos/Y0URD34TH/Project-GLD/readme')) {
+        return new Response(gldMeta.content, { status: 200, headers: { 'Content-Type': 'text/plain' } });
+      }
+      if (uStr.includes('api.github.com/repos/Y0URD34TH/Project-GLD')) {
+        return new Response(JSON.stringify({
+          name: 'Project-GLD',
+          description: gldMeta.notes,
+          topics: ['downloader', 'game', 'games', 'library', 'lua', 'lua-scripts'],
+          owner: { avatar_url: 'https://example.com/avatar.png' }
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return innerFetch(url, options);
+    };
+
+    const bgPromises = [];
+    const testEnv = { ...env, __ctx: { waitUntil: (p) => bgPromises.push(p) } };
+
+    try {
+      await runForcetagsReview(testEnv, {
+        token: 'test_token',
+        chatId: 'comm_chat',
+        scope: 'community',
+        communityId: 'comm_test',
+        wantAll: true
+      });
+      await Promise.all(bgPromises);
+    } finally {
+      globalThis.fetch = innerFetch;
+    }
+
+    const reviewedGld = await mockDb.prepare('SELECT tags FROM links WHERE id = ?').bind('link_gld_stale').first();
+    const reviewedTags = JSON.parse(reviewedGld.tags || '[]');
+    assert.ok(reviewedTags.includes('game'), 'Reviewed link must add missing game tag');
+    assert.ok(reviewedTags.includes('github'), 'Reviewed link must keep github tag');
+    assert.equal(reviewedTags.includes('cloud'), false, 'Reviewed link must drop unevidenced cloud tag');
+    assert.equal(reviewedTags.includes('open-source'), false, 'Reviewed link must drop open-source tag');
 
     console.log('reporting, editing, and structure duplicate tests passed');
   } finally {

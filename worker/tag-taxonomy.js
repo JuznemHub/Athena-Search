@@ -43,17 +43,17 @@ export const CATEGORY_TAGS = [
   'finance', 'education', 'productivity', 'social', 'automation', 'networking',
   'database', 'cloud', 'storage', 'search', 'messaging', 'streaming', 'audio',
   'emulator', 'rom', 'flashing', 'root', 'gpu', 'reading', 'reference',
-  'writing',
+  'writing', 'game',
 ];
 
 /** Programming languages and markup. */
 export const LANGUAGE_TAGS = [
   'python', 'javascript', 'typescript', 'rust', 'kotlin', 'swift', 'java',
-  'php', 'ruby', 'go', 'cpp', 'csharp', 'shell', 'sql', 'css', 'html',
+  'php', 'ruby', 'go', 'cpp', 'csharp', 'shell', 'sql', 'css', 'html', 'lua',
 ];
 
 /** Facts about the project, not a topic or a type. */
-export const ATTRIBUTE_TAGS = ['open-source', 'self-hosted', 'offline'];
+export const ATTRIBUTE_TAGS = ['self-hosted', 'offline'];
 
 export const CANONICAL_TAGS = new Set([
   ...TYPE_TAGS, ...PLATFORM_TAGS, ...ECOSYSTEM_TAGS, ...BRAND_TAGS,
@@ -63,6 +63,7 @@ export const CANONICAL_TAGS = new Set([
 export const PLATFORM_SET = new Set([...PLATFORM_TAGS, 'multiplatform']);
 export const BRAND_SET = new Set(BRAND_TAGS);
 export const TYPE_SET = new Set(TYPE_TAGS);
+export const CATEGORY_SET = new Set(CATEGORY_TAGS);
 export const ECOSYSTEM_SET = new Set(ECOSYSTEM_TAGS);
 
 /**
@@ -73,6 +74,8 @@ export const TAG_ALIASES = {
   opensource: 'open-source',
   'open-source': 'open-source',
   tools: 'tool',
+  downloader: 'tool',
+  'download-manager': 'tool',
   apps: 'app',
   applications: 'app',
   programs: 'software',
@@ -141,12 +144,13 @@ export const GENERIC_REJECTS = new Set([
   'program', 'programs', 'media', 'content', 'client', 'clients', 'mobile',
   'resources', 'resource', 'development', 'store', 'play', 'com', 'app-store',
   'play-store', 'site', 'portal', 'collection', 'list', 'directory', 'hub',
-  'world', 'community', 'project', 'projects',
+  'world', 'community', 'project', 'projects', 'open-source', 'opensource',
+  'open', 'source',
 ]);
 
-const bound = (src) => new RegExp(`(^|[^a-z0-9])(${src})([^a-z0-9]|$)`, 'i');
-const hit = (bag, src) => bound(src).test(bag);
-const countHits = (bag, src) => {
+export const bound = (src) => new RegExp(`(^|[^a-z0-9])(${src})([^a-z0-9]|$)`, 'i');
+export const hit = (bag, src) => bound(src).test(bag);
+export const countHits = (bag, src) => {
   if (!bag) return 0;
   const re = new RegExp(`(^|[^a-z0-9])(${src})([^a-z0-9]|$)`, 'gi');
   return (bag.match(re) || []).length;
@@ -300,7 +304,7 @@ const CATEGORY_RULES = [
   ['automation', 'automation|automate|workflows?'],
   ['networking', 'networking|dns|http|tcp|proxy server'],
   ['database', 'database|sql|postgres|sqlite|redis'],
-  ['cloud', 'cloud storage|cloud hosting|s3|object storage'],
+  ['cloud', 'cloud (?:computing|infrastructure|hosting|provider|platform|native)|\\baws\\b|\\bazure\\b|\\bgcp\\b|google cloud|openstack|kubernetes|nextcloud|owncloud'],
   ['storage', 'file storage|storage server|nas'],
   ['search', 'search engine|full-?text search'],
   ['messaging', 'messaging|chat app|instant messenger'],
@@ -314,6 +318,7 @@ const CATEGORY_RULES = [
   ['reading', 'reader|reading list|rss reader'],
   ['reference', 'reference|handbook|cheat ?sheet'],
   ['writing', 'writing|markdown|note-?taking'],
+  ['game', 'games?|gaming|videogames?|gameplay|gamer|game library|game manager|game launcher|game downloade?r?|roms?|emulat(or|ion)|steam|gog|itch\\.io'],
 ];
 
 const LANGUAGE_RULES = [
@@ -333,6 +338,7 @@ const LANGUAGE_RULES = [
   ['sql', '\\bsql\\b'],
   ['css', '\\bcss\\b'],
   ['html', '\\bhtml\\b'],
+  ['lua', '\\blua\\b'],
 ];
 
 function detectPlatforms(host, path, primary, body) {
@@ -473,7 +479,6 @@ export function extractFacts(rawUrl, meta = {}) {
   const categories = scoreRules(CATEGORY_RULES, 4);
   const languages = scoreRules(LANGUAGE_RULES, 3);
   const attributes = [];
-  if (repo || hit(all, 'open[- ]source|gpl|mit licen[cs]e|apache licen[cs]e')) attributes.push('open-source');
   if (hit(all, 'self[- ]hosted|selfhosted|self hosted')) attributes.push('self-hosted');
   if (hit(primary, '\\boffline\\b')) attributes.push('offline');
 

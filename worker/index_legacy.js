@@ -6,7 +6,8 @@ import { handleLogApi } from './log-api.js';
 import { runtimeLogs, redactLog, writeRuntimeLog } from './runtime-logs.js';
 import {
   tagsFromFacts, validateTags, extractFacts, properNounBans, normalizeTag,
-  JUNK_TAGS, GENERIC_REJECTS, CANONICAL_TAGS, TYPE_SET, TAG_VOCAB_TEXT,
+  JUNK_TAGS, GENERIC_REJECTS, CANONICAL_TAGS, TYPE_SET, CATEGORY_SET, TAG_VOCAB_TEXT,
+  hit,
 } from './tag-taxonomy.js';
 import {
   DEFAULT_FMHY_CATEGORIES,
@@ -10896,7 +10897,7 @@ async function editTelegramRichMessage(token, chatId, messageId, richHtml, threa
  * are never selected, so a human edit can never be overwritten by a review or
  * a background enrichment pass.
  */
-async function runForcetagsReview(env, { token, chatId, forumThreadId = null, tgUserId = null, scope = 'community', communityId = '', wantAll = false }) {
+export async function runForcetagsReview(env, { token, chatId, forumThreadId = null, tgUserId = null, scope = 'community', communityId = '', wantAll = false }) {
   const personal = scope === 'personal';
   const scopeLabel = personal ? 'personal' : 'community';
   await ensureAiConfigTable(env);
@@ -10987,14 +10988,28 @@ async function runForcetagsReview(env, { token, chatId, forumThreadId = null, tg
         // as page text would let old tags confirm themselves forever.
         const result = await describeAndTagLink(env, r.url, {
           title: oldTitle, notes: oldNotes, content: '',
-        }, { config: cfgFt, maxTags: 8, scrape: true });
+        }, { config: cfgFt, maxTags: 8, scrape: true, reviewTags: current });
         if (result.usedAi) st.aiHits++; else st.ruleHits++;
         for (const rej of result.rejected || []) st.rejectCounts[rej.reason] = (st.rejectCounts[rej.reason] || 0) + 1;
 
-        // Keep tags a human or an earlier pass already chose only when they
-        // survive the same whitelist: junk stamps, fluff, names and invented
-        // words all fall away here.
-        const verdict = validateTags([...result.tags, ...current], {
+        // Only keep current tags that have concrete evidence in the fresh
+        // facts or page text; drop unevidenced or rejected tags.
+        const evidencedCurrent = current.filter((tag) => {
+          const norm = normalizeTag(tag);
+          if (JUNK_TAGS.has(norm) || GENERIC_REJECTS.has(norm)) return false;
+          if (result.tags.includes(norm)) return true;
+          if (result.facts?.type === norm) return true;
+          if ((result.facts?.categories || []).includes(norm)) return true;
+          if ((result.facts?.platforms || []).includes(norm)) return true;
+          if ((result.facts?.brands || []).includes(norm)) return true;
+          if ((result.facts?.ecosystems || []).includes(norm)) return true;
+          if ((result.facts?.languages || []).includes(norm)) return true;
+          if ((result.facts?.attributes || []).includes(norm)) return true;
+          if (hit(result.facts?.primary || '', norm)) return true;
+          return false;
+        });
+
+        const verdict = validateTags([...result.tags, ...evidencedCurrent], {
           banned: nameBansFor(r.url, oldTitle),
           allowedBrands: result.facts?.brands || [],
           max: 8,
@@ -11005,7 +11020,13 @@ async function runForcetagsReview(env, { token, chatId, forumThreadId = null, tg
         for (const tag of verdict.tags) {
           if (tag === 'multiplatform') continue;
           if (TYPE_SET.has(tag)) {
-            if (typeTaken) continue;
+            if (typeTaken) {
+              if (CATEGORY_SET.has(tag)) {
+                newTags.push(tag);
+                continue;
+              }
+              continue;
+            }
             typeTaken = true;
           }
           newTags.push(tag);
@@ -19381,13 +19402,14 @@ async function scrapeForgeMetadata(rawUrl, env) {
       let title = data.name || repo;
       let description = (data.description || '').trim();
       let image = data.owner?.avatar_url || '';
-      let content = '';
+      const topics = Array.isArray(data.topics) ? data.topics.filter(Boolean) : [];
+      let content = topics.length ? `Topics: ${topics.join(', ')}\n\n` : '';
       try {
         const readmeRes = await fetchWithTimeout(`https://api.github.com/repos/${owner}/${repo}/readme`, {
           headers: { ...headers, Accept: 'application/vnd.github.raw' }, env
         });
         if (readmeRes.ok) {
-          content = (await readmeRes.text()).slice(0, 12000);
+          content += (await readmeRes.text()).slice(0, 12000);
           const intro = parseReadmeIntro(content.slice(0, 8000));
           if (intro.title) title = intro.title;
           if (intro.description && intro.description.length >= 20) description = intro.description;
@@ -19398,7 +19420,7 @@ async function scrapeForgeMetadata(rawUrl, env) {
       } catch (_) {}
       if (/^GitHub\s*-/i.test(title)) title = data.name || repo;
       description = cleanGenericSummary(description);
-      if (!description) description = `Open-source project ${owner}/${repo} on GitHub.`;
+      if (!description) description = `Project ${owner}/${repo} on GitHub.`;
       return {
         title: String(title).slice(0, 120),
         description: description.slice(0, 900),
@@ -19419,7 +19441,8 @@ async function scrapeForgeMetadata(rawUrl, env) {
       let title = data.name || repo;
       let description = (data.description || '').trim();
       let image = data.owner?.avatar_url || data.avatar_url || '';
-      let content = '';
+      const topics = Array.isArray(data.topics) ? data.topics.filter(Boolean) : [];
+      let content = topics.length ? `Topics: ${topics.join(', ')}\n\n` : '';
       try {
         // raw README candidates
         for (const name of ['README.md', 'readme.md', 'README.MD']) {
@@ -19427,7 +19450,7 @@ async function scrapeForgeMetadata(rawUrl, env) {
             headers: { 'User-Agent': 'AthenaBot/1.3' }, env
           });
           if (rr.ok) {
-            content = (await rr.text()).slice(0, 12000);
+            content += (await rr.text()).slice(0, 12000);
             const intro = parseReadmeIntro(content.slice(0, 8000));
             if (intro.title) title = intro.title;
             if (intro.description && intro.description.length >= 20) {
@@ -19438,7 +19461,7 @@ async function scrapeForgeMetadata(rawUrl, env) {
         }
       } catch (_) {}
       description = cleanGenericSummary(description);
-      if (!description) description = `Open-source project ${owner}/${repo} on ${host}.`;
+      if (!description) description = `Project ${owner}/${repo} on ${host}.`;
       return {
         title: String(title).slice(0, 120),
         description: description.slice(0, 900),
@@ -20418,7 +20441,7 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, config = undefined, revi
  * final list is validated against the controlled vocabulary. Returns
  * `{ tags, description, title, facts, usedAi }` and never throws.
  */
-async function describeAndTagLink(env, rawUrl, meta = {}, { config, maxTags = 8, scrape = false } = {}) {
+async function describeAndTagLink(env, rawUrl, meta = {}, { config, maxTags = 8, scrape = false, reviewTags = null } = {}) {
   let title = String(meta.title || '').trim();
   let notes = String(meta.notes || '').trim();
   let content = String(meta.content || '').trim();
@@ -20449,7 +20472,7 @@ async function describeAndTagLink(env, rawUrl, meta = {}, { config, maxTags = 8,
   let ai = null;
   if (cfg?.api_key) {
     try {
-      ai = await aiDescribeAndTag(env, rawUrl, { title, notes, content }, cfg, null, nameBansFor(rawUrl, title), facts);
+      ai = await aiDescribeAndTag(env, rawUrl, { title, notes, content }, cfg, reviewTags, nameBansFor(rawUrl, title), facts);
     } catch (_) { ai = null; }
   }
 
@@ -20467,12 +20490,19 @@ async function describeAndTagLink(env, rawUrl, meta = {}, { config, maxTags = 8,
   });
 
   // One type wins (the deterministic one first), so a link never carries
-  // contradictory labels like app + website.
+  // contradictory labels like app + website. Tags that are also valid
+  // categories (such as 'game') are preserved as categories.
   const deduped = [];
   let typeTaken = false;
   for (const tag of verdict.tags) {
     if (TYPE_SET.has(tag)) {
-      if (typeTaken) continue;
+      if (typeTaken) {
+        if (CATEGORY_SET.has(tag)) {
+          deduped.push(tag);
+          continue;
+        }
+        continue;
+      }
       typeTaken = true;
     }
     deduped.push(tag);
