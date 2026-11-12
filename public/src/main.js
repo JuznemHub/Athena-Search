@@ -192,6 +192,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function showLoggedOut() {
+    const tour = $('athenaTour');
+    if (tour?.open) tour.close();
     authGate.classList.remove('hidden');
     appRoot.classList.add('hidden');
     sideDrawer.classList.remove('active');
@@ -271,6 +273,33 @@ document.addEventListener('DOMContentLoaded', () => {
     if (/^(https?|mailto|tel):/.test(probe)) return escapeHtml(raw);
     if (/^[a-z][a-z0-9+.-]*:/.test(probe)) return '#'; // any other explicit scheme
     return escapeHtml(raw); // relative/scheme-less
+  }
+
+  function previewUrl(value, base) {
+    if (typeof value !== 'string' || !value.trim()) return null;
+    try {
+      const url = new URL(value, base);
+      if ((url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password) return url;
+    } catch (_) {}
+    return null;
+  }
+
+  function renderLinkPreview(link) {
+    const destination = previewUrl(link.url);
+    const directImage = destination && (
+      /\.(?:avif|bmp|gif|ico|jpe?g|png|svg|webp)$/i.test(destination.pathname)
+      || /^(?:telegra\.ph|graph\.org)$/.test(destination.hostname) && /^\/file\/[a-z\d]/i.test(destination.pathname)
+      || /^(?:external-preview|preview)\.redd\.it$/.test(destination.hostname)
+    );
+    const image = directImage ? destination : previewUrl(link.imageUrl || link.image_url, destination?.href);
+    return image ? `<img class="link-preview" src="${escapeHtml(image.href)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">` : '';
+  }
+
+  function removeFailedLinkPreviews(container) {
+    container.querySelectorAll('.link-preview').forEach(image => {
+      image.addEventListener('error', () => image.remove(), { once: true });
+      if (image.complete && !image.naturalWidth) image.remove();
+    });
   }
 
   function normalizeLink(row) {
@@ -1292,7 +1321,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return '';
     }
     if (!DOCUMENT_EXTENSIONS.has(ext)) return 'unsupported file type';
-    if (file.size > DOCUMENT_MAX_BYTES) return 'larger than 512 KiB';
+    if (file.size > DOCUMENT_MAX_BYTES) return 'larger than 5 MiB';
     if (content.includes('\0')) return 'appears to be binary';
     const sample = content.slice(0, 8192);
     const controls = [...sample].filter(ch => {
@@ -1441,13 +1470,18 @@ document.addEventListener('DOMContentLoaded', () => {
           showToast(data.error || 'Website is already added', true);
           return;
         }
+        if (!res.ok || !data.success) {
+          showToast(data.error || 'Failed to save', true);
+          return;
+        }
         if (data.id) item.id = data.id;
         if (data.title) item.title = data.title;
         if (data.notes != null) item.notes = data.notes;
         if (data.image_url) item.imageUrl = data.image_url;
         if (data.site_name) item.siteName = data.site_name;
       } catch (err) {
-        if (!err.auth) console.warn(err);
+        if (!err.auth) showToast(err.message || 'Failed to save', true);
+        return;
       }
       state.personalLinks.unshift(item);
       showToast(parsed.type === 'link' ? 'Link saved (metadata scraped)' : 'Note saved to brain');
@@ -1521,14 +1555,18 @@ document.addEventListener('DOMContentLoaded', () => {
     if (found) {
       try {
         if (state.scope === 'personal') {
-          await api('/api/personal-links', { method: 'DELETE', body: JSON.stringify({ id: found.id }) });
+          const { res, data } = await api('/api/personal-links', { method: 'DELETE', body: JSON.stringify({ id: found.id }) });
+          if (!res.ok || !data.success) {
+            showToast(data.error || 'Delete failed', true);
+            return;
+          }
           state.personalLinks = state.personalLinks.filter(l => l.id !== found.id);
         } else {
           const { res, data } = await api('/api/links', {
             method: 'DELETE',
             body: JSON.stringify({ id: found.id, community_id: state.activeCommunity })
           });
-          if (!res.ok) {
+          if (!res.ok || !data.success) {
             showToast(data.error || 'Delete failed', true);
             return;
           }
@@ -1565,6 +1603,7 @@ document.addEventListener('DOMContentLoaded', () => {
     barActionBtn.setAttribute('aria-expanded', 'false');
     document.querySelectorAll('.mode-pill').forEach(p => {
       p.classList.toggle('active', p.dataset.mode === mode);
+      p.setAttribute('aria-pressed', String(p.dataset.mode === mode));
     });
 
     iconSearch.classList.toggle('hidden', mode !== 'search');
@@ -1618,6 +1657,7 @@ document.addEventListener('DOMContentLoaded', () => {
       scopeSubtitle.textContent = 'Answers from your .md / links only';
       emptyState.classList.add('hidden');
     }
+    searchInput.setAttribute('aria-label', searchInput.placeholder.replace(/…$/, ''));
   }
 
   function updateScopeUI() {
@@ -1657,21 +1697,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function filterLinks(links, query) {
     let list = links || [];
-    if (query) {
-      // Prefer Athena fuzzy search (ytdlp ↔ yt-dlp)
-      if (window.AthenaSearch?.searchCorpus) {
-        const limit = window.__athenaSteroid ? 500 : 80;
-        list = window.AthenaSearch.searchCorpus(list, query, limit);
-      } else {
-        const q = query.toLowerCase();
-        const qa = q.replace(/[^a-z0-9]/g, '');
-        list = list.filter(item => {
-          const bag = [item.title, item.url, item.notes, (item.tags || []).join(' ')].join(' ').toLowerCase();
-          const ba = bag.replace(/[^a-z0-9]/g, '');
-          return bag.includes(q) || (qa.length >= 2 && ba.includes(qa));
-        });
-      }
-    }
     if (state.filterTag) {
       const tagLower = state.filterTag.toLowerCase();
       if (tagLower === 'notags') {
@@ -1684,6 +1709,22 @@ document.addEventListener('DOMContentLoaded', () => {
       list = list.filter(item => Boolean(item.manualEditedAt || item.manual_edited_at));
     } else if (state.filterStatus === 'unedited') {
       list = list.filter(item => !item.manualEditedAt && !item.manual_edited_at);
+    }
+    if (query) {
+      // Apply filters before the search limit so matching filtered items are not
+      // discarded by higher-ranked items from other tags or statuses.
+      if (window.AthenaSearch?.searchCorpus) {
+        const limit = window.__athenaSteroid ? 500 : 80;
+        list = window.AthenaSearch.searchCorpus(list, query, limit);
+      } else {
+        const q = query.toLowerCase();
+        const qa = q.replace(/[^a-z0-9]/g, '');
+        list = list.filter(item => {
+          const bag = [item.title, item.url, item.notes, (item.tags || []).join(' ')].join(' ').toLowerCase();
+          const ba = bag.replace(/[^a-z0-9]/g, '');
+          return bag.includes(q) || (qa.length >= 2 && ba.includes(qa));
+        });
+      }
     }
     if (state.filterSort === 'edited_desc') {
       list = [...list].sort((a, b) => Number(b.manualEditedAt || b.manual_edited_at || 0) - Number(a.manualEditedAt || a.manual_edited_at || 0));
@@ -1794,15 +1835,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const who = item.addedBy || item.added_by || '';
       const plat = providerLabel(item.addedByProvider);
       const when = formatDateTime(item.createdAt);
-      let favicon = '';
-      try {
-        if (item.imageUrl) {
-          favicon = item.imageUrl;
-        } else if (item.url && item.url.startsWith('http')) {
-          const host = new URL(item.url).hostname;
-          favicon = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64`;
-        }
-      } catch (_) {}
+      const preview = renderLinkPreview(item);
+      const host = preview ? '' : previewUrl(item.url)?.hostname;
+      const favicon = host ? `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64` : '';
 
       const authorLine = isCommunity
         ? `<div class="g-author">${plat ? `<span class="plat-tag plat-${plat.toLowerCase()}">${escapeHtml(plat)}</span>` : ''}
@@ -1860,6 +1895,7 @@ document.addEventListener('DOMContentLoaded', () => {
           ${cardActionsHtml}
         </div>
         <a class="g-title" href="${safeHref(href)}" ${item.url ? 'target="_blank" rel="noopener noreferrer"' : ''}>${highlight(item.title || 'Untitled', query)}</a>
+        ${preview}
         ${desc ? `<p class="g-snippet">${highlight(desc, query)}</p>` : ''}
         ${tagsHtml}
         ${voteRow}
@@ -1882,6 +1918,7 @@ document.addEventListener('DOMContentLoaded', () => {
       `;
       resultsList.appendChild(card);
     });
+    removeFailedLinkPreviews(resultsList);
 
     resultsList.querySelectorAll('.g-tag-chip').forEach(btn => {
       btn.addEventListener('click', (e) => {
@@ -1962,6 +1999,7 @@ document.addEventListener('DOMContentLoaded', () => {
           if (idx >= 0) {
             list[idx] = {
               ...list[idx],
+              __sd: undefined,
               title: data.title != null ? data.title : title,
               url: data.url || url,
               notes: data.notes != null ? data.notes : notes,
@@ -2231,9 +2269,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const isSelected = state.filterTag && state.filterTag.toLowerCase() === t.name.toLowerCase();
       const isNoTags = t.name.toLowerCase() === 'notags';
       return `
-        <button type="button" class="main-tag-chip ${isSelected ? 'active' : ''}" data-tag="${escapeHtml(t.name)}" title="${isNoTags ? 'Untagged links' : `Tag #${escapeHtml(t.name)}`} (${t.count})">
+        <button type="button" class="main-tag-chip ${isSelected ? 'active' : ''}" aria-pressed="${Boolean(isSelected)}" data-tag="${escapeHtml(t.name)}" title="${isNoTags ? 'Untagged links' : `Tag #${escapeHtml(t.name)}`} (${t.count})">
           <span>#${escapeHtml(t.name)}</span>
-          <span class="admin-tag-count" style="opacity:0.8;font-size:0.7rem;">(${t.count.toLocaleString()})</span>
+          <span class="admin-tag-count">(${t.count.toLocaleString()})</span>
         </button>
       `;
     }).join('');
@@ -2737,31 +2775,40 @@ document.addEventListener('DOMContentLoaded', () => {
     e.preventDefault();
     const q = searchInput.value.trim();
     if (!q) return;
-    if (state.mode === 'dump') {
-      await saveDump(q);
-    } else if (state.mode === 'delete') {
-      await runDelete(q);
-    } else if (state.mode === 'ai') {
-      await runAi();
-    } else {
-      runSearch();
+    try {
+      if (state.mode === 'dump') {
+        await saveDump(q);
+      } else if (state.mode === 'delete') {
+        await runDelete(q);
+      } else if (state.mode === 'ai') {
+        await runAi();
+      } else {
+        runSearch();
+      }
+    } catch (err) {
+      if (!err.auth) showToast(err.message || 'Request failed', true);
     }
   }
 
   // ---- Theme (UI only) ----
 
   const THEME_ORDER = ['dark', 'light', 'material', 'glass'];
-  const THEME_META = { dark: '#06070a', light: '#f4f5f9', material: '#121218', glass: '#05060c' };
+  const THEME_META = { dark: '#0a0a0a', light: '#f4f5f9', material: '#121218', glass: '#05060c' };
 
   function applyTheme(theme) {
     const t = THEME_ORDER.includes(theme) ? theme : 'dark';
     document.documentElement.setAttribute('data-theme', t);
     try { localStorage.setItem('athena_theme', t); } catch (_) {}
     const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.content = THEME_META[t] || THEME_META.dark;
+    if (meta) meta.content = THEME_META[t];
     document.querySelectorAll('.theme-chip').forEach(chip => {
-      chip.classList.toggle('active', chip.dataset.theme === t);
+      const selected = chip.dataset.theme === t;
+      chip.classList.toggle('active', selected);
+      chip.setAttribute('aria-pressed', String(selected));
     });
+    let customAccent = null;
+    try { customAccent = localStorage.getItem(ACCENT_LS_KEY); } catch (_) {}
+    applyAccentColor(validAccent(customAccent) ? customAccent : defaultAccent(), false);
   }
 
   function initThemeUI() {
@@ -2773,9 +2820,33 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // ---- Glass appearance ----
+  function initGlassBlur() {
+    const input = $('glassBlurInput');
+    const output = $('glassBlurValue');
+    if (!input || !output) return;
+    let saved = null;
+    try { saved = localStorage.getItem('athena_glass_blur'); } catch (_) {}
+    const value = saved !== null && /^-?\d+$/.test(saved) ? Math.max(0, Math.min(40, Number(saved))) : 24;
+    function applyBlur(blur, persist) {
+      const amount = Math.max(0, Math.min(40, Math.round(Number(blur))));
+      input.value = String(amount);
+      output.textContent = `${amount} px`;
+      input.setAttribute('aria-valuetext', `${amount} pixels`);
+      document.documentElement.style.setProperty('--glass-blur', `${amount}px`);
+      if (persist) {
+        try { localStorage.setItem('athena_glass_blur', String(amount)); } catch (_) {}
+      }
+    }
+    applyBlur(value, false);
+    input.addEventListener('input', () => applyBlur(input.value, true));
+  }
+
   // ---- Accent color system ----
   const ACCENT_DEFAULT = '#8e70f6';
   const ACCENT_LS_KEY = 'athena_accent_color';
+  const validAccent = hex => /^#[0-9a-f]{6}$/i.test(hex || '');
+  const defaultAccent = () => document.documentElement.dataset.theme === 'dark' ? '#0072f5' : ACCENT_DEFAULT;
 
   function hexToHsl(hex) {
     let r = 0, g = 0, b = 0;
@@ -2802,23 +2873,26 @@ document.addEventListener('DOMContentLoaded', () => {
     return { h: Math.round(h * 360), s: Math.round(s * 100), l: Math.round(l * 100) };
   }
 
-  function applyAccentColor(hex) {
+  function applyAccentColor(hex, persist = true) {
     const root = document.documentElement;
     const hsl = hexToHsl(hex);
     const h = hsl.h, s = hsl.s, l = hsl.l;
 
     root.style.setProperty('--accent', hex);
-    const fg = l > 50 ? '#08080f' : '#ffffff';
+    const rgb = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255);
+    const luminance = rgb.map(c => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2)
+      .reduce((sum, c, i) => sum + c * [0.2126, 0.7152, 0.0722][i], 0);
+    const fg = (luminance + 0.05) / 0.05 >= 1.05 / (luminance + 0.05) ? '#000000' : '#ffffff';
     root.style.setProperty('--accent-fg', fg);
     root.style.setProperty('--accent-soft', `hsla(${h}, ${s}%, ${l}%, 0.22)`);
-    root.style.setProperty('--accent-gradient', `linear-gradient(135deg, hsl(${h}, ${s}%, ${Math.min(l + 15, 80)}%), hsl(${h}, ${s}%, ${Math.max(l - 15, 15)}%))`);
+    root.style.setProperty('--accent-gradient', hex);
     root.style.setProperty('--accent-hover', `hsl(${h}, ${Math.min(s + 5, 100)}%, ${Math.min(l + 8, 85)}%)`);
     root.style.setProperty('--accent-surface', `hsla(${h}, ${s}%, ${l}%, 0.08)`);
     root.style.setProperty('--accent-border', `hsla(${h}, ${s}%, ${l}%, 0.35)`);
     root.style.setProperty('--primary-purple', hex);
     root.style.setProperty('--border-highlight', `hsla(${h}, ${s}%, ${l}%, 0.35)`);
 
-    try { localStorage.setItem(ACCENT_LS_KEY, hex); } catch (_) {}
+    if (persist) { try { localStorage.setItem(ACCENT_LS_KEY, hex); } catch (_) {} }
 
     const input = $('accentColorInput');
     const label = $('accentCurrentLabel');
@@ -2831,9 +2905,10 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function initAccentColor() {
-    let saved = ACCENT_DEFAULT;
-    try { saved = localStorage.getItem(ACCENT_LS_KEY) || ACCENT_DEFAULT; } catch (_) {}
-    applyAccentColor(saved);
+    let saved = null;
+    try { saved = localStorage.getItem(ACCENT_LS_KEY); } catch (_) {}
+    saved = validAccent(saved) ? saved : defaultAccent();
+    applyAccentColor(saved, false);
 
     const colorInput = $('accentColorInput');
     if (colorInput) {
@@ -2846,7 +2921,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const resetBtn = $('accentResetBtn');
     if (resetBtn) {
       resetBtn.addEventListener('click', () => {
-        applyAccentColor(ACCENT_DEFAULT);
+        try { localStorage.removeItem(ACCENT_LS_KEY); } catch (_) {}
+        applyAccentColor(defaultAccent(), false);
       });
     }
 
@@ -2854,77 +2930,6 @@ document.addEventListener('DOMContentLoaded', () => {
       sw.addEventListener('click', () => {
         applyAccentColor(sw.dataset.color);
       });
-    });
-  }
-
-  // ---- Dice animation ----
-  // ---- Dice animation (SVG pip-based) ----
-  const DICE_PIPS = {
-    1: [{ x: 36, y: 36 }],
-    2: [{ x: 20, y: 52 }, { x: 52, y: 20 }],
-    3: [{ x: 20, y: 52 }, { x: 36, y: 36 }, { x: 52, y: 20 }],
-    4: [{ x: 20, y: 20 }, { x: 52, y: 20 }, { x: 20, y: 52 }, { x: 52, y: 52 }],
-    5: [{ x: 20, y: 20 }, { x: 52, y: 20 }, { x: 36, y: 36 }, { x: 20, y: 52 }, { x: 52, y: 52 }],
-    6: [{ x: 20, y: 20 }, { x: 52, y: 20 }, { x: 20, y: 36 }, { x: 52, y: 36 }, { x: 20, y: 52 }, { x: 52, y: 52 }]
-  };
-
-  function renderDicePips(face) {
-    const pips = DICE_PIPS[face] || DICE_PIPS[1];
-    const svg = document.getElementById('diceSvg');
-    const g = document.getElementById('dicePips');
-    if (!g || !svg) return;
-    g.innerHTML = '';
-    pips.forEach(p => {
-      const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-      c.setAttribute('cx', p.x);
-      c.setAttribute('cy', p.y);
-      c.setAttribute('r', '5');
-      c.setAttribute('fill', 'rgba(255,255,255,0.92)');
-      g.appendChild(c);
-    });
-  }
-
-  function initDice() {
-    const mark = $('heroMark');
-    const svg = document.getElementById('diceSvg');
-    if (!mark || !svg) return;
-
-    let currentFace = 1;
-    let rolling = false;
-    renderDicePips(currentFace);
-
-    function rollDice() {
-      if (rolling) return;
-      rolling = true;
-
-      let newFace;
-      do { newFace = Math.floor(Math.random() * 6) + 1; } while (newFace === currentFace);
-
-      svg.classList.add('rolling');
-
-      setTimeout(() => {
-        svg.classList.remove('rolling');
-        renderDicePips(newFace);
-        currentFace = newFace;
-        rolling = false;
-      }, 600);
-    }
-
-    mark.addEventListener('click', rollDice);
-
-    // Idle rolls
-    let idleTimer = setInterval(() => {
-      if (!rolling && document.visibilityState === 'visible') rollDice();
-    }, 6000);
-
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') {
-        clearInterval(idleTimer);
-      } else {
-        idleTimer = setInterval(() => {
-          if (!rolling && document.visibilityState === 'visible') rollDice();
-        }, 6000);
-      }
     });
   }
 
@@ -3002,6 +3007,11 @@ document.addEventListener('DOMContentLoaded', () => {
     searchWrap.classList.add('hidden');
     if (feedView) feedView.classList.add('hidden');
     if (scopeSwitch) scopeSwitch.classList.add('hidden');
+    $('wikiView')?.classList.add('hidden');
+    $('wikiSidebar')?.classList.remove('mobile-open');
+    $('wikiSidebarBackdrop')?.classList.add('hidden');
+    document.body.classList.remove('wiki-active');
+    document.body.style.overflow = '';
     adminView.classList.remove('hidden');
 
     const badge = $('modeBadgeText');
@@ -3051,6 +3061,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     adminView.classList.add('hidden');
     searchWrap.classList.remove('hidden');
+    $('resultsContainer')?.classList.remove('hidden');
     if (scopeSwitch) scopeSwitch.classList.remove('hidden');
 
     const badge = $('modeBadgeText');
@@ -3251,6 +3262,7 @@ document.addEventListener('DOMContentLoaded', () => {
            </div>`;
 
       card.innerHTML = `
+        ${renderLinkPreview(item)}
         <div class="admin-card-head">
           <div class="admin-card-url-row">
             ${favicon ? `<img src="${safeHref(favicon)}" alt="" width="16" height="16" loading="lazy" referrerpolicy="no-referrer" style="border-radius:3px;">` : ''}
@@ -3299,6 +3311,7 @@ document.addEventListener('DOMContentLoaded', () => {
       `;
       listEl.appendChild(card);
     });
+    removeFailedLinkPreviews(listEl);
 
     listEl.querySelectorAll('.admin-card-tag').forEach(tagEl => {
       tagEl.addEventListener('click', (e) => {
@@ -3661,7 +3674,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const tagsCard = $('mainTagsCard');
     if (tagsToggleBtn && tagsCard) {
       tagsToggleBtn.addEventListener('click', () => {
-        tagsCard.classList.toggle('hidden');
+        const isHidden = tagsCard.classList.toggle('hidden');
+        tagsToggleBtn.setAttribute('aria-expanded', String(!isHidden));
       });
     }
 
@@ -3707,7 +3721,12 @@ document.addEventListener('DOMContentLoaded', () => {
     if (searchWrapper) searchWrapper.classList.add('hidden');
     if (resultsContainer) resultsContainer.classList.add('hidden');
     wikiView.classList.remove('hidden');
+    $('aside_feed')?.classList.remove('mobile-open');
+    $('freshrssSidebarBackdrop')?.classList.add('hidden');
     document.body.classList.remove('feed-active');
+    document.body.style.overflow = '';
+    document.querySelector('.scope-switch-container')?.classList.add('hidden');
+    if (modeBadgeText) modeBadgeText.textContent = 'Wiki';
     document.body.classList.add('wiki-active');
 
     if (window.location.hash !== '#wiki') {
@@ -3765,6 +3784,8 @@ document.addEventListener('DOMContentLoaded', () => {
     document.body.style.overflow = '';
     if (searchWrapper) searchWrapper.classList.remove('hidden');
     if (resultsContainer) resultsContainer.classList.remove('hidden');
+    document.querySelector('.scope-switch-container')?.classList.remove('hidden');
+    if (modeBadgeText) modeBadgeText.textContent = state.mode ? state.mode.charAt(0).toUpperCase() + state.mode.slice(1) : 'Search';
     if (window.location.hash === '#wiki') {
       history.pushState('', document.title, window.location.pathname + window.location.search);
     }
@@ -4217,6 +4238,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     </div>
                     ${l.url ? `<button type="button" class="wiki-copy-url-btn" data-url="${escapeHtml(l.url)}" title="Copy URL" aria-label="Copy URL"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>` : ''}
                   </div>
+                  ${renderLinkPreview(l)}
                   ${l.notes ? `<p class="wiki-card-desc">${escapeHtml(l.notes)}</p>` : ''}
                   <div class="wiki-card-footer">
                     <div class="wiki-card-tags">
@@ -4236,6 +4258,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     blocksEl.innerHTML = blocksHtml;
+    removeFailedLinkPreviews(blocksEl);
 
     // Wire copy buttons on link cards
     blocksEl.querySelectorAll('.wiki-copy-url-btn').forEach(btn => {
@@ -4631,6 +4654,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (wikiView) wikiView.classList.remove('hidden');
 
     $('wikiControlsBar')?.classList.add('hidden');
+    $('wikiTourBtn')?.classList.add('hidden');
     $('wikiSidebar')?.classList.add('hidden');
     $('wikiCatHero')?.classList.add('hidden');
     $('wikiPagination')?.classList.add('hidden');
@@ -6483,16 +6507,228 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  function setupPageTour() {
+    const dialog = $('athenaTour');
+    if (typeof dialog?.showModal !== 'function') return;
+
+    const searchLaunch = $('searchTourBtn');
+    const wikiLaunch = $('wikiTourBtn');
+    const feedLaunch = $('feedTourBtn');
+    const adminDbLaunch = $('adminDbTourBtn');
+    const progress = $('athenaTourProgress');
+    const title = $('athenaTourTitle');
+    const description = $('athenaTourDescription');
+    const action = $('athenaTourAction');
+    const back = $('athenaTourBack');
+    const next = $('athenaTourNext');
+    let launcher;
+    let steps;
+    let tourName;
+    let index;
+    let onClose;
+
+    function useMode(mode, target = searchInput) {
+      setMode(mode);
+      target?.focus();
+    }
+
+    function searchSteps() {
+      const hasLibrary = state.scope === 'personal' ? isGod() : Boolean(state.activeCommunity);
+      return [
+        {
+          title: 'Find a saved item',
+          description: `Search titles, notes, URLs, or tags. ${isGod()
+            ? 'Choose Personal for your own library or Community for a shared one.'
+            : 'Choose a community you’ve joined to search its library.'}`,
+          label: 'Try Search',
+          run: () => useMode('search')
+        },
+        {
+          title: 'Narrow your results',
+          description: 'In Search, choose a tag or status to narrow the results. Use Sort to change the order, or clear a tag to see more matches.',
+          label: 'Show filters',
+          run: () => useMode('search', $('mainTagsToggleBtn'))
+        },
+        {
+          title: 'Save something with Dump',
+          description: `${hasLibrary ? '' : 'Join or select a community before saving. '}In Dump, paste a URL or type a note, then press Enter. Use the plus button to upload supported documents.`,
+          label: 'Try Dump',
+          run: hasLibrary ? () => useMode('dump') : null
+        },
+        {
+          title: 'Ask about your library',
+          description: 'Choose AI and ask a question about the selected library. Athena draws on saved links and documents. Open the sources to check an answer.',
+          label: 'Open AI',
+          run: () => useMode('ai')
+        },
+        {
+          title: 'Browse the Wiki',
+          description: 'Wiki organizes saved links by topic and subheading. Open it from the header when you want to browse a category.',
+          label: 'Open Wiki',
+          run: () => {
+            openWiki();
+            wikiLaunch.focus();
+          }
+        }
+      ];
+    }
+
+    function wikiSteps() {
+      const pages = [
+        {
+          title: 'Browse by category',
+          description: 'Choose a category in the sidebar, then pick a subheading to jump to a smaller group of links. On a phone, tap Categories to open the sidebar.'
+        },
+        {
+          title: 'Find a link in the Wiki',
+          description: 'Use the Wiki search field to filter links by title, tag, or description. Clear the field to return to browsing.',
+          label: 'Find links',
+          run: () => $('wikiSearchInput')?.focus()
+        }
+      ];
+      if (state.publicWikiMode) {
+        pages.push({
+          title: 'Using a shared Wiki',
+          description: 'This shared Wiki is read-only. You can browse and open the listed links while this share remains active.'
+        });
+      } else if (isGod()) {
+        pages.push({
+          title: 'Share a read-only Wiki',
+          description: 'Use Share to generate a read-only link with an expiry you choose. Anyone with that link can browse the shared Wiki until it expires.'
+        });
+      }
+      return pages;
+    }
+
+    function feedSteps() {
+      return [
+        {
+          title: 'Switch between Personal & Community feeds',
+          description: 'Choose Personal Feeds to route subscriptions and articles into your private library (personal_links), or choose Community to share feeds in a community library (links).',
+          label: 'Use Personal Feeds',
+          run: () => $('freshrssScopePersonalBtn')?.focus()
+        },
+        {
+          title: 'Subscribe or import OPML',
+          description: 'Add an RSS, Atom, or JSON feed URL, or import an OPML file. New articles are automatically parsed, tagged, and indexed for Search, Wiki, and AI.',
+          label: 'Add a feed',
+          run: () => $('freshrssAddFeedBtn')?.click()
+        },
+        {
+          title: 'Filter, label, and summarize',
+          description: 'Search with operators like is:unread, is:starred, or #tag, apply custom labels, save community articles to your Personal DB, or generate an AI summary.',
+          label: 'Search stream',
+          run: () => $('freshrssSearchInput')?.focus()
+        }
+      ];
+    }
+
+    function adminDbSteps() {
+      return [
+        {
+          title: 'Choose a library scope',
+          description: 'Select Community Links to manage a community library where you have staff access, or Personal Links to manage your private library.',
+          label: 'Choose scope',
+          run: () => $('adminDbScope')?.focus()
+        },
+        {
+          title: 'Filter by tag, status, or query',
+          description: 'Click a tag chip, filter by Edited or Unedited records, or type a query to find specific links and notes.',
+          label: 'Search records',
+          run: () => $('adminDbSearch')?.focus()
+        },
+        {
+          title: 'Edit inline with audit history',
+          description: 'Use Edit on any record to update its title, URL, notes, or tags inline. Manual edits record who updated the link and when.'
+        }
+      ];
+    }
+
+    function render() {
+      const step = steps[index];
+      progress.textContent = `${tourName} · Step ${index + 1} of ${steps.length}`;
+      title.textContent = step.title;
+      description.textContent = step.description;
+      action.hidden = !step.run;
+      action.textContent = step.label || '';
+      back.disabled = index === 0;
+      next.textContent = index === steps.length - 1 ? 'Done' : 'Next';
+      dialog.scrollTop = 0;
+      if (dialog.open) title.focus();
+    }
+
+    function open(button, name, pages) {
+      if (dialog.open) return;
+      launcher = button;
+      tourName = name;
+      steps = pages;
+      index = 0;
+      onClose = null;
+      render();
+      dialog.showModal();
+      title.focus();
+    }
+
+    searchLaunch.addEventListener('click', () => open(searchLaunch, 'Search tour', searchSteps()));
+    wikiLaunch.addEventListener('click', () => open(wikiLaunch, 'Wiki tour', wikiSteps()));
+    feedLaunch?.addEventListener('click', () => open(feedLaunch, 'Feed tour', feedSteps()));
+    adminDbLaunch?.addEventListener('click', () => open(adminDbLaunch, 'Database tour', adminDbSteps()));
+    searchLaunch.classList.remove('hidden');
+    wikiLaunch.classList.remove('hidden');
+    feedLaunch?.classList.remove('hidden');
+    adminDbLaunch?.classList.remove('hidden');
+    $('athenaTourClose').addEventListener('click', () => dialog.close());
+    back.addEventListener('click', () => {
+      if (index > 0) {
+        index -= 1;
+        render();
+      }
+    });
+    next.addEventListener('click', () => {
+      if (index === steps.length - 1) {
+        dialog.close();
+      } else {
+        index += 1;
+        render();
+      }
+    });
+    action.addEventListener('click', () => {
+      onClose = steps[index].run;
+      dialog.close();
+    });
+    dialog.addEventListener('close', () => {
+      if (dialog.open) return;
+      if (onClose) onClose();
+      else launcher?.focus();
+      onClose = null;
+    });
+  }
+
   // ---- Events ----
+
+  function setupFloatingHeader() {
+    const header = appRoot?.querySelector('.top-bar');
+    if (!header) return;
+
+    function update() {
+      header.classList.toggle('is-floating', window.scrollY > 24);
+    }
+
+    window.addEventListener('scroll', update, { passive: true });
+    window.addEventListener('pageshow', update);
+    update();
+  }
 
   function setupEventListeners() {
     initThemeUI();
+    initGlassBlur();
     initAccentColor();
-    initDice();
+    setupFloatingHeader();
     setupAdminDbEvents();
     setupMainDbEvents();
     setupWikiEvents();
     setupFeedEvents();
+    setupPageTour();
 
     function openDrawer() {
       if (sideDrawer) sideDrawer.classList.add('active');
