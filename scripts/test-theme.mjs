@@ -4,7 +4,7 @@ import vm from 'node:vm';
 import { test } from 'node:test';
 
 const source = fs.readFileSync(new URL('../public/src/main.js', import.meta.url), 'utf8');
-const section = source.slice(source.indexOf('  const THEME_ORDER'), source.indexOf('  // ---- Dice animation ----'));
+const section = source.slice(source.indexOf('  const THEME_ORDER'), source.indexOf('  // ---- Admin & Owner Database Explorer ----'));
 
 function harness(initial = {}) {
   const storage = new Map(Object.entries(initial));

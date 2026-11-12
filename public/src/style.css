@@ -34,18 +34,51 @@ body {
 ::-webkit-scrollbar-thumb:hover { background: var(--text-mute); }
 ::selection { background: var(--accent); color: var(--accent-fg, #08080f); }
 
-.app-container { display: flex; flex-direction: column; min-height: 100vh; position: relative; z-index: 1; }
+.app-container {
+  --floating-header-top: max(8px, env(safe-area-inset-top));
+  --floating-header-inset: max(6px, min(2vw, 28px), env(safe-area-inset-left), env(safe-area-inset-right));
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  position: relative;
+  z-index: 1;
+}
 
 /* Top bar */
 .top-bar {
   display: flex; align-items: center; justify-content: space-between;
+  width: 100%;
+  align-self: center;
   padding: 10px 24px;
   background: color-mix(in srgb, var(--topbar-bg, #08080f) 82%, transparent);
   backdrop-filter: blur(20px) saturate(180%);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   position: sticky; top: 0; z-index: 50;
-  transition: border-color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
+  transition: width var(--dur-2) var(--ease), top var(--dur-2) var(--ease),
+    border-radius var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease),
+    border-color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
+}
+
+#appRoot > .top-bar.is-floating {
+  top: var(--floating-header-top) !important;
+  width: min(1160px, calc(100% - 2 * var(--floating-header-inset)));
+  border-radius: 18px;
+  outline: 1px solid var(--hairline);
+  outline-offset: -1px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.2), inset 0 1px rgba(255, 255, 255, 0.08);
+}
+
+#appRoot:has(> .top-bar.is-floating) .notif-panel {
+  top: calc(72px + var(--floating-header-top));
+}
+
+#appRoot:has(> .top-bar.is-floating) .wiki-sub-block {
+  scroll-margin-top: calc(80px + var(--floating-header-top));
+}
+
+@media (min-width: 721px) and (max-width: 900px) {
+  #appRoot > .top-bar.is-floating .mode-badge { display: none; }
 }
 
 .icon-btn {
@@ -63,9 +96,15 @@ body {
 }
 .brand-logo:hover { transform: scale(1.02); }
 .logo-text { display: inline-flex; gap: 0.18em; }
-.logo-orb {
-  width: 12px; height: 12px; border-radius: 50%; background: var(--accent);
+.athena-mark {
+  display: block;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 27%;
+  background: url("./assets/athena-mark-dark.jpg") center / cover no-repeat;
 }
+:root[data-theme="light"] .athena-mark { background-image: url("./assets/athena-mark-light.jpg"); }
 .logo-text .highlight { color: var(--accent); }
 
 .mode-badge {
@@ -84,25 +123,9 @@ body {
 }
 .search-wrapper { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 18px; }
 
-/* ========== Animated Dice ========== */
 .hero-mark {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-  transition: transform var(--dur-1) var(--ease), filter var(--dur-1) var(--ease);
-}
-.hero-mark:hover { filter: drop-shadow(0 6px 18px var(--accent-soft)); transform: translateY(-2px); }
-.hero-mark:active { transform: scale(0.95); }
-
-.dice-svg { display: block; border-radius: 14px; }
-@media (prefers-reduced-motion: no-preference) {
-  .dice-svg.rolling { animation: diceSpin 0.6s cubic-bezier(0.2, 0.8, 0.2, 1); }
-}
-@keyframes diceSpin {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
+  width: 72px;
+  height: 72px;
 }
 
 .hero-title {
@@ -231,6 +254,16 @@ body {
   margin: 2px 0 4px; transition: color var(--dur-1) var(--ease);
 }
 .g-title:hover { color: var(--serp-link-hover, #a8c7ff); text-decoration: underline; }
+.link-preview {
+  display: block;
+  align-self: flex-start;
+  max-width: 100%;
+  max-height: 9rem;
+  object-fit: contain;
+  object-position: left center;
+  border-radius: var(--radius-md, 8px);
+}
+.g-result .link-preview { margin: 4px 0 8px; }
 .g-snippet {
   font-size: 0.88rem; color: var(--serp-snippet, #a0a8c0);
   line-height: 1.55; margin: 0; white-space: pre-wrap;

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#0a0a0a">
   <title>Athena | Second Brain Search</title>
+  <link rel="icon" type="image/png" sizes="64x64" href="./src/assets/athena-favicon.png?v=1.0.70">
   <meta name="description" content="One bar: search, dump, and AI answers from your markdown brain.">
   <script>
     (function () {
@@ -29,15 +30,16 @@
       }
     })();
   </script>
-<link rel="stylesheet" href="./src/style.css?v=1.0.69">
-<link rel="stylesheet" href="./src/themes.css?v=1.0.69">
+<link rel="stylesheet" href="./src/style.css?v=1.0.70">
+<link rel="stylesheet" href="./src/themes.css?v=1.0.70">
+<link rel="stylesheet" href="./src/tour.css?v=1.0.70">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
   <div id="authGate" class="auth-gate">
     <div class="auth-gate-card">
       <div class="auth-gate-logo">
-        <span class="logo-orb"></span>
+        <span class="athena-mark" aria-hidden="true"></span>
         <span class="logo-text">Athena<span class="highlight">Search</span></span>
       </div>
       <h1>Welcome</h1>
@@ -65,7 +67,7 @@
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
       </button>
       <a class="brand-logo" href="/" aria-label="Refresh Athena Search">
-        <span class="logo-orb" aria-hidden="true"></span>
+        <span class="athena-mark" aria-hidden="true"></span>
         <span class="logo-text">Athena<span class="highlight">Search</span></span>
       </a>
       <div class="theme-bar" id="themeBar" role="group" aria-label="Theme">
@@ -97,17 +99,12 @@
 
     <main class="main-content">
       <div class="search-wrapper" id="searchWrapper">
-        <button type="button" class="hero-mark" id="heroMark" aria-label="Roll the Athena dice">
-          <svg class="dice-svg" id="diceSvg" viewBox="0 0 72 72" width="72" height="72" aria-hidden="true">
-            <rect x="2" y="2" width="68" height="68" rx="14" fill="var(--accent)" stroke="rgba(255,255,255,0.15)" stroke-width="1"/>
-            <g class="dice-pips" id="dicePips" fill="rgba(255,255,255,0.92)">
-              <!-- Face 1: center pip -->
-              <circle class="pip-dot" cx="36" cy="36" r="6"/>
-            </g>
-          </svg>
-        </button>
+        <span class="athena-mark hero-mark" aria-hidden="true"></span>
         <h1 class="hero-title" id="heroTitle">Athena</h1>
-        <p class="hero-subtitle" id="scopeSubtitle">Search your second brain</p>
+        <div class="athena-search-intro">
+          <p class="hero-subtitle" id="scopeSubtitle">Search your second brain</p>
+          <button type="button" class="athena-tour-launch hidden" id="searchTourBtn" aria-haspopup="dialog" aria-controls="athenaTour">Take a tour</button>
+        </div>
 
         <!-- Single unified bar -->
         <form class="search-bar-box" id="searchBarBox" autocomplete="off">
@@ -323,6 +320,7 @@
               </div>
             </div>
             <div class="wiki-header-actions">
+              <button type="button" class="athena-tour-launch hidden" id="wikiTourBtn" aria-haspopup="dialog" aria-controls="athenaTour">Wiki tour</button>
               <button type="button" id="wikiShareBtn" class="btn btn-secondary btn-sm wiki-share-btn hidden" title="Generate public shareable link (Owner rank only)">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"></path><polyline points="16 6 12 2 8 6"></polyline><line x1="12" y1="2" x2="12" y2="15"></line></svg>
                 <span>Share</span>
@@ -441,6 +439,22 @@
   </div>
 
 
+
+  <dialog class="athena-tour" id="athenaTour" aria-labelledby="athenaTourTitle" aria-describedby="athenaTourDescription">
+    <div class="athena-tour-header">
+      <p class="athena-tour-progress" id="athenaTourProgress"></p>
+      <button type="button" class="athena-tour-close" id="athenaTourClose" aria-label="Close tour">×</button>
+    </div>
+    <h2 id="athenaTourTitle" tabindex="-1"></h2>
+    <p class="athena-tour-description" id="athenaTourDescription"></p>
+    <div class="athena-tour-footer">
+      <button type="button" class="btn btn-secondary" id="athenaTourAction" hidden></button>
+      <div class="athena-tour-navigation">
+        <button type="button" class="btn btn-secondary" id="athenaTourBack">Back</button>
+        <button type="button" class="btn btn-primary" id="athenaTourNext">Next</button>
+      </div>
+    </div>
+  </dialog>
 
   <div id="drawerOverlay" class="drawer-overlay"></div>
   <aside id="sideDrawer" class="side-drawer">
@@ -718,9 +732,9 @@
     </div>
   </div>
 
-  <script src="./src/lib/dedupe.js?v=1.0.69"></script>
-  <script src="./src/lib/search.js?v=1.0.69"></script>
-  <script src="./src/lib/ai.js?v=1.0.69"></script>
-  <script src="./src/main.js?v=1.0.69"></script>
+  <script src="./src/lib/dedupe.js?v=1.0.70"></script>
+  <script src="./src/lib/search.js?v=1.0.70"></script>
+  <script src="./src/lib/ai.js?v=1.0.70"></script>
+  <script src="./src/main.js?v=1.0.70"></script>
 </body>
 </html>
