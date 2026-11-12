@@ -884,6 +884,8 @@ document.addEventListener('DOMContentLoaded', () => {
         openAdminDb();
       } else if (window.location.hash === '#wiki') {
         openWiki();
+      } else if (window.location.hash === '#feed' || window.location.hash === '#rss') {
+        openFeed();
       }
     } catch (err) {
       console.error('[athena] render failed:', err);
@@ -2993,10 +2995,12 @@ document.addEventListener('DOMContentLoaded', () => {
   function openAdminDb() {
     const adminView = $('adminDbView');
     const searchWrap = $('searchWrapper');
+    const feedView = $('feedView');
     const scopeSwitch = document.querySelector('.scope-switch-container');
     if (!adminView || !searchWrap) return;
 
     searchWrap.classList.add('hidden');
+    if (feedView) feedView.classList.add('hidden');
     if (scopeSwitch) scopeSwitch.classList.add('hidden');
     adminView.classList.remove('hidden');
 
@@ -3477,6 +3481,9 @@ document.addEventListener('DOMContentLoaded', () => {
       } else if (wikiView && !wikiView.classList.contains('hidden')) {
         e.preventDefault();
         closeWiki();
+      } else if ($('feedView') && !$('feedView').classList.contains('hidden')) {
+        e.preventDefault();
+        closeFeed();
       }
     });
 
@@ -3578,9 +3585,12 @@ document.addEventListener('DOMContentLoaded', () => {
         openAdminDb();
       } else if (window.location.hash === '#wiki') {
         openWiki();
+      } else if (window.location.hash === '#feed' || window.location.hash === '#rss') {
+        openFeed();
       } else {
         closeAdminDb();
         closeWiki();
+        closeFeed();
       }
     });
   }
@@ -3689,12 +3699,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const searchWrapper = $('searchWrapper');
     const resultsContainer = $('resultsContainer');
     const adminView = $('adminDbView');
+    const feedView = $('feedView');
 
     if (!wikiView) return;
     if (adminView) adminView.classList.add('hidden');
+    if (feedView) feedView.classList.add('hidden');
     if (searchWrapper) searchWrapper.classList.add('hidden');
     if (resultsContainer) resultsContainer.classList.add('hidden');
     wikiView.classList.remove('hidden');
+    document.body.classList.remove('feed-active');
     document.body.classList.add('wiki-active');
 
     if (window.location.hash !== '#wiki') {
@@ -4635,6 +4648,1841 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  // =========================================================================
+  // FreshRSS Feed Reader & Personal/Community Knowledge Ingest Module
+  // =========================================================================
+
+  const FALLBACK_FEED_ICON = 'data:image/svg+xml;utf8,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2216%22 height=%2216%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22%2338bdf8%22 stroke-width=%222%22%3E%3Cpath d=%22M4 11a9 9 0 0 1 9 9%22/%3E%3Cpath d=%22M4 4a16 16 0 0 1 16 16%22/%3E%3Ccircle cx=%225%22 cy=%2219%22 r=%221.5%22/%3E%3C/svg%3E';
+
+  const feedState = {
+    communityId: localStorage.getItem('freshrss_community_id') || '',
+    stream: 'all',
+    category: '',
+    label: '',
+    streamTitle: 'Main stream',
+    search: '',
+    sort: 'id',
+    order: 'DESC',
+    page: 1,
+    limit: 30,
+    totalPages: 1,
+    totalArticles: 0,
+    totalUnread: 0,
+    totalImportantUnread: 0,
+    totalStarred: 0,
+    categories: [],
+    articles: [],
+    labels: [],
+    viewMode: localStorage.getItem('freshrss_view_mode') || 'normal',
+    stateFilter: 'unread',
+    autoMarkRead: localStorage.getItem('freshrss_auto_read') !== '0',
+    compactDensity: localStorage.getItem('freshrss_compact') === '1',
+    loading: false,
+    expandedIds: new Set(),
+    activeArticleIndex: -1
+  };
+
+  function sanitizeFeedHtml(html) {
+    if (!html) return '';
+    return String(html)
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<iframe[\s\S]*?<\/iframe>/gi, '')
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<object[\s\S]*?<\/object>/gi, '')
+      .replace(/<embed[\s\S]*?>/gi, '')
+      .replace(/on\w+\s*=\s*["'][^"']*["']/gi, '')
+      .replace(/on\w+\s*=\s*[^\s>]+/gi, '')
+      .replace(/href\s*=\s*["']\s*javascript:[^"']*["']/gi, 'href="#"');
+  }
+
+  function stripHtmlSnippet(html, maxLen = 150) {
+    if (!html) return '';
+    const text = String(html)
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;/gi, "'")
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (text.length <= maxLen) return text;
+    return text.slice(0, maxLen).trim() + '…';
+  }
+
+  function formatFeedDate(ms) {
+    if (!ms) return '';
+    const diffSec = Math.floor((Date.now() - ms) / 1000);
+    if (diffSec < 60) return 'Just now';
+    if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+    if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+    if (diffSec < 604800) return `${Math.floor(diffSec / 86400)}d ago`;
+    return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+
+  function refreshAthenaLinksAfterFeedSync(targetScopeId) {
+    const scopeId = targetScopeId || feedState.communityId;
+    if (scopeId === 'personal') {
+      loadPersonalLinks().catch(() => {});
+    } else if (scopeId) {
+      loadCommunityLinksIfAny().catch(() => {});
+    }
+  }
+
+  function populateFeedScopeSelect(selectElem, currentScope) {
+    if (!selectElem) return;
+    const opts = [];
+    opts.push(
+      `<option value="personal" ${currentScope === 'personal' ? 'selected' : ''}>Personal Second Brain (personal_links)</option>`
+    );
+    if (Array.isArray(state.communities) && state.communities.length > 0) {
+      for (const c of state.communities) {
+        opts.push(
+          `<option value="${escapeHtml(c.id)}" ${c.id === currentScope ? 'selected' : ''}>${escapeHtml(c.name || c.id)} (Community links)</option>`
+        );
+      }
+    }
+    selectElem.innerHTML = opts.join('');
+  }
+
+  function syncFeedScopeUI() {
+    const isPersonal = feedState.communityId === 'personal';
+    $('freshrssScopePersonalBtn')?.classList.toggle('active', isPersonal);
+    $('freshrssScopeCommunityBtn')?.classList.toggle('active', !isPersonal);
+
+    const commSel = $('freshrssCommunitySelect');
+    if (commSel) {
+      populateFeedScopeSelect(commSel, feedState.communityId);
+      commSel.value = feedState.communityId;
+      commSel.classList.toggle('hidden', isPersonal);
+    }
+
+    const dbPill = $('freshrssActiveDbPill');
+    if (dbPill) {
+      if (isPersonal) {
+        dbPill.textContent = 'Personal DB (personal_links)';
+        dbPill.classList.remove('is-community');
+        dbPill.title = 'Subscriptions and articles in this view are stored in your private Personal DB (personal_links)';
+      } else {
+        const commObj = (state.communities || []).find((c) => c.id === feedState.communityId);
+        const commName = commObj ? (commObj.name || commObj.id) : 'Community';
+        dbPill.textContent = `Community DB (${commName} -> links)`;
+        dbPill.classList.add('is-community');
+        dbPill.title = 'Subscriptions and articles in this view are stored in the shared Community DB (links)';
+      }
+    }
+  }
+
+  function switchFeedScope(nextCommunityId) {
+    if (!nextCommunityId) return;
+    feedState.communityId = nextCommunityId;
+    localStorage.setItem('freshrss_community_id', nextCommunityId);
+    feedState.stream = 'all';
+    feedState.category = '';
+    feedState.label = '';
+    feedState.streamTitle = 'Main stream';
+    syncFeedScopeUI();
+    updateActiveSidebarStyles();
+    loadFeedSources();
+    loadFeedArticles();
+  }
+
+  function openFeed() {
+    const feedView = $('feedView');
+    const searchWrapper = $('searchWrapper');
+    const resultsContainer = $('resultsContainer');
+    const adminView = $('adminDbView');
+    const wikiView = $('wikiView');
+    const scopeSwitch = document.querySelector('.scope-switch-container');
+
+    if (!feedView) return;
+    if (adminView) adminView.classList.add('hidden');
+    if (wikiView) wikiView.classList.add('hidden');
+    if (searchWrapper) searchWrapper.classList.add('hidden');
+    if (resultsContainer) resultsContainer.classList.add('hidden');
+    if (scopeSwitch) scopeSwitch.classList.add('hidden');
+
+    document.body.classList.remove('wiki-active');
+    document.body.classList.add('feed-active');
+    feedView.classList.remove('hidden');
+    feedView.classList.toggle('compact-density', feedState.compactDensity);
+
+    const badge = $('modeBadgeText');
+    if (badge) badge.textContent = 'Feed';
+
+    if (window.location.hash !== '#feed' && window.location.hash !== '#rss') {
+      window.location.hash = '#feed';
+    }
+
+    // Resolve active feed scope: support Personal DB ('personal') and Community DB
+    const validCommunityIds = new Set((state.communities || []).map((c) => c.id));
+    if (!feedState.communityId || (feedState.communityId !== 'personal' && !validCommunityIds.has(feedState.communityId))) {
+      if (state.scope === 'personal' || !state.communities?.length) {
+        feedState.communityId = 'personal';
+      } else {
+        feedState.communityId = state.activeCommunity || state.communities[0].id || 'personal';
+      }
+    }
+
+    syncFeedScopeUI();
+    setFeedViewMode(feedState.viewMode);
+
+    loadFeedSources();
+    loadFeedArticles();
+  }
+
+  function closeFeed() {
+    const feedView = $('feedView');
+    const searchWrapper = $('searchWrapper');
+    const resultsContainer = $('resultsContainer');
+    const scopeSwitch = document.querySelector('.scope-switch-container');
+
+    if (!feedView) return;
+    feedView.classList.add('hidden');
+    document.body.classList.remove('feed-active');
+
+    $('aside_feed')?.classList.remove('mobile-open');
+    $('freshrssSidebarBackdrop')?.classList.add('hidden');
+    document.body.style.overflow = '';
+
+    if (searchWrapper) searchWrapper.classList.remove('hidden');
+    if (resultsContainer) resultsContainer.classList.remove('hidden');
+    if (scopeSwitch) scopeSwitch.classList.remove('hidden');
+
+    const badge = $('modeBadgeText');
+    if (badge) badge.textContent = state.mode ? (state.mode.charAt(0).toUpperCase() + state.mode.slice(1)) : 'Search';
+
+    if (window.location.hash === '#feed' || window.location.hash === '#rss') {
+      history.pushState('', document.title, window.location.pathname + window.location.search);
+    }
+  }
+
+  function setFeedViewMode(mode) {
+    feedState.viewMode = mode;
+    localStorage.setItem('freshrss_view_mode', mode);
+
+    $('freshrssViewNormalBtn')?.classList.toggle('active', mode === 'normal');
+    $('freshrssViewGlobalBtn')?.classList.toggle('active', mode === 'global');
+    $('freshrssViewReaderBtn')?.classList.toggle('active', mode === 'reader');
+
+    const listEl = $('freshrssArticlesList');
+    const globalGrid = $('freshrssGlobalGrid');
+    const paginationEl = $('freshrssPagination');
+
+    if (mode === 'global') {
+      if (listEl) listEl.classList.add('hidden');
+      if (globalGrid) globalGrid.classList.remove('hidden');
+      if (paginationEl) paginationEl.classList.add('hidden');
+      renderFeedGlobalView();
+    } else {
+      if (listEl) {
+        listEl.classList.remove('hidden');
+        listEl.className = `freshrss-articles-container view-${mode}`;
+      }
+      if (globalGrid) globalGrid.classList.add('hidden');
+      renderFeedArticles();
+    }
+  }
+
+  async function loadFeedSources() {
+    if (!feedState.communityId) return;
+    try {
+      const { data } = await api(`/api/feed/sources?community_id=${encodeURIComponent(feedState.communityId)}`);
+      if (!data?.success) return;
+
+      feedState.categories = data.categories || [];
+      feedState.totalUnread = data.total_unread || 0;
+      feedState.totalImportantUnread = data.total_important_unread ?? 0;
+      feedState.totalStarred = data.total_starred || 0;
+      feedState.labels = Array.isArray(data.labels) ? data.labels : [];
+
+      updateBadgeCounters();
+      renderFeedSidebar();
+      if (feedState.viewMode === 'global') {
+        renderFeedGlobalView();
+      }
+    } catch (err) {
+      console.warn('[feed] loadFeedSources failed:', err);
+    }
+  }
+
+  function renderFeedSidebar() {
+    const tree = $('freshrssCategoriesTree');
+    const datalist = $('freshrssCategoryList');
+    const labelsTree = $('freshrssLabelsList');
+    const labelsCountEl = $('freshrssLabelsCount');
+    if (!tree) return;
+
+    if (datalist) {
+      datalist.innerHTML = feedState.categories.map((c) =>
+        `<option value="${escapeHtml(c.name)}">`
+      ).join('');
+    }
+
+    // Render My Labels list (aggregated from custom article labels & categories)
+    if (labelsCountEl) {
+      labelsCountEl.textContent = String(feedState.labels.length || 0);
+    }
+    if (labelsTree) {
+      if (!feedState.labels.length) {
+        labelsTree.innerHTML = `<li class="item feed"><span class="title" style="color:var(--frss-text-muted);font-size:0.76rem;">No labels yet</span></li>`;
+      } else {
+        labelsTree.innerHTML = feedState.labels.map((lbl) => {
+          const name = typeof lbl === 'string' ? lbl : lbl.name;
+          const count = typeof lbl === 'object' && lbl.count != null ? lbl.count : '';
+          const isActive = feedState.label.toLowerCase() === String(name).toLowerCase();
+          return `
+            <li class="item feed ${isActive ? 'active' : ''}" data-filter-label="${escapeHtml(name)}">
+              <span class="item-title">
+                <img class="icon" src="/assets/freshrss/label.svg" alt="" style="width:13px;height:13px;">
+                <span class="title">${escapeHtml(name)}</span>
+              </span>
+              ${count !== '' ? `<span class="badge">${count}</span>` : ''}
+            </li>
+          `;
+        }).join('');
+
+        labelsTree.querySelectorAll('[data-filter-label]').forEach((el) => {
+          el.addEventListener('click', () => {
+            const labelName = el.getAttribute('data-filter-label') || '';
+            feedState.label = labelName;
+            feedState.stream = 'all';
+            feedState.category = '';
+            feedState.streamTitle = `Label: ${labelName}`;
+            feedState.page = 1;
+            updateActiveSidebarStyles();
+            if (feedState.viewMode === 'global') setFeedViewMode('normal');
+            else loadFeedArticles();
+          });
+        });
+      }
+    }
+
+    if (!feedState.categories.length) {
+      const targetDesc = feedState.communityId === 'personal'
+        ? 'your Personal Second Brain (personal_links)'
+        : 'this Community Archive (links)';
+      tree.innerHTML = `
+        <div class="freshrss-loading-feeds">
+          <p style="margin:0 0 8px;">No feeds in ${escapeHtml(targetDesc)} yet.</p>
+          <p style="margin:0;font-size:0.78rem;">Click <strong>+ Add subscription</strong> above to subscribe and auto-ingest articles.</p>
+        </div>
+      `;
+      return;
+    }
+
+    // Render Categories & Feeds Tree
+    tree.innerHTML = feedState.categories.map((cat) => {
+      const isCatActive = feedState.category === cat.name && feedState.stream === 'all' && !feedState.label;
+      return `
+        <ul class="tree" style="padding:0;margin:0;">
+          <li class="tree-folder category ${isCatActive ? 'active' : ''}" data-category="${escapeHtml(cat.name)}">
+            <a class="tree-folder-title">
+              <span class="dropdown-toggle" title="Toggle category"><img class="icon" src="/assets/freshrss/down.svg" loading="lazy" alt=""></span>
+              <span class="title">${escapeHtml(cat.name)}</span>
+              <span class="badge ${cat.unread_count > 0 ? 'has-unread' : ''}">${cat.unread_count}</span>
+            </a>
+            <ul class="tree-folder-items">
+              ${cat.feeds.map((feed) => {
+                const isFeedActive = feedState.stream === feed.id;
+                const icon = feed.icon_url || `https://www.google.com/s2/favicons?domain=${encodeURIComponent(feed.site_url || feed.url)}&sz=32`;
+                const hasErr = (feed.error_count || 0) > 0;
+                return `
+                  <li class="item feed ${isFeedActive ? 'active' : ''} ${hasErr ? 'has-error' : ''}" data-feed-id="${escapeHtml(feed.id)}" data-feed-title="${escapeHtml(feed.title)}" data-feed-important="${feed.is_important ? '1' : '0'}">
+                    <div class="feed-gear-wrap" style="position:relative;display:inline-flex;">
+                      <button type="button" class="feed-gear-btn" title="Feed actions" aria-label="Feed actions" data-gear-btn="${escapeHtml(feed.id)}">
+                        <img class="icon" src="/assets/freshrss/configure.svg" alt="">
+                      </button>
+                      <ul class="feed-dropdown-menu hidden" data-gear-menu="${escapeHtml(feed.id)}">
+                        <li><button type="button" data-feed-action="filter">Filter stream</button></li>
+                        <li><button type="button" data-feed-action="refresh">Refresh feed now</button></li>
+                        <li><button type="button" data-feed-action="mark-read">Mark feed as read</button></li>
+                        <li><button type="button" data-feed-action="toggle-important">${feed.is_important ? 'Unpin from Important' : 'Pin to Important'}</button></li>
+                        <li><a href="${safeHref(feed.site_url || feed.url)}" target="_blank" rel="noopener noreferrer">Visit website</a></li>
+                        <li><button type="button" data-feed-action="edit" data-feed-cat="${escapeHtml(cat.name)}">Edit subscription</button></li>
+                        <li><button type="button" data-feed-action="delete" style="color:#f87171">Unsubscribe</button></li>
+                      </ul>
+                    </div>
+                    <a class="item-title" title="${escapeHtml(feed.title)}${hasErr ? ' (Last sync reported an error)' : ''}">
+                      <img class="favicon" src="${escapeHtml(icon)}" alt="" onerror="this.onerror=null;this.src='${FALLBACK_FEED_ICON}'">
+                      <span class="title">${escapeHtml(feed.title)}</span>
+                      ${feed.is_important ? `<img class="icon feed-important-pin" src="/assets/freshrss/important.svg" alt="Important" title="Pinned to Important feeds">` : ''}
+                      ${feed.unread_count > 0 ? `<span class="badge has-unread">${feed.unread_count}</span>` : ''}
+                    </a>
+                  </li>
+                `;
+              }).join('')}
+            </ul>
+          </li>
+        </ul>
+      `;
+    }).join('');
+
+    // Category folder click events
+    tree.querySelectorAll('.tree-folder.category').forEach((folder) => {
+      const titleLink = folder.querySelector('.tree-folder-title');
+      const chevron = folder.querySelector('.dropdown-toggle');
+      const catName = folder.getAttribute('data-category');
+
+      chevron?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        folder.classList.toggle('collapsed');
+      });
+
+      titleLink?.addEventListener('click', (e) => {
+        if (e.target.closest('.dropdown-toggle')) return;
+        feedState.stream = 'all';
+        feedState.category = catName || '';
+        feedState.label = '';
+        feedState.streamTitle = catName || 'Category';
+        feedState.page = 1;
+        updateActiveSidebarStyles();
+        if (feedState.viewMode === 'global') {
+          setFeedViewMode('normal');
+        } else {
+          loadFeedArticles();
+        }
+      });
+    });
+
+    // Feed items click events
+    tree.querySelectorAll('.item.feed').forEach((item) => {
+      const feedId = item.getAttribute('data-feed-id');
+      const feedTitle = item.getAttribute('data-feed-title');
+      const isImportant = item.getAttribute('data-feed-important') === '1';
+      const titleLink = item.querySelector('.item-title');
+
+      titleLink?.addEventListener('click', () => {
+        feedState.stream = feedId;
+        feedState.category = '';
+        feedState.label = '';
+        feedState.streamTitle = feedTitle || 'Feed';
+        feedState.page = 1;
+        updateActiveSidebarStyles();
+        if (feedState.viewMode === 'global') {
+          setFeedViewMode('normal');
+        } else {
+          loadFeedArticles();
+        }
+      });
+
+      const gearBtn = item.querySelector('[data-gear-btn]');
+      const gearMenu = item.querySelector('[data-gear-menu]');
+
+      gearBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        document.querySelectorAll('.feed-dropdown-menu').forEach((m) => {
+          if (m !== gearMenu) m.classList.add('hidden');
+        });
+        gearMenu?.classList.toggle('hidden');
+      });
+
+      gearMenu?.querySelector('[data-feed-action="filter"]')?.addEventListener('click', () => {
+        gearMenu.classList.add('hidden');
+        feedState.stream = feedId;
+        feedState.category = '';
+        feedState.label = '';
+        feedState.streamTitle = feedTitle || 'Feed';
+        updateActiveSidebarStyles();
+        loadFeedArticles();
+      });
+
+      gearMenu?.querySelector('[data-feed-action="refresh"]')?.addEventListener('click', async () => {
+        gearMenu.classList.add('hidden');
+        try {
+          const { res, data } = await api('/api/feed/refresh', {
+            method: 'POST',
+            body: JSON.stringify({ community_id: feedState.communityId, feed_id: feedId })
+          });
+          if (res?.ok && data?.success) {
+            showToast(`Synced "${feedTitle}": ${data.new_articles_count || 0} new articles`);
+            loadFeedSources();
+            loadFeedArticles();
+            refreshAthenaLinksAfterFeedSync(feedState.communityId);
+          } else {
+            showToast(data?.error || 'Feed refresh failed', true);
+          }
+        } catch (err) {
+          showToast(err.message || 'Feed refresh error', true);
+        }
+      });
+
+      gearMenu?.querySelector('[data-feed-action="mark-read"]')?.addEventListener('click', async () => {
+        gearMenu.classList.add('hidden');
+        try {
+          const { res, data } = await api('/api/feed/mark-all-read', {
+            method: 'POST',
+            body: JSON.stringify({ community_id: feedState.communityId, feed_id: feedId })
+          });
+          if (res?.ok && data?.success) {
+            showToast(`Marked "${feedTitle}" as read`);
+            loadFeedSources();
+            loadFeedArticles();
+          }
+        } catch (err) {
+          showToast(err.message || 'Failed to mark feed read', true);
+        }
+      });
+
+      gearMenu?.querySelector('[data-feed-action="toggle-important"]')?.addEventListener('click', async () => {
+        gearMenu.classList.add('hidden');
+        try {
+          const { res, data } = await api('/api/feed', {
+            method: 'PATCH',
+            body: JSON.stringify({ feed_id: feedId, is_important: !isImportant })
+          });
+          if (res?.ok && data?.success) {
+            showToast(!isImportant ? `Pinned "${feedTitle}" to Important feeds` : `Unpinned "${feedTitle}" from Important feeds`);
+            loadFeedSources();
+            if (feedState.stream === 'important' || feedState.stateFilter === 'important') {
+              loadFeedArticles();
+            }
+          }
+        } catch (err) {
+          showToast(err.message || 'Failed to update feed', true);
+        }
+      });
+
+      gearMenu?.querySelector('[data-feed-action="edit"]')?.addEventListener('click', () => {
+        gearMenu.classList.add('hidden');
+        const catName = gearMenu.querySelector('[data-feed-action="edit"]')?.getAttribute('data-feed-cat') || 'General';
+        openEditFeedModal(feedId, feedTitle, catName, isImportant);
+      });
+
+      gearMenu?.querySelector('[data-feed-action="delete"]')?.addEventListener('click', async () => {
+        gearMenu.classList.add('hidden');
+        if (!confirm(`Unsubscribe from "${feedTitle}" and remove its cached stream items?`)) return;
+        try {
+          const { res, data } = await api('/api/feed', {
+            method: 'DELETE',
+            body: JSON.stringify({ feed_id: feedId })
+          });
+          if (res?.ok && data?.success) {
+            showToast(`Unsubscribed from "${feedTitle}"`);
+            if (feedState.stream === feedId) {
+              feedState.stream = 'all';
+              feedState.streamTitle = 'Main stream';
+            }
+            loadFeedSources();
+            loadFeedArticles();
+          } else {
+            showToast(data?.error || 'Failed to unsubscribe feed', true);
+          }
+        } catch (err) {
+          showToast(err.message || 'Network error', true);
+        }
+      });
+    });
+  }
+
+  function updateActiveSidebarStyles() {
+    $('freshrssNavMain')?.classList.toggle('active', feedState.stream === 'all' && !feedState.category && !feedState.label);
+    $('freshrssNavImportant')?.classList.toggle('active', feedState.stream === 'important');
+    $('freshrssNavStarred')?.classList.toggle('active', feedState.stream === 'starred');
+
+    const titleEl = $('freshrssStreamTitle');
+    if (titleEl) titleEl.textContent = feedState.streamTitle;
+
+    const filterPill = $('freshrssActiveFilterPill');
+    if (filterPill) {
+      const parts = [];
+      if (feedState.label) parts.push(`Label: ${feedState.label}`);
+      if (feedState.search) parts.push(`Search: ${feedState.search}`);
+      if (parts.length > 0) {
+        filterPill.classList.remove('hidden');
+        filterPill.innerHTML = `<span>${escapeHtml(parts.join(' · '))}</span><button type="button" title="Clear active filter" aria-label="Clear active filter">&times;</button>`;
+        filterPill.querySelector('button')?.addEventListener('click', () => {
+          feedState.label = '';
+          feedState.search = '';
+          const searchInput = $('freshrssSearchInput');
+          if (searchInput) searchInput.value = '';
+          $('freshrssClearSearchBtn')?.classList.add('hidden');
+          if (feedState.streamTitle.startsWith('Label:')) {
+            feedState.streamTitle = 'Main stream';
+          }
+          updateActiveSidebarStyles();
+          renderFeedSidebar();
+          loadFeedArticles();
+        });
+      } else {
+        filterPill.classList.add('hidden');
+        filterPill.innerHTML = '';
+      }
+    }
+  }
+
+  function renderFeedGlobalView() {
+    const grid = $('freshrssGlobalGrid');
+    if (!grid) return;
+
+    if (!feedState.categories.length) {
+      grid.innerHTML = `
+        <div class="freshrss-empty-state" style="grid-column: 1 / -1;">
+          <h3>No Feeds Subscribed</h3>
+          <p>Click "+ Add Feed" to subscribe to RSS, Atom, or JSON feeds in this database scope.</p>
+        </div>
+      `;
+      return;
+    }
+
+    grid.innerHTML = feedState.categories.map((cat) => `
+      <div class="box category" data-category="${escapeHtml(cat.name)}">
+        <div class="box-title">
+          <h2>${escapeHtml(cat.name)}</h2>
+          <span class="badge ${cat.unread_count > 0 ? 'has-unread' : ''}">${cat.unread_count}</span>
+        </div>
+        <ul class="box-content scrollbar-thin">
+          ${cat.feeds.map((feed) => {
+            const icon = feed.icon_url || `https://www.google.com/s2/favicons?domain=${encodeURIComponent(feed.site_url || feed.url)}&sz=32`;
+            return `
+              <li class="item feed" data-feed-id="${escapeHtml(feed.id)}" data-feed-title="${escapeHtml(feed.title)}">
+                <img class="favicon" src="${escapeHtml(icon)}" alt="" onerror="this.onerror=null;this.src='${FALLBACK_FEED_ICON}'">
+                <span class="title">${escapeHtml(feed.title)}</span>
+                ${feed.is_important ? `<img class="icon feed-important-pin" src="/assets/freshrss/important.svg" alt="Important">` : ''}
+                ${feed.unread_count > 0 ? `<span class="badge has-unread">${feed.unread_count}</span>` : ''}
+              </li>
+            `;
+          }).join('')}
+        </ul>
+      </div>
+    `).join('');
+
+    grid.querySelectorAll('.box.category').forEach((box) => {
+      const catName = box.getAttribute('data-category');
+      box.querySelector('.box-title')?.addEventListener('click', () => {
+        feedState.stream = 'all';
+        feedState.category = catName || '';
+        feedState.label = '';
+        feedState.streamTitle = catName || 'Category';
+        updateActiveSidebarStyles();
+        setFeedViewMode('normal');
+        loadFeedArticles();
+      });
+
+      box.querySelectorAll('.item.feed').forEach((feedItem) => {
+        feedItem.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const feedId = feedItem.getAttribute('data-feed-id');
+          const feedTitle = feedItem.getAttribute('data-feed-title');
+          feedState.stream = feedId || 'all';
+          feedState.category = '';
+          feedState.label = '';
+          feedState.streamTitle = feedTitle || 'Feed';
+          updateActiveSidebarStyles();
+          setFeedViewMode('normal');
+          loadFeedArticles();
+        });
+      });
+    });
+  }
+
+  async function loadFeedArticles(append = false) {
+    if (!feedState.communityId) return;
+
+    if (!append) {
+      feedState.page = 1;
+      feedState.expandedIds.clear();
+      feedState.activeArticleIndex = -1;
+      const expandLabel = $('freshrssExpandAllLabel');
+      if (expandLabel) expandLabel.textContent = 'Expand all';
+      const listEl = $('freshrssArticlesList');
+      if (listEl && feedState.viewMode !== 'global') {
+        listEl.innerHTML = `
+          <div class="freshrss-loading-articles">
+            <div class="freshrss-spinner"></div>
+            <p>Loading stream…</p>
+          </div>
+        `;
+      }
+    }
+
+    feedState.loading = true;
+
+    try {
+      const params = new URLSearchParams({
+        community_id: feedState.communityId,
+        stream: feedState.stream || 'all',
+        state: feedState.stateFilter || 'all',
+        page: String(feedState.page),
+        limit: String(feedState.limit),
+        sort: feedState.sort,
+        order: feedState.order
+      });
+
+      if (feedState.category) params.set('category', feedState.category);
+      if (feedState.label) params.set('label', feedState.label);
+      if (feedState.search) params.set('search', feedState.search);
+
+      const { res, data } = await api(`/api/feed/streams?${params.toString()}`);
+
+      if (!res?.ok || !data?.success) {
+        showToast(data?.error || 'Failed to load articles', true);
+        return;
+      }
+
+      feedState.totalPages = data.total_pages || 1;
+      feedState.totalArticles = data.total || 0;
+
+      if (append) {
+        feedState.articles = feedState.articles.concat(data.articles || []);
+      } else {
+        feedState.articles = data.articles || [];
+      }
+
+      const countsEl = $('freshrssArticleCounts');
+      if (countsEl) {
+        countsEl.textContent = `${feedState.totalArticles} ${feedState.totalArticles === 1 ? 'article' : 'articles'}`;
+      }
+
+      updateActiveSidebarStyles();
+
+      if (feedState.viewMode !== 'global') {
+        renderFeedArticles();
+      }
+
+      const paginationEl = $('freshrssPagination');
+      const pageInfo = $('freshrssPageInfo');
+      const loadMoreBtn = $('freshrssLoadMoreBtn');
+
+      if (paginationEl && feedState.viewMode !== 'global') {
+        const hasMore = feedState.page < feedState.totalPages;
+        paginationEl.classList.toggle('hidden', feedState.totalArticles === 0);
+        if (loadMoreBtn) loadMoreBtn.classList.toggle('hidden', !hasMore);
+        if (pageInfo) pageInfo.textContent = `Page ${feedState.page} of ${feedState.totalPages}`;
+      }
+    } catch (err) {
+      console.warn('[feed] loadFeedArticles failed:', err);
+    } finally {
+      feedState.loading = false;
+    }
+  }
+
+  function renderFeedArticles() {
+    const listEl = $('freshrssArticlesList');
+    if (!listEl) return;
+
+    if (!feedState.articles.length) {
+      const isUnreadOnly = feedState.stateFilter === 'unread';
+      listEl.innerHTML = `
+        <div class="freshrss-empty-state">
+          <h3>${isUnreadOnly ? 'No unread articles in this view' : 'No articles match this filter'}</h3>
+          <p>${isUnreadOnly
+            ? 'You have read everything in this stream. Switch to the "All" tab in the toolbar above to browse read articles, or add a new subscription.'
+            : 'Try clearing your search filter, selecting another stream, or clicking Refresh to sync feeds.'}</p>
+          ${isUnreadOnly ? `<button type="button" class="btn btn-secondary btn-sm" id="freshrssEmptyShowAllBtn">Show All Articles</button>` : ''}
+        </div>
+      `;
+      $('freshrssEmptyShowAllBtn')?.addEventListener('click', () => {
+        document.querySelectorAll('.freshrss-state-tab').forEach((t) => {
+          t.classList.toggle('active', t.getAttribute('data-filter') === 'all');
+        });
+        feedState.stateFilter = 'all';
+        feedState.page = 1;
+        loadFeedArticles();
+      });
+      return;
+    }
+
+    listEl.innerHTML = feedState.articles.map((art, idx) => {
+      const isExpanded = feedState.viewMode === 'reader' || feedState.expandedIds.has(art.id);
+      const isCurrent = feedState.activeArticleIndex === idx;
+      const isRead = Boolean(art.is_read);
+      const isStarred = Boolean(art.is_starred);
+      const icon = art.feed_icon_url || `https://www.google.com/s2/favicons?domain=${encodeURIComponent(art.feed_site_url || art.url)}&sz=32`;
+      const dateStr = formatFeedDate(art.published_at);
+      const snippet = stripHtmlSnippet(art.summary || art.content || '', 160);
+      const cleanContent = sanitizeFeedHtml(art.content || art.summary || '');
+      let domain;
+      try {
+        domain = art.url ? new URL(art.url).hostname.replace(/^www\./, '') : '';
+      } catch (_) {
+        domain = '';
+      }
+      const userLabels = Array.isArray(art.labels) ? art.labels : [];
+      const taxonomyTags = Array.isArray(art.tags) ? art.tags : [];
+      const isPersonalFeed = art.feed_scope === 'personal' || feedState.communityId === 'personal';
+
+      return `
+        <div class="flux ${!isRead ? 'is-unread' : ''} ${isExpanded ? 'open' : ''} ${isCurrent ? 'current' : ''}" data-article-id="${escapeHtml(art.id)}" data-article-index="${idx}">
+          <div class="flux_header">
+            <div class="flux-left-controls">
+              <button type="button" class="quick-btn" title="${isRead ? 'Mark as unread (m)' : 'Mark as read (m)'}" aria-label="${isRead ? 'Mark as unread' : 'Mark as read'}" data-action="toggle-read">
+                <img class="icon" src="${isRead ? '/assets/freshrss/read.svg' : '/assets/freshrss/unread.svg'}" alt="">
+              </button>
+              <button type="button" class="quick-btn ${isStarred ? 'is-starred' : ''}" title="${isStarred ? 'Remove from Favourites (s)' : 'Add to Favourites (s)'}" aria-label="${isStarred ? 'Remove from Favourites' : 'Add to Favourites'}" data-action="star">
+                <img class="icon" src="${isStarred ? '/assets/freshrss/starred.svg' : '/assets/freshrss/non-starred.svg'}" alt="">
+              </button>
+            </div>
+
+            <a class="website" data-action="filter-feed" title="Filter stream by ${escapeHtml(art.feed_title)}">
+              <img class="favicon" src="${escapeHtml(icon)}" alt="" onerror="this.onerror=null;this.src='${FALLBACK_FEED_ICON}'">
+              <span class="websiteName">${escapeHtml(art.feed_title)}</span>
+            </a>
+
+            <div class="titleAuthorSummaryDate" data-action="expand">
+              <span class="title" dir="auto">${escapeHtml(art.title)}</span>
+              ${snippet ? `<span class="summary-snippet">${escapeHtml(snippet)}</span>` : ''}
+            </div>
+
+            <div class="flux-inline-badges">
+              ${art.feed_category ? `<span class="flux-category-chip" data-action="tag-filter" data-tag="${escapeHtml(art.feed_category)}" title="Filter by #${escapeHtml(art.feed_category)}">#${escapeHtml(art.feed_category)}</span>` : ''}
+              ${userLabels.map((lbl) => `<span class="flux-label-chip" data-action="label-filter" data-label="${escapeHtml(lbl)}" title="Filter by label: ${escapeHtml(lbl)}">${escapeHtml(lbl)}</span>`).join('')}
+            </div>
+
+            <span class="date" data-action="expand">${escapeHtml(dateStr)}</span>
+
+            <div class="quick-actions">
+              <button type="button" class="quick-btn" title="Manage article labels" aria-label="Manage article labels" data-action="label-modal">
+                <img class="icon" src="/assets/freshrss/label.svg" alt="">
+              </button>
+              <a href="${safeHref(art.url)}" target="_blank" rel="noopener noreferrer" class="quick-btn" title="Open original article (${escapeHtml(domain || 'website')})" aria-label="Open original article">
+                <img class="icon" src="/assets/freshrss/link.svg" alt="">
+              </a>
+            </div>
+          </div>
+
+          ${isExpanded ? `
+            <article class="flux_content" dir="auto">
+              <header>
+                <h2><a href="${safeHref(art.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(art.title)}</a></h2>
+                <div class="subtitle">
+                  <span class="website">
+                    <img class="favicon" src="${escapeHtml(icon)}" alt="" onerror="this.onerror=null;this.src='${FALLBACK_FEED_ICON}'">
+                    <span>${escapeHtml(art.feed_title)}</span>
+                  </span>
+                  ${art.author ? `<span class="author">By ${escapeHtml(art.author)}</span>` : ''}
+                  <span class="date">${escapeHtml(dateStr)}</span>
+                </div>
+              </header>
+              <div class="text">
+                ${cleanContent || `<p>${escapeHtml(art.title)}</p>`}
+              </div>
+              <footer>
+                <div class="footer-left">
+                  <span class="pzp-brain-badge" title="${isPersonalFeed ? 'Indexed in your private Personal DB (personal_links)' : 'Indexed in shared Community DB (links)'}">
+                    <span>${isPersonalFeed ? 'In Personal DB (personal_links)' : 'In Community DB (links)'}</span>
+                  </span>
+                  ${!isPersonalFeed ? `
+                    <button type="button" class="pzp-save-personal-btn ${art.saved_to_personal ? 'is-saved' : ''}" data-action="save-personal" title="Save a copy of this article to your private Personal DB (personal_links)">
+                      <span>${art.saved_to_personal ? 'Saved to Personal DB' : '+ Save to Personal DB'}</span>
+                    </button>
+                  ` : ''}
+                  <button type="button" class="pzp-ai-summarize-btn" data-action="summarize" title="Generate concise AI summary">
+                    <span>AI Summary</span>
+                  </button>
+                  <button type="button" class="pzp-label-btn" data-action="label-modal" title="Add or edit custom labels">
+                    <img class="icon" src="/assets/freshrss/label.svg" alt="" style="width:13px;height:13px;">
+                    <span>Labels${userLabels.length ? ` (${userLabels.length})` : ''}</span>
+                  </button>
+                  ${taxonomyTags.map((t) => `<span class="flux-tag-pill" data-action="tag-filter" data-tag="${escapeHtml(t)}">#${escapeHtml(t)}</span>`).join('')}
+                </div>
+                <div class="footer-right">
+                  <button type="button" class="pzp-visit-btn" data-action="copy-link" title="Copy article URL">
+                    <img class="icon" src="/assets/freshrss/share.svg" alt="" style="width:13px;height:13px;">
+                    <span>Copy URL</span>
+                  </button>
+                  <a href="${safeHref(art.url)}" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-sm" title="Visit source website">
+                    <span>Read on ${escapeHtml(domain || 'source')}</span>
+                  </a>
+                </div>
+              </footer>
+            </article>
+          ` : ''}
+        </div>
+      `;
+    }).join('');
+
+    // Attach article event handlers
+    listEl.querySelectorAll('.flux').forEach((fluxEl) => {
+      const artId = fluxEl.getAttribute('data-article-id');
+      const artIdx = parseInt(fluxEl.getAttribute('data-article-index') || '0', 10);
+      const article = feedState.articles.find((a) => a.id === artId);
+      if (!article) return;
+
+      // Click on title/summary/date to expand or collapse
+      fluxEl.querySelectorAll('[data-action="expand"]').forEach((triggerEl) => {
+        triggerEl.addEventListener('click', () => {
+          feedState.activeArticleIndex = artIdx;
+          if (feedState.viewMode === 'reader') return;
+
+          if (feedState.expandedIds.has(artId)) {
+            feedState.expandedIds.delete(artId);
+          } else {
+            feedState.expandedIds.add(artId);
+            if (!article.is_read && feedState.autoMarkRead) {
+              article.is_read = true;
+              fluxEl.classList.remove('is-unread');
+              api('/api/feed/article', {
+                method: 'PATCH',
+                body: JSON.stringify({ article_id: artId, is_read: true })
+              }).catch(() => {});
+              feedState.totalUnread = Math.max(0, feedState.totalUnread - 1);
+              updateBadgeCounters();
+            }
+          }
+          renderFeedArticles();
+        });
+      });
+
+      // Filter feed on website click
+      fluxEl.querySelector('[data-action="filter-feed"]')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        feedState.stream = article.feed_id;
+        feedState.category = '';
+        feedState.label = '';
+        feedState.streamTitle = article.feed_title;
+        updateActiveSidebarStyles();
+        loadFeedArticles();
+      });
+
+      // Star / favourite toggle
+      fluxEl.querySelector('[data-action="star"]')?.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const nextStarred = !article.is_starred;
+        article.is_starred = nextStarred;
+        feedState.totalStarred = Math.max(0, feedState.totalStarred + (nextStarred ? 1 : -1));
+        updateBadgeCounters();
+        renderFeedArticles();
+
+        try {
+          await api('/api/feed/article', {
+            method: 'PATCH',
+            body: JSON.stringify({ article_id: artId, is_starred: nextStarred })
+          });
+        } catch (_) {}
+      });
+
+      // Read / unread toggle
+      fluxEl.querySelector('[data-action="toggle-read"]')?.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const nextRead = !article.is_read;
+        article.is_read = nextRead;
+        fluxEl.classList.toggle('is-unread', !nextRead);
+        feedState.totalUnread = Math.max(0, feedState.totalUnread + (nextRead ? -1 : 1));
+        updateBadgeCounters();
+        renderFeedArticles();
+
+        try {
+          await api('/api/feed/article', {
+            method: 'PATCH',
+            body: JSON.stringify({ article_id: artId, is_read: nextRead })
+          });
+        } catch (_) {}
+      });
+
+      // Save copy to Personal DB (personal_links)
+      fluxEl.querySelector('[data-action="save-personal"]')?.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (article.saved_to_personal) return;
+        try {
+          const { res, data } = await api('/api/feed/article', {
+            method: 'PATCH',
+            body: JSON.stringify({ article_id: artId, save_to_personal: true })
+          });
+          if (res?.ok && data?.success) {
+            article.saved_to_personal = true;
+            showToast('Saved article to your Personal DB (personal_links)');
+            renderFeedArticles();
+            refreshAthenaLinksAfterFeedSync('personal');
+          } else {
+            showToast(data?.error || 'Could not save to Personal DB', true);
+          }
+        } catch (err) {
+          showToast(err.message || 'Failed to save to Personal DB', true);
+        }
+      });
+
+      // Open Label management modal
+      fluxEl.querySelectorAll('[data-action="label-modal"]').forEach((btn) => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          openArticleLabelModal(article);
+        });
+      });
+
+      // AI Summarize
+      fluxEl.querySelector('[data-action="summarize"]')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openAiSummaryModal(article);
+      });
+
+      // Tag filter
+      fluxEl.querySelectorAll('[data-action="tag-filter"]').forEach((chip) => {
+        chip.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const tag = chip.getAttribute('data-tag');
+          if (tag) {
+            const searchInput = $('freshrssSearchInput');
+            if (searchInput) {
+              searchInput.value = '#' + tag;
+              $('freshrssClearSearchBtn')?.classList.remove('hidden');
+            }
+            feedState.search = '#' + tag;
+            feedState.page = 1;
+            loadFeedArticles();
+          }
+        });
+      });
+
+      // Label filter
+      fluxEl.querySelectorAll('[data-action="label-filter"]').forEach((chip) => {
+        chip.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const lbl = chip.getAttribute('data-label') || '';
+          if (lbl) {
+            feedState.label = lbl;
+            feedState.page = 1;
+            updateActiveSidebarStyles();
+            loadFeedArticles();
+          }
+        });
+      });
+
+      // Copy link
+      fluxEl.querySelector('[data-action="copy-link"]')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(article.url).then(() => {
+            showToast('Article URL copied to clipboard');
+          });
+        }
+      });
+    });
+  }
+
+  function updateBadgeCounters() {
+    const navBadge = $('feedNavBadge');
+    if (navBadge) {
+      navBadge.textContent = feedState.totalUnread > 99 ? '99+' : String(feedState.totalUnread);
+      navBadge.classList.toggle('hidden', feedState.totalUnread <= 0);
+    }
+    const mainBadge = $('freshrssMainUnreadCount');
+    if (mainBadge) {
+      mainBadge.textContent = String(feedState.totalUnread);
+      mainBadge.classList.toggle('has-unread', feedState.totalUnread > 0);
+    }
+    const importantBadge = $('freshrssImportantUnreadCount');
+    if (importantBadge) {
+      importantBadge.textContent = String(feedState.totalImportantUnread || 0);
+      importantBadge.classList.toggle('has-unread', (feedState.totalImportantUnread || 0) > 0);
+    }
+    const starBadge = $('freshrssStarredCount');
+    if (starBadge) {
+      starBadge.textContent = String(feedState.totalStarred);
+    }
+  }
+
+  async function markAllFeedRead() {
+    if (!feedState.communityId) return;
+    try {
+      const payload = {
+        community_id: feedState.communityId,
+        feed_id: feedState.stream.startsWith('feed_') ? feedState.stream : undefined,
+        category: feedState.category || undefined
+      };
+      const { res, data } = await api('/api/feed/mark-all-read', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      if (res?.ok && data?.success) {
+        showToast('Marked current stream as read');
+        loadFeedSources();
+        loadFeedArticles();
+      }
+    } catch (err) {
+      showToast(err.message || 'Mark all read failed', true);
+    }
+  }
+
+  async function refreshFeeds() {
+    const refreshBtn = $('freshrssRefreshBtn');
+    if (refreshBtn) {
+      refreshBtn.querySelector('.icon')?.classList.add('athena-spin');
+    }
+
+    try {
+      const { res, data } = await api('/api/feed/refresh', {
+        method: 'POST',
+        body: JSON.stringify({ community_id: feedState.communityId })
+      });
+      if (res?.ok && data?.success) {
+        const count = data.new_articles_count || 0;
+        const targetLabel = feedState.communityId === 'personal' ? 'Personal DB (personal_links)' : 'Community DB (links)';
+        showToast(count > 0 ? `Synced feeds: ${count} new articles indexed into ${targetLabel}` : 'All feeds up to date');
+        loadFeedSources();
+        loadFeedArticles();
+        if (count > 0) {
+          refreshAthenaLinksAfterFeedSync(feedState.communityId);
+        }
+      } else {
+        showToast(data?.error || 'Refresh failed', true);
+      }
+    } catch (err) {
+      showToast(err.message || 'Network error during refresh', true);
+    } finally {
+      if (refreshBtn) {
+        refreshBtn.querySelector('.icon')?.classList.remove('athena-spin');
+      }
+    }
+  }
+
+  // Edit Feed Modal Logic
+  function openEditFeedModal(feedId, title, category, isImportant = false) {
+    const modal = $('freshrssEditModal');
+    const idInput = $('freshrssEditFeedId');
+    const titleInput = $('freshrssEditTitleInput');
+    const catInput = $('freshrssEditCategoryInput');
+    const impInput = $('freshrssEditImportantInput');
+    const err = $('freshrssEditFeedError');
+
+    if (!modal) return;
+    if (idInput) idInput.value = feedId;
+    if (titleInput) titleInput.value = title;
+    if (catInput) catInput.value = category || '';
+    if (impInput) impInput.checked = Boolean(isImportant);
+    if (err) err.classList.add('hidden');
+
+    modal.classList.remove('hidden');
+    titleInput?.focus();
+  }
+
+  function closeEditFeedModal() {
+    $('freshrssEditModal')?.classList.add('hidden');
+  }
+
+  // Article Custom Labels Modal Logic
+  function openArticleLabelModal(article) {
+    const modal = $('freshrssLabelModal');
+    const idInput = $('freshrssLabelArticleId');
+    const titleEl = $('freshrssLabelArticleTitle');
+    const labelInput = $('freshrssLabelInput');
+    const chipsContainer = $('freshrssExistingLabelsChips');
+    if (!modal || !article) return;
+
+    if (idInput) idInput.value = article.id;
+    if (titleEl) titleEl.textContent = article.title;
+    const currentLabels = Array.isArray(article.labels) ? [...article.labels] : [];
+    if (labelInput) labelInput.value = currentLabels.join(', ');
+
+    if (chipsContainer) {
+      const knownLabels = [...new Set([
+        ...feedState.labels.map((l) => (typeof l === 'string' ? l : l.name)),
+        'read-later',
+        'important',
+        'research',
+        'reference'
+      ].filter(Boolean))];
+
+      chipsContainer.innerHTML = knownLabels.map((lbl) => {
+        const active = currentLabels.some((c) => c.toLowerCase() === lbl.toLowerCase());
+        return `<button type="button" class="search-operator-chip ${active ? 'active' : ''}" data-pick-label="${escapeHtml(lbl)}">#${escapeHtml(lbl)}</button>`;
+      }).join('');
+
+      chipsContainer.querySelectorAll('[data-pick-label]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const picked = btn.getAttribute('data-pick-label') || '';
+          const parts = (labelInput?.value || '')
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean);
+          const idx = parts.findIndex((p) => p.toLowerCase() === picked.toLowerCase());
+          if (idx >= 0) {
+            parts.splice(idx, 1);
+            btn.classList.remove('active');
+          } else {
+            parts.push(picked);
+            btn.classList.add('active');
+          }
+          if (labelInput) labelInput.value = parts.join(', ');
+        });
+      });
+    }
+
+    modal.classList.remove('hidden');
+    labelInput?.focus();
+  }
+
+  function closeArticleLabelModal() {
+    $('freshrssLabelModal')?.classList.add('hidden');
+  }
+
+  // AI Summary Modal Logic
+  async function openAiSummaryModal(article) {
+    const modal = $('freshrssAiSummaryModal');
+    const titleEl = $('freshrssAiArticleTitle');
+    const contentEl = $('freshrssAiSummaryContent');
+
+    if (!modal) return;
+    modal.classList.remove('hidden');
+    if (titleEl) titleEl.textContent = article.title;
+    if (contentEl) {
+      contentEl.innerHTML = `
+        <div class="freshrss-spinner"></div>
+        <p>Synthesizing key insights from article via Athena AI…</p>
+      `;
+    }
+
+    const cleanText = (article.content || article.summary || article.title)
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    try {
+      const { res, data } = await api('/api/ai/chat', {
+        method: 'POST',
+        body: JSON.stringify({
+          messages: [
+            {
+              role: 'system',
+              content: 'You are a research assistant for the Athena Search Second Brain. Summarize the article into 3 to 5 concise bullet points highlighting key facts and takeaways.'
+            },
+            {
+              role: 'user',
+              content: `Article Title: ${article.title}\n\nArticle Body:\n${cleanText.slice(0, 3500)}`
+            }
+          ]
+        })
+      });
+
+      const reply = data?.choices?.[0]?.message?.content || data?.reply || data?.answer || '';
+      if (res?.ok && reply) {
+        if (contentEl) {
+          contentEl.innerHTML = sanitizeFeedHtml(reply.replace(/\n/g, '<br>'));
+        }
+      } else {
+        if (contentEl) {
+          contentEl.innerHTML = `<p>${escapeHtml(stripHtmlSnippet(article.summary || article.content || 'Summary unavailable from AI at this time.', 600))}</p>`;
+        }
+      }
+    } catch (_) {
+      if (contentEl) {
+        contentEl.innerHTML = `<p>${escapeHtml(stripHtmlSnippet(article.summary || article.content || 'Summary unavailable.', 600))}</p>`;
+      }
+    }
+  }
+
+  // Floating Navigation & Keyboard Shortcuts
+  function navigateArticle(direction) {
+    if (!feedState.articles.length) return;
+    const baseIdx = feedState.activeArticleIndex < 0 ? (direction > 0 ? -1 : 0) : feedState.activeArticleIndex;
+    const newIdx = Math.max(0, Math.min(feedState.articles.length - 1, baseIdx + direction));
+    feedState.activeArticleIndex = newIdx;
+    const art = feedState.articles[newIdx];
+    if (!art) return;
+
+    feedState.expandedIds.add(art.id);
+    if (!art.is_read && feedState.autoMarkRead) {
+      art.is_read = true;
+      api('/api/feed/article', {
+        method: 'PATCH',
+        body: JSON.stringify({ article_id: art.id, is_read: true })
+      }).catch(() => {});
+      feedState.totalUnread = Math.max(0, feedState.totalUnread - 1);
+      updateBadgeCounters();
+    }
+
+    renderFeedArticles();
+
+    const targetEl = document.querySelector(`.flux[data-article-index="${newIdx}"]`);
+    targetEl?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  function setupFeedEvents() {
+    $('feedNavBtn')?.addEventListener('click', openFeed);
+    $('freshrssCloseBtn')?.addEventListener('click', closeFeed);
+
+    // Explicit Personal DB vs Community DB Scope Switcher Buttons
+    $('freshrssScopePersonalBtn')?.addEventListener('click', () => {
+      switchFeedScope('personal');
+    });
+
+    $('freshrssScopeCommunityBtn')?.addEventListener('click', () => {
+      const targetComm = state.activeCommunity || state.communities?.[0]?.id;
+      if (!targetComm) {
+        showToast('Join or create a community in Settings first, or use Personal Feeds', true);
+        return;
+      }
+      switchFeedScope(targetComm);
+    });
+
+    $('freshrssCommunitySelect')?.addEventListener('change', (e) => {
+      switchFeedScope(e.target.value);
+    });
+
+    // Sidebar navigation streams
+    $('freshrssNavMain')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      feedState.stream = 'all';
+      feedState.category = '';
+      feedState.label = '';
+      feedState.streamTitle = 'Main stream';
+      updateActiveSidebarStyles();
+      if (feedState.viewMode === 'global') setFeedViewMode('normal');
+      else loadFeedArticles();
+    });
+
+    $('freshrssNavImportant')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      feedState.stream = 'important';
+      feedState.category = '';
+      feedState.label = '';
+      feedState.streamTitle = 'Important feeds';
+      updateActiveSidebarStyles();
+      if (feedState.viewMode === 'global') setFeedViewMode('normal');
+      else loadFeedArticles();
+    });
+
+    $('freshrssNavStarred')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      feedState.stream = 'starred';
+      feedState.category = '';
+      feedState.label = '';
+      feedState.streamTitle = 'Favourites';
+      updateActiveSidebarStyles();
+      if (feedState.viewMode === 'global') setFeedViewMode('normal');
+      else loadFeedArticles();
+    });
+
+    $('freshrssLabelsToggle')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      const folder = $('freshrssNavLabelsFolder');
+      const list = $('freshrssLabelsList');
+      folder?.classList.toggle('collapsed');
+      list?.classList.toggle('hidden');
+    });
+
+    // Sidebar Toggle (Mobile and Desktop)
+    const asideEl = $('aside_feed');
+    const backdropEl = $('freshrssSidebarBackdrop');
+    const toggleBtn = $('freshrssToggleSidebarBtn');
+    const closeSidebarBtn = $('freshrssCloseSidebarBtn');
+
+    function toggleSidebar() {
+      if (window.innerWidth <= 860) {
+        const open = asideEl?.classList.toggle('mobile-open');
+        backdropEl?.classList.toggle('hidden', !open);
+        document.body.style.overflow = open ? 'hidden' : '';
+      } else {
+        asideEl?.classList.toggle('collapsed-sidebar');
+        toggleBtn?.classList.toggle('active', !asideEl?.classList.contains('collapsed-sidebar'));
+      }
+    }
+
+    toggleBtn?.addEventListener('click', toggleSidebar);
+    closeSidebarBtn?.addEventListener('click', toggleSidebar);
+    backdropEl?.addEventListener('click', () => {
+      asideEl?.classList.remove('mobile-open');
+      backdropEl?.classList.add('hidden');
+      document.body.style.overflow = '';
+    });
+
+    // View Switchers + Expand All Toggle
+    $('freshrssViewNormalBtn')?.addEventListener('click', () => setFeedViewMode('normal'));
+    $('freshrssViewGlobalBtn')?.addEventListener('click', () => setFeedViewMode('global'));
+    $('freshrssViewReaderBtn')?.addEventListener('click', () => setFeedViewMode('reader'));
+
+    $('freshrssExpandAllBtn')?.addEventListener('click', () => {
+      if (!feedState.articles.length) return;
+      const expandLabel = $('freshrssExpandAllLabel');
+      const allExpanded = feedState.expandedIds.size >= feedState.articles.length;
+      if (allExpanded) {
+        feedState.expandedIds.clear();
+        if (expandLabel) expandLabel.textContent = 'Expand all';
+      } else {
+        feedState.articles.forEach((a) => feedState.expandedIds.add(a.id));
+        if (expandLabel) expandLabel.textContent = 'Collapse all';
+      }
+      renderFeedArticles();
+    });
+
+    // Reader Settings Dropdown
+    const settingsBtn = $('freshrssSettingsBtn');
+    const settingsMenu = $('freshrssSettingsMenu');
+    const autoReadCheck = $('freshrssSettingAutoRead');
+    const compactCheck = $('freshrssSettingCompact');
+
+    if (autoReadCheck) {
+      autoReadCheck.checked = feedState.autoMarkRead;
+      autoReadCheck.addEventListener('change', () => {
+        feedState.autoMarkRead = autoReadCheck.checked;
+        localStorage.setItem('freshrss_auto_read', feedState.autoMarkRead ? '1' : '0');
+      });
+    }
+
+    if (compactCheck) {
+      compactCheck.checked = feedState.compactDensity;
+      compactCheck.addEventListener('change', () => {
+        feedState.compactDensity = compactCheck.checked;
+        localStorage.setItem('freshrss_compact', feedState.compactDensity ? '1' : '0');
+        $('feedView')?.classList.toggle('compact-density', feedState.compactDensity);
+      });
+    }
+
+    settingsBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      settingsMenu?.classList.toggle('hidden');
+    });
+
+    // Search Operators Help Popover
+    const searchHelpBtn = $('freshrssSearchHelpBtn');
+    const searchHelpPopover = $('freshrssSearchHelpPopover');
+    searchHelpBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      searchHelpPopover?.classList.toggle('hidden');
+    });
+
+    searchHelpPopover?.querySelectorAll('.search-operator-chip').forEach((chip) => {
+      chip.addEventListener('click', () => {
+        const op = chip.getAttribute('data-op') || '';
+        const searchInput = $('freshrssSearchInput');
+        if (searchInput) {
+          searchInput.value = op;
+          searchInput.focus();
+          $('freshrssClearSearchBtn')?.classList.remove('hidden');
+          if (!op.endsWith(':')) {
+            feedState.search = op;
+            feedState.page = 1;
+            loadFeedArticles();
+          }
+        }
+        searchHelpPopover.classList.add('hidden');
+      });
+    });
+
+    // Sort Dropdown
+    const sortDropdownBtn = $('freshrssSortToggleBtn');
+    const sortMenu = $('freshrssSortMenu');
+
+    sortDropdownBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      sortMenu?.classList.toggle('hidden');
+    });
+
+    sortMenu?.querySelectorAll('.item button').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const item = btn.closest('.item');
+        const sortVal = item?.getAttribute('data-sort') || 'id';
+        const orderVal = item?.getAttribute('data-order') || 'DESC';
+        feedState.sort = sortVal;
+        feedState.order = orderVal;
+
+        const sortLabel = $('freshrssSortLabel');
+        if (sortLabel) sortLabel.textContent = btn.textContent;
+
+        sortMenu.querySelectorAll('.item').forEach((i) => i.classList.remove('active'));
+        item?.classList.add('active');
+        sortMenu.classList.add('hidden');
+
+        feedState.page = 1;
+        loadFeedArticles();
+      });
+    });
+
+    // State Filter Tabs (All, Unread, Important, Favourites)
+    document.querySelectorAll('.freshrss-state-tab').forEach((tab) => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.freshrss-state-tab').forEach((t) => t.classList.remove('active'));
+        tab.classList.add('active');
+        feedState.stateFilter = tab.getAttribute('data-filter') || 'all';
+        feedState.page = 1;
+        loadFeedArticles();
+      });
+    });
+
+    // Global Search Input
+    const searchInput = $('freshrssSearchInput');
+    const clearBtn = $('freshrssClearSearchBtn');
+    const searchBtn = $('freshrssSearchBtn');
+    let searchDebounce = null;
+
+    function triggerSearch() {
+      if (!searchInput) return;
+      feedState.search = searchInput.value.trim();
+      feedState.page = 1;
+      loadFeedArticles();
+    }
+
+    if (searchInput) {
+      searchInput.addEventListener('input', () => {
+        clearBtn?.classList.toggle('hidden', !searchInput.value.trim());
+        clearTimeout(searchDebounce);
+        searchDebounce = setTimeout(triggerSearch, 250);
+      });
+      searchInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          clearTimeout(searchDebounce);
+          triggerSearch();
+        }
+      });
+    }
+
+    searchBtn?.addEventListener('click', triggerSearch);
+
+    clearBtn?.addEventListener('click', () => {
+      if (searchInput) searchInput.value = '';
+      clearBtn.classList.add('hidden');
+      feedState.search = '';
+      feedState.page = 1;
+      loadFeedArticles();
+    });
+
+    // Toolbar Actions
+    $('freshrssMarkAllReadBtn')?.addEventListener('click', markAllFeedRead);
+    $('freshrssRefreshBtn')?.addEventListener('click', refreshFeeds);
+
+    // Pagination Load More
+    $('freshrssLoadMoreBtn')?.addEventListener('click', () => {
+      if (feedState.page < feedState.totalPages) {
+        feedState.page++;
+        loadFeedArticles(true);
+      }
+    });
+
+    // Floating Nav Buttons
+    $('freshrssPrevEntryBtn')?.addEventListener('click', () => navigateArticle(-1));
+    $('freshrssNextEntryBtn')?.addEventListener('click', () => navigateArticle(1));
+    $('freshrssUpBtn')?.addEventListener('click', () => {
+      const streamEl = $('stream');
+      if (streamEl) streamEl.scrollTo({ top: 0, behavior: 'smooth' });
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+
+    // Keyboard Shortcuts (FreshRSS Standard: j, k, m, s, v, r, Escape)
+    window.addEventListener('keydown', (e) => {
+      const feedView = $('feedView');
+      if (!feedView || feedView.classList.contains('hidden')) return;
+
+      const tag = document.activeElement?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+        if (e.key === 'Escape') {
+          document.activeElement.blur();
+        }
+        return;
+      }
+
+      if (e.key === 'j') {
+        e.preventDefault();
+        navigateArticle(1);
+      } else if (e.key === 'k') {
+        e.preventDefault();
+        navigateArticle(-1);
+      } else if (e.key === 'm') {
+        e.preventDefault();
+        const art = feedState.articles[feedState.activeArticleIndex];
+        if (art) {
+          art.is_read = !art.is_read;
+          api('/api/feed/article', {
+            method: 'PATCH',
+            body: JSON.stringify({ article_id: art.id, is_read: art.is_read })
+          }).catch(() => {});
+          feedState.totalUnread = Math.max(0, feedState.totalUnread + (art.is_read ? -1 : 1));
+          updateBadgeCounters();
+          renderFeedArticles();
+        }
+      } else if (e.key === 's') {
+        e.preventDefault();
+        const art = feedState.articles[feedState.activeArticleIndex];
+        if (art) {
+          art.is_starred = !art.is_starred;
+          api('/api/feed/article', {
+            method: 'PATCH',
+            body: JSON.stringify({ article_id: art.id, is_starred: art.is_starred })
+          }).catch(() => {});
+          feedState.totalStarred = Math.max(0, feedState.totalStarred + (art.is_starred ? 1 : -1));
+          updateBadgeCounters();
+          renderFeedArticles();
+        }
+      } else if (e.key === 'v') {
+        const art = feedState.articles[feedState.activeArticleIndex];
+        if (art?.url) {
+          window.open(art.url, '_blank', 'noopener,noreferrer');
+        }
+      } else if (e.key === 'r') {
+        e.preventDefault();
+        refreshFeeds();
+      } else if (e.key === 'Escape') {
+        document.querySelectorAll('.freshrss-modal-overlay').forEach((m) => m.classList.add('hidden'));
+        document.querySelectorAll('.feed-dropdown-menu').forEach((m) => m.classList.add('hidden'));
+        sortMenu?.classList.add('hidden');
+        settingsMenu?.classList.add('hidden');
+        searchHelpPopover?.classList.add('hidden');
+      }
+    });
+
+    // Close dropdowns on outside click
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('#freshrssSortDropdown')) {
+        sortMenu?.classList.add('hidden');
+      }
+      if (!e.target.closest('#freshrssSettingsDropdown')) {
+        settingsMenu?.classList.add('hidden');
+      }
+      if (!e.target.closest('.freshrss-search-area')) {
+        searchHelpPopover?.classList.add('hidden');
+      }
+      if (!e.target.closest('.feed-gear-wrap')) {
+        document.querySelectorAll('.feed-dropdown-menu').forEach((m) => m.classList.add('hidden'));
+      }
+    });
+
+    // Add Feed Modal
+    const addModal = $('freshrssAddModal');
+    const addForm = $('freshrssAddFeedForm');
+    const addError = $('freshrssAddFeedError');
+
+    function updateFeedIngestNote(scopeVal) {
+      const note = $('freshrssIngestNoteText');
+      const hint = $('freshrssScopeHint');
+      if (scopeVal === 'personal') {
+        if (hint) hint.textContent = 'Personal feeds store articles in your private Personal DB (personal_links).';
+        if (note) note.textContent = 'Articles are automatically parsed, tagged with Athena taxonomy facts, and saved to your private Personal DB (personal_links).';
+      } else {
+        if (hint) hint.textContent = 'Community feeds store articles in the shared Community DB (links).';
+        if (note) note.textContent = 'Articles are automatically parsed, tagged with Athena taxonomy facts, and saved to the shared Community DB (links).';
+      }
+    }
+
+    function openAddModal() {
+      addModal?.classList.remove('hidden');
+      if (addError) addError.classList.add('hidden');
+      const scopeSel = $('freshrssScopeInput');
+      if (scopeSel) {
+        populateFeedScopeSelect(scopeSel, feedState.communityId || 'personal');
+        updateFeedIngestNote(scopeSel.value);
+        scopeSel.onchange = () => updateFeedIngestNote(scopeSel.value);
+      }
+      $('freshrssFeedUrlInput')?.focus();
+    }
+
+    function closeAddModal() {
+      addModal?.classList.add('hidden');
+      addForm?.reset();
+    }
+
+    $('freshrssAddFeedBtn')?.addEventListener('click', openAddModal);
+    $('freshrssSidebarAddBtn')?.addEventListener('click', openAddModal);
+    $('freshrssCloseAddModalBtn')?.addEventListener('click', closeAddModal);
+    $('freshrssCancelAddBtn')?.addEventListener('click', closeAddModal);
+
+    addForm?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const url = $('freshrssFeedUrlInput')?.value.trim();
+      const category = $('freshrssCategoryInput')?.value.trim() || 'General';
+      const customTitle = $('freshrssCustomTitleInput')?.value.trim();
+      const isImportant = Boolean($('freshrssImportantInput')?.checked);
+      const targetCommunityId = $('freshrssScopeInput')?.value || feedState.communityId || 'personal';
+      const submitBtn = $('freshrssSubmitAddBtn');
+
+      if (!url) return;
+      if (submitBtn) submitBtn.disabled = true;
+      if (addError) addError.classList.add('hidden');
+
+      try {
+        const { res, data } = await api('/api/feed/add', {
+          method: 'POST',
+          body: JSON.stringify({
+            url,
+            category,
+            title: customTitle,
+            is_important: isImportant,
+            community_id: targetCommunityId
+          })
+        });
+        if (res?.ok && data?.success) {
+          const targetName = targetCommunityId === 'personal' ? 'Personal DB (personal_links)' : 'Community DB (links)';
+          showToast(`Subscribed to "${data.feed.title}" (${data.feed.articles_count} articles saved to ${targetName})`);
+          closeAddModal();
+          if (feedState.communityId !== targetCommunityId) {
+            switchFeedScope(targetCommunityId);
+          } else {
+            loadFeedSources();
+            loadFeedArticles();
+          }
+          refreshAthenaLinksAfterFeedSync(targetCommunityId);
+        } else {
+          if (addError) {
+            addError.textContent = data?.error || 'Failed to add feed';
+            addError.classList.remove('hidden');
+          }
+        }
+      } catch (err) {
+        if (addError) {
+          addError.textContent = err.message || 'Network error';
+          addError.classList.remove('hidden');
+        }
+      } finally {
+        if (submitBtn) submitBtn.disabled = false;
+      }
+    });
+
+    // Edit Feed Modal Form
+    const editForm = $('freshrssEditFeedForm');
+    const editError = $('freshrssEditFeedError');
+    $('freshrssCloseEditModalBtn')?.addEventListener('click', closeEditFeedModal);
+    $('freshrssCancelEditBtn')?.addEventListener('click', closeEditFeedModal);
+
+    editForm?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const feedId = $('freshrssEditFeedId')?.value;
+      const title = $('freshrssEditTitleInput')?.value.trim();
+      const category = $('freshrssEditCategoryInput')?.value.trim();
+      const isImportant = Boolean($('freshrssEditImportantInput')?.checked);
+      const submitBtn = $('freshrssSubmitEditBtn');
+
+      if (!feedId || !title) return;
+      if (submitBtn) submitBtn.disabled = true;
+      if (editError) editError.classList.add('hidden');
+
+      try {
+        const { res, data } = await api('/api/feed', {
+          method: 'PATCH',
+          body: JSON.stringify({ feed_id: feedId, title, category, is_important: isImportant })
+        });
+        if (res?.ok && data?.success) {
+          showToast('Subscription updated');
+          closeEditFeedModal();
+          loadFeedSources();
+          loadFeedArticles();
+        } else {
+          if (editError) {
+            editError.textContent = data?.error || 'Failed to update feed';
+            editError.classList.remove('hidden');
+          }
+        }
+      } catch (err) {
+        if (editError) {
+          editError.textContent = err.message || 'Network error';
+          editError.classList.remove('hidden');
+        }
+      } finally {
+        if (submitBtn) submitBtn.disabled = false;
+      }
+    });
+
+    // Article Labels Modal Form
+    const labelForm = $('freshrssLabelForm');
+    $('freshrssCloseLabelModalBtn')?.addEventListener('click', closeArticleLabelModal);
+    $('freshrssCancelLabelBtn')?.addEventListener('click', closeArticleLabelModal);
+
+    labelForm?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const artId = $('freshrssLabelArticleId')?.value;
+      const rawLabels = $('freshrssLabelInput')?.value || '';
+      const labels = [...new Set(rawLabels.split(',').map((s) => s.replace(/^#+/, '').trim()).filter(Boolean))];
+      if (!artId) return;
+
+      try {
+        const { res, data } = await api('/api/feed/article', {
+          method: 'PATCH',
+          body: JSON.stringify({ article_id: artId, labels })
+        });
+        if (res?.ok && data?.success) {
+          const art = feedState.articles.find((a) => a.id === artId);
+          if (art) art.labels = data.labels || labels;
+          showToast('Article labels saved');
+          closeArticleLabelModal();
+          loadFeedSources();
+          renderFeedArticles();
+        } else {
+          showToast(data?.error || 'Failed to save labels', true);
+        }
+      } catch (err) {
+        showToast(err.message || 'Failed to save labels', true);
+      }
+    });
+
+    // OPML Import & Export
+    const opmlModal = $('freshrssOpmlModal');
+    const opmlInput = $('freshrssOpmlFileInput');
+    const opmlStatus = $('freshrssOpmlStatus');
+    const opmlError = $('freshrssOpmlError');
+
+    function openOpmlModal() {
+      settingsMenu?.classList.add('hidden');
+      opmlModal?.classList.remove('hidden');
+      if (opmlError) opmlError.classList.add('hidden');
+      if (opmlStatus) opmlStatus.textContent = '';
+      const opmlScope = $('freshrssOpmlScopeInput');
+      if (opmlScope) {
+        populateFeedScopeSelect(opmlScope, feedState.communityId || 'personal');
+      }
+    }
+
+    function closeOpmlModal() {
+      opmlModal?.classList.add('hidden');
+      if (opmlInput) opmlInput.value = '';
+    }
+
+    function exportOpmlFile() {
+      settingsMenu?.classList.add('hidden');
+      if (!feedState.communityId) return;
+      window.open(`/api/feed/opml/export?community_id=${encodeURIComponent(feedState.communityId)}`, '_blank');
+    }
+
+    $('freshrssOpmlImportBtn')?.addEventListener('click', openOpmlModal);
+    $('freshrssHeaderImportOpmlBtn')?.addEventListener('click', openOpmlModal);
+    $('freshrssCloseOpmlModalBtn')?.addEventListener('click', closeOpmlModal);
+    $('freshrssCancelOpmlBtn')?.addEventListener('click', closeOpmlModal);
+
+    $('freshrssSubmitOpmlBtn')?.addEventListener('click', async () => {
+      const file = opmlInput?.files?.[0];
+      if (!file) {
+        if (opmlError) {
+          opmlError.textContent = 'Please select an OPML or XML file';
+          opmlError.classList.remove('hidden');
+        }
+        return;
+      }
+
+      const targetCommunityId = $('freshrssOpmlScopeInput')?.value || feedState.communityId || 'personal';
+      if (opmlStatus) opmlStatus.textContent = 'Parsing OPML subscriptions and ingesting feeds…';
+      if (opmlError) opmlError.classList.add('hidden');
+
+      try {
+        const text = await file.text();
+        const { res, data } = await api('/api/feed/opml/import', {
+          method: 'POST',
+          body: JSON.stringify({
+            opml_text: text,
+            community_id: targetCommunityId
+          })
+        });
+        if (res?.ok && data?.success) {
+          const targetName = targetCommunityId === 'personal' ? 'Personal DB (personal_links)' : 'Community DB (links)';
+          showToast(`Imported ${data.imported_count} feeds to ${targetName}`);
+          closeOpmlModal();
+          if (feedState.communityId !== targetCommunityId) {
+            switchFeedScope(targetCommunityId);
+          } else {
+            loadFeedSources();
+            loadFeedArticles();
+          }
+          refreshAthenaLinksAfterFeedSync(targetCommunityId);
+        } else {
+          if (opmlError) {
+            opmlError.textContent = data?.error || 'OPML import failed';
+            opmlError.classList.remove('hidden');
+          }
+        }
+      } catch (err) {
+        if (opmlError) {
+          opmlError.textContent = err.message || 'File read error';
+          opmlError.classList.remove('hidden');
+        }
+      }
+    });
+
+    $('freshrssOpmlExportBtn')?.addEventListener('click', exportOpmlFile);
+    $('freshrssHeaderExportOpmlBtn')?.addEventListener('click', exportOpmlFile);
+
+    // AI Summary Modal Close
+    $('freshrssCloseAiModalBtn')?.addEventListener('click', () => {
+      $('freshrssAiSummaryModal')?.classList.add('hidden');
+    });
+  }
+
   // ---- Events ----
 
   function setupEventListeners() {
@@ -4644,6 +6492,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupAdminDbEvents();
     setupMainDbEvents();
     setupWikiEvents();
+    setupFeedEvents();
 
     function openDrawer() {
       if (sideDrawer) sideDrawer.classList.add('active');

@@ -12,7 +12,7 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import worker, { getInstanceAiConfig, getSteroidMode, syncAiConfigToPeer, syncSteroidToPeer, resumeCloneJobs, syncInstanceTelegramCommands } from '../worker/index.js';
+import worker, { getInstanceAiConfig, getSteroidMode, syncAiConfigToPeer, syncSteroidToPeer, resumeCloneJobs, syncInstanceTelegramCommands, refreshAllFeedsJob } from '../worker/index.js';
 import { installConsoleLogging } from '../worker/runtime-logs.js';
 import { createAssets } from './assets.js';
 import { startBackups, runBackupOnce } from './backup.js';
@@ -54,7 +54,7 @@ const ALLOWED_ENV = [
   'TELEGRAM_OAUTH_REDIRECT_BASE', 'STORAGE_KEY',
   'DISCORD_CLIENT_ID', 'DISCORD_CLIENT_SECRET',
   'BACKUP_TELEGRAM_TOKEN', 'BACKUP_TELEGRAM_CHAT_ID', 'GDRIVE_CLIENT_ID',
-  'OAUTH_RELAY_BACKEND',
+  'OAUTH_RELAY_BACKEND', 'RSS_REFRESH_INTERVAL_MINUTES',
   // Optional headless Chromium for JS-rendered pages.
   'CHROME_BIN',
   // Optional derived search index; PostgreSQL remains the source of truth.
@@ -216,6 +216,18 @@ server.listen(PORT, HOST, () => {
 
   // Durable parents resume their own current child, then remaining topics.
   resumeCloneJobs(env, env.TELEGRAM_BOT_TOKEN || '').catch((error) => console.error('[index] resume failed:', error.message));
+
+  // Background RSS feed refresher: runs every 30 minutes (configurable via RSS_REFRESH_INTERVAL_MINUTES).
+  const feedRefreshMinutes = parseFloat(process.env.RSS_REFRESH_INTERVAL_MINUTES || '30');
+  if (feedRefreshMinutes > 0) {
+    const feedRefreshMs = feedRefreshMinutes * 60 * 1000;
+    setTimeout(() => {
+      refreshAllFeedsJob(env).catch((err) => console.warn('[rss] initial sync error:', err.message));
+    }, 10_000);
+    setInterval(() => {
+      refreshAllFeedsJob(env).catch((err) => console.warn('[rss] periodic sync error:', err.message));
+    }, feedRefreshMs).unref();
+  }
 
   if (process.env.CF_PURGE_CACHE === '1' && process.env.CF_ZONE_ID && process.env.CF_API_EMAIL && process.env.CF_API_KEY) {
     fetch(`https://api.cloudflare.com/client/v4/zones/${process.env.CF_ZONE_ID}/purge_cache`, {

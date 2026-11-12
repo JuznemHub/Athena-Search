@@ -301,3 +301,59 @@ CREATE TABLE IF NOT EXISTS wiki_share_links (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_wiki_share_links_token ON wiki_share_links(token);
 CREATE INDEX IF NOT EXISTS idx_wiki_share_links_expires ON wiki_share_links(expires_at);
 
+-- RSS Feeds (FreshRSS feed integration)
+CREATE TABLE IF NOT EXISTS rss_feeds (
+  id TEXT PRIMARY KEY,
+  community_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  url TEXT NOT NULL,
+  url_hash TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT,
+  site_url TEXT,
+  category TEXT NOT NULL DEFAULT 'General',
+  icon_url TEXT,
+  is_important INTEGER NOT NULL DEFAULT 0,
+  last_fetched_at INTEGER NOT NULL DEFAULT 0,
+  fetch_status TEXT NOT NULL DEFAULT 'ok',
+  error_message TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rss_feeds_comm ON rss_feeds(community_id);
+CREATE INDEX IF NOT EXISTS idx_rss_feeds_url_hash ON rss_feeds(community_id, url_hash);
+
+-- RSS Articles
+CREATE TABLE IF NOT EXISTS rss_articles (
+  id TEXT PRIMARY KEY,
+  feed_id TEXT NOT NULL,
+  community_id TEXT NOT NULL,
+  guid TEXT NOT NULL,
+  url TEXT NOT NULL,
+  url_hash TEXT NOT NULL,
+  title TEXT NOT NULL,
+  author TEXT,
+  summary TEXT,
+  content TEXT,
+  image_url TEXT,
+  published_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  link_id TEXT,
+  FOREIGN KEY(feed_id) REFERENCES rss_feeds(id)
+);
+CREATE INDEX IF NOT EXISTS idx_rss_articles_feed ON rss_articles(feed_id, published_at DESC);
+CREATE INDEX IF NOT EXISTS idx_rss_articles_comm ON rss_articles(community_id, published_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rss_articles_guid ON rss_articles(feed_id, guid);
+
+-- RSS Article Read / Starred States per user
+CREATE TABLE IF NOT EXISTS rss_article_states (
+  article_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  is_read INTEGER NOT NULL DEFAULT 0,
+  is_starred INTEGER NOT NULL DEFAULT 0,
+  labels TEXT DEFAULT '[]',
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(article_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_rss_states_user ON rss_article_states(user_id, is_read, is_starred);
+
+
