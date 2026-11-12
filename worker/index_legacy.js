@@ -705,10 +705,10 @@ export default {
           return await handlePostPersonalLink(request, user.id, env, corsHeaders);
         }
         if (request.method === 'PATCH') {
-          return await handlePatchPersonalLink(request, user.id, env, corsHeaders);
+          return await handlePatchPersonalLink(request, user, env, corsHeaders);
         }
         if (request.method === 'DELETE') {
-          return await handleDeletePersonalLink(request, user.id, env, corsHeaders);
+          return await handleDeletePersonalLink(request, user, env, corsHeaders);
         }
       }
 
@@ -2754,13 +2754,17 @@ async function requireActiveMember(env, communityId, user, corsHeaders) {
   if (!communityId || !user?.id) {
     return Response.json({ success: false, error: 'Forbidden' }, { status: 403, headers: corsHeaders });
   }
+  const isGod = await isInstanceOwnerUserAsync(user, env);
+  if (isGod) return null;
   if (await isBannedFromCommunity(env, communityId, user)) {
     return deny(corsHeaders, 'You are banned from this community', 'BANNED');
   }
-  if (!(await ensureMember(communityId, user.id, env))) {
-    return Response.json({ success: false, error: 'Forbidden' }, { status: 403, headers: corsHeaders });
+  if (await ensureMember(communityId, user.id, env)) {
+    return null;
   }
-  return null;
+  const c = await env.DB.prepare('SELECT creator_id FROM communities WHERE id = ?').bind(communityId).first().catch(() => null);
+  if (c?.creator_id === user.id) return null;
+  return Response.json({ success: false, error: 'Forbidden' }, { status: 403, headers: corsHeaders });
 }
 
 async function ensureMember(communityId, userId, env) {
@@ -3505,33 +3509,77 @@ async function createNotification(env, { userId, communityId, type, title, body,
 async function notifyCommunityStaff(env, communityId, { type, title, body, payload }) {
   const c = await env.DB.prepare('SELECT * FROM communities WHERE id = ?').bind(communityId).first();
   if (!c) return;
-  const targets = new Set([c.creator_id]);
-  const { results: members } = await env.DB.prepare(
-    `SELECT user_id FROM community_members WHERE community_id = ? AND role IN ('owner','admin')`
-  ).bind(communityId).all();
-  for (const m of members || []) targets.add(m.user_id);
+  const targets = new Set();
+  if (c.creator_id) targets.add(c.creator_id);
+  let members = [];
+  try {
+    const res = await env.DB.prepare(
+      `SELECT user_id FROM community_members WHERE community_id = ? AND role IN ('owner','admin')`
+    ).bind(communityId).all();
+    members = res?.results || [];
+  } catch (_) {}
+  for (const m of members) {
+    if (m.user_id) targets.add(m.user_id);
+  }
+
+  // Also include GOD users on Athena website notification page
+  const ownerIds = parseIdList(env.TG_OWNER_IDS || '');
+  if (ownerIds.length > 0) {
+    const placeholders = ownerIds.map(() => '?').join(',');
+    try {
+      const res = await env.DB.prepare(
+        `SELECT id FROM users WHERE (provider = 'telegram' AND provider_id IN (${placeholders})) OR telegram_api_id IN (${placeholders})`
+      ).bind(...ownerIds.map(String), ...ownerIds.map(String)).all();
+      for (const god of res?.results || []) {
+        if (god.id) targets.add(god.id);
+      }
+    } catch (_) {}
+  }
 
   for (const uid of targets) {
-    await createNotification(env, { userId: uid, communityId, type, title, body, payload });
+    try {
+      await createNotification(env, { userId: uid, communityId, type, title, body, payload });
+    } catch (_) {}
   }
 
-  // Telegram/Discord group notify via bound bots
-  const { results: bots } = await env.DB.prepare(
-    'SELECT * FROM community_bots WHERE community_id = ?'
-  ).bind(communityId).all();
-  for (const b of bots || []) {
-    if (b.platform === 'telegram' && env.TELEGRAM_BOT_TOKEN) {
-      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, b.group_id, `🔔 ${title}\n${body || ''}`);
+  // Telegram bot DMs only: send to all admin DMs (reports must NEVER drop in public telegram groups)
+  if (env.TELEGRAM_BOT_TOKEN) {
+    const dmTargets = new Set();
+    for (const oid of ownerIds) {
+      if (oid && /^-?\d+$/.test(oid)) dmTargets.add(String(oid));
     }
-  }
+    try {
+      const res = await env.DB.prepare(
+        `SELECT platform_user_id FROM community_admins WHERE community_id = ? AND platform = 'telegram'`
+      ).bind(communityId).all();
+      for (const a of res?.results || []) {
+        if (a.platform_user_id && /^-?\d+$/.test(String(a.platform_user_id))) {
+          dmTargets.add(String(a.platform_user_id));
+        }
+      }
+    } catch (_) {}
 
-  // Platform admin IDs (DM if telegram user id)
-  const { results: admins } = await env.DB.prepare(
-    'SELECT * FROM community_admins WHERE community_id = ?'
-  ).bind(communityId).all();
-  for (const a of admins || []) {
-    if (a.platform === 'telegram' && env.TELEGRAM_BOT_TOKEN) {
-      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, a.platform_user_id, `🔔 ${title}\n${body || ''}`);
+    if (targets.size > 0) {
+      const uids = [...targets];
+      const placeholders = uids.map(() => '?').join(',');
+      try {
+        const res = await env.DB.prepare(
+          `SELECT provider, provider_id, telegram_api_id FROM users WHERE id IN (${placeholders})`
+        ).bind(...uids).all();
+        for (const su of res?.results || []) {
+          if (su.telegram_api_id && /^-?\d+$/.test(String(su.telegram_api_id))) {
+            dmTargets.add(String(su.telegram_api_id));
+          } else if (su.provider === 'telegram' && su.provider_id && /^-?\d+$/.test(String(su.provider_id))) {
+            dmTargets.add(String(su.provider_id));
+          }
+        }
+      } catch (_) {}
+    }
+    const dmText = `🔔 ${boldHtml(title)}\n${escHtml(body || '')}`;
+    for (const tgId of dmTargets) {
+      try {
+        await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, tgId, dmText);
+      } catch (_) {}
     }
   }
 }
@@ -8182,28 +8230,46 @@ async function handlePostPersonalLink(request, userId, env, corsHeaders) {
   }, { headers: corsHeaders });
 }
 
-async function handleDeletePersonalLink(request, userId, env, corsHeaders) {
+async function handleDeletePersonalLink(request, userOrId, env, corsHeaders) {
+  const user = typeof userOrId === 'object' && userOrId !== null ? userOrId : { id: String(userOrId) };
+  const userId = user.id;
+  const isGod = await isInstanceOwnerUserAsync(user, env);
   const body = await request.json();
-  await env.DB.prepare(
-    'DELETE FROM personal_links WHERE id = ? AND user_id = ?'
-  ).bind(body.id, userId).run();
-  markMeiliScopeDirty(env, 'personal', userId);
+  if (isGod) {
+    const existing = await env.DB.prepare('SELECT user_id FROM personal_links WHERE id = ?').bind(body.id).first();
+    if (existing) {
+      await env.DB.prepare('DELETE FROM personal_links WHERE id = ?').bind(body.id).run();
+      markMeiliScopeDirty(env, 'personal', existing.user_id);
+    }
+  } else {
+    await env.DB.prepare(
+      'DELETE FROM personal_links WHERE id = ? AND user_id = ?'
+    ).bind(body.id, userId).run();
+    markMeiliScopeDirty(env, 'personal', userId);
+  }
   return Response.json({ success: true }, { headers: corsHeaders });
 }
 
-async function handlePatchPersonalLink(request, userId, env, corsHeaders) {
+async function handlePatchPersonalLink(request, userOrId, env, corsHeaders) {
+  const user = typeof userOrId === 'object' && userOrId !== null ? userOrId : { id: String(userOrId) };
+  const userId = user.id;
+  const isGod = await isInstanceOwnerUserAsync(user, env);
   const body = await request.json();
   const id = body.id;
   if (!id) {
     return Response.json({ success: false, error: 'id required' }, { status: 400, headers: corsHeaders });
   }
-  const existing = await env.DB.prepare(
-    'SELECT * FROM personal_links WHERE id = ? AND user_id = ?'
-  ).bind(id, userId).first();
+  let existing;
+  if (isGod) {
+    existing = await env.DB.prepare('SELECT * FROM personal_links WHERE id = ?').bind(id).first();
+  } else {
+    existing = await env.DB.prepare('SELECT * FROM personal_links WHERE id = ? AND user_id = ?').bind(id, userId).first();
+  }
   if (!existing) {
     return Response.json({ success: false, error: 'Not found' }, { status: 404, headers: corsHeaders });
   }
 
+  const targetUserId = existing.user_id;
   let url = existing.url;
   let urlHash = existing.url_hash;
   let title = existing.title;
@@ -8216,7 +8282,7 @@ async function handlePatchPersonalLink(request, userId, env, corsHeaders) {
     url = String(body.url).trim();
     urlHash = generateUrlHash(url);
     // prevent collision with another personal link
-    const clash = await findExistingLink(env, 'personal_links', 'user_id', userId, url, id);
+    const clash = await findExistingLink(env, 'personal_links', 'user_id', targetUserId, url, id);
     if (clash) {
       return Response.json({ success: false, error: 'Another link already uses that URL' }, { status: 409, headers: corsHeaders });
     }
@@ -8245,27 +8311,27 @@ async function handlePatchPersonalLink(request, userId, env, corsHeaders) {
   const editedAt = Date.now();
   const editorId = userId;
   const editorRow = await env.DB.prepare('SELECT display_name, username FROM users WHERE id = ?').bind(userId).first();
-  const editorName = editorRow?.display_name || editorRow?.username || 'Owner';
+  const editorName = editorRow?.display_name || editorRow?.username || (isGod ? 'Owner' : 'User');
   try {
     await env.DB.prepare(
       `UPDATE personal_links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, image_url = ?, site_name = ?, manual_edited_at = ?, last_edited_by = ?, last_edited_by_name = ?, search_blob = NULL
-       WHERE id = ? AND user_id = ?`
-    ).bind(url, urlHash, title, notes, tags, imageUrl || null, siteName || null, editedAt, editorId, editorName, id, userId).run();
+       WHERE id = ?`
+    ).bind(url, urlHash, title, notes, tags, imageUrl || null, siteName || null, editedAt, editorId, editorName, id).run();
   } catch (_) {
     try {
       await env.DB.prepare(
         `UPDATE personal_links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, image_url = ?, site_name = ?, manual_edited_at = ?
-         WHERE id = ? AND user_id = ?`
-      ).bind(url, urlHash, title, notes, tags, imageUrl || null, siteName || null, editedAt, id, userId).run();
+         WHERE id = ?`
+      ).bind(url, urlHash, title, notes, tags, imageUrl || null, siteName || null, editedAt, id).run();
     } catch (_) {
       await env.DB.prepare(
         `UPDATE personal_links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?
-         WHERE id = ? AND user_id = ?`
-      ).bind(url, urlHash, title, notes, tags, id, userId).run();
+         WHERE id = ?`
+      ).bind(url, urlHash, title, notes, tags, id).run();
     }
   }
 
-  markMeiliScopeDirty(env, 'personal', userId);
+  markMeiliScopeDirty(env, 'personal', targetUserId);
 
   let parsedPersonalTags;
   try { parsedPersonalTags = JSON.parse(tags); } catch (_) { parsedPersonalTags = []; }
@@ -8297,13 +8363,14 @@ async function handlePatchCommunityLink(request, user, env, corsHeaders) {
   }
   const gate = await requireActiveMember(env, existing.community_id, user, corsHeaders);
   if (gate) return gate;
-  // Owner/admin only. The author exception is gone on purpose: edits and
-  // deletes are rank-gated everywhere (bot commands, search buttons, admin
-  // DB and website cards all share this gate).
+  // Community members, original author, community staff, and GOD can edit links.
+  // Overwriting an existing edit updates last_edited_by_name and manual_edited_at.
   const isGod = await isInstanceOwnerUserAsync(user, env);
   const staff = isGod || (await ensureOwnerOrAdmin(existing.community_id, user.id, env));
-  if (!staff) {
-    return Response.json({ success: false, error: 'Only owner/admins can edit or delete' }, { status: 403, headers: corsHeaders });
+  const isAuthor = (existing.added_by && existing.added_by === user.id) || (existing.added_by_user_id && existing.added_by_user_id === user.id);
+  const isMember = await ensureMember(existing.community_id, user.id, env);
+  if (!staff && !isAuthor && !isMember) {
+    return Response.json({ success: false, error: 'You must be a member of this community to edit links' }, { status: 403, headers: corsHeaders });
   }
 
   let url = existing.url;
@@ -8345,7 +8412,7 @@ async function handlePatchCommunityLink(request, user, env, corsHeaders) {
   await ensureLinkMetaColumns(env);
   const editedAt = Date.now();
   const editorId = user.id;
-  const editorName = user.display_name || user.username || 'Admin';
+  const editorName = user.display_name || user.username || (staff ? 'Admin' : 'Member');
   try {
     await env.DB.prepare(
       `UPDATE links SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, image_url = ?, site_name = ?, manual_edited_at = ?, last_edited_by = ?, last_edited_by_name = ?, search_blob = NULL
@@ -21209,4 +21276,8 @@ export {
   handleOpmlImport,
   handleOpmlExport,
   autoIngestRssArticle,
+  notifyCommunityStaff,
+  handlePatchCommunityLink,
+  handlePatchPersonalLink,
+  handleDeletePersonalLink,
 };

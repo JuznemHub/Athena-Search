@@ -1802,9 +1802,8 @@ document.addEventListener('DOMContentLoaded', () => {
     resultsMeta.textContent = `About ${items.length} result${items.length === 1 ? '' : 's'}${query ? ` for “${query}”` : ''}${corpusTotal != null ? ` · ${corpusTotal} saved items searched` : ''}`;
 
     const isCommunity = state.scope === 'community';
-    // Owner/admin only: everyone else sees no edit/delete affordance, and the
-    // server rejects the call with "Only owner/admins can edit or delete".
-    const canModerate = state.scope === 'personal' || isStaffRank() || isCommunityStaff();
+    const canEdit = !!state.currentUser;
+    const canDelete = state.scope === 'personal' || isStaffRank() || isCommunityStaff();
 
     items.forEach(item => {
       const card = document.createElement('article');
@@ -1870,16 +1869,22 @@ document.addEventListener('DOMContentLoaded', () => {
             <button type="button" class="g-tag-chip g-tag-empty" data-tag="notags" title="Untagged link — click to filter">#notags</button>
            </div>`;
 
-      const cardActionsHtml = canModerate ? `
+      const editBtnHtml = canEdit ? `
+        <button type="button" class="btn btn-secondary btn-sm edit-link-btn" data-id="${escapeHtml(item.id)}" title="Edit link and tags">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+          <span>Edit</span>
+        </button>` : '';
+
+      const delBtnHtml = canDelete ? `
+        <button type="button" class="btn btn-sm g-card-del-btn del-link-btn" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(item.title || item.url || 'this link')}" title="Delete link from database">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+          <span>Delete</span>
+        </button>` : '';
+
+      const cardActionsHtml = (canEdit || canDelete) ? `
         <div class="g-card-actions">
-          <button type="button" class="btn btn-secondary btn-sm edit-link-btn" data-id="${escapeHtml(item.id)}" title="Edit link and tags">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-            <span>Edit</span>
-          </button>
-          <button type="button" class="btn btn-sm g-card-del-btn del-link-btn" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(item.title || item.url || 'this link')}" title="Delete link from database">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
-            <span>Delete</span>
-          </button>
+          ${editBtnHtml}
+          ${delBtnHtml}
         </div>` : '';
 
       card.innerHTML = `
@@ -1912,7 +1917,7 @@ document.addEventListener('DOMContentLoaded', () => {
           <div class="edit-panel-actions">
             <button type="button" class="btn btn-primary btn-sm edit-save">Save</button>
             <button type="button" class="btn btn-secondary btn-sm edit-cancel">Cancel</button>
-            <button type="button" class="btn btn-sm g-card-del-btn edit-delete">Delete</button>
+            ${canDelete ? '<button type="button" class="btn btn-sm g-card-del-btn edit-delete">Delete</button>' : ''}
           </div>
         </div>
       `;
@@ -6868,15 +6873,31 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (notifBellBtn) {
-      notifBellBtn.addEventListener('click', async () => {
+      notifBellBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
         await loadNotifications();
         renderNotifications();
         notifPanel?.classList.toggle('hidden');
       });
     }
     if (closeNotifBtn) {
-      closeNotifBtn.addEventListener('click', () => notifPanel?.classList.add('hidden'));
+      closeNotifBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        notifPanel?.classList.add('hidden');
+      });
     }
+    document.addEventListener('click', (e) => {
+      if (notifPanel && !notifPanel.classList.contains('hidden')) {
+        if (!notifPanel.contains(e.target) && !notifBellBtn?.contains(e.target)) {
+          notifPanel.classList.add('hidden');
+        }
+      }
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && notifPanel && !notifPanel.classList.contains('hidden')) {
+        notifPanel.classList.add('hidden');
+      }
+    });
 
     searchBarBox.addEventListener('submit', onSubmit);
 

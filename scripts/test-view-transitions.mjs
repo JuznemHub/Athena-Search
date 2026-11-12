@@ -137,3 +137,20 @@ test('Feed to Wiki and Database cleans up Feed active classes and mobile sidebar
   assert.equal(hidden(h.scopeSwitch), false);
   assert.equal(h.body.classList.contains('feed-active'), false);
 });
+
+test('Notifications panel and toast live outside searchWrapper and remain accessible across all views', () => {
+  const indexHtml = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const searchWrapperStart = indexHtml.indexOf('<div class="search-wrapper" id="searchWrapper">');
+  const searchWrapperEnd = indexHtml.indexOf('<!-- Admin & Owner Database Explorer View -->');
+  assert.ok(searchWrapperStart > 0 && searchWrapperEnd > searchWrapperStart);
+  const searchWrapperContent = indexHtml.slice(searchWrapperStart, searchWrapperEnd);
+
+  assert.equal(searchWrapperContent.includes('id="notifPanel"'), false, 'notifPanel must not be inside searchWrapper');
+  assert.equal(searchWrapperContent.includes('id="toast"'), false, 'toast must not be inside searchWrapper');
+
+  const appRootStart = indexHtml.indexOf('<div id="appRoot" class="app-container hidden">');
+  const mainContentStart = indexHtml.indexOf('<main class="main-content">');
+  const beforeMain = indexHtml.slice(appRootStart, mainContentStart);
+  assert.ok(beforeMain.includes('id="notifPanel"'), 'notifPanel must be inside appRoot before main-content');
+  assert.ok(beforeMain.includes('id="toast"'), 'toast must be inside appRoot before main-content');
+});

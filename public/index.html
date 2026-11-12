@@ -102,6 +102,16 @@
       </div>
     </header>
 
+    <div id="notifPanel" class="notif-panel hidden" role="region" aria-label="Notifications panel">
+      <div class="notif-panel-head">
+        <strong>Notifications</strong>
+        <button type="button" id="closeNotifBtn" class="icon-btn" aria-label="Close notifications">&times;</button>
+      </div>
+      <div id="notifList" class="notif-list"></div>
+    </div>
+
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
     <main class="main-content">
       <div class="search-wrapper" id="searchWrapper">
         <span class="athena-mark hero-mark" aria-hidden="true"></span>
@@ -193,16 +203,6 @@
             <div id="mainTagsCloud" class="main-tags-cloud"></div>
           </div>
         </div>
-
-        <div id="notifPanel" class="notif-panel hidden">
-          <div class="notif-panel-head">
-            <strong>Notifications</strong>
-            <button type="button" id="closeNotifBtn" class="icon-btn" aria-label="Close notifications">&times;</button>
-          </div>
-          <div id="notifList" class="notif-list"></div>
-        </div>
-
-        <div id="toast" class="toast hidden"></div>
 
         <!-- AI answer card -->
         <div id="aiAnswerCard" class="ai-answer-card hidden">
