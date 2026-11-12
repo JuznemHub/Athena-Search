@@ -432,6 +432,106 @@ function detectType({ host, primary, body, repo, ecosystems, platforms }) {
   return 'website';
 }
 
+const CONTEXT_STOPWORDS = new Set([
+  ...TITLE_STOPWORDS, ...JUNK_TAGS, ...GENERIC_REJECTS,
+  'a', 'an', 'in', 'on', 'at', 'to', 'of', 'by', 'as', 'is', 'be', 'or', 'are',
+  'was', 'were', 'been', 'has', 'have', 'had', 'do', 'does', 'did', 'will',
+  'would', 'could', 'should', 'may', 'might', 'can', 'not', 'no', 'yes', 'but',
+  'if', 'so', 'than', 'then', 'too', 'very', 'just', 'only', 'also', 'even',
+  'into', 'over', 'after', 'before', 'between', 'under', 'again', 'further',
+  'once', 'such', 'same', 'own', 'other', 'some', 'any', 'each', 'every',
+  'both', 'few', 'many', 'much', 'several', 'via', 'per', 'etc', 'eg', 'ie',
+  'http', 'https', 'www', 'org', 'net', 'io', 'dev', 'me', 'co', 'uk', 'us',
+  'support', 'supports', 'supported', 'feature', 'features', 'made', 'make',
+  'makes', 'built', 'build', 'allows', 'allow', 'provides', 'provide', 'offers',
+  'offer', 'includes', 'include', 'based', 'written', 'designed', 'created',
+  'available', 'source', 'files', 'data', 'system', 'systems', 'user', 'users',
+  'way', 'ways', 'time', 'work', 'works', 'working', 'need', 'needs', 'like',
+  'find', 'finding', 'searching', 'downloading', 'saving', 'view', 'filter',
+  'back', 'thanks', 'custom', 'any', 'automatic', 'restore', 'sync', 'readme',
+  'license', 'contributing', 'authors', 'sponsors', 'acknowledgements', 'table',
+  'showcase', 'getting', 'started', 'install', 'installation', 'usage', 'docs',
+  'version', 'latest', 'main', 'master', 'branch', 'repo', 'repository',
+]);
+
+/**
+ * Extract prominent subject terms directly from context (topics, title, notes,
+ * and repeated body terms) without relying on a hardcoded rule list.
+ */
+export function extractContextualTerms({ title = '', notes = '', content = '', banned = new Set() } = {}) {
+  const scores = new Map();
+  const sources = new Map();
+  const bump = (raw, weight, sourceName) => {
+    const tag = normalizeTag(raw);
+    if (!tag || tag.length < 3 || /^\d+$/.test(tag)) return;
+    if (CONTEXT_STOPWORDS.has(tag) || JUNK_TAGS.has(tag) || GENERIC_REJECTS.has(tag)) return;
+    if (banned.has(tag) || PLATFORM_SET.has(tag) || ECOSYSTEM_SET.has(tag) || BRAND_SET.has(tag)) return;
+    if (TYPE_SET.has(tag) && !CATEGORY_SET.has(tag)) return;
+    scores.set(tag, (scores.get(tag) || 0) + weight);
+    if (!sources.has(tag)) sources.set(tag, new Set());
+    if (sourceName) sources.get(tag).add(sourceName);
+  };
+
+  // Explicit repository/page topics carry high contextual weight
+  const topicMatch = String(content || '').match(/^Topics:\s*([^\n]+)/i);
+  const bodyWithoutTopics = topicMatch ? String(content || '').slice(topicMatch[0].length) : String(content || '');
+  if (topicMatch) {
+    for (const raw of topicMatch[1].split(/[,;\s]+/)) {
+      const cleaned = raw.trim().toLowerCase();
+      if (!cleaned) continue;
+      bump(cleaned, 6, 'topics');
+    }
+  }
+
+  // Title words carry primary subject weight
+  for (const w of String(title || '').toLowerCase().split(/[^a-z0-9]+/)) {
+    bump(w, 4, 'title');
+  }
+
+  // Notes / summary carry secondary subject weight
+  for (const w of String(notes || '').toLowerCase().split(/[^a-z0-9]+/)) {
+    bump(w, 3, 'notes');
+  }
+
+  // Body words only reinforce terms already seen in title/notes/topics or repeated >= 4 times
+  const bodyCounts = new Map();
+  for (const w of bodyWithoutTopics.toLowerCase().split(/[^a-z0-9]+/)) {
+    const tag = normalizeTag(w);
+    if (!tag || tag.length < 3 || CONTEXT_STOPWORDS.has(tag)) continue;
+    bodyCounts.set(tag, (bodyCounts.get(tag) || 0) + 1);
+  }
+  for (const [tag, count] of bodyCounts.entries()) {
+    if (scores.has(tag)) {
+      scores.set(tag, scores.get(tag) + Math.min(count, 5));
+      sources.get(tag)?.add('body');
+    } else if (count >= 4 && CANONICAL_TAGS.has(tag)) {
+      bump(tag, Math.min(count, 4), 'body');
+    }
+  }
+
+  // Canonical terms need score >= 4; non-canonical context terms must appear in explicit topics or >= 2 distinct sections (e.g. title + notes/body) with score >= 6
+  const ranked = [...scores.entries()]
+    .filter(([tag, score]) => {
+      if (CANONICAL_TAGS.has(tag)) return score >= 4;
+      const src = sources.get(tag);
+      return score >= 6 && (src?.has('topics') || (src?.size || 0) >= 2);
+    })
+    .sort((a, b) => b[1] - a[1])
+    .map(([tag]) => tag);
+
+  // Deduplicate hyphenated compounds when the base tag is already present (e.g. keep 'lua', drop 'lua-scripts')
+  const finalTerms = [];
+  for (const tag of ranked) {
+    if (tag.includes('-')) {
+      const parts = tag.split('-');
+      if (parts.some((p) => finalTerms.includes(p) || ranked.includes(p))) continue;
+    }
+    finalTerms.push(tag);
+    if (finalTerms.length >= 6) break;
+  }
+  return finalTerms;
+}
+
 /**
  * Read facts from a link. Pure function: no network, no model. Callers that
  * scraped a page pass its title/description/body in; everything else falls
@@ -456,28 +556,43 @@ export function extractFacts(rawUrl, meta = {}) {
   const platforms = detectPlatforms(host, path, primary, body);
   const ecosystems = detectEcosystems(host);
   const brands = detectBrands(host, primary, body, title);
-  // Platform words only describe what the thing runs on. A news article that
-  // merely mentions Android is not an Android app, so the software signal
-  // decides whether the detected platforms count.
   const software = softwareHint;
 
   const type = detectType({ host, primary, body, repo, ecosystems, platforms });
-  // Topics need real evidence: one curated mention, or three in the body.
-  // Ranked by mention count so the most-discussed topics win the tag budget
-  // instead of rule order deciding. Keeps long pages from collecting every
-  // vaguely related word.
+  const topicMatch = content.match(/^Topics:\s*([^\n]+)/i);
+  const topicsLine = topicMatch ? topicMatch[1].toLowerCase() : '';
+
+  // Contextual salience scoring: title & topics carry the highest weight,
+  // notes carry medium weight, and body mentions only count when dominant.
   const scoreRules = (rules, cap) => {
     const scored = [];
     for (const [tag, src] of rules) {
-      if (hit(primary, src) || countHits(body, src) >= 3) {
-        scored.push([tag, countHits(`${primary} ${body}`, src)]);
+      const titleHits = countHits(title.toLowerCase(), src);
+      const topicHits = countHits(topicsLine, src);
+      const notesHits = countHits(notes.toLowerCase(), src);
+      const bodyHits = countHits(body, src);
+      const score = (titleHits * 5) + (topicHits * 5) + (notesHits * 3) + (bodyHits >= 3 ? Math.min(bodyHits, 6) : 0);
+      if (titleHits > 0 || topicHits > 0 || notesHits > 0 || bodyHits >= 3) {
+        scored.push([tag, score]);
       }
     }
     scored.sort((a, b) => b[1] - a[1]);
     return scored.slice(0, cap).map(([tag]) => tag);
   };
-  const categories = scoreRules(CATEGORY_RULES, 4);
+  const ruleCategories = scoreRules(CATEGORY_RULES, 4);
   const languages = scoreRules(LANGUAGE_RULES, 3);
+  const domainBans = new Set();
+  if (host) {
+    for (const part of host.split('.')) if (part.length >= 3) domainBans.add(normalizeTag(part));
+  }
+  if (path) {
+    for (const seg of path.split('/').filter(Boolean).slice(0, 2)) {
+      const norm = normalizeTag(seg.replace(/\.git$/i, ''));
+      if (norm && norm.length >= 3 && !CANONICAL_TAGS.has(norm)) domainBans.add(norm);
+    }
+  }
+  const contextualTerms = extractContextualTerms({ title, notes, content, banned: domainBans });
+  const categories = [...new Set([...ruleCategories, ...contextualTerms])].slice(0, 5);
   const attributes = [];
   if (hit(all, 'self[- ]hosted|selfhosted|self hosted')) attributes.push('self-hosted');
   if (hit(primary, '\\boffline\\b')) attributes.push('offline');
@@ -496,6 +611,7 @@ export function extractFacts(rawUrl, meta = {}) {
     ecosystems,
     brands,
     categories,
+    contextualTerms,
     languages,
     attributes,
     telegram: brands.includes('telegram'),
@@ -509,9 +625,10 @@ export function extractFacts(rawUrl, meta = {}) {
  * do not parse the page twice.
  */
 export function tagsFromFacts(facts = {}) {
+  const contextual = new Set(facts.contextualTerms || []);
   const tags = [];
   const add = (t) => {
-    if (!t || !CANONICAL_TAGS.has(t) || tags.includes(t) || tags.length >= 8) return;
+    if (!t || (!CANONICAL_TAGS.has(t) && !contextual.has(t)) || tags.includes(t) || tags.length >= 8) return;
     tags.push(t);
   };
 
@@ -542,13 +659,13 @@ export function classifyTags(rawUrl, meta = {}) {
 }
 
 /**
- * Enforce the vocabulary. User-curated tags can be allowed through with
- * `allowVocabulary`, but generated tags (rules and model) are canonical only.
- * Returns { tags, rejected: [{ tag, reason }] } with one reason per drop.
+ * Enforce the vocabulary. User-curated tags or contextual subject terms can be
+ * allowed through with `vocabulary`, while junk, fluff, and domain/product names
+ * are rejected. Returns { tags, rejected: [{ tag, reason }] }.
  */
 export function validateTags(tags, { vocabulary = [], banned = [], allowedBrands = null, max = 8 } = {}) {
   const allowed = new Set((vocabulary || []).map(normalizeTag).filter(Boolean));
-  const bannedSet = new Set((banned || []).map(normalizeTag).filter(Boolean));
+  const bannedSet = new Set((banned || []).map(normalizeTag).filter((t) => t && !allowed.has(t)));
   const brandSet = allowedBrands ? new Set([...allowedBrands].map(normalizeTag)) : null;
   const out = [];
   const rejected = [];

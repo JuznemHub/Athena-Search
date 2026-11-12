@@ -510,6 +510,18 @@ async function runTests() {
     assert.equal(reviewedTags.includes('cloud'), false, 'Reviewed link must drop unevidenced cloud tag');
     assert.equal(reviewedTags.includes('open-source'), false, 'Reviewed link must drop open-source tag');
 
+    // Test 12: Context-driven dynamic tagging for domain topics not in static rules
+    const voxelUrl = 'https://github.com/someone/mesh-renderer';
+    const voxelMeta = {
+      title: 'Voxel Raytracing Renderer with Shaders',
+      notes: 'Real-time voxel raytracing engine using custom shaders.',
+      content: 'Topics: voxel, raytracing, shaders, graphics\n\nA real-time voxel renderer.'
+    };
+    const voxelClassified = classifyTags(voxelUrl, voxelMeta);
+    assert.ok(voxelClassified.tags.includes('voxel'), 'Dynamic context term voxel must be extracted without hardcoding');
+    assert.ok(voxelClassified.tags.includes('raytracing'), 'Dynamic context term raytracing must be extracted without hardcoding');
+    assert.ok(voxelClassified.tags.includes('shaders'), 'Dynamic context term shaders must be extracted without hardcoding');
+
     console.log('reporting, editing, and structure duplicate tests passed');
   } finally {
     globalThis.fetch = originalFetch;

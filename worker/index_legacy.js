@@ -11000,6 +11000,7 @@ export async function runForcetagsReview(env, { token, chatId, forumThreadId = n
           if (result.tags.includes(norm)) return true;
           if (result.facts?.type === norm) return true;
           if ((result.facts?.categories || []).includes(norm)) return true;
+          if ((result.facts?.contextualTerms || []).includes(norm)) return true;
           if ((result.facts?.platforms || []).includes(norm)) return true;
           if ((result.facts?.brands || []).includes(norm)) return true;
           if ((result.facts?.ecosystems || []).includes(norm)) return true;
@@ -11010,6 +11011,7 @@ export async function runForcetagsReview(env, { token, chatId, forumThreadId = n
         });
 
         const verdict = validateTags([...result.tags, ...evidencedCurrent], {
+          vocabulary: result.facts?.contextualTerms || [],
           banned: nameBansFor(r.url, oldTitle),
           allowedBrands: result.facts?.brands || [],
           max: 8,
@@ -20306,19 +20308,20 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, config = undefined, revi
     bookmarkFacts.brands?.length ? `Brands on the page: ${bookmarkFacts.brands.join(', ')}` : '',
     bookmarkFacts.ecosystems?.length ? `Host ecosystem: ${bookmarkFacts.ecosystems.join(', ')}` : '',
     bookmarkFacts.categories?.length ? `Topic signals: ${bookmarkFacts.categories.join(', ')}` : '',
+    bookmarkFacts.contextualTerms?.length ? `Context keywords: ${bookmarkFacts.contextualTerms.join(', ')}` : '',
   ].filter(Boolean).join('\n');
 
   const system = [
     'You classify saved bookmarks for a link archive.',
     'Write 1-2 factual English sentences describing what the page is and what it does. Preserve the concrete subject; do not open with "This page" and do not merely repeat the site name.',
     'Return an English title when the source title is not English.',
-    'Choose 3-6 lowercase tags (no #, no spaces), ONLY from the vocabulary below. Never invent a word.',
+    'Choose 3-6 lowercase tags (no #, no spaces), from the vocabulary or context keywords below based on the page subject.',
     'Pick the type tag that fits: app, software, tool, service, website, library, framework, api, bot, extension, plugin, cli, game, documentation, driver, theme.',
     'Use platform tags only when the page says the software runs there. Do not return multiplatform; it is computed from the platform facts.',
     'Use a brand tag only when the brand is named in the facts. Never tag a site, project, person or domain name.',
-    'Never emit ingest stamps (backfill, dump, untagged, duplicate). Use telegram only when the facts name a Telegram entity (bot, client, channel, group); a passing "shared via Telegram" line is not enough.',
+    'Never emit ingest stamps (backfill, dump, untagged, duplicate) or generic filler (open-source, free, online, technology). Use telegram only when the facts name a Telegram entity (bot, client, channel, group); a passing "shared via Telegram" line is not enough.',
     'Prefer specific topics over broad ones. Returning 3 accurate tags is better than 6 vague ones.',
-    reviewing ? 'Keep current tags only when they still fit; drop ingest stamps, names and vague words.' : '',
+    reviewing ? 'Keep current tags only when they still fit the primary subject; drop ingest stamps, names, incidental mentions, and vague words.' : '',
     'Reply with ONLY one JSON object: {"title": "...", "description": "...", "tags": ["a", "b", "c"]}'
   ].filter(Boolean).join(' ');
 
@@ -20412,6 +20415,7 @@ async function aiDescribeAndTag(env, rawUrl, meta = {}, config = undefined, revi
         // named in the facts; "multiplatform" is recomputed by the caller.
         parsed.tags = parsed.tags.filter((tag) => tag !== 'multiplatform');
         parsed.tags = validateTags(parsed.tags, {
+          vocabulary: bookmarkFacts.contextualTerms || [],
           banned: Array.isArray(bannedTags) ? bannedTags : [],
           allowedBrands,
           max: 6,
@@ -20484,6 +20488,7 @@ async function describeAndTagLink(env, rawUrl, meta = {}, { config, maxTags = 8,
   const ruleTags = tagsFromFacts(facts);
   const candidate = [...ruleTags, ...(ai?.tags || [])];
   const verdict = validateTags(candidate, {
+    vocabulary: facts.contextualTerms || [],
     banned: nameBansFor(rawUrl, title),
     allowedBrands: facts.brands,
     max: Math.max(1, Math.min(Number(maxTags) || 8, 10)),
