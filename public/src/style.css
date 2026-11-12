@@ -2327,40 +2327,129 @@ body.public-wiki-only #wikiCloseBtn {
 
 
 /* ==========================================================================
-   FreshRSS 1:1 Feed Reader View Styles
+   FreshRSS Feed Reader View Styles (Full Viewport + Multi-Theme + PZP)
    ========================================================================== */
 
 .feed-nav-btn {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 6px;
+  width: auto !important;
+  height: 32px !important;
+  padding: 5px 12px !important;
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px !important;
+  cursor: pointer;
   position: relative;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+
+.feed-nav-btn:hover,
+body.feed-active .feed-nav-btn {
+  background: var(--accent-surface, rgba(139, 92, 246, 0.18));
+  border-color: var(--accent-border, rgba(139, 92, 246, 0.4));
+  color: var(--accent, #a78bfa);
+  transform: translateY(-1px);
+}
+
+.feed-nav-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 .feed-nav-badge {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  background: #ff7700;
-  color: #fff;
-  font-size: 0.65rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  background: #e65100;
+  color: #ffffff;
+  font-size: 0.68rem;
   font-weight: 700;
   line-height: 1;
-  padding: 2px 5px;
+  padding: 0 5px;
   border-radius: 999px;
-  box-shadow: 0 0 8px rgba(255, 119, 0, 0.5);
 }
 
-/* ==========================================================================
-   FreshRSS 1:1 Complete Reader (Origine & Base-Theme styling with PZP touches)
-   ========================================================================== */
+.feed-nav-badge.hidden {
+  display: none !important;
+}
 
+/* Full-width responsive canvas when Feed Reader is active */
+body.feed-active .main-content {
+  max-width: min(1720px, 98vw) !important;
+  width: 100% !important;
+  padding-left: clamp(10px, 1.8vw, 24px) !important;
+  padding-right: clamp(10px, 1.8vw, 24px) !important;
+  padding-top: 12px !important;
+  padding-bottom: 36px !important;
+  align-items: stretch !important;
+}
+
+body.feed-active .scope-switch-container {
+  display: none !important;
+}
+
+/* Theme tokens scoped to .freshrss-view for guaranteed contrast across Dark/Light/Material/Glass */
 .freshrss-view {
+  --frss-bg-header: rgba(18, 21, 30, 0.96);
+  --frss-bg-toolbar: rgba(14, 17, 25, 0.96);
+  --frss-bg-sidebar: rgba(15, 18, 26, 0.98);
+  --frss-bg-stream: rgba(11, 13, 20, 0.94);
+  --frss-bg-row-hover: rgba(255, 255, 255, 0.045);
+  --frss-bg-row-unread: rgba(255, 255, 255, 0.018);
+  --frss-bg-expanded: rgba(17, 20, 30, 0.98);
+  --frss-bg-elevated: #181c29;
+  --frss-bg-input: rgba(6, 8, 14, 0.65);
+  --frss-border: rgba(255, 255, 255, 0.11);
+  --frss-border-subtle: rgba(255, 255, 255, 0.07);
+  --frss-text: #f1f5f9;
+  --frss-text-secondary: #cbd5e1;
+  --frss-text-muted: #94a3b8;
+  --frss-accent: #38bdf8;
+  --frss-accent-strong: #0284c7;
+  --frss-accent-soft: rgba(56, 189, 248, 0.15);
+  --frss-accent-border: rgba(56, 189, 248, 0.4);
+  --frss-personal-bg: rgba(168, 85, 247, 0.16);
+  --frss-personal-text: #d8b4fe;
+  --frss-personal-border: rgba(168, 85, 247, 0.4);
+
   width: 100%;
-  max-width: 1500px;
+  max-width: 100%;
   margin: 0 auto;
-  padding: 0 0 60px;
   display: flex;
   flex-direction: column;
   gap: 0;
-  animation: athena-fade-in 0.2s ease-out;
+  color: var(--frss-text);
+}
+
+:root[data-theme="light"] .freshrss-view,
+[data-theme="light"] .freshrss-view {
+  --frss-bg-header: #ffffff;
+  --frss-bg-toolbar: #f8fafc;
+  --frss-bg-sidebar: #f1f5f9;
+  --frss-bg-stream: #ffffff;
+  --frss-bg-row-hover: #f1f5f9;
+  --frss-bg-row-unread: #ffffff;
+  --frss-bg-expanded: #f8fafc;
+  --frss-bg-elevated: #ffffff;
+  --frss-bg-input: #f8fafc;
+  --frss-border: #cbd5e1;
+  --frss-border-subtle: #e2e8f0;
+  --frss-text: #0f172a;
+  --frss-text-secondary: #334155;
+  --frss-text-muted: #475569;
+  --frss-accent: #0369a1;
+  --frss-accent-strong: #0284c7;
+  --frss-accent-soft: rgba(2, 132, 199, 0.12);
+  --frss-accent-border: rgba(2, 132, 199, 0.38);
+  --frss-personal-bg: rgba(126, 34, 206, 0.1);
+  --frss-personal-text: #6b21a8;
+  --frss-personal-border: rgba(126, 34, 206, 0.32);
 }
 
 .freshrss-view.hidden {
@@ -2374,36 +2463,46 @@ body.public-wiki-only #wikiCloseBtn {
   display: inline-block;
   vertical-align: middle;
   line-height: 1;
+  flex-shrink: 0;
 }
 
-/* In dark themes, brighten gray SVG icons so they are crisp and visible */
-:root:not([data-theme="light"]) .freshrss-view .icon:not([src*="starred.svg"]):not([src*="unread.svg"]) {
-  filter: brightness(1.75) contrast(1.1);
+:root:not([data-theme="light"]) .freshrss-view .icon:not([src*="starred.svg"]):not([src*="non-starred.svg"]):not([src*="unread.svg"]):not([src*="FreshRSS-logo.svg"]) {
+  filter: brightness(1.85) contrast(1.1);
 }
 
-:root[data-theme="light"] .freshrss-view .icon:not([src*="starred.svg"]):not([src*="unread.svg"]),
-[data-theme="light"] .freshrss-view .icon:not([src*="starred.svg"]):not([src*="unread.svg"]) {
-  filter: brightness(0.65);
+:root[data-theme="light"] .freshrss-view .icon:not([src*="starred.svg"]):not([src*="non-starred.svg"]):not([src*="unread.svg"]):not([src*="FreshRSS-logo.svg"]),
+[data-theme="light"] .freshrss-view .icon:not([src*="starred.svg"]):not([src*="non-starred.svg"]):not([src*="unread.svg"]):not([src*="FreshRSS-logo.svg"]) {
+  filter: brightness(0.55);
 }
 
-/* Top Tier Header (.header.freshrss-header) */
+:root[data-theme="light"] .freshrss-logo-wrap .logo,
+[data-theme="light"] .freshrss-logo-wrap .logo {
+  filter: brightness(0.62) saturate(1.3);
+}
+
+/* ==========================================================================
+   1. Top Header (.freshrss-header)
+   ========================================================================== */
+
 .freshrss-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 8px 16px;
-  background: var(--bg-surface, rgba(22, 24, 33, 0.85));
-  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+  gap: 14px;
+  padding: 10px 16px;
+  background: var(--frss-bg-header);
+  border: 1px solid var(--frss-border);
   border-top-left-radius: 12px;
   border-top-right-radius: 12px;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  position: relative;
+  z-index: 30;
 }
 
-.freshrss-header .item.title {
+.freshrss-brand-area {
   display: flex;
   align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .freshrss-logo-wrap {
@@ -2415,15 +2514,30 @@ body.public-wiki-only #wikiCloseBtn {
 .freshrss-logo-wrap .logo {
   height: 28px;
   width: auto;
-  max-width: 140px;
+  max-width: 148px;
   object-fit: contain;
 }
 
-/* Top Search Bar */
-.freshrss-header .item.search {
+.freshrss-brand-divider {
+  color: var(--frss-text-muted);
+  font-size: 0.9rem;
+  opacity: 0.5;
+}
+
+.freshrss-brand-sub {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--frss-text-muted);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* Search Bar + Operator Help */
+.freshrss-search-area {
   flex: 1;
-  max-width: 480px;
-  margin: 0 16px;
+  min-width: 220px;
+  max-width: 580px;
+  position: relative;
 }
 
 .freshrss-search-stick {
@@ -2431,142 +2545,416 @@ body.public-wiki-only #wikiCloseBtn {
   display: flex;
   align-items: center;
   width: 100%;
+  background: var(--frss-bg-input);
+  border: 1px solid var(--frss-border);
+  border-radius: 8px;
+  padding: 2px 4px 2px 10px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.freshrss-search-stick:focus-within {
+  border-color: var(--frss-accent);
+  box-shadow: 0 0 0 2px var(--frss-accent-soft);
+}
+
+.freshrss-search-stick .search-leading-icon {
+  width: 14px;
+  height: 14px;
+  opacity: 0.65;
+  margin-right: 8px;
+  flex-shrink: 0;
+}
+
+:root:not([data-theme="light"]) .freshrss-search-stick .search-leading-icon {
+  filter: brightness(1.8);
 }
 
 .freshrss-search-stick input {
-  width: 100%;
-  padding: 6px 36px 6px 12px;
-  font-size: 0.85rem;
-  background: rgba(0, 0, 0, 0.25);
-  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.12));
-  border-radius: 6px;
-  color: var(--text-main);
+  flex: 1;
+  min-width: 0;
+  padding: 6px 6px 6px 0;
+  font-size: 0.84rem;
+  background: transparent;
+  border: none;
+  color: var(--frss-text);
   outline: none;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
-.freshrss-search-stick input:focus {
-  border-color: var(--accent, #ff7700);
-  box-shadow: 0 0 0 2px rgba(255, 119, 0, 0.2);
-}
-
-.freshrss-search-btn {
-  position: absolute;
-  right: 2px;
-  background: transparent !important;
-  border: none !important;
-  padding: 4px 8px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+.freshrss-search-stick input::placeholder {
+  color: var(--frss-text-muted);
 }
 
 .freshrss-clear-search {
-  position: absolute;
-  right: 30px;
   background: transparent;
   border: none;
-  color: var(--text-muted);
+  color: var(--frss-text-muted);
   cursor: pointer;
-  font-size: 16px;
+  font-size: 1.05rem;
   line-height: 1;
-  padding: 2px;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+
+.freshrss-clear-search:hover {
+  color: var(--frss-text);
+  background: var(--frss-bg-row-hover);
 }
 
 .freshrss-clear-search.hidden {
   display: none !important;
 }
 
-/* Header Actions */
-.freshrss-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.freshrss-header-select {
-  padding: 5px 8px;
-  font-size: 0.78rem;
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.2);
-  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.12));
-  color: var(--text-main);
-}
-
-.freshrss-add-sub-btn {
-  background: var(--accent, #ff7700) !important;
-  color: #fff !important;
-  font-weight: 600;
-  padding: 5px 12px;
-  font-size: 0.8rem;
-  border-radius: 6px;
-  border: none;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.freshrss-close-btn {
+.freshrss-search-help-btn {
   background: transparent;
-  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
-  border-radius: 6px;
-  padding: 5px 8px;
+  border: 1px solid var(--frss-border-subtle);
+  color: var(--frss-text-muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  margin-right: 4px;
 }
 
+.freshrss-search-help-btn:hover {
+  color: var(--frss-text);
+  border-color: var(--frss-accent);
+}
+
+.freshrss-search-btn {
+  background: var(--frss-accent-soft);
+  border: 1px solid var(--frss-accent-border);
+  color: var(--frss-accent);
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.freshrss-search-btn:hover {
+  background: var(--frss-accent-strong);
+  color: #ffffff;
+}
+
+.freshrss-search-help-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  background: var(--frss-bg-elevated);
+  border: 1px solid var(--frss-border);
+  border-radius: 10px;
+  padding: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  z-index: 100;
+}
+
+.freshrss-search-help-popover.hidden {
+  display: none !important;
+}
+
+.freshrss-search-help-popover .search-help-title {
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--frss-text-muted);
+  margin-bottom: 8px;
+}
+
+.freshrss-search-help-popover .search-help-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.search-operator-chip {
+  background: var(--frss-bg-row-hover);
+  border: 1px solid var(--frss-border);
+  color: var(--frss-text-secondary);
+  font-size: 0.76rem;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.search-operator-chip code {
+  color: var(--frss-accent);
+  font-weight: 600;
+}
+
+.search-operator-chip:hover {
+  border-color: var(--frss-accent);
+  background: var(--frss-accent-soft);
+}
+
+/* Header Actions & Scope Switcher */
+.freshrss-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.freshrss-scope-switcher {
+  display: inline-flex;
+  align-items: center;
+  background: var(--frss-bg-input);
+  border: 1px solid var(--frss-border);
+  border-radius: 8px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.freshrss-scope-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--frss-text-muted);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.freshrss-scope-btn:hover {
+  color: var(--frss-text);
+}
+
+.freshrss-scope-btn.active[data-scope="personal"] {
+  background: var(--frss-personal-bg);
+  color: var(--frss-personal-text);
+  box-shadow: inset 0 0 0 1px var(--frss-personal-border);
+}
+
+.freshrss-scope-btn.active[data-scope="community"] {
+  background: var(--frss-accent-soft);
+  color: var(--frss-accent);
+  box-shadow: inset 0 0 0 1px var(--frss-accent-border);
+}
+
+.freshrss-header-select {
+  padding: 4px 8px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  border-radius: 6px;
+  background: var(--frss-bg-elevated);
+  border: 1px solid var(--frss-border);
+  color: var(--frss-text);
+  max-width: 175px;
+  cursor: pointer;
+}
+
+.freshrss-header-select.hidden {
+  display: none !important;
+}
+
+.freshrss-add-sub-btn {
+  background: var(--frss-accent-strong) !important;
+  color: #ffffff !important;
+  font-weight: 600;
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: filter 0.15s ease;
+}
+
+.freshrss-add-sub-btn:hover {
+  filter: brightness(1.12);
+}
+
+.freshrss-icon-action-btn,
+.freshrss-close-btn {
+  background: var(--frss-bg-input);
+  border: 1px solid var(--frss-border);
+  color: var(--frss-text-secondary);
+  border-radius: 7px;
+  padding: 6px 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.freshrss-icon-action-btn:hover,
 .freshrss-close-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--frss-bg-row-hover);
+  border-color: var(--frss-accent-border);
+  color: var(--frss-text);
 }
 
-/* Subheader Toolbar (.nav_menu.freshrss-nav-menu) */
+/* Settings Dropdown */
+.freshrss-settings-dropdown {
+  position: relative;
+}
+
+.freshrss-settings-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 260px;
+  background: var(--frss-bg-elevated);
+  border: 1px solid var(--frss-border);
+  border-radius: 10px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.5);
+  padding: 10px;
+  z-index: 120;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.freshrss-settings-menu.hidden {
+  display: none !important;
+}
+
+.settings-menu-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--frss-border-subtle);
+}
+
+.settings-menu-section:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.settings-menu-heading {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--frss-text-muted);
+}
+
+.settings-check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+  color: var(--frss-text);
+  cursor: pointer;
+}
+
+.settings-menu-item {
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--frss-text);
+  font-size: 0.8rem;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.settings-menu-item:hover {
+  background: var(--frss-accent-soft);
+  color: var(--frss-accent);
+}
+
+.settings-shortcut-list {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 4px;
+  font-size: 0.75rem;
+  color: var(--frss-text-secondary);
+}
+
+.settings-shortcut-list kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  font-size: 0.7rem;
+  font-family: monospace;
+  background: var(--frss-bg-input);
+  border: 1px solid var(--frss-border);
+  border-radius: 4px;
+  color: var(--frss-text);
+}
+
+/* ==========================================================================
+   2. Subheader Toolbar (.freshrss-nav-menu)
+   ========================================================================== */
+
 .freshrss-nav-menu {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   flex-wrap: wrap;
-  gap: 6px;
-  padding: 6px 14px;
-  background: var(--bg-surface-2, rgba(17, 19, 27, 0.95));
-  border-left: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
-  border-right: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
-  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+  gap: 8px;
+  padding: 7px 16px;
+  background: var(--frss-bg-toolbar);
+  border-left: 1px solid var(--frss-border);
+  border-right: 1px solid var(--frss-border);
+  border-bottom: 1px solid var(--frss-border);
+  position: relative;
+  z-index: 25;
+}
+
+.freshrss-toolbar-left,
+.freshrss-toolbar-right {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .freshrss-nav-menu .group {
   display: inline-flex;
   align-items: center;
+  gap: 4px;
 }
 
 .freshrss-nav-menu .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 5px 8px;
-  font-size: 0.8rem;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 0.79rem;
+  font-weight: 500;
+  background: var(--frss-bg-input);
+  border: 1px solid var(--frss-border);
   border-radius: 6px;
-  color: var(--text-main);
+  color: var(--frss-text-secondary);
   cursor: pointer;
-  transition: all 0.15s ease;
+  white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
 .freshrss-nav-menu .btn:hover {
-  background: rgba(255, 255, 255, 0.09);
+  background: var(--frss-bg-row-hover);
+  color: var(--frss-text);
+  border-color: var(--frss-accent-border);
 }
 
 .freshrss-nav-menu .btn.active {
-  background: var(--accent-surface, rgba(255, 119, 0, 0.22));
-  border-color: var(--accent, #ff7700);
-  color: var(--accent, #ff7700);
+  background: var(--frss-accent-soft);
+  border-color: var(--frss-accent);
+  color: var(--frss-accent);
   font-weight: 600;
-}
-
-.freshrss-views-group {
-  gap: 3px;
-  margin: 0 4px;
 }
 
 /* Sort Dropdown */
@@ -2574,25 +2962,21 @@ body.public-wiki-only #wikiCloseBtn {
   position: relative;
 }
 
-.freshrss-sort-dropdown .dropdown-toggle {
-  gap: 6px;
-}
-
 .freshrss-sort-dropdown .sort-label {
   font-size: 0.78rem;
-  color: var(--text-muted);
+  color: var(--frss-text);
 }
 
 .freshrss-sort-dropdown .dropdown-menu {
   position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  z-index: 1000;
-  min-width: 210px;
-  background: var(--bg-surface, #181a24);
-  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.15));
+  top: calc(100% + 5px);
+  right: 0;
+  z-index: 110;
+  min-width: 220px;
+  background: var(--frss-bg-elevated);
+  border: 1px solid var(--frss-border);
   border-radius: 8px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
   list-style: none;
   padding: 4px 0;
   margin: 0;
@@ -2605,65 +2989,54 @@ body.public-wiki-only #wikiCloseBtn {
 .freshrss-sort-dropdown .dropdown-menu .item button {
   width: 100%;
   text-align: left;
-  padding: 6px 12px;
+  padding: 7px 14px;
   font-size: 0.8rem;
   background: transparent;
   border: none;
-  color: var(--text-main);
+  color: var(--frss-text-secondary);
   cursor: pointer;
-  transition: background 0.15s ease;
 }
 
 .freshrss-sort-dropdown .dropdown-menu .item button:hover,
 .freshrss-sort-dropdown .dropdown-menu .item.active button {
-  background: var(--accent-surface, rgba(255, 119, 0, 0.18));
-  color: var(--accent, #ff7700);
+  background: var(--frss-accent-soft);
+  color: var(--frss-accent);
   font-weight: 600;
 }
 
 .freshrss-sort-dropdown .dropdown-menu .item.separator {
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--frss-border-subtle);
   margin-top: 4px;
   padding-top: 4px;
 }
 
-/* State Filter Tabs */
-.freshrss-state-tabs {
-  gap: 3px;
-  margin-left: auto;
-}
+/* ==========================================================================
+   3. Global Body Layout: Sidebar + Main Stream
+   ========================================================================== */
 
-.freshrss-state-tab {
-  font-size: 0.76rem !important;
-  font-weight: 500;
-  gap: 4px;
-}
-
-/* Global Body Layout: Sidebar + Main Stream */
 .freshrss-global-layout {
   display: flex;
-  min-height: 650px;
-  border-left: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
-  border-right: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
-  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+  min-height: calc(100vh - 175px);
+  border-left: 1px solid var(--frss-border);
+  border-right: 1px solid var(--frss-border);
+  border-bottom: 1px solid var(--frss-border);
   border-bottom-left-radius: 12px;
   border-bottom-right-radius: 12px;
-  background: var(--bg-surface, rgba(20, 22, 30, 0.7));
-  backdrop-filter: blur(10px);
+  background: var(--frss-bg-stream);
   position: relative;
   overflow: hidden;
 }
 
 /* Aside Sidebar (.aside_feed) */
 .aside_feed {
-  width: 270px;
+  width: 276px;
   flex-shrink: 0;
-  background: var(--bg-surface-2, rgba(16, 18, 25, 0.95));
-  border-right: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+  background: var(--frss-bg-sidebar);
+  border-right: 1px solid var(--frss-border);
   display: flex;
   flex-direction: column;
   overflow-y: auto;
-  max-height: calc(100vh - 120px);
+  max-height: calc(100vh - 150px);
   transition: width 0.2s ease, transform 0.22s ease;
 }
 
@@ -2674,21 +3047,40 @@ body.public-wiki-only #wikiCloseBtn {
   overflow: hidden !important;
 }
 
-.aside_feed .toggle_aside {
+.aside-mobile-header {
   display: none;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--frss-border-subtle);
+}
+
+.aside-mobile-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--frss-text);
+}
+
+.aside_feed .toggle_aside {
   background: transparent;
   border: none;
-  padding: 8px;
+  padding: 6px;
   cursor: pointer;
-  align-self: flex-end;
+  border-radius: 6px;
 }
 
 .aside-top-actions {
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--frss-border-subtle);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
+}
+
+.freshrss-sidebar-add-btn {
+  width: 100%;
+  justify-content: center;
+  font-weight: 600;
 }
 
 .aside-opml-links {
@@ -2696,35 +3088,39 @@ body.public-wiki-only #wikiCloseBtn {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  font-size: 0.75rem;
+  font-size: 0.76rem;
 }
 
 .aside-opml-links .opml-link {
   background: transparent;
   border: none;
-  color: var(--text-muted);
-  font-size: 0.75rem;
+  color: var(--frss-text-muted);
+  font-size: 0.76rem;
   cursor: pointer;
   text-decoration: underline;
-  padding: 0;
+  padding: 2px 4px;
 }
 
 .aside-opml-links .opml-link:hover {
-  color: var(--accent, #ff7700);
+  color: var(--frss-accent);
 }
 
 .aside-opml-links .dot {
-  color: var(--text-muted);
+  color: var(--frss-text-muted);
 }
 
 /* Sidebar Tree Structure */
 .aside_feed .tree {
   list-style: none;
   margin: 0;
-  padding: 6px 8px;
+  padding: 8px;
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.aside_feed .freshrss-dynamic-tree-wrap {
+  list-style: none;
 }
 
 .aside_feed .tree-folder {
@@ -2737,23 +3133,24 @@ body.public-wiki-only #wikiCloseBtn {
   align-items: center;
   gap: 8px;
   padding: 7px 10px;
-  border-radius: 6px;
-  color: var(--text-main);
+  border-radius: 7px;
+  color: var(--frss-text-secondary);
   text-decoration: none;
   font-size: 0.84rem;
   font-weight: 500;
   cursor: pointer;
   user-select: none;
-  transition: background 0.15s ease;
+  transition: background 0.14s ease, color 0.14s ease;
 }
 
 .aside_feed .tree-folder-title:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--frss-bg-row-hover);
+  color: var(--frss-text);
 }
 
 .aside_feed .tree-folder.active > .tree-folder-title {
-  background: var(--accent-surface, rgba(255, 119, 0, 0.18));
-  color: var(--accent, #ff7700);
+  background: var(--frss-accent-soft);
+  color: var(--frss-accent);
   font-weight: 600;
 }
 
@@ -2768,16 +3165,16 @@ body.public-wiki-only #wikiCloseBtn {
   font-size: 0.72rem;
   font-weight: 700;
   padding: 2px 7px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text-muted);
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.16);
+  color: var(--frss-text-secondary);
   line-height: 1.2;
 }
 
-.aside_feed .tree-folder.active .badge,
+.aside_feed .tree-folder.active > .tree-folder-title .badge,
 .aside_feed .badge.has-unread {
-  background: var(--accent, #ff7700);
-  color: #fff;
+  background: var(--frss-accent-strong);
+  color: #ffffff;
 }
 
 .aside_feed .dropdown-toggle {
@@ -2793,7 +3190,7 @@ body.public-wiki-only #wikiCloseBtn {
 .aside_feed .dropdown-toggle .icon {
   width: 12px;
   height: 12px;
-  transition: transform 0.2s ease;
+  transition: transform 0.18s ease;
 }
 
 .aside_feed .tree-folder.collapsed .dropdown-toggle .icon {
@@ -2806,12 +3203,12 @@ body.public-wiki-only #wikiCloseBtn {
 
 .aside_feed .tree-folder-items {
   list-style: none;
-  margin: 0 0 4px 14px;
+  margin: 2px 0 4px 12px;
   padding: 2px 0 2px 8px;
-  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  border-left: 1px solid var(--frss-border);
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
 }
 
 .aside_feed .freshrss-categories-divider {
@@ -2819,8 +3216,8 @@ body.public-wiki-only #wikiCloseBtn {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--text-muted);
-  padding: 10px 10px 4px;
+  color: var(--frss-text-muted);
+  padding: 12px 10px 4px;
   list-style: none;
 }
 
@@ -2829,74 +3226,91 @@ body.public-wiki-only #wikiCloseBtn {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 4px 8px;
+  gap: 6px;
+  padding: 5px 8px;
   border-radius: 6px;
-  font-size: 0.8rem;
+  font-size: 0.81rem;
   cursor: pointer;
-  color: var(--text-muted);
-  transition: all 0.15s ease;
+  color: var(--frss-text-secondary);
+  transition: background 0.14s ease, color 0.14s ease;
   position: relative;
 }
 
 .aside_feed .item.feed:hover {
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text-main);
+  background: var(--frss-bg-row-hover);
+  color: var(--frss-text);
 }
 
 .aside_feed .item.feed.active {
-  background: var(--accent-surface, rgba(255, 119, 0, 0.15));
-  color: var(--accent, #ff7700);
+  background: var(--frss-accent-soft);
+  color: var(--frss-accent);
   font-weight: 600;
+}
+
+.aside_feed .item.feed.has-error {
+  border-left: 2px solid #ef4444;
 }
 
 .aside_feed .item.feed .item-title {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .aside_feed .item.feed .favicon {
-  width: 14px;
-  height: 14px;
+  width: 15px;
+  height: 15px;
   border-radius: 3px;
   flex-shrink: 0;
   object-fit: contain;
 }
 
-.aside_feed .item.feed .feed-gear-btn {
-  opacity: 0;
-  background: transparent;
-  border: none;
-  padding: 2px;
-  cursor: pointer;
-  border-radius: 3px;
-  transition: opacity 0.15s ease;
+.aside_feed .item.feed .feed-important-pin {
+  width: 12px;
+  height: 12px;
+  opacity: 0.85;
+  flex-shrink: 0;
 }
 
-.aside_feed .item.feed:hover .feed-gear-btn {
-  opacity: 0.7;
+.aside_feed .item.feed .feed-gear-btn {
+  opacity: 0.35;
+  background: transparent;
+  border: none;
+  padding: 3px;
+  cursor: pointer;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.14s ease, background 0.14s ease;
+}
+
+.aside_feed .item.feed:hover .feed-gear-btn,
+.aside_feed .item.feed .feed-gear-btn:focus-visible {
+  opacity: 0.95;
 }
 
 .aside_feed .item.feed .feed-gear-btn:hover {
   opacity: 1;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--frss-bg-row-hover);
 }
 
 .aside_feed .feed-dropdown-menu {
   position: absolute;
-  top: 100%;
-  right: 0;
+  top: calc(100% + 2px);
+  right: 4px;
   z-index: 1000;
-  background: var(--bg-surface, #181a24);
-  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.15));
-  border-radius: 6px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  background: var(--frss-bg-elevated);
+  border: 1px solid var(--frss-border);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
   padding: 4px 0;
-  min-width: 150px;
+  min-width: 175px;
   list-style: none;
 }
 
@@ -2906,74 +3320,138 @@ body.public-wiki-only #wikiCloseBtn {
 
 .aside_feed .feed-dropdown-menu li button,
 .aside_feed .feed-dropdown-menu li a {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: 100%;
   text-align: left;
-  padding: 5px 12px;
-  font-size: 0.78rem;
+  padding: 6px 12px;
+  font-size: 0.79rem;
   background: transparent;
   border: none;
-  color: var(--text-main);
+  color: var(--frss-text);
   text-decoration: none;
   cursor: pointer;
 }
 
 .aside_feed .feed-dropdown-menu li button:hover,
 .aside_feed .feed-dropdown-menu li a:hover {
-  background: var(--accent-surface, rgba(255, 119, 0, 0.15));
-  color: var(--accent, #ff7700);
+  background: var(--frss-accent-soft);
+  color: var(--frss-accent);
 }
 
-/* Main Stream Container (#stream.freshrss-main-stream) */
+/* ==========================================================================
+   4. Main Stream Container (#stream.freshrss-main-stream)
+   ========================================================================== */
+
 .freshrss-main-stream {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   overflow-y: auto;
-  max-height: calc(100vh - 120px);
+  max-height: calc(100vh - 150px);
 }
 
 .freshrss-stream-banner {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 18px;
-  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
-  background: var(--bg-surface, rgba(20, 22, 30, 0.6));
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--frss-border);
+  background: var(--frss-bg-toolbar);
 }
 
-.freshrss-stream-banner .banner-left {
+.freshrss-stream-banner .banner-left,
+.freshrss-stream-banner .banner-right {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
 .freshrss-stream-banner .stream-title {
   margin: 0;
-  font-size: 1.15rem;
+  font-size: 1.12rem;
   font-weight: 700;
-  color: var(--text-main);
+  color: var(--frss-text);
 }
 
 .freshrss-stream-banner .counts-pill {
+  font-size: 0.76rem;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--frss-bg-row-hover);
+  border: 1px solid var(--frss-border-subtle);
+  color: var(--frss-text-secondary);
+}
+
+.freshrss-filter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 0.75rem;
-  padding: 2px 8px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text-muted);
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--frss-accent-soft);
+  border: 1px solid var(--frss-accent-border);
+  color: var(--frss-accent);
+}
+
+.freshrss-filter-pill.hidden {
+  display: none !important;
+}
+
+.freshrss-filter-pill button {
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 0.85rem;
+  line-height: 1;
+}
+
+.freshrss-db-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--frss-personal-bg);
+  color: var(--frss-personal-text);
+  border: 1px solid var(--frss-personal-border);
+}
+
+.freshrss-db-pill.is-community {
+  background: var(--frss-accent-soft);
+  color: var(--frss-accent);
+  border-color: var(--frss-accent-border);
 }
 
 .pzp-sync-tag {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 0.75rem;
+  font-size: 0.74rem;
+  font-weight: 600;
   padding: 3px 10px;
   border-radius: 999px;
+  background: rgba(16, 185, 129, 0.14);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.32);
+}
+
+:root[data-theme="light"] .pzp-sync-tag,
+[data-theme="light"] .pzp-sync-tag {
+  color: #047857;
   background: rgba(16, 185, 129, 0.12);
-  color: #10b981;
-  border: 1px solid rgba(16, 185, 129, 0.25);
 }
 
 .live-dot {
@@ -2982,63 +3460,74 @@ body.public-wiki-only #wikiCloseBtn {
   border-radius: 50%;
   background: #10b981;
   box-shadow: 0 0 6px #10b981;
-  animation: pzp-pulse 2s infinite;
 }
 
-@keyframes pzp-pulse {
-  0% { transform: scale(0.95); opacity: 0.8; }
-  50% { transform: scale(1.15); opacity: 1; }
-  100% { transform: scale(0.95); opacity: 0.8; }
-}
+/* ==========================================================================
+   5. Articles Stream (.flux, .flux_header, .flux_content)
+   ========================================================================== */
 
-/* Articles List Container: Normal & Reader */
 .freshrss-articles-container {
   display: flex;
   flex-direction: column;
 }
 
-/* Article Card (flux) */
 .flux {
-  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
-  transition: background 0.15s ease;
+  border-bottom: 1px solid var(--frss-border-subtle);
+  background: transparent;
+  transition: background 0.12s ease;
+}
+
+.flux.is-unread {
+  background: var(--frss-bg-row-unread);
 }
 
 .flux:hover {
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--frss-bg-row-hover);
 }
 
-.flux.is-unread .flux_header .title {
-  font-weight: 700;
-  color: var(--text-main);
-}
-
-.flux:not(.is-unread) .flux_header .title {
-  font-weight: 400;
-  color: var(--text-muted);
+.flux.current {
+  box-shadow: inset 3px 0 0 var(--frss-accent);
 }
 
 .flux_header {
   display: flex;
   align-items: center;
-  padding: 9px 18px;
-  gap: 12px;
+  padding: 10px 18px;
+  gap: 10px;
   cursor: pointer;
   user-select: none;
+  min-height: 44px;
+}
+
+.freshrss-view.compact-density .flux_header {
+  padding: 6px 16px;
+  min-height: 36px;
+}
+
+/* Left status buttons (Read/Unread + Star/Favourite) like FreshRSS demo */
+.flux_header .flux-left-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
 }
 
 .flux_header .website {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  max-width: 170px;
+  width: 155px;
+  max-width: 155px;
   flex-shrink: 0;
-  font-size: 0.78rem;
-  color: var(--text-muted);
+  font-size: 0.79rem;
+  font-weight: 500;
+  color: var(--frss-text-secondary);
   text-decoration: none;
+  overflow: hidden;
 }
 
 .flux_header .website:hover {
-  color: var(--accent, #ff7700);
+  color: var(--frss-accent);
 }
 
 .flux_header .website .favicon {
@@ -3057,8 +3546,9 @@ body.public-wiki-only #wikiCloseBtn {
 
 .flux_header .titleAuthorSummaryDate {
   flex: 1;
+  min-width: 0;
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 8px;
   overflow: hidden;
   white-space: nowrap;
@@ -3066,39 +3556,96 @@ body.public-wiki-only #wikiCloseBtn {
 }
 
 .flux_header .title {
-  font-size: 0.88rem;
+  font-size: 0.9rem;
+  color: var(--frss-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+  max-width: 62%;
+}
+
+.flux.is-unread .flux_header .title {
+  font-weight: 700;
+  color: var(--frss-text);
+}
+
+.flux:not(.is-unread) .flux_header .title {
+  font-weight: 500;
+  color: var(--frss-text-secondary);
+}
+
+.flux_header .summary-snippet {
+  font-size: 0.82rem;
+  color: var(--frss-text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: 1;
+  min-width: 0;
+}
+
+.flux_header .flux-inline-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.flux-category-chip,
+.flux-label-chip {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--frss-bg-input);
+  border: 1px solid var(--frss-border);
+  color: var(--frss-text-secondary);
+  white-space: nowrap;
+}
+
+.flux-label-chip {
+  background: var(--frss-accent-soft);
+  border-color: var(--frss-accent-border);
+  color: var(--frss-accent);
 }
 
 .flux_header .date {
   font-size: 0.75rem;
-  color: var(--text-muted);
+  color: var(--frss-text-muted);
   flex-shrink: 0;
+  min-width: 68px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .flux_header .quick-actions {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   flex-shrink: 0;
 }
 
 .flux_header .quick-btn {
   background: transparent;
-  border: none;
-  padding: 3px 5px;
-  border-radius: 4px;
+  border: 1px solid transparent;
+  padding: 4px 6px;
+  border-radius: 5px;
   cursor: pointer;
-  opacity: 0.65;
-  transition: opacity 0.15s ease, background 0.15s ease;
+  opacity: 0.75;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--frss-text-secondary);
+  text-decoration: none;
+  transition: opacity 0.14s ease, background 0.14s ease, border-color 0.14s ease;
 }
 
 .flux_header .quick-btn:hover {
   opacity: 1;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--frss-bg-input);
+  border-color: var(--frss-border);
+  color: var(--frss-text);
 }
 
 .flux_header .quick-btn.is-starred {
@@ -3107,55 +3654,62 @@ body.public-wiki-only #wikiCloseBtn {
 
 /* Expanded Article Content (.flux_content) */
 .flux_content {
-  padding: 18px 24px 22px;
-  background: rgba(0, 0, 0, 0.12);
-  border-top: 1px solid var(--border-color, rgba(255, 255, 255, 0.06));
+  padding: 20px 26px 24px;
+  background: var(--frss-bg-expanded);
+  border-top: 1px solid var(--frss-border-subtle);
+}
+
+.flux_content.hidden {
+  display: none !important;
 }
 
 .flux_content header h2 {
   margin: 0 0 10px;
-  font-size: 1.35rem;
+  font-size: 1.32rem;
   font-weight: 700;
   line-height: 1.35;
 }
 
 .flux_content header h2 a {
-  color: var(--text-main);
+  color: var(--frss-text);
   text-decoration: none;
 }
 
 .flux_content header h2 a:hover {
-  color: var(--accent, #ff7700);
+  color: var(--frss-accent);
+  text-decoration: underline;
 }
 
 .flux_content .subtitle {
   display: flex;
   align-items: center;
   gap: 12px;
-  font-size: 0.8rem;
-  color: var(--text-muted);
-  margin-bottom: 16px;
+  font-size: 0.81rem;
+  color: var(--frss-text-muted);
+  margin-bottom: 18px;
   flex-wrap: wrap;
 }
 
 .flux_content .subtitle .website {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  color: var(--accent, #ff7700);
+  gap: 6px;
+  color: var(--frss-accent);
+  font-weight: 600;
 }
 
 .flux_content .subtitle .website .favicon {
-  width: 14px;
-  height: 14px;
-  border-radius: 2px;
+  width: 15px;
+  height: 15px;
+  border-radius: 3px;
 }
 
 .flux_content .text {
-  font-size: 0.95rem;
-  line-height: 1.7;
-  color: var(--text-main);
-  max-width: 820px;
+  font-size: 0.96rem;
+  line-height: 1.72;
+  color: var(--frss-text);
+  max-width: 75ch;
+  overflow-wrap: break-word;
 }
 
 .flux_content .text img {
@@ -3166,8 +3720,21 @@ body.public-wiki-only #wikiCloseBtn {
 }
 
 .flux_content .text a {
-  color: var(--accent, #ff7700);
+  color: var(--frss-accent);
   text-decoration: underline;
+}
+
+.flux_content .text pre,
+.flux_content .text code {
+  background: var(--frss-bg-input);
+  border-radius: 5px;
+  padding: 2px 5px;
+  font-size: 0.86em;
+}
+
+.flux_content .text pre {
+  padding: 12px;
+  overflow-x: auto;
 }
 
 .flux_content footer {
@@ -3176,7 +3743,7 @@ body.public-wiki-only #wikiCloseBtn {
   justify-content: space-between;
   margin-top: 20px;
   padding-top: 14px;
-  border-top: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+  border-top: 1px solid var(--frss-border-subtle);
   flex-wrap: wrap;
   gap: 10px;
 }
@@ -3185,60 +3752,93 @@ body.public-wiki-only #wikiCloseBtn {
 .flux_content .footer-right {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
 .pzp-brain-badge {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  font-size: 0.72rem;
+  gap: 5px;
+  font-size: 0.74rem;
   font-weight: 600;
-  color: #10b981;
-  background: rgba(16, 185, 129, 0.12);
-  border: 1px solid rgba(16, 185, 129, 0.25);
-  padding: 3px 8px;
+  color: #34d399;
+  background: rgba(16, 185, 129, 0.14);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  padding: 4px 10px;
   border-radius: 6px;
+}
+
+:root[data-theme="light"] .pzp-brain-badge,
+[data-theme="light"] .pzp-brain-badge {
+  color: #047857;
+}
+
+.pzp-save-personal-btn,
+.pzp-label-btn,
+.pzp-ai-summarize-btn,
+.pzp-visit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.77rem;
+  font-weight: 600;
+  padding: 5px 11px;
+  border-radius: 6px;
+  border: 1px solid var(--frss-border);
+  color: var(--frss-text-secondary);
+  background: var(--frss-bg-input);
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease;
+}
+
+.pzp-save-personal-btn:hover,
+.pzp-label-btn:hover,
+.pzp-visit-btn:hover {
+  border-color: var(--frss-accent);
+  color: var(--frss-accent);
+  background: var(--frss-accent-soft);
+}
+
+.pzp-save-personal-btn.is-saved {
+  border-color: var(--frss-personal-border);
+  background: var(--frss-personal-bg);
+  color: var(--frss-personal-text);
 }
 
 .pzp-ai-summarize-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 0.76rem;
-  font-weight: 600;
-  padding: 4px 10px;
-  border-radius: 6px;
-  border: 1px solid var(--accent, #ff7700);
-  color: var(--accent, #ff7700);
-  background: transparent;
-  cursor: pointer;
-  transition: all 0.15s ease;
+  border-color: var(--frss-accent-border);
+  color: var(--frss-accent);
+  background: var(--frss-accent-soft);
 }
 
 .pzp-ai-summarize-btn:hover {
-  background: var(--accent, #ff7700);
-  color: #fff;
+  background: var(--frss-accent-strong);
+  color: #ffffff;
 }
 
 .flux-tag-pill {
-  font-size: 0.72rem;
-  padding: 2px 7px;
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.07);
-  color: var(--text-muted);
+  font-size: 0.73rem;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--frss-bg-input);
+  border: 1px solid var(--frss-border);
+  color: var(--frss-text-secondary);
   cursor: pointer;
 }
 
 .flux-tag-pill:hover {
-  background: var(--accent-surface, rgba(255, 119, 0, 0.2));
-  color: var(--accent, #ff7700);
+  background: var(--frss-accent-soft);
+  border-color: var(--frss-accent-border);
+  color: var(--frss-accent);
 }
 
 /* Global View Grid (.freshrss-global-grid) */
 .freshrss-global-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 16px;
   padding: 20px;
 }
@@ -3248,8 +3848,8 @@ body.public-wiki-only #wikiCloseBtn {
 }
 
 .box.category {
-  background: var(--bg-surface-2, rgba(17, 19, 27, 0.95));
-  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+  background: var(--frss-bg-sidebar);
+  border: 1px solid var(--frss-border);
   border-radius: 10px;
   overflow: hidden;
   display: flex;
@@ -3260,9 +3860,9 @@ body.public-wiki-only #wikiCloseBtn {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 14px;
-  background: rgba(255, 255, 255, 0.03);
-  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+  padding: 12px 16px;
+  background: var(--frss-bg-toolbar);
+  border-bottom: 1px solid var(--frss-border-subtle);
   cursor: pointer;
 }
 
@@ -3270,7 +3870,7 @@ body.public-wiki-only #wikiCloseBtn {
   margin: 0;
   font-size: 0.95rem;
   font-weight: 700;
-  color: var(--text-main);
+  color: var(--frss-text);
 }
 
 .box.category .box-content {
@@ -3279,7 +3879,7 @@ body.public-wiki-only #wikiCloseBtn {
   padding: 6px 0;
   display: flex;
   flex-direction: column;
-  max-height: 250px;
+  max-height: 260px;
   overflow-y: auto;
 }
 
@@ -3287,17 +3887,17 @@ body.public-wiki-only #wikiCloseBtn {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 14px;
+  padding: 7px 16px;
   cursor: pointer;
-  font-size: 0.82rem;
-  color: var(--text-muted);
+  font-size: 0.83rem;
+  color: var(--frss-text-secondary);
   gap: 8px;
-  transition: background 0.15s ease;
+  transition: background 0.14s ease;
 }
 
 .box.category .box-content .item.feed:hover {
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text-main);
+  background: var(--frss-bg-row-hover);
+  color: var(--frss-text);
 }
 
 .box.category .box-content .item.feed .favicon {
@@ -3315,15 +3915,19 @@ body.public-wiki-only #wikiCloseBtn {
 }
 
 /* Reading View Modifier */
+.freshrss-articles-container.view-reader {
+  padding: 16px;
+  gap: 18px;
+}
+
 .freshrss-articles-container.view-reader .flux {
-  margin-bottom: 24px;
-  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+  border: 1px solid var(--frss-border);
   border-radius: 10px;
   overflow: hidden;
 }
 
 .freshrss-articles-container.view-reader .flux_header {
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--frss-bg-toolbar);
 }
 
 /* Floating Navigation (#nav_entries) */
@@ -3331,30 +3935,29 @@ body.public-wiki-only #wikiCloseBtn {
   position: fixed;
   bottom: 24px;
   right: 28px;
-  z-index: 1000;
+  z-index: 950;
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
 .nav_entries button {
-  width: 38px;
-  height: 38px;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
-  background: var(--bg-surface, #181a24);
-  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.15));
+  background: var(--frss-bg-elevated);
+  border: 1px solid var(--frss-border);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: transform 0.15s ease, background 0.15s ease;
+  transition: transform 0.14s ease, border-color 0.14s ease;
 }
 
 .nav_entries button:hover {
-  transform: scale(1.1);
-  background: var(--accent-surface, rgba(255, 119, 0, 0.2));
-  border-color: var(--accent, #ff7700);
+  transform: translateY(-2px);
+  border-color: var(--frss-accent);
 }
 
 /* Modals & Dialogs */
@@ -3377,8 +3980,8 @@ body.public-wiki-only #wikiCloseBtn {
 }
 
 .freshrss-modal-card {
-  background: var(--bg-surface, #181a24);
-  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.15));
+  background: var(--frss-bg-elevated);
+  border: 1px solid var(--frss-border);
   border-radius: 12px;
   width: 100%;
   max-width: 480px;
@@ -3387,10 +3990,11 @@ body.public-wiki-only #wikiCloseBtn {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  color: var(--frss-text);
 }
 
 .freshrss-ai-card {
-  max-width: 620px;
+  max-width: 640px;
 }
 
 .freshrss-modal-header {
@@ -3401,9 +4005,9 @@ body.public-wiki-only #wikiCloseBtn {
 
 .freshrss-modal-header h3 {
   margin: 0;
-  font-size: 1.15rem;
+  font-size: 1.12rem;
   font-weight: 700;
-  color: var(--text-main);
+  color: var(--frss-text);
 }
 
 .freshrss-modal-form {
@@ -3412,16 +4016,32 @@ body.public-wiki-only #wikiCloseBtn {
   gap: 14px;
 }
 
-.freshrss-ingest-note {
+.freshrss-checkbox-row {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
-  background: rgba(255, 119, 0, 0.08);
-  border: 1px solid rgba(255, 119, 0, 0.2);
+  font-size: 0.84rem;
+  color: var(--frss-text);
+  cursor: pointer;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--frss-bg-input);
+  border: 1px solid var(--frss-border-subtle);
+}
+
+.freshrss-label-chips-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.freshrss-ingest-note {
+  background: var(--frss-accent-soft);
+  border: 1px solid var(--frss-accent-border);
   border-radius: 8px;
   padding: 10px 12px;
-  font-size: 0.82rem;
-  color: var(--text-main);
+  font-size: 0.81rem;
+  color: var(--frss-text-secondary);
 }
 
 .freshrss-ingest-note p {
@@ -3437,19 +4057,19 @@ body.public-wiki-only #wikiCloseBtn {
 
 .ai-article-title {
   margin: 0 0 12px;
-  font-size: 1.05rem;
+  font-size: 1.02rem;
   font-weight: 600;
-  color: var(--text-main);
+  color: var(--frss-text);
 }
 
 .ai-summary-content {
   font-size: 0.92rem;
   line-height: 1.65;
-  color: var(--text-main);
-  background: rgba(0, 0, 0, 0.2);
+  color: var(--frss-text);
+  background: var(--frss-bg-input);
   padding: 14px;
   border-radius: 8px;
-  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+  border: 1px solid var(--frss-border);
   max-height: 380px;
   overflow-y: auto;
 }
@@ -3469,24 +4089,26 @@ body.public-wiki-only #wikiCloseBtn {
 
 .freshrss-pagination .page-info {
   font-size: 0.8rem;
-  color: var(--text-muted);
+  color: var(--frss-text-muted);
 }
 
 /* Loading & Empty States */
-.freshrss-loading-articles {
+.freshrss-loading-articles,
+.freshrss-loading-feeds {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 60px 20px;
-  color: var(--text-muted);
+  padding: 48px 20px;
+  color: var(--frss-text-muted);
+  font-size: 0.86rem;
 }
 
 .freshrss-spinner {
   width: 28px;
   height: 28px;
-  border: 3px solid rgba(255, 255, 255, 0.1);
-  border-top-color: var(--accent, #ff7700);
+  border: 3px solid var(--frss-border);
+  border-top-color: var(--frss-accent);
   border-radius: 50%;
   animation: athena-spin 0.8s linear infinite;
   margin-bottom: 12px;
@@ -3498,59 +4120,106 @@ body.public-wiki-only #wikiCloseBtn {
 
 .freshrss-empty-state {
   text-align: center;
-  padding: 60px 20px;
-  background: var(--bg-surface, rgba(25, 27, 36, 0.7));
+  padding: 52px 24px;
+  background: var(--frss-bg-toolbar);
+  border: 1px dashed var(--frss-border);
   border-radius: 12px;
-  margin: 20px;
-}
-
-.freshrss-empty-icon {
-  font-size: 2.5rem;
-  margin-bottom: 10px;
+  margin: 24px;
 }
 
 .freshrss-empty-state h3 {
-  margin: 0 0 6px;
-  font-size: 1.15rem;
-  color: var(--text-main);
+  margin: 0 0 8px;
+  font-size: 1.08rem;
+  color: var(--frss-text);
 }
 
 .freshrss-empty-state p {
-  margin: 0;
-  font-size: 0.88rem;
-  color: var(--text-muted);
+  margin: 0 auto 16px;
+  max-width: 46ch;
+  font-size: 0.86rem;
+  color: var(--frss-text-muted);
 }
 
-/* Mobile Responsiveness */
+/* Mobile & Tablet Responsiveness */
+@media (max-width: 1024px) {
+  .flux_header .summary-snippet {
+    display: none;
+  }
+  .flux_header .title {
+    max-width: 100%;
+    flex: 1;
+  }
+}
+
 @media (max-width: 860px) {
   .freshrss-header {
     flex-wrap: wrap;
+    padding: 10px 12px;
+    gap: 8px;
   }
-  .freshrss-header .item.search {
+  .freshrss-brand-sub,
+  .freshrss-brand-divider {
+    display: none;
+  }
+  .freshrss-header-right {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .freshrss-scope-switcher {
+    max-width: 100%;
+    flex-wrap: wrap;
+  }
+  .freshrss-search-area {
     order: 3;
     width: 100%;
     max-width: 100%;
-    margin: 8px 0 0;
+    flex-basis: 100%;
+  }
+  .freshrss-header-actions {
+    margin-left: auto;
+    flex-wrap: wrap;
+  }
+  .freshrss-nav-menu {
+    padding: 6px 10px;
+    gap: 6px;
+  }
+  .freshrss-toolbar-left,
+  .freshrss-toolbar-right {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .freshrss-state-tabs {
+    flex-wrap: wrap;
+    max-width: 100%;
+  }
+  .freshrss-state-tab {
+    padding: 0 7px;
+    font-size: 0.72rem;
+  }
+  .freshrss-nav-menu .toolbar-btn-label {
+    display: none;
   }
   .aside_feed {
     position: fixed;
     top: 0;
     bottom: 0;
     left: 0;
-    width: 280px;
+    width: 288px !important;
     height: 100vh;
     max-height: 100vh;
-    background: var(--bg-surface, #141620);
+    background: var(--frss-bg-elevated);
     z-index: 1060;
-    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.7);
+    box-shadow: 6px 0 28px rgba(0, 0, 0, 0.7);
     transform: translateX(-105%);
     transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
   }
   .aside_feed.mobile-open {
     transform: translateX(0);
   }
-  .aside_feed .toggle_aside {
-    display: inline-flex;
+  .aside-mobile-header {
+    display: flex;
   }
   .freshrss-sidebar-backdrop {
     position: fixed;
@@ -3562,8 +4231,77 @@ body.public-wiki-only #wikiCloseBtn {
   .freshrss-sidebar-backdrop.hidden {
     display: none !important;
   }
+  .flux_header {
+    flex-wrap: wrap;
+    padding: 10px 12px;
+    gap: 6px;
+  }
+  .flux_header .website {
+    width: auto;
+    max-width: 140px;
+  }
+  .flux_header .titleAuthorSummaryDate {
+    order: 3;
+    flex-basis: 100%;
+    white-space: normal;
+  }
+  .flux_header .title {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+  .flux_header .date {
+    margin-left: auto;
+  }
   .nav_entries {
     bottom: 16px;
     right: 16px;
+  }
+}
+
+@media (max-width: 640px) {
+  .top-bar {
+    gap: 6px !important;
+    padding: 8px 10px !important;
+  }
+  .top-bar .icon-btn {
+    min-width: 34px;
+    min-height: 34px;
+    padding: 5px;
+  }
+  .brand-logo {
+    overflow: hidden;
+  }
+  .brand-logo .logo-text {
+    font-size: 0.9rem !important;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .admin-nav-label,
+  .admin-db-nav-label,
+  .wiki-nav-label,
+  .feed-nav-label {
+    display: none;
+  }
+  .admin-nav-btn,
+  .admin-db-nav-btn,
+  .wiki-nav-btn,
+  .feed-nav-btn {
+    padding: 5px 8px;
+  }
+  .freshrss-scope-switcher {
+    width: 100%;
+    display: flex;
+  }
+  .freshrss-scope-btn {
+    flex: 1;
+    justify-content: center;
+  }
+  .freshrss-header-actions {
+    width: 100%;
+    justify-content: space-between;
+    margin-left: 0;
   }
 }

@@ -7,6 +7,7 @@ import {
   autoIngestRssArticle,
   handleGetFeedSources,
   handleGetFeedStreams,
+  handleUpdateFeed,
   handlePatchFeedArticle,
   handleMarkAllArticlesRead,
   handleDeleteFeed,
@@ -239,7 +240,24 @@ await env.DB.prepare(
    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 ).bind('art_1', 'feed_1', 'comm_1', testArticle.guid, testArticle.url, 'art_hash', testArticle.title, 'Author', testArticle.summary, Date.now(), Date.now(), linkId).run();
 
-// Test handleGetFeedSources
+// Test combined stream=feed_1&state=unread (regression test for clicking a feed in Unread tab)
+const feedUnreadUrl = new URL('https://athena.test/api/feed/streams?community_id=comm_1&stream=feed_1&state=unread');
+const feedUnreadRes = await handleGetFeedStreams(feedUnreadUrl, testUser, env, corsHeaders);
+const feedUnreadData = await feedUnreadRes.json();
+assert(feedUnreadData.success);
+assert.equal(feedUnreadData.articles.length, 1, 'Clicking a feed while on Unread tab must return its unread articles');
+
+// Test pinning feed as Important via handleUpdateFeed
+const pinReq = new Request('https://athena.test/api/feed', {
+  method: 'PATCH',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ feed_id: 'feed_1', is_important: true })
+});
+const pinRes = await handleUpdateFeed(pinReq, testUser, env, corsHeaders);
+const pinData = await pinRes.json();
+assert(pinData.success);
+
+// Test handleGetFeedSources includes total_important_unread
 const sourcesUrl = new URL('https://athena.test/api/feed/sources?community_id=comm_1');
 const sourcesRes = await handleGetFeedSources(sourcesUrl, testUser, env, corsHeaders);
 const sourcesData = await sourcesRes.json();
@@ -247,27 +265,48 @@ assert(sourcesData.success);
 assert.equal(sourcesData.categories.length, 1);
 assert.equal(sourcesData.categories[0].name, 'Tech');
 assert.equal(sourcesData.total_unread, 1);
+assert.equal(sourcesData.total_important_unread, 1);
+assert.equal(sourcesData.categories[0].feeds[0].is_important, true);
 
-// Test handleGetFeedStreams
-const streamsUrl = new URL('https://athena.test/api/feed/streams?community_id=comm_1&stream=all');
-const streamsRes = await handleGetFeedStreams(streamsUrl, testUser, env, corsHeaders);
-const streamsData = await streamsRes.json();
-assert(streamsData.success);
-assert.equal(streamsData.articles.length, 1);
-assert.equal(streamsData.articles[0].title, 'The Future of AI Feeds');
-assert.equal(streamsData.articles[0].is_read, false);
+// Test stream=important
+const impStreamUrl = new URL('https://athena.test/api/feed/streams?community_id=comm_1&stream=important&state=all');
+const impStreamRes = await handleGetFeedStreams(impStreamUrl, testUser, env, corsHeaders);
+const impStreamData = await impStreamRes.json();
+assert(impStreamData.success);
+assert.equal(impStreamData.articles.length, 1);
+assert.equal(impStreamData.articles[0].feed_is_important, true);
 
-// Test handlePatchFeedArticle (marking read & starred)
+// Test handlePatchFeedArticle (marking read, starred, custom labels, and saving copy to Personal DB)
 const patchReq = new Request('https://athena.test/api/feed/article', {
   method: 'PATCH',
   headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ article_id: 'art_1', is_read: true, is_starred: true })
+  body: JSON.stringify({
+    article_id: 'art_1',
+    is_read: true,
+    is_starred: true,
+    labels: ['read-later', 'ai-digest'],
+    save_to_personal: true
+  })
 });
 const patchRes = await handlePatchFeedArticle(patchReq, testUser, env, corsHeaders);
 const patchData = await patchRes.json();
 assert(patchData.success);
 assert.equal(patchData.is_read, true);
 assert.equal(patchData.is_starred, true);
+assert.deepEqual(patchData.labels, ['read-later', 'ai-digest']);
+assert(patchData.personal_link_id, 'Saving community article to Personal DB must return personal_link_id');
+
+// Verify label filter and search operators on handleGetFeedStreams
+const labelFilterUrl = new URL('https://athena.test/api/feed/streams?community_id=comm_1&stream=all&state=all&label=read-later');
+const labelFilterRes = await handleGetFeedStreams(labelFilterUrl, testUser, env, corsHeaders);
+const labelFilterData = await labelFilterRes.json();
+assert.equal(labelFilterData.articles.length, 1);
+assert.deepEqual(labelFilterData.articles[0].labels, ['read-later', 'ai-digest']);
+
+const searchOpUrl = new URL('https://athena.test/api/feed/streams?community_id=comm_1&stream=all&state=all&search=author:Author%20intitle:Future');
+const searchOpRes = await handleGetFeedStreams(searchOpUrl, testUser, env, corsHeaders);
+const searchOpData = await searchOpRes.json();
+assert.equal(searchOpData.articles.length, 1);
 
 // Verify unread count becomes 0
 const sourcesRes2 = await handleGetFeedSources(sourcesUrl, testUser, env, corsHeaders);
@@ -380,3 +419,4 @@ const checkPersonalFeed = await mockDb.prepare('SELECT * FROM rss_feeds WHERE id
 assert.equal(checkPersonalFeed, null, 'Personal feed should be deleted');
 
 console.log('All RSS Feed and FreshRSS integration tests passed successfully.');
+

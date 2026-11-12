@@ -313,6 +313,7 @@ CREATE TABLE IF NOT EXISTS rss_feeds (
   site_url TEXT,
   category TEXT NOT NULL DEFAULT 'General',
   icon_url TEXT,
+  is_important INTEGER NOT NULL DEFAULT 0,
   last_fetched_at INTEGER NOT NULL DEFAULT 0,
   fetch_status TEXT NOT NULL DEFAULT 'ok',
   error_message TEXT,
@@ -349,8 +350,10 @@ CREATE TABLE IF NOT EXISTS rss_article_states (
   user_id TEXT NOT NULL,
   is_read INTEGER NOT NULL DEFAULT 0,
   is_starred INTEGER NOT NULL DEFAULT 0,
+  labels TEXT DEFAULT '[]',
   updated_at INTEGER NOT NULL,
   PRIMARY KEY(article_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS idx_rss_states_user ON rss_article_states(user_id, is_read, is_starred);
+
 

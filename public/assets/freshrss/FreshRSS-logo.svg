@@ -1,14 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 256">
 	<title>Logo FreshRSS</title>
-	<circle cx="128" cy="128" r="33" fill="#0062be"/>
-	<g fill="none" stroke="#0062be" stroke-width="24">
-		<g stroke-opacity=".3">
+	<circle cx="128" cy="128" r="33" fill="#2b8aff"/>
+	<g fill="none" stroke="#2b8aff" stroke-width="24">
+		<g stroke-opacity=".35">
 			<path d="M12 128a116 116 0 1 1 116 116"/>
 			<path d="M54 128a74 74 0 1 1 74 74"/>
 		</g>
 		<path d="M128 12a116 116 0 0 1 116 116M128 54a74 74 0 0 1 74 74"/>
 	</g>
-	<g fill="#0062bd" stroke-width="0" font-family="'Open Sans'" font-size="213" font-weight="600">
+	<g fill="#58a6ff" stroke-width="0" font-family="'Open Sans'" font-size="213" font-weight="600">
 		<desc>
 			FreshRSS
 		</desc>
