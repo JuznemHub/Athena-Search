@@ -87,6 +87,46 @@ const tn = parseTweetNookJson([{ post_url: 'https://x.com/bob/status/7', text: '
 assert.equal(tn.length, 1);
 assert.ok(tn[0].tags.includes('x') && tn[0].tags.includes('from-bob'));
 
+const currentTweetNookPost = {
+  tweet_id: '7',
+  text: '  Saved thought\nwith context  ',
+  author: { id: '42', username: 'bob', display_name: 'Bob' },
+  created_at: '2026-11-12T12:00:00Z',
+  collection: { type: 'bookmarks', folder_id: null, sort_index: null, added_at: null, synced_at: null },
+  media: [],
+  urls: [],
+  article: null,
+  media_tags: [],
+  qt_media_tags: [],
+  raw_json: {},
+};
+assert.deepEqual(parseTweetNookJson([currentTweetNookPost]), [{
+  url: 'https://x.com/bob/status/7',
+  title: 'Saved thought with context',
+  tags: ['x', 'bookmark', 'from-bob'],
+}]);
+assert.deepEqual(parseTweetNookJson([{
+  ...currentTweetNookPost, author: null, text: '', collection: { type: 'likes' },
+}]), [{
+  url: 'https://x.com/i/status/7', title: 'https://x.com/i/status/7', tags: ['x', 'like'],
+}]);
+assert.deepEqual(parseTweetNookJson([{
+  ...currentTweetNookPost,
+  tags: ['Tools', 'tools'],
+  urls: [
+    { position: 0, url_hash: 'a', short_url: 'https://t.co/a', expanded_url: 'https://example.org/redirect', display_url: 'example.org/a', canonical_url: 'https://example.org/a', resolved: null },
+    { position: 1, url_hash: 'b', short_url: 'https://t.co/b', expanded_url: 'https://example.org/a', display_url: 'example.org/a', canonical_url: null, resolved: null },
+    { position: 2, url_hash: 'c', short_url: 'https://t.co/c', expanded_url: 'https://x.com/alice/status/8', display_url: 'x.com/alice/status/8', canonical_url: null, resolved: null },
+  ],
+}]), [{
+  url: 'https://example.org/a', title: 'Saved thought with context', tags: ['x', 'bookmark', 'from-bob', 'tools'],
+}]);
+assert.deepEqual(parseTweetNookJson({ posts: [{
+  id_str: '9', screen_name: 'alice', full_text: 'Legacy post', collection: 'bookmarks',
+}] }), [{
+  url: 'https://x.com/alice/status/9', title: 'Legacy post', tags: ['x', 'bookmarks'],
+}]);
+
 // parseYtdJs rejects non-arrays
 assert.equal(parseYtdJs('window.YTD.x.part0 = {"a":1}'), null);
 assert.equal(parseYtdJs('no brackets'), null);
@@ -98,8 +138,19 @@ try {
   fs.writeFileSync(f, '[]');
   process.env.REDDIT_EXPORT_PATH = f;
   assert.ok(detectSocialSources().some((s) => s.file === f && s.kind === 'reddit-json'));
+  const tweetNookFile = path.join(tmp, 'posts.json');
+  fs.writeFileSync(tweetNookFile, JSON.stringify([currentTweetNookPost]));
+  process.env.TWEETNOOK_EXPORT_PATH = tweetNookFile;
+  const source = detectSocialSources().find((s) => s.file === tweetNookFile);
+  assert.equal(source.kind, 'tweetnook-json');
+  assert.deepEqual(await loadSocialLinks(source), [{
+    url: 'https://x.com/bob/status/7',
+    title: 'Saved thought with context',
+    tags: ['x', 'bookmark', 'from-bob'],
+  }]);
 } finally {
   delete process.env.REDDIT_EXPORT_PATH;
+  delete process.env.TWEETNOOK_EXPORT_PATH;
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 

@@ -203,13 +203,30 @@ export function parseXArchiveDir(dir) {
   return out;
 }
 
-/** Parse `tweetnook export json` output: array of {url, text/title, author,
- *  collection, tags}. Unknown shapes degrade to URL extraction. */
+/** Parse current TweetNook exports and older flat post exports. */
 export function parseTweetNookJson(raw) {
   const items = Array.isArray(raw) ? raw : Array.isArray(raw?.posts) ? raw.posts : [];
   const out = [];
   for (const it of items) {
     if (!it) continue;
+    if (it.tweet_id) {
+      const screenName = typeof it.author === 'string' ? it.author : it.author?.username || it.username || it.screen_name || '';
+      const collection = typeof it.collection === 'string' ? it.collection : it.collection?.type || 'tweets';
+      const links = tweetToLinks({
+        id_str: String(it.tweet_id),
+        full_text: it.title || it.text || it.full_text || it.content,
+        entities: {
+          urls: (Array.isArray(it.urls) ? it.urls : []).map((u) => ({
+            expanded_url: u?.canonical_url || u?.expanded_url,
+          })),
+        },
+      }, { screenName, collection });
+      for (const link of links) {
+        link.tags = tagList(...link.tags, ...(Array.isArray(it.tags) ? it.tags : []));
+      }
+      out.push(...links);
+      continue;
+    }
     const url = it.url || it.post_url || it.link
       || (it.id_str || it.id ? tweetStatusUrl(String(it.screen_name || it.username || ''), String(it.id_str || it.id)) : '');
     if (!isHttp(url)) continue;

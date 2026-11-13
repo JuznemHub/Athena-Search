@@ -118,6 +118,20 @@ After installing dependencies, you can also run it from the repository root:
   (`tweetnook import x-archive <zip>`, `tweetnook export json --collection all`).
   Tweets with outside links dump one entry per link; text-only tweets/likes
   dump as a link to the tweet itself, tagged `x` (+ `r-<sub>` for Reddit)
+  Current TweetNook JSON exports use `tweet_id`, `author.username` and
+  `collection.type`; older flat exports are also supported.
+
+  For bookmarks only, sync bookmarks in TweetNook, then export:
+
+  ```sh
+  tweetnook export json --collection bookmarks --out posts.json
+  TWEETNOOK_EXPORT_PATH=/full/path/to/posts.json athena-tui
+  ```
+
+  In Import social, skip X archive setup to use the detected export if you
+  have no stored social paths, then use Dump to upload the imported links.
+  An official X archive may contain tweets and likes without bookmarks;
+  importing that archive does not verify a bookmark import.
 
 ## Env
 
