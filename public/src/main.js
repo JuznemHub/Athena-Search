@@ -7570,11 +7570,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const CLEANER_CHECKPOINT_KEY = 'athena_cleaner_checkpoint';
   let cleanerState = {
+    scopeKey: '',
+    total: 0,
     candidates: [],
     ids: [],
     offset: 0,
     processed: 0,
     updated: 0,
+    failed: 0,
     paused: false,
     running: false,
     diffs: []
@@ -7603,20 +7606,37 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     listEl.innerHTML = diffs.map((d) => {
+      if (d.error) {
+        return `
+          <div class="cleaner-diff-row">
+            <div class="cleaner-diff-col">
+              <div class="cleaner-diff-label">Error (${escapeHtml(d.id || '?')})</div>
+              <div class="cleaner-diff-url">${escapeHtml(d.error)}</div>
+            </div>
+          </div>
+        `;
+      }
       const beforeTags = (d.before?.tags || []).map((t) => `#${t}`).join(' ') || '(none)';
       const afterTags = (d.after?.tags || []).map((t) => `#${t}`).join(' ') || '(none)';
+      const fields = Array.isArray(d.changedFields) && d.changedFields.length
+        ? d.changedFields.join(', ')
+        : (d.changed === false ? 'no changes' : 'updated');
+      const beforeNotes = String(d.before?.notes || '').trim();
+      const afterNotes = String(d.after?.notes || '').trim();
       return `
         <div class="cleaner-diff-row">
           <div class="cleaner-diff-col">
             <div class="cleaner-diff-label">Before (${escapeHtml(d.id)})</div>
             <div class="cleaner-diff-title">${escapeHtml(d.before?.title || '(untitled)')}</div>
             <div class="cleaner-diff-url">${escapeHtml(d.before?.url || '')}</div>
+            ${beforeNotes ? `<div class="cleaner-diff-url">${escapeHtml(beforeNotes.slice(0, 120))}</div>` : ''}
             <div class="cleaner-diff-tags">${escapeHtml(beforeTags)}</div>
           </div>
           <div class="cleaner-diff-col cleaner-diff-after">
-            <div class="cleaner-diff-label">After</div>
+            <div class="cleaner-diff-label">After · ${escapeHtml(fields)}${d.usedAi ? ' · AI' : ''}</div>
             <div class="cleaner-diff-title">${escapeHtml(d.after?.title || '(untitled)')}</div>
             <div class="cleaner-diff-url">${escapeHtml(d.after?.url || '')}</div>
+            ${afterNotes ? `<div class="cleaner-diff-url">${escapeHtml(afterNotes.slice(0, 120))}</div>` : ''}
             <div class="cleaner-diff-tags">${escapeHtml(afterTags)}</div>
           </div>
         </div>
@@ -7624,24 +7644,45 @@ document.addEventListener('DOMContentLoaded', () => {
     }).join('');
   }
 
-  function updateCleanerProgressUI() {
+  function loadCleanerCheckpoint() {
+    try {
+      const raw = localStorage.getItem(CLEANER_CHECKPOINT_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed?.ids) && parsed.ids.length ? parsed : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function updateCleanerProgressUI(statusOverride = '') {
     const wrap = $('cleanerProgressWrap');
     const fill = $('cleanerProgressFill');
     const txt = $('cleanerStatusText');
     const pauseBtn = $('cleanerPauseBtn');
     const resumeBtn = $('cleanerResumeBtn');
+    const savedCheckpoint = loadCleanerCheckpoint();
     const total = cleanerState.ids.length || cleanerState.candidates.length || 0;
     const pct = total > 0 ? Math.min(100, Math.round((cleanerState.offset / total) * 100)) : 0;
-    if (wrap) wrap.classList.toggle('hidden', total === 0 && !cleanerState.running);
+    if (wrap) wrap.classList.toggle('hidden', total === 0 && !cleanerState.running && !statusOverride);
     if (fill) fill.style.width = `${pct}%`;
     if (txt) {
-      txt.textContent = `${cleanerState.offset}/${total} scanned · ${cleanerState.updated} updated${cleanerState.paused ? ' · Paused' : ''}`;
+      if (statusOverride) {
+        txt.textContent = statusOverride;
+      } else {
+        const failPart = cleanerState.failed ? ` · ${cleanerState.failed} failed` : '';
+        txt.textContent = `${cleanerState.offset}/${total} processed · ${cleanerState.updated} updated${failPart}${cleanerState.paused ? ' · Paused' : ''}`;
+      }
     }
-    if (pauseBtn) pauseBtn.disabled = !cleanerState.running;
+    if (pauseBtn) {
+      const showPause = cleanerState.running && !cleanerState.paused;
+      pauseBtn.classList.toggle('hidden', !showPause);
+      pauseBtn.disabled = !showPause;
+    }
     if (resumeBtn) {
-      let hasCheckpoint = false;
-      try { hasCheckpoint = Boolean(localStorage.getItem(CLEANER_CHECKPOINT_KEY)); } catch (_) {}
-      resumeBtn.disabled = cleanerState.running || (!cleanerState.paused && !hasCheckpoint);
+      const canResume = !cleanerState.running && (cleanerState.paused || Boolean(savedCheckpoint)) && (cleanerState.offset < total || Boolean(savedCheckpoint));
+      resumeBtn.classList.toggle('hidden', !canResume);
+      resumeBtn.disabled = !canResume;
     }
   }
 
@@ -7649,37 +7690,61 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!isGod()) return showToast('GOD rank only', true);
     const scope = $('cleanerScopeSelect')?.value || 'community';
     const communityId = $('cleanerCommunitySelect')?.value || '';
-    const filter = $('cleanerFilterSelect')?.value || 'all';
+    const filter = $('cleanerFilterSelect')?.value || 'unedited';
     const mode = $('cleanerModeSelect')?.value || 'ai';
     const scanBtn = $('cleanerScanBtn');
     if (scanBtn) scanBtn.disabled = true;
     try {
-      const qs = new URLSearchParams({ scope, filter, limit: '100' });
-      if (scope === 'community' && communityId) qs.set('community_id', communityId);
-      const { res, data } = await api(`/api/admin/cleaner/candidates?${qs.toString()}`);
-      if (!res?.ok || !data?.success) throw new Error(data?.error || 'Scan failed');
-      cleanerState.candidates = data.candidates || [];
-      cleanerState.ids = cleanerState.candidates.map((c) => c.id);
+      const pageSize = 200;
+      let offset = 0;
+      let total = 0;
+      let resolvedScopeKey = communityId;
+      const allLinks = [];
+
+      while (true) {
+        const qs = new URLSearchParams({ scope, filter, limit: String(pageSize), offset: String(offset) });
+        if (scope === 'community' && resolvedScopeKey) qs.set('community_id', resolvedScopeKey);
+        const { res, data } = await api(`/api/admin/cleaner/candidates?${qs.toString()}`);
+        if (!res?.ok || !data?.success) throw new Error(data?.error || 'Scan failed');
+        const pageLinks = Array.isArray(data.links) ? data.links : (Array.isArray(data.candidates) ? data.candidates : []);
+        if (offset === 0) {
+          total = Number(data.total ?? pageLinks.length);
+          if (data.scope_key) resolvedScopeKey = data.scope_key;
+        }
+        if (!pageLinks.length) break;
+        allLinks.push(...pageLinks);
+        offset += pageLinks.length;
+        updateCleanerProgressUI(`Scanning candidates… ${allLinks.length}/${total || allLinks.length}`);
+        if (allLinks.length >= total || pageLinks.length < pageSize) break;
+      }
+
+      cleanerState.scopeKey = resolvedScopeKey;
+      cleanerState.total = total || allLinks.length;
+      cleanerState.candidates = allLinks;
+      cleanerState.ids = allLinks.map((c) => c.id);
       cleanerState.offset = 0;
       cleanerState.processed = 0;
       cleanerState.updated = 0;
+      cleanerState.failed = 0;
       cleanerState.paused = false;
       cleanerState.diffs = [];
-      $('cleanerBackupBtn').disabled = cleanerState.candidates.length === 0;
-      $('cleanerStartBtn').disabled = cleanerState.candidates.length === 0;
+      if ($('cleanerBackupBtn')) $('cleanerBackupBtn').disabled = cleanerState.candidates.length === 0;
+      if ($('cleanerStartBtn')) $('cleanerStartBtn').disabled = cleanerState.candidates.length === 0;
+
       if (cleanerState.ids.length > 0) {
         const previewIds = cleanerState.ids.slice(0, 10);
         const { res: dryRes, data: dryData } = await api('/api/admin/cleaner/run', {
           method: 'POST',
-          body: JSON.stringify({ scope, community_id: communityId, mode, dry_run: true, ids: previewIds })
+          body: JSON.stringify({ scope, community_id: resolvedScopeKey, mode, dry_run: true, ids: previewIds })
         });
-        if (dryRes?.ok && dryData?.success && Array.isArray(dryData.diffs)) {
-          cleanerState.diffs = dryData.diffs;
+        const dryItems = Array.isArray(dryData?.items) ? dryData.items : (Array.isArray(dryData?.diffs) ? dryData.diffs : []);
+        if (dryRes?.ok && dryData?.success && dryItems.length) {
+          cleanerState.diffs = dryItems;
         }
       }
       renderCleanerDiffs(cleanerState.diffs);
       updateCleanerProgressUI();
-      showToast(`Found ${data.total ?? cleanerState.candidates.length} cleaner candidates`);
+      showToast(`Found ${cleanerState.candidates.length} cleaner candidates`);
     } catch (err) {
       showToast(err.message || 'Scan failed', true);
     } finally {
@@ -7695,7 +7760,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const payload = {
       exported_at: new Date().toISOString(),
       scope: $('cleanerScopeSelect')?.value || 'community',
-      community_id: $('cleanerCommunitySelect')?.value || '',
+      community_id: cleanerState.scopeKey || $('cleanerCommunitySelect')?.value || '',
       count: cleanerState.candidates.length,
       candidates: cleanerState.candidates
     };
@@ -7710,77 +7775,120 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function runCleanerBatches(resume = false) {
     if (!isGod()) return showToast('GOD rank only', true);
+    if (cleanerState.running) return;
     if (resume) {
-      try {
-        const raw = localStorage.getItem(CLEANER_CHECKPOINT_KEY);
-        if (raw) {
-          const saved = JSON.parse(raw);
-          if (Array.isArray(saved.ids) && saved.ids.length) {
-            cleanerState.ids = saved.ids;
-            cleanerState.offset = Number(saved.offset || 0);
-            cleanerState.processed = Number(saved.processed || 0);
-            cleanerState.updated = Number(saved.updated || 0);
-            cleanerState.diffs = Array.isArray(saved.diffs) ? saved.diffs : [];
-            if ($('cleanerScopeSelect') && saved.scope) $('cleanerScopeSelect').value = saved.scope;
-            populateCleanerCommunities();
-            if ($('cleanerCommunitySelect') && saved.communityId) $('cleanerCommunitySelect').value = saved.communityId;
-            if ($('cleanerModeSelect') && saved.mode) $('cleanerModeSelect').value = saved.mode;
-          }
-        }
-      } catch (_) {}
+      const saved = loadCleanerCheckpoint();
+      if (saved) {
+        cleanerState.ids = saved.ids;
+        cleanerState.offset = Number(saved.offset || 0);
+        cleanerState.processed = Number(saved.processed || 0);
+        cleanerState.updated = Number(saved.updated || 0);
+        cleanerState.failed = Number(saved.failed || 0);
+        cleanerState.scopeKey = String(saved.scopeKey || saved.communityId || '');
+        cleanerState.diffs = Array.isArray(saved.diffs) ? saved.diffs : [];
+        if ($('cleanerScopeSelect') && saved.scope) $('cleanerScopeSelect').value = saved.scope;
+        populateCleanerCommunities();
+        if ($('cleanerCommunitySelect') && cleanerState.scopeKey) $('cleanerCommunitySelect').value = cleanerState.scopeKey;
+        if ($('cleanerModeSelect') && saved.mode) $('cleanerModeSelect').value = saved.mode;
+        renderCleanerDiffs(cleanerState.diffs);
+      }
     } else {
       cleanerState.offset = 0;
       cleanerState.processed = 0;
       cleanerState.updated = 0;
+      cleanerState.failed = 0;
       cleanerState.diffs = [];
     }
     if (!cleanerState.ids.length) return showToast('No cleaner targets loaded', true);
     const scope = $('cleanerScopeSelect')?.value || 'community';
-    const communityId = $('cleanerCommunitySelect')?.value || '';
+    const communityId = cleanerState.scopeKey || $('cleanerCommunitySelect')?.value || '';
     const mode = $('cleanerModeSelect')?.value || 'ai';
     cleanerState.running = true;
     cleanerState.paused = false;
-    $('cleanerStartBtn').disabled = true;
+    if ($('cleanerStartBtn')) $('cleanerStartBtn').disabled = true;
+    if ($('cleanerScanBtn')) $('cleanerScanBtn').disabled = true;
     updateCleanerProgressUI();
 
-    while (cleanerState.offset < cleanerState.ids.length) {
-      if (cleanerState.paused) break;
-      const chunk = cleanerState.ids.slice(cleanerState.offset, cleanerState.offset + 10);
-      try {
-        const { res, data } = await api('/api/admin/cleaner/run', {
-          method: 'POST',
-          body: JSON.stringify({ scope, community_id: communityId, mode, dry_run: false, ids: chunk })
-        });
-        if (!res?.ok || !data?.success) throw new Error(data?.error || 'Cleaner batch failed');
+    const onOffline = () => {
+      if (cleanerState.running && !cleanerState.paused) {
+        cleanerState.paused = true;
+        updateCleanerProgressUI('Offline — paused safely with checkpoint');
+      }
+    };
+    window.addEventListener('offline', onOffline);
+
+    try {
+      while (cleanerState.offset < cleanerState.ids.length) {
+        if (cleanerState.paused) break;
+        const chunk = cleanerState.ids.slice(cleanerState.offset, cleanerState.offset + 10);
+        let batchData = null;
+        let lastErr = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (cleanerState.paused) break;
+          try {
+            const { res, data } = await api('/api/admin/cleaner/run', {
+              method: 'POST',
+              body: JSON.stringify({ scope, community_id: communityId, mode, dry_run: false, ids: chunk })
+            });
+            if (res?.status === 429 || (res?.status >= 500 && res.status < 600)) {
+              const waitSec = Math.min(15, Math.max(1, parseInt(res.headers?.get('Retry-After') || String(2 ** attempt), 10) || (2 ** attempt)));
+              updateCleanerProgressUI(`Rate limit / server busy (${res.status}) — retrying in ${waitSec}s…`);
+              await new Promise((r) => setTimeout(r, waitSec * 1000));
+              continue;
+            }
+            if (!res?.ok || !data?.success) throw new Error(data?.error || 'Cleaner batch failed');
+            batchData = data;
+            break;
+          } catch (err) {
+            lastErr = err;
+            if (attempt < 2) {
+              await new Promise((r) => setTimeout(r, 1000 * (2 ** attempt)));
+            }
+          }
+        }
+        if (cleanerState.paused) break;
+        if (!batchData) {
+          cleanerState.paused = true;
+          showToast(lastErr?.message || 'Cleaner paused on error', true);
+          break;
+        }
+
+        const batchItems = Array.isArray(batchData.items) ? batchData.items : (Array.isArray(batchData.diffs) ? batchData.diffs : []);
+        const fixedCount = Number(batchData.fixed ?? batchData.updated ?? 0);
+        const failedCount = Number(batchData.failed ?? 0);
         cleanerState.offset += chunk.length;
-        cleanerState.processed += Number(data.processed || chunk.length);
-        cleanerState.updated += Number(data.updated || 0);
-        if (Array.isArray(data.diffs) && data.diffs.length) {
-          cleanerState.diffs = [...cleanerState.diffs, ...data.diffs].slice(-60);
+        cleanerState.processed += Number(batchData.processed ?? chunk.length);
+        cleanerState.updated += fixedCount;
+        cleanerState.failed += failedCount;
+
+        const changedItems = batchItems.filter((it) => it.changed || it.error);
+        if (changedItems.length) {
+          cleanerState.diffs = [...cleanerState.diffs, ...changedItems].slice(-60);
           renderCleanerDiffs(cleanerState.diffs);
         }
         try {
           localStorage.setItem(CLEANER_CHECKPOINT_KEY, JSON.stringify({
             scope,
             communityId,
+            scopeKey: communityId,
             mode,
             ids: cleanerState.ids,
             offset: cleanerState.offset,
             processed: cleanerState.processed,
             updated: cleanerState.updated,
+            failed: cleanerState.failed,
             diffs: cleanerState.diffs
           }));
         } catch (_) {}
         updateCleanerProgressUI();
-      } catch (err) {
-        cleanerState.paused = true;
-        showToast(err.message || 'Cleaner paused on error', true);
-        break;
       }
+    } finally {
+      window.removeEventListener('offline', onOffline);
+      cleanerState.running = false;
+      if ($('cleanerStartBtn')) $('cleanerStartBtn').disabled = cleanerState.ids.length === 0;
+      if ($('cleanerScanBtn')) $('cleanerScanBtn').disabled = false;
     }
 
-    cleanerState.running = false;
-    $('cleanerStartBtn').disabled = false;
     if (!cleanerState.paused && cleanerState.offset >= cleanerState.ids.length) {
       try { localStorage.removeItem(CLEANER_CHECKPOINT_KEY); } catch (_) {}
       showToast(`Cleaner finished: ${cleanerState.updated} links updated`);

@@ -1276,24 +1276,25 @@
           <div class="admin-ctrl-group">
             <label for="cleanerFilterSelect">Filter</label>
             <select id="cleanerFilterSelect" class="input input-sm">
-              <option value="all">All non-manual rows</option>
-              <option value="backfill">#backfill tag only</option>
-              <option value="untagged">Untagged rows only</option>
+              <option value="unedited">All non-manual rows</option>
+              <option value="backfill">#backfill &amp; Telegram imports</option>
+              <option value="untagged">Untagged / unedited rows</option>
+              <option value="all">All rows in scope</option>
             </select>
           </div>
         </div>
         <div class="cleaner-action-bar">
           <button type="button" id="cleanerScanBtn" class="btn btn-secondary btn-sm">Scan Candidates</button>
-          <button type="button" id="cleanerBackupBtn" class="btn btn-secondary btn-sm">Export Backup JSON</button>
+          <button type="button" id="cleanerBackupBtn" class="btn btn-secondary btn-sm" disabled>Export Backup JSON</button>
           <button type="button" id="cleanerStartBtn" class="btn btn-primary btn-sm" disabled>Start Live Clean</button>
           <button type="button" id="cleanerPauseBtn" class="btn btn-secondary btn-sm hidden">Pause</button>
           <button type="button" id="cleanerResumeBtn" class="btn btn-primary btn-sm hidden">Resume Saved Run</button>
         </div>
         <div id="cleanerProgressWrap" class="cleaner-progress hidden">
           <div class="cleaner-progress-bar"><div id="cleanerProgressFill" class="cleaner-progress-fill" style="width:0%"></div></div>
-          <div id="cleanerStatusText" class="status-msg"></div>
+          <div id="cleanerStatusText" class="status-msg cleaner-status-text"></div>
         </div>
-        <div id="cleanerDiffList" class="athena-modal-scroll-list"></div>
+        <div id="cleanerDiffList" class="athena-modal-scroll-list cleaner-diff-list"></div>
       </div>
     </div>
   </div>

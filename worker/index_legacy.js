@@ -5467,6 +5467,10 @@ async function handleScrapeFeedArticle(request, user, env, corsHeaders) {
   if (art.feed_community_id === 'personal' && art.feed_user_id !== user.id) {
     return deny(corsHeaders, 'Personal feed belongs to another user');
   }
+  if (art.feed_community_id && art.feed_community_id !== 'personal') {
+    const gate = await requireActiveMember(env, art.feed_community_id, user, corsHeaders);
+    if (gate) return gate;
+  }
   if (!art.url || !/^https?:\/\//i.test(art.url)) {
     return Response.json({ success: false, error: 'Article has no HTTP URL' }, { status: 400, headers: corsHeaders });
   }
@@ -5478,6 +5482,7 @@ async function handleScrapeFeedArticle(request, user, env, corsHeaders) {
     }
     return Response.json({
       success: true,
+      scraped: Boolean(fullText),
       article_id: articleId,
       title: meta?.title || art.title,
       content: fullText || art.content || art.summary || '',
@@ -11637,7 +11642,7 @@ export async function runForcetagsReview(env, { token, chatId, forumThreadId = n
   const getBlCached = async (tbl, colKey) => {
     const sc = tbl === 'personal_links' ? 'personal' : 'community';
     const k = `${sc}:${colKey}`;
-    if (!blCache.has(k)) blCache.set(k, await getBlacklistRules(env, sc, colKey).catch(() => ({ entries: [], urls: [], tags: [] })));
+    if (!blCache.has(k)) blCache.set(k, await getBlacklistRules(env, sc, colKey).catch(() => ({ entries: [], urlPatterns: [], tagSet: new Set() })));
     return blCache.get(k);
   };
 
@@ -12012,7 +12017,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
         await ensureSearchColumns(env);
         await env.DB.prepare(
           `UPDATE ${tbl} SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, last_edited_by = ?, last_edited_by_name = ?, manual_edited_at = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
-        ).bind(cleanUrl, generateUrlHash(cleanUrl), updTitle, updNotes, JSON.stringify(safeTags), 'AI', 'AI', editedAt, hit.id).run();
+        ).bind(cleanUrl, generateUrlHash(cleanUrl), updTitle, updNotes, JSON.stringify(safeTags), 'ai', 'AI', editedAt, hit.id).run();
         markMeiliScopeDirty(env, session.scope, session.scope_key);
         await logActivityEvent(env, { action: '✦ Card AI-enriched (TG)', tgUser: cq.from, title: updTitle, url: cleanUrl, scope: session.scope, scopeKey: session.scope_key });
         const view = await getTelegramSearchPage(env, session);
@@ -16026,7 +16031,7 @@ async function structureDatabase(env, { onProgress = null, scope = null, scopeId
               if (hint) keepTitle = hint;
             }
 
-            const blStruct = await getBlacklistRules(env, t.name === 'links' ? 'community' : 'personal', row.scope_id).catch(() => ({ entries: [], urls: [], tags: [] }));
+            const blStruct = await getBlacklistRules(env, t.name === 'links' ? 'community' : 'personal', row.scope_id).catch(() => ({ entries: [], urlPatterns: [], tagSet: new Set() }));
             const keepTags = filterBlacklistedTags(
               cleanTagsForStructure(allTagCandidates, keepUrl, keepTitle, keepNotes),
               blStruct
@@ -16101,7 +16106,7 @@ async function structureDatabase(env, { onProgress = null, scope = null, scopeId
             const hint = extractTitleFromNoteText(row.notes, row.url);
             if (hint) updTitle = hint;
           }
-          const blRow = await getBlacklistRules(env, t.name === 'links' ? 'community' : 'personal', row.scope_id).catch(() => ({ entries: [], urls: [], tags: [] }));
+          const blRow = await getBlacklistRules(env, t.name === 'links' ? 'community' : 'personal', row.scope_id).catch(() => ({ entries: [], urlPatterns: [], tagSet: new Set() }));
           const updTags = filterBlacklistedTags(
             cleanTagsForStructure(rowTagCandidates(row), row.url, updTitle || row.title, updNotes || row.notes),
             blRow

@@ -32,6 +32,7 @@ const BOILERPLATE_LINE_RE = [
   /^join\s+@[\w_]+\b.*$/i,
   /^follow\s+@[\w_]+\b.*$/i,
   /^source\s*:\s*https?:\/\/t\.me\/\S+\s*$/i,
+  /^rssfdv$/i,
 ];
 
 const TELEGRAM_SUBJECT_RE = /(?:^|\.)(?:t\.me|telegram\.(?:me|org|dog))$|\btelegram\s+(?:bot|client|channel|group|sticker|theme|mini\s*app)\b|@[a-z0-9_]{4,}bot\b/i;
@@ -73,23 +74,32 @@ export function extractInlineHashtags(text) {
 }
 
 /**
- * Remove forwarding boilerplate, standalone handle footers, and excess blank
- * lines from notes/descriptions while keeping real factual content.
+ * Remove forwarding boilerplate, bot-ingestion headers, referral codes,
+ * standalone handle footers, and excess blank lines from notes/descriptions.
  */
 export function cleanBoilerplateText(text, url = '') {
-  const raw = String(text || '').replace(/\r\n?/g, '\n').trim();
+  let raw = String(text || '').replace(/\r\n?/g, '\n').trim();
   if (!raw) return '';
+  raw = raw
+    .replace(/^(?:Already in community|Saved to community)\s*:\s*/i, '')
+    .replace(/^Updated:\s*Title:\s*.*?\nURL:\s*.*?\nNotes:\s*/is, '')
+    .trim();
   const urlNorm = String(url || '').trim().replace(/\/+$/, '').toLowerCase();
   const lines = raw.split('\n').map((line) => line.trim()).filter((line) => {
     if (!line) return false;
     if (BOILERPLATE_LINE_RE.some((re) => re.test(line))) return false;
     if (/^@[a-z0-9_]{3,}$/i.test(line)) return false;
+    if (/^(?:#[a-z0-9_-]+\s*)+$/i.test(line)) return false;
     if (urlNorm && line.replace(/\/+$/, '').toLowerCase() === urlNorm) return false;
     return true;
   });
   let cleaned = lines.join(' ').replace(/\s+/g, ' ').trim();
   // Strip leading forwarding prefix inline too
-  cleaned = cleaned.replace(/^(?:forwarded from|via|source)\s*:\s*@?[\w.\-\s]{1,40}(?:\s*[-–|:]\s*)?/i, '').trim();
+  cleaned = cleaned
+    .replace(/^(?:forwarded from|via|source)\s*:\s*@?[\w.\-\s]{1,40}(?:\s*[-–|:]\s*)?/i, '')
+    .replace(/\b(?:use this referral code|submit code|referral code|ref code)\s*[:\-]?\s*[a-zA-Z0-9_-]+/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
   // Drop leftover trailing inline hashtags only if the remainder still carries text
   const withoutTags = cleaned.replace(/(?:\s+#[a-zA-Z0-9][\w-]{1,39})+\s*$/, '').trim();
   if (withoutTags.length >= 20) cleaned = withoutTags;
@@ -106,7 +116,18 @@ export function cleanCleanerTitle(rawTitle, url = '') {
   const urlTrim = String(url || '').trim().replace(/\/+$/, '').toLowerCase();
   if (urlTrim && t.replace(/\/+$/, '').toLowerCase() === urlTrim) return '';
   if (/^https?:\/\/\S+$/i.test(t)) return '';
-  t = t.replace(/^(?:forwarded from|telegram)\s*[:\-–|]\s*/i, '').trim();
+  if (/^[a-z0-9_.-]+\.[a-z]{2,}(?:\/\S*)?$/i.test(t)) return '';
+  if (/drive\.google\.com/i.test(String(url || ''))) {
+    const gdriveMatch = t.match(/^@?[a-z0-9_.-]+\s+([a-z0-9_.-]+(?:\s+[a-z0-9_.-]+)?)\s+[–-]\s+Google Drive$/i);
+    if (gdriveMatch) {
+      return `${gdriveMatch[1].trim()} – public`.slice(0, 200);
+    }
+  }
+  t = t
+    .replace(/^(?:forwarded from|telegram)\s*[:\-–|]\s*/i, '')
+    .replace(/^@[a-z0-9_-]+(?:\s*[:\-–|]\s*|\s+)/i, '')
+    .replace(/^["']|["']$/g, '')
+    .trim();
   return t.slice(0, 200);
 }
 
@@ -117,6 +138,10 @@ export function fallbackTitleFromContext(url, notes = '') {
   const firstSentence = String(notes || '').split(/[.!?\n]/)[0]?.trim() || '';
   if (firstSentence.length >= 6 && firstSentence.length <= 100 && !/^https?:\/\//i.test(firstSentence)) {
     return firstSentence;
+  }
+  const ghMatch = String(url || '').match(/github\.com\/([^/]+)\/([^/?#]+)/i);
+  if (ghMatch) {
+    return `${ghMatch[1]}/${ghMatch[2]}`.slice(0, 120);
   }
   try {
     const u = new URL(String(url || ''));
@@ -140,7 +165,12 @@ export function cleanTagsDeterministic(rawTags, {
   blacklistedTags = new Set(),
   max = 8,
 } = {}) {
-  const banned = new Set([...properNounBans(title)]);
+  const banned = new Set([...properNounBans(title), 'rssfdv']);
+  const handleMatches = `${title} ${notes}`.match(/@([a-zA-Z0-9_-]{2,40})/g) || [];
+  for (const h of handleMatches) {
+    const normHandle = normalizeTag(h.slice(1));
+    if (normHandle) banned.add(normHandle);
+  }
   for (const bt of blacklistedTags || []) banned.add(normalizeTag(bt));
   // Strip backfill/dump/handle noise and conditional telegram before validation
   const allowTelegram = TELEGRAM_SUBJECT_RE.test(`${url} ${title} ${notes}`);
@@ -157,7 +187,11 @@ export function cleanTagsDeterministic(rawTags, {
   }
 
   const facts = extractFacts(url, { title, notes, content });
-  const ruleTags = tagsFromFacts(facts);
+  const semanticBoost = [];
+  if (/drive\.google\.com/i.test(url)) semanticBoost.push('google', 'storage', 'cloud');
+  else if (/mega\.nz|dropbox\.com|mediafire\.com|1fichier|rapidgator/i.test(url)) semanticBoost.push('storage', 'cloud');
+  if (/sepolia|faucet|ethereum|airdrop/i.test(`${url} ${notes}`)) semanticBoost.push('crypto');
+  const ruleTags = [...new Set([...tagsFromFacts(facts), ...semanticBoost])];
   // AI-first order when aiTags supplied, backed by grounded facts & cleaned existing tags
   const candidates = aiTags?.length
     ? [...aiTags.map(normalizeTag), ...parsedRaw, ...ruleTags]

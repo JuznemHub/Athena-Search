@@ -72,6 +72,22 @@ function makeEnvDb() {
   assert.ok(!out.tags.includes('opensource'));
   assert.ok(out.tags.includes('game'));
   assert.equal(out.changed, true);
+
+  // Ported athena-db-cleaner.zip rules: Google Drive folder title, bot-ingestion prefixes, referral codes, rssfdv/handles
+  const gdriveOut = normalizeLinkRecord({
+    id: 'lnk_gd',
+    url: 'https://drive.google.com/drive/folders/abc123',
+    title: '@someuser BooksPack – Google Drive',
+    notes: 'Already in community: Curated reading pack Use this Referral Code: REF99\nrssfdv\n@someuser',
+    tags: JSON.stringify(['backfill', 'rssfdv', 'someuser', 'telegram']),
+  });
+  assert.equal(gdriveOut.title, 'BooksPack – public');
+  assert.ok(!/already in community/i.test(gdriveOut.notes));
+  assert.ok(!/referral code/i.test(gdriveOut.notes));
+  assert.ok(!gdriveOut.tags.includes('rssfdv'));
+  assert.ok(!gdriveOut.tags.includes('someuser'));
+  assert.ok(!gdriveOut.tags.includes('telegram'));
+  assert.ok(gdriveOut.tags.includes('storage'));
 }
 
 // 2. blacklist.js add, match, filter, remove
@@ -105,14 +121,14 @@ function makeEnvDb() {
   assert.equal(removed, true);
 }
 
-// 3. bookmarks.js add, list, toggle off
+// 3. bookmarks.js add (camelCase & snake_case), list, toggle off
 {
   const env = makeEnvDb();
   await ensureBookmarksTable(env);
   const first = await toggleUserBookmark(env, 'u_42', {
     scope: 'community',
     scopeKey: 'c_1',
-    link_id: 'l_1',
+    linkId: 'l_1',
     url: 'https://sqlite.org/index.html',
     title: 'SQLite Home Page',
     tags: ['database'],
@@ -122,6 +138,8 @@ function makeEnvDb() {
   const list = await listUserBookmarks(env, 'u_42');
   assert.equal(list.length, 1);
   assert.equal(list[0].url, 'https://sqlite.org/index.html');
+  assert.equal(list[0].scope_key, 'c_1');
+  assert.equal(list[0].link_id, 'l_1');
 
   const second = await toggleUserBookmark(env, 'u_42', {
     url: 'https://sqlite.org/index.html',
@@ -205,7 +223,7 @@ function makeEnvDb() {
   }
 }
 
-// 8. Web UI, PWA, CSS z-index, and Tauri v2 files check
+// 8. Web UI, GUI DB Cleaner contract, PWA, CSS z-index, and Tauri v2 files check
 {
   const root = path.resolve('.');
   const indexHtml = fs.readFileSync(path.join(root, 'public/index.html'), 'utf8');
@@ -214,6 +232,18 @@ function makeEnvDb() {
   assert.ok(indexHtml.includes('id="blacklistModal"'));
   assert.ok(indexHtml.includes('id="bookmarksModal"'));
   assert.ok(indexHtml.includes('manifest.json'));
+  assert.ok(indexHtml.includes('value="unedited"'));
+
+  const mainJs = fs.readFileSync(path.join(root, 'public/src/main.js'), 'utf8');
+  assert.ok(mainJs.includes('data.links'));
+  assert.ok(mainJs.includes('dryData?.items'));
+  assert.ok(mainJs.includes('batchData.items'));
+  assert.ok(mainJs.includes('batchData.fixed'));
+  assert.ok(mainJs.includes("pauseBtn.classList.toggle('hidden'"));
+  assert.ok(mainJs.includes("resumeBtn.classList.toggle('hidden'"));
+
+  const workerLegacy = fs.readFileSync(path.join(root, 'worker/index_legacy.js'), 'utf8');
+  assert.ok(workerLegacy.includes('scraped: Boolean(fullText)'));
 
   const styleCss = fs.readFileSync(path.join(root, 'public/src/style.css'), 'utf8');
   assert.ok(/\.notif-panel\s*\{[\s\S]*?z-index:\s*1200/i.test(styleCss));

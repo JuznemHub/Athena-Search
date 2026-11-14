@@ -35,7 +35,11 @@ export async function listUserBookmarks(env, userId) {
 export async function toggleUserBookmark(env, userId, item) {
   await ensureBookmarksTable(env);
   const url = String(item?.url || '').trim();
-  const linkId = item?.link_id ? String(item.link_id) : (item?.id ? String(item.id) : null);
+  const rawLinkId = item?.link_id ?? item?.linkId ?? item?.id ?? null;
+  const linkId = rawLinkId ? String(rawLinkId) : null;
+  const scope = String(item?.scope || 'community');
+  const scopeKey = String(item?.scope_key ?? item?.scopeKey ?? '');
+  const siteName = String(item?.site_name ?? item?.siteName ?? '').slice(0, 120);
   if (!url && !linkId) throw new Error('url or link_id required');
 
   const existing = await env.DB.prepare(
@@ -61,14 +65,14 @@ export async function toggleUserBookmark(env, userId, item) {
   ).bind(
     id,
     String(userId),
-    String(item?.scope || 'community'),
-    String(item?.scope_key || ''),
+    scope,
+    scopeKey,
     linkId,
     url,
     String(item?.title || '').slice(0, 300),
     String(item?.notes || '').slice(0, 1200),
     tagsJson,
-    String(item?.site_name || '').slice(0, 120),
+    siteName,
     now
   ).run();
 
@@ -78,14 +82,14 @@ export async function toggleUserBookmark(env, userId, item) {
     bookmark: {
       id,
       user_id: String(userId),
-      scope: String(item?.scope || 'community'),
-      scope_key: String(item?.scope_key || ''),
+      scope,
+      scope_key: scopeKey,
       link_id: linkId,
       url,
       title: String(item?.title || '').slice(0, 300),
       notes: String(item?.notes || '').slice(0, 1200),
       tags: Array.isArray(item?.tags) ? item.tags.slice(0, 10) : [],
-      site_name: String(item?.site_name || '').slice(0, 120),
+      site_name: siteName,
       created_at: now,
     },
   };
