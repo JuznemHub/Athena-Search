@@ -48,6 +48,8 @@ export const PRIMARY_KEYS = {
   rss_feeds: ['id'],
   rss_articles: ['id'],
   rss_article_states: ['article_id', 'user_id'],
+  blacklist_entries: ['id'],
+  user_bookmarks: ['id'],
 };
 
 /**

@@ -5,33 +5,39 @@
   const LS_KEY = 'athena_ai_config';
 
   const PRESETS = {
-    openai: { label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', mode: 'openai', model: 'gpt-4o-mini' },
-    openrouter: { label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', mode: 'openai', model: 'openrouter/free' },
-    omniroute: { label: 'OmniRoute (self-hosted)', baseUrl: 'http://127.0.0.1:20128/v1', mode: 'openai', model: 'openrouter/free' },
-    anthropic: { label: 'Anthropic', baseUrl: 'https://api.anthropic.com', mode: 'anthropic', model: 'claude-sonnet-4-20250514' },
-    groq: { label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', mode: 'openai', model: 'llama-3.3-70b-versatile' },
-    nvidia: { label: 'NVIDIA NIM', baseUrl: 'https://integrate.api.nvidia.com/v1', mode: 'openai', model: 'meta/llama-3.1-8b-instruct' },
-    amd: { label: 'AMD Radeon Cloud', baseUrl: 'https://developer.amd.com.cn/radeon/api/v1', mode: 'openai', model: 'DeepSeek-V4-Flash' },
-    deepseek: { label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', mode: 'openai', model: 'deepseek-v4-flash' },
+    openai: { label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', mode: 'openai', model: 'gpt-4o-mini', tier: 'Paid (BYOK)', rateNote: 'Usage-billed per token via OpenAI API key' },
+    openrouter: { label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', mode: 'openai', model: 'openrouter/free', tier: 'Free + Paid (BYOK)', rateNote: ':free models require no credits (~20 RPM)' },
+    omniroute: { label: 'OmniRoute (self-hosted)', baseUrl: 'http://127.0.0.1:20128/v1', mode: 'openai', model: 'openrouter/free', tier: 'Self-hosted Router', rateNote: 'Local multi-provider gateway on :20128' },
+    anthropic: { label: 'Anthropic', baseUrl: 'https://api.anthropic.com', mode: 'anthropic', model: 'claude-sonnet-4-20250514', tier: 'Paid (BYOK)', rateNote: 'Anthropic Messages API (/v1/messages)' },
+    groq: { label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', mode: 'openai', model: 'llama-3.3-70b-versatile', tier: 'Free Tier + Paid', rateNote: 'Fast LPU inference with generous free daily tier' },
+    nvidia: { label: 'NVIDIA NIM', baseUrl: 'https://integrate.api.nvidia.com/v1', mode: 'openai', model: 'meta/llama-3.1-8b-instruct', tier: 'Free Credits (BYOK)', rateNote: '40 RPM free developer credits via build.nvidia.com' },
+    amd: { label: 'AMD Radeon Cloud', baseUrl: 'https://developer.amd.com.cn/radeon/api/v1', mode: 'openai', model: 'DeepSeek-V4-Flash', tier: 'Free Tier (BYOK)', rateNote: 'AMD Developer Cloud endpoint' },
+    deepseek: { label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', mode: 'openai', model: 'deepseek-v4-flash', tier: 'Low-cost Paid', rateNote: 'Direct DeepSeek API (/v1/chat/completions)' },
     opencode_go: {
       label: 'OpenCode Zen Go',
       baseUrl: 'https://opencode.ai/zen/go/v1',
       mode: 'openai',
-      model: 'deepseek-v4-flash'
+      model: 'deepseek-v4-flash',
+      tier: 'Free Tier',
+      rateNote: 'Free gateway preset — use free models like deepseek-v4-flash'
     },
     opencode_zen: {
       label: 'OpenCode Zen',
       baseUrl: 'https://opencode.ai/zen/v1',
       mode: 'openai',
-      model: 'deepseek-v4-flash'
+      model: 'deepseek-v4-flash',
+      tier: 'Free Tier + Paid',
+      rateNote: 'Curated free & paid routing models'
     },
     cohere_command: {
       label: 'Cohere Command',
       baseUrl: 'https://api.cohere.ai/compatibility/v1',
       mode: 'openai',
-      model: 'command-r-plus'
+      model: 'command-r-plus',
+      tier: 'Trial Free + Paid',
+      rateNote: 'OpenAI compatibility layer for Command models'
     },
-    custom: { label: 'Custom (OpenAI-compatible)', baseUrl: '', mode: 'openai', model: '' }
+    custom: { label: 'Custom (OpenAI-compatible)', baseUrl: '', mode: 'openai', model: '', tier: 'Custom', rateNote: 'Any OpenAI or Anthropic compatible endpoint' }
   };
 
   function loadConfig() {

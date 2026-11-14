@@ -975,3 +975,24 @@ body::before {
   [data-theme="glass"] .athena-tour,
   [data-theme="glass"] :is(.wiki-link-card, .g-result):is(:hover, :focus-within) { background: #1a1e27 !important; }
 }
+
+/* ========== shadcn/ui Neutral Ring, Border & Button Refinement ========== */
+:root {
+  --shadcn-ring: color-mix(in srgb, var(--accent, #8b5cf6) 45%, transparent);
+}
+.g-result,
+.admin-card,
+.wiki-link-card,
+.main-tags-card {
+  border-color: var(--hairline);
+  transition: border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
+}
+.btn-primary,
+.btn-secondary {
+  border-radius: 8px;
+  font-weight: 600;
+}
+:is(button, a, input, select, textarea):focus-visible {
+  outline: 2px solid var(--shadcn-ring);
+  outline-offset: 2px;
+}

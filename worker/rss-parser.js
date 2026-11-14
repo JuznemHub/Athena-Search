@@ -103,29 +103,62 @@ export function parseDateToMs(dateStr) {
   return Date.now();
 }
 
+function resolveFeedUrl(candidate, baseUrl = '') {
+  const clean = decodeXmlEntities(String(candidate || '').trim());
+  if (!clean) return '';
+  try {
+    return baseUrl ? new URL(clean, baseUrl).toString() : clean;
+  } catch {
+    return clean;
+  }
+}
+
+/**
+ * Pick the best Atom <link> href regardless of attribute order (`rel` before or after `href`).
+ */
+function extractAtomLink(blockXml, preferRel = 'alternate', baseUrl = '') {
+  const linkTags = [...String(blockXml || '').matchAll(/<link\b([^>]*?)\/?>/gi)];
+  let fallback = '';
+  for (const m of linkTags) {
+    const attrs = m[1] || '';
+    const href = extractAttrFromTag(attrs, 'href');
+    if (!href) continue;
+    const rel = (extractAttrFromTag(attrs, 'rel') || 'alternate').toLowerCase();
+    if (rel === preferRel) return resolveFeedUrl(href, baseUrl);
+    if (!fallback && rel !== 'self' && rel !== 'hub') fallback = resolveFeedUrl(href, baseUrl);
+  }
+  return fallback;
+}
+
 /**
  * Parse RSS 2.0 / 0.9x XML document.
  */
-function parseRss(xml) {
+function parseRss(xml, feedBaseUrl = '') {
   const channelMatch = xml.match(/<channel[\s\S]*?>([\s\S]*?)<\/channel>/i);
   const channelXml = channelMatch ? channelMatch[1] : xml;
 
   const feedTitle = extractTagContent(channelXml, 'title') || 'Untitled Feed';
   const feedDescription = extractTagContent(channelXml, 'description') || '';
-  const feedLink = extractTagContent(channelXml, 'link') || '';
-  const feedIcon = extractTagContent(channelXml, 'url') || null;
+  const channelHead = channelXml.split(/<item[\s>]/i)[0] || channelXml;
+  const feedLink = resolveFeedUrl(extractTagContent(channelHead, 'link') || extractAtomLink(channelHead, 'alternate', feedBaseUrl), feedBaseUrl);
+  const baseForItems = feedLink || feedBaseUrl;
+  const imageMatch = channelHead.match(/<image\b[^>]*>([\s\S]*?)<\/image>/i);
+  const feedIcon = imageMatch ? resolveFeedUrl(extractTagContent(imageMatch[1], 'url'), baseForItems) : null;
 
-  const itemRegex = /<item(?:[\s\S]*?)>([\s\S]*?)<\/item>/gi;
+  const itemRegex = /<item(?:\s+[^>]*)?>([\s\S]*?)<\/item>/gi;
   const articles = [];
   let match;
 
   while ((match = itemRegex.exec(xml)) !== null) {
     const itemXml = match[1];
     const title = extractTagContent(itemXml, 'title') || 'Untitled';
-    const link = extractTagContent(itemXml, 'link') || extractAttribute(itemXml, 'guid', 'isPermaLink') !== 'false' ? extractTagContent(itemXml, 'guid') : '';
-    const guid = extractTagContent(itemXml, 'guid') || link || title;
+    const rawLink = extractTagContent(itemXml, 'link') || extractAtomLink(itemXml, 'alternate', baseForItems);
+    const rawGuid = extractTagContent(itemXml, 'guid');
+    const isPerma = extractAttribute(itemXml, 'guid', 'isPermaLink') !== 'false' && /^https?:\/\//i.test(rawGuid);
+    const link = resolveFeedUrl(rawLink || (isPerma ? rawGuid : ''), baseForItems);
+    const guid = rawGuid || link || title;
     const author = extractTagContent(itemXml, 'dc:creator') || extractTagContent(itemXml, 'author') || '';
-    const pubDateStr = extractTagContent(itemXml, 'pubDate') || extractTagContent(itemXml, 'dc:date');
+    const pubDateStr = extractTagContent(itemXml, 'pubDate') || extractTagContent(itemXml, 'dc:date') || extractTagContent(itemXml, 'published') || extractTagContent(itemXml, 'updated');
     const publishedAt = parseDateToMs(pubDateStr);
     const content = extractTagContent(itemXml, 'content:encoded') || extractTagContent(itemXml, 'description') || '';
     const summary = stripHtml(extractTagContent(itemXml, 'description') || content);
@@ -158,30 +191,22 @@ function parseRss(xml) {
 /**
  * Parse Atom 1.0 XML document.
  */
-function parseAtom(xml) {
-  const feedTitle = extractTagContent(xml, 'title') || 'Untitled Atom Feed';
-  const feedSubtitle = extractTagContent(xml, 'subtitle') || '';
-  const feedIcon = extractTagContent(xml, 'icon') || extractTagContent(xml, 'logo') || null;
+function parseAtom(xml, feedBaseUrl = '') {
+  const feedHead = xml.split(/<entry[\s>]/i)[0] || xml;
+  const feedTitle = extractTagContent(feedHead, 'title') || 'Untitled Atom Feed';
+  const feedSubtitle = extractTagContent(feedHead, 'subtitle') || '';
+  const feedIcon = resolveFeedUrl(extractTagContent(feedHead, 'icon') || extractTagContent(feedHead, 'logo') || '', feedBaseUrl) || null;
+  const feedLink = extractAtomLink(feedHead, 'alternate', feedBaseUrl);
+  const baseForEntries = feedLink || feedBaseUrl;
 
-  // Atom feed link can be <link href="..." rel="alternate"/> or <link href="..."/>
-  let feedLink = '';
-  const feedLinkMatch = xml.match(/<link[^>]+(?:rel=["']alternate["'][^>]+)?href=["']([^"']+)["'][^>]*>/i);
-  if (feedLinkMatch) feedLink = feedLinkMatch[1];
-
-  const entryRegex = /<entry(?:[\s\S]*?)>([\s\S]*?)<\/entry>/gi;
+  const entryRegex = /<entry(?:\s+[^>]*)?>([\s\S]*?)<\/entry>/gi;
   const articles = [];
   let match;
 
   while ((match = entryRegex.exec(xml)) !== null) {
     const entryXml = match[1];
     const title = extractTagContent(entryXml, 'title') || 'Untitled';
-
-    // Entry link
-    let link = '';
-    const linkAltMatch = entryXml.match(/<link[^>]+rel=["']alternate["'][^>]+href=["']([^"']+)["']/i) ||
-                         entryXml.match(/<link[^>]+href=["']([^"']+)["']/i);
-    if (linkAltMatch) link = linkAltMatch[1];
-
+    const link = extractAtomLink(entryXml, 'alternate', baseForEntries);
     const guid = extractTagContent(entryXml, 'id') || link || title;
     const author = extractTagContent(entryXml, 'name') || extractTagContent(entryXml, 'author') || '';
     const pubDateStr = extractTagContent(entryXml, 'published') || extractTagContent(entryXml, 'updated');
@@ -260,7 +285,7 @@ function parseJsonFeed(jsonStr) {
 /**
  * Detect feed type and parse raw feed content (string or object).
  */
-export function parseFeed(content) {
+export function parseFeed(content, feedBaseUrl = '') {
   if (!content) {
     throw new Error('Empty feed content');
   }
@@ -274,10 +299,10 @@ export function parseFeed(content) {
 
   // Check for Atom vs RSS
   if (/<feed[\s\S]*?xmlns=["'][^"']*atom/i.test(str) || (str.includes('<feed') && str.includes('<entry'))) {
-    return parseAtom(str);
+    return parseAtom(str, feedBaseUrl);
   }
 
-  return parseRss(str);
+  return parseRss(str, feedBaseUrl);
 }
 
 /**

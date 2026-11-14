@@ -413,7 +413,7 @@ function detectType({ host, primary, body, repo, ecosystems, platforms }) {
   if (sig('browser extension|chrome extension|firefox add-?on|addon')) return 'extension';
   if (sig('\\bplugin\\b|plug-in')) return 'plugin';
   if (kind('\\btheme\\b|icon pack')) return 'theme';
-  if (sig('\\bgame\\b|gaming|emulator')) return 'game';
+  if (sig('\\bgames?\\b|gaming|emulator|game[- ]launcher|repack')) return 'game';
   if (sig('\\bcli\\b|command line|terminal app')) return 'cli';
   if (kind('\\bdriver(s)?\\b')) return 'driver';
   if (kind('documentation|docs|manual|reference guide')) return 'documentation';
@@ -664,8 +664,8 @@ export function classifyTags(rawUrl, meta = {}) {
  * are rejected. Returns { tags, rejected: [{ tag, reason }] }.
  */
 export function validateTags(tags, { vocabulary = [], banned = [], allowedBrands = null, max = 8 } = {}) {
-  const allowed = new Set((vocabulary || []).map(normalizeTag).filter(Boolean));
-  const bannedSet = new Set((banned || []).map(normalizeTag).filter((t) => t && !allowed.has(t)));
+  const allowed = new Set(Array.from(vocabulary || []).map(normalizeTag).filter(Boolean));
+  const bannedSet = new Set(Array.from(banned || []).map(normalizeTag).filter((t) => t && !allowed.has(t)));
   const brandSet = allowedBrands ? new Set([...allowedBrands].map(normalizeTag)) : null;
   const out = [];
   const rejected = [];

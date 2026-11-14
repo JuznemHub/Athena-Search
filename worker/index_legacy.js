@@ -17,6 +17,24 @@ import {
   saveWikiTaxonomy,
 } from './wiki-taxonomy.js';
 import { parseFeed, parseOpml, generateOpml } from './rss-parser.js';
+import {
+  normalizeCleanUrl,
+  cleanBoilerplateText,
+  cleanCleanerTitle,
+  normalizeLinkRecord,
+} from './db-cleaner.js';
+import {
+  getBlacklistRules,
+  checkUrlBlacklisted,
+  filterBlacklistedTags,
+  addBlacklistEntry,
+  removeBlacklistEntry,
+} from './blacklist.js';
+import {
+  listUserBookmarks,
+  toggleUserBookmark,
+  removeUserBookmark,
+} from './bookmarks.js';
 
 function cloneDisplayName(chatTitle, chatType, flowThread, topicTitle) {
   const base = String(chatTitle || '');
@@ -451,6 +469,36 @@ export default {
       }
       if (pathname === '/api/feed/opml/export' && request.method === 'GET') {
         return await handleOpmlExport(url, user, env, corsHeaders);
+      }
+      if (pathname === '/api/feed/article/scrape' && request.method === 'POST') {
+        return await handleScrapeFeedArticle(request, user, env, corsHeaders);
+      }
+
+      // User bookmarks on Search & AI results (Item 7)
+      if (pathname === '/api/bookmarks') {
+        if (request.method === 'GET') return await handleGetBookmarks(user, env, corsHeaders);
+        if (request.method === 'POST') return await handleToggleBookmark(request, user, env, corsHeaders);
+        if (request.method === 'DELETE') return await handleDeleteBookmark(request, user, env, corsHeaders);
+      }
+
+      // Blacklist management (Item 14)
+      if (pathname === '/api/blacklist') {
+        if (request.method === 'GET') return await handleGetBlacklist(url, user, env, corsHeaders);
+        if (request.method === 'POST') return await handleAddBlacklist(request, user, env, corsHeaders);
+        if (request.method === 'DELETE') return await handleDeleteBlacklist(request, user, env, corsHeaders);
+      }
+
+      // Owner-only single-card AI re-enrich (Purple Star - Item 3)
+      if (pathname === '/api/links/ai-enrich-one' && request.method === 'POST') {
+        return await handleAiEnrichOneLink(request, user, env, corsHeaders);
+      }
+
+      // Owner-only GUI DB Cleaner (Item 2)
+      if (pathname === '/api/admin/cleaner/candidates' && request.method === 'GET') {
+        return await handleGetCleanerCandidates(url, user, env, corsHeaders);
+      }
+      if (pathname === '/api/admin/cleaner/run' && request.method === 'POST') {
+        return await handleRunCleanerBatch(request, user, env, corsHeaders);
       }
 
       // Community links — members only (join required before dump)
@@ -3653,6 +3701,10 @@ async function handlePostCommunityLink(request, user, env, corsHeaders) {
     }, { status: 403, headers: corsHeaders });
   }
 
+  const blRules = await getBlacklistRules(env, 'community', communityId);
+  if (checkUrlBlacklisted(rawUrl, blRules)) {
+    return Response.json({ success: false, error: 'This domain or URL is blacklisted', code: 'BLACKLISTED_URL' }, { status: 400, headers: corsHeaders });
+  }
   const urlHash = generateUrlHash(rawUrl);
   const existing = await findExistingLink(env, 'links', 'community_id', communityId, rawUrl);
 
@@ -3756,6 +3808,14 @@ async function handleDeleteCommunityLink(request, user, env, corsHeaders) {
   await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(link.id).run();
   await env.DB.prepare('DELETE FROM link_votes WHERE link_id = ?').bind(link.id).run();
   markMeiliScopeDirty(env, 'community', link.community_id);
+  await logActivityEvent(env, {
+    action: '🗑 Link deleted',
+    actorUser: user,
+    title: link.title || '',
+    url: link.url || '',
+    scope: 'community',
+    scopeKey: link.community_id,
+  });
   return Response.json({ success: true, deleted: link.id }, { headers: corsHeaders });
 }
 
@@ -4106,16 +4166,15 @@ async function handleAiOrganizeWiki(request, user, env, corsHeaders) {
 
   const scopeWhere = scope === 'personal' ? 'WHERE user_id = ?' : 'WHERE community_id = ?';
 
-  const tagRows = await env.DB.prepare(
-    `SELECT tags, count(*) as cnt FROM ${table} ${scopeWhere} GROUP BY tags ORDER BY cnt DESC LIMIT 30`
+  const contextRows = await env.DB.prepare(
+    `SELECT title, url, notes FROM ${table} ${scopeWhere} ORDER BY created_at DESC LIMIT 80`
   ).bind(scopeKey).all();
 
-  const titleRows = await env.DB.prepare(
-    `SELECT title, url FROM ${table} ${scopeWhere} ORDER BY created_at DESC LIMIT 40`
-  ).bind(scopeKey).all();
-
-  const sampleTags = (tagRows?.results || []).map(r => r.tags).filter(Boolean).slice(0, 25);
-  const sampleTitles = (titleRows?.results || []).map(r => `${r.title || ''} (${r.url || ''})`).slice(0, 30);
+  const sampleContext = (contextRows?.results || []).map((r) => ({
+    title: String(r.title || '').slice(0, 120),
+    url: String(r.url || '').slice(0, 140),
+    desc: String(r.notes || '').replace(/\s+/g, ' ').trim().slice(0, 180),
+  })).slice(0, 50);
 
   let aiConfig = null;
   try { aiConfig = await getInstanceAiConfig(env); } catch (_) {}
@@ -4128,23 +4187,24 @@ async function handleAiOrganizeWiki(request, user, env, corsHeaders) {
     }, { headers: corsHeaders });
   }
 
-  const prompt = `You are an expert knowledge curator specializing in directory wikis like FreeMediaHeckYeah (fmhy.net).
-Review this sample of links and tags from our library:
-Sample Tags: ${JSON.stringify(sampleTags)}
-Sample Links: ${JSON.stringify(sampleTitles)}
+  const prompt = `You are a directory curator organizing links like FreeMediaHeckYeah (fmhy.net).
+Classify strictly by what each resource DOES based on its URL and description/title context. Ignore noisy/misleading legacy tags (for example, do not put a game launcher in Cloud just because of a stray cloud mention).
 
-Generate a structured FMHY-style wiki taxonomy with 10 to 16 categories that covers these items.
+Sample Links (title, url, description):
+${JSON.stringify(sampleContext)}
+
+Generate a structured FMHY-style wiki taxonomy with 10 to 16 categories that accurately groups these resources by real function.
 Each category must have:
-- "id": lowercase slug (e.g. "video", "privacy", "tools")
-- "title": human-readable title (e.g. "Video & Streaming")
-- "icon": single emoji (e.g. "🎬")
+- "id": lowercase slug (e.g. "gaming", "video", "privacy", "tools")
+- "title": human-readable title (e.g. "Gaming & Emulation")
+- "icon": single emoji (e.g. "🎮")
 - "description": concise 1-sentence description
 - "subheadings": array of 2 to 5 subheadings, each having:
-  - "id": slug (e.g. "video-streaming")
-  - "title": title (e.g. "Movies & TV Streaming")
+  - "id": slug (e.g. "gaming-launchers")
+  - "title": title (e.g. "Game Launchers & Stores")
   - "description": description
-  - "tags": array of 3 to 10 matching tag words
-  - "keywords": array of 3 to 10 matching keywords
+  - "keywords": array of 4 to 12 strong contextual keywords matched against title/url/description
+  - "tags": array of 3 to 8 clean lowercase topic tags (no generic tags like backfill/opensource/website)
 
 Return ONLY a valid JSON object without markdown fences:
 { "categories": [ ... ] }`;
@@ -4402,6 +4462,11 @@ async function autoIngestRssArticle(env, article, feed, user) {
   const rawUrl = article.url;
 
   try {
+    const blRules = await getBlacklistRules(env, isPersonal ? 'personal' : 'community', scopeKey);
+    if (checkUrlBlacklisted(rawUrl, blRules)) {
+      return null;
+    }
+
     const existing = await findExistingLink(env, targetTable, scopeColumn, scopeKey, rawUrl);
     if (existing) {
       return existing.id;
@@ -4418,8 +4483,7 @@ async function autoIngestRssArticle(env, article, feed, user) {
 
     let taxonomyTags = [];
     try {
-      const facts = extractFacts({
-        url: rawUrl,
+      const facts = extractFacts(rawUrl, {
         title: article.title || '',
         description: plainSummary,
         siteName: feed.title || ''
@@ -4427,7 +4491,10 @@ async function autoIngestRssArticle(env, article, feed, user) {
       taxonomyTags = tagsFromFacts(facts) || [];
     } catch (_) {}
 
-    const tagSet = Array.from(new Set(['rss', catTag, ...taxonomyTags].filter(Boolean))).slice(0, 8);
+    const tagSet = filterBlacklistedTags(
+      Array.from(new Set(['rss', catTag, ...taxonomyTags].filter(Boolean))),
+      blRules
+    ).slice(0, 8);
     const tags = JSON.stringify(tagSet);
     const notes = plainSummary;
 
@@ -4506,7 +4573,7 @@ async function fetchAndParseFeed(feedUrl, env) {
   }
 
   const text = await res.text();
-  return parseFeed(text);
+  return parseFeed(text, feedUrl);
 }
 
 async function handleGetFeedSources(url, user, env, corsHeaders) {
@@ -4744,17 +4811,21 @@ async function handleGetFeedStreams(url, user, env, corsHeaders) {
   const orderParam = (url.searchParams.get('order') || 'DESC').toUpperCase();
   const order = orderParam === 'ASC' ? 'ASC' : 'DESC';
 
-  let orderClause = `a.published_at ${order}`;
+  let orderClause = `a.published_at ${order}, a.created_at ${order}`;
   if (sort === 'id') {
     orderClause = `a.created_at ${order}`;
-  } else if (sort === 'date') {
-    orderClause = `a.published_at ${order}`;
+  } else if (sort === 'date' || sort === 'newest') {
+    orderClause = `a.published_at DESC, a.created_at DESC`;
+  } else if (sort === 'oldest') {
+    orderClause = `a.published_at ASC, a.created_at ASC`;
+  } else if (sort === 'unread') {
+    orderClause = `COALESCE(s.is_read, 0) ASC, a.published_at ${order}`;
   } else if (sort === 'title') {
     orderClause = `a.title ${order}`;
   } else if (sort === 'feed') {
-    orderClause = `f.title ${order}`;
+    orderClause = `f.title ${order}, a.published_at ${order}`;
   } else if (sort === 'category') {
-    orderClause = `f.category ${order}, f.title ${order}`;
+    orderClause = `f.category ${order}, f.title ${order}, a.published_at ${order}`;
   } else if (sort === 'rand') {
     orderClause = 'RANDOM()';
   }
@@ -4801,8 +4872,7 @@ async function handleGetFeedStreams(url, user, env, corsHeaders) {
       autoTags.push(String(row.feed_category).toLowerCase().replace(/[^a-z0-9_-]/g, '-'));
     }
     try {
-      const facts = extractFacts({
-        url: row.url || '',
+      const facts = extractFacts(row.url || '', {
         title: row.title || '',
         description: row.summary || '',
         siteName: row.feed_title || ''
@@ -5374,6 +5444,455 @@ async function refreshAllFeedsJob(env) {
   } catch (err) {
     console.error('[rss-job] background refresh error:', err.message);
   }
+}
+
+async function handleScrapeFeedArticle(request, user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  await ensureFeedTables(env);
+  let body = {};
+  try { body = await request.json(); } catch (_) {}
+  const articleId = String(body.article_id || '').trim();
+  if (!articleId) {
+    return Response.json({ success: false, error: 'article_id required' }, { status: 400, headers: corsHeaders });
+  }
+  const art = await env.DB.prepare(
+    `SELECT a.*, f.community_id AS feed_community_id, f.user_id AS feed_user_id
+     FROM rss_articles a
+     JOIN rss_feeds f ON f.id = a.feed_id
+     WHERE a.id = ?`
+  ).bind(articleId).first();
+  if (!art) {
+    return Response.json({ success: false, error: 'Article not found' }, { status: 404, headers: corsHeaders });
+  }
+  if (art.feed_community_id === 'personal' && art.feed_user_id !== user.id) {
+    return deny(corsHeaders, 'Personal feed belongs to another user');
+  }
+  if (!art.url || !/^https?:\/\//i.test(art.url)) {
+    return Response.json({ success: false, error: 'Article has no HTTP URL' }, { status: 400, headers: corsHeaders });
+  }
+  try {
+    const meta = await scrapeLinkMetadata(art.url, env);
+    const fullText = String(meta?.content || meta?.description || '').trim();
+    if (fullText) {
+      await env.DB.prepare('UPDATE rss_articles SET content = ? WHERE id = ?').bind(fullText.slice(0, 20000), articleId).run().catch(() => {});
+    }
+    return Response.json({
+      success: true,
+      article_id: articleId,
+      title: meta?.title || art.title,
+      content: fullText || art.content || art.summary || '',
+      image_url: meta?.image_url || art.image_url || null,
+    }, { headers: corsHeaders });
+  } catch (err) {
+    return Response.json({ success: false, error: err?.message || 'Scrape failed' }, { status: 502, headers: corsHeaders });
+  }
+}
+
+async function handleGetBookmarks(user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  const bookmarks = await listUserBookmarks(env, user.id);
+  return Response.json({ success: true, bookmarks }, { headers: corsHeaders });
+}
+
+async function handleToggleBookmark(request, user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  let body = {};
+  try { body = await request.json(); } catch (_) {}
+  try {
+    const out = await toggleUserBookmark(env, user.id, body);
+    return Response.json({ success: true, ...out }, { headers: corsHeaders });
+  } catch (err) {
+    return Response.json({ success: false, error: err?.message || 'Bookmark failed' }, { status: 400, headers: corsHeaders });
+  }
+}
+
+async function handleDeleteBookmark(request, user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  let body = {};
+  try { body = await request.json(); } catch (_) {}
+  const removed = await removeUserBookmark(env, user.id, { id: body.id || '', url: body.url || '' });
+  return Response.json({ success: true, removed }, { headers: corsHeaders });
+}
+
+async function handleGetBlacklist(url, user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  const scope = (url.searchParams.get('scope') || 'community').toLowerCase();
+  const communityId = String(url.searchParams.get('community_id') || '').trim();
+  const scopeKey = scope === 'personal' ? user.id : (scope === 'global' ? '' : communityId);
+  if (scope === 'community' && scopeKey) {
+    const gate = await requireActiveMember(env, scopeKey, user, corsHeaders);
+    if (gate) return gate;
+  }
+  const rules = await getBlacklistRules(env, scope, scopeKey);
+  return Response.json({ success: true, entries: rules.entries || [] }, { headers: corsHeaders });
+}
+
+async function handleAddBlacklist(request, user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  let body = {};
+  try { body = await request.json(); } catch (_) {}
+  const scope = String(body.scope || 'community').toLowerCase();
+  const communityId = String(body.community_id || '').trim();
+  const kind = String(body.kind || 'url').toLowerCase() === 'tag' ? 'tag' : 'url';
+  const pattern = String(body.pattern || '').trim();
+  const reason = String(body.reason || '').trim();
+  const isGod = await isInstanceOwnerUserAsync(user, env);
+
+  if (scope === 'global' || scope === 'personal') {
+    if (!isGod) return deny(corsHeaders, 'Only GOD can modify global or personal blacklist', 'GOD_ONLY');
+  } else {
+    if (!communityId) return Response.json({ success: false, error: 'community_id required' }, { status: 400, headers: corsHeaders });
+    const staff = isGod || (await ensureOwnerOrAdmin(communityId, user.id, env));
+    if (!staff) return deny(corsHeaders, 'Admin or Owner rank required for community blacklist', 'ADMIN_ONLY');
+  }
+
+  try {
+    const scopeKey = scope === 'personal' ? user.id : (scope === 'global' ? '' : communityId);
+    const entry = await addBlacklistEntry(env, { scope, scopeKey, kind, pattern, reason, createdBy: user.id });
+    await logActivityEvent(env, {
+      action: '🚫 Blacklist added',
+      actorUser: user,
+      details: `[${entry.kind}] ${entry.pattern}${reason ? ` — ${reason}` : ''}`,
+      scope,
+      scopeKey,
+    });
+    return Response.json({ success: true, entry }, { headers: corsHeaders });
+  } catch (err) {
+    return Response.json({ success: false, error: err?.message || 'Failed to add blacklist entry' }, { status: 400, headers: corsHeaders });
+  }
+}
+
+async function handleDeleteBlacklist(request, user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  let body = {};
+  try { body = await request.json(); } catch (_) {}
+  const scope = String(body.scope || 'community').toLowerCase();
+  const communityId = String(body.community_id || '').trim();
+  const isGod = await isInstanceOwnerUserAsync(user, env);
+
+  if (scope === 'global' || scope === 'personal') {
+    if (!isGod) return deny(corsHeaders, 'Only GOD can modify global or personal blacklist', 'GOD_ONLY');
+  } else if (communityId) {
+    const staff = isGod || (await ensureOwnerOrAdmin(communityId, user.id, env));
+    if (!staff) return deny(corsHeaders, 'Admin or Owner rank required', 'ADMIN_ONLY');
+  } else if (!isGod) {
+    return deny(corsHeaders, 'Scope authorization required');
+  }
+
+  const scopeKey = scope === 'personal' ? user.id : (scope === 'global' ? '' : communityId);
+  const removed = await removeBlacklistEntry(env, {
+    id: String(body.id || ''),
+    pattern: String(body.pattern || ''),
+    scope: body.id ? '' : scope,
+    scopeKey,
+  });
+  if (removed) {
+    await logActivityEvent(env, {
+      action: '♻️ Blacklist removed',
+      actorUser: user,
+      details: body.pattern || body.id,
+      scope,
+      scopeKey,
+    });
+  }
+  return Response.json({ success: true, removed }, { headers: corsHeaders });
+}
+
+async function handleAiEnrichOneLink(request, user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  if (!(await isInstanceOwnerUserAsync(user, env))) {
+    return deny(corsHeaders, 'AI card rewrite is GOD rank only', 'GOD_ONLY');
+  }
+  let body = {};
+  try { body = await request.json(); } catch (_) {}
+  const id = String(body.id || '').trim();
+  const scope = String(body.scope || 'community').toLowerCase();
+  if (!id) return Response.json({ success: false, error: 'id required' }, { status: 400, headers: corsHeaders });
+
+  const table = scope === 'personal' ? 'personal_links' : 'links';
+  const row = await env.DB.prepare(`SELECT * FROM ${table} WHERE id = ?`).bind(id).first();
+  if (!row) return Response.json({ success: false, error: 'Link not found' }, { status: 404, headers: corsHeaders });
+
+  const scopeKey = scope === 'personal' ? row.user_id : row.community_id;
+  const blRules = await getBlacklistRules(env, scope, scopeKey);
+  if (checkUrlBlacklisted(row.url, blRules)) {
+    return Response.json({ success: false, error: 'URL matches blacklist policy', code: 'BLACKLISTED_URL' }, { status: 400, headers: corsHeaders });
+  }
+
+  const cleanUrl = normalizeCleanUrl(row.url) || row.url;
+  const urlHash = generateUrlHash(cleanUrl);
+  // Scrape fresh URL first; if blocked/timeout, fall back seamlessly to stored description -> title -> tags
+  let scrapedMeta = null;
+  if (/^https?:\/\//i.test(cleanUrl)) {
+    try { scrapedMeta = await scrapeLinkMetadata(cleanUrl, env); } catch (_) { scrapedMeta = null; }
+  }
+
+  let existingTags;
+  try { existingTags = JSON.parse(row.tags || '[]'); } catch (_) { existingTags = []; }
+
+  const seedMeta = {
+    title: cleanCleanerTitle(scrapedMeta?.title || row.title, cleanUrl) || row.title || '',
+    notes: cleanBoilerplateText(scrapedMeta?.description || row.notes || '', cleanUrl) || row.notes || '',
+    content: scrapedMeta?.content || [row.notes, row.title, existingTags.join(' ')].filter(Boolean).join('\n'),
+  };
+
+  const cfg = await getInstanceAiConfig(env).catch(() => null);
+  const generated = await describeAndTagLink(env, cleanUrl, seedMeta, {
+    config: cfg,
+    scrape: false,
+    reviewTags: existingTags,
+    maxTags: 8,
+  });
+
+  const normalized = normalizeLinkRecord(row, {
+    aiResult: generated,
+    scrapedMeta,
+    blacklistedTags: blRules.tagSet,
+    maxTags: 8,
+  });
+
+  // Never change URL if it collides with another row
+  let finalUrl = normalized.url;
+  let finalHash = urlHash;
+  if (finalUrl !== row.url) {
+    const scopeCol = scope === 'personal' ? 'user_id' : 'community_id';
+    const clash = await findExistingLink(env, table, scopeCol, scopeKey, finalUrl, id);
+    if (clash) {
+      finalUrl = row.url;
+      finalHash = row.url_hash;
+    }
+  }
+
+  const finalTags = filterBlacklistedTags(normalized.tags, blRules);
+  const editedAt = Date.now();
+  await ensureLinkMetaColumns(env);
+  await ensureSearchColumns(env);
+
+  await env.DB.prepare(
+    `UPDATE ${table}
+     SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?,
+         image_url = COALESCE(?, image_url), site_name = COALESCE(?, site_name),
+         manual_edited_at = ?, last_edited_by = 'ai', last_edited_by_name = 'AI',
+         metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL
+     WHERE id = ?`
+  ).bind(
+    finalUrl,
+    finalHash,
+    normalized.title,
+    normalized.notes,
+    JSON.stringify(finalTags),
+    scrapedMeta?.image_url || null,
+    scrapedMeta?.site_name || null,
+    editedAt,
+    id
+  ).run();
+
+  markMeiliScopeDirty(env, scope, scopeKey);
+
+  await logActivityEvent(env, {
+    action: '✦ Link rewritten by AI',
+    actorUser: user,
+    title: normalized.title,
+    url: finalUrl,
+    details: `Tags: ${finalTags.map((t) => '#' + t).join(' ')}`,
+    scope,
+    scopeKey,
+  });
+
+  return Response.json({
+    success: true,
+    used_ai: Boolean(generated?.usedAi),
+    link: {
+      ...row,
+      url: finalUrl,
+      url_hash: finalHash,
+      title: normalized.title,
+      notes: normalized.notes,
+      tags: finalTags,
+      image_url: scrapedMeta?.image_url || row.image_url || '',
+      site_name: scrapedMeta?.site_name || row.site_name || '',
+      manual_edited_at: editedAt,
+      last_edited_by: 'ai',
+      last_edited_by_name: 'AI',
+    },
+  }, { headers: corsHeaders });
+}
+
+async function handleGetCleanerCandidates(url, user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  if (!(await isInstanceOwnerUserAsync(user, env))) {
+    return deny(corsHeaders, 'DB Cleaner is GOD rank only', 'GOD_ONLY');
+  }
+  const scope = (url.searchParams.get('scope') || 'community').toLowerCase();
+  const communityId = String(url.searchParams.get('community_id') || '').trim();
+  const filter = (url.searchParams.get('filter') || 'backfill').toLowerCase();
+  const limit = Math.min(200, Math.max(10, parseInt(url.searchParams.get('limit') || '50', 10)));
+  const offset = Math.max(0, parseInt(url.searchParams.get('offset') || '0', 10));
+
+  const table = scope === 'personal' ? 'personal_links' : 'links';
+  const scopeCol = scope === 'personal' ? 'user_id' : 'community_id';
+  let scopeKey = scope === 'personal' ? user.id : communityId;
+  if (scope === 'community' && !scopeKey) {
+    const first = await env.DB.prepare('SELECT id FROM communities ORDER BY created_at DESC LIMIT 1').first();
+    scopeKey = first?.id || '';
+  }
+  if (!scopeKey) return Response.json({ success: true, total: 0, links: [] }, { headers: corsHeaders });
+
+  let extraWhere = '';
+  if (filter === 'backfill') {
+    extraWhere = ` AND (LOWER(COALESCE(tags,'')) LIKE '%backfill%' OR LOWER(COALESCE(title,'')) LIKE 'link from telegram%' OR COALESCE(tags,'') IN ('', '[]', 'null'))`;
+  } else if (filter === 'untagged') {
+    extraWhere = ` AND (COALESCE(tags,'') IN ('', '[]', 'null', '["untagged"]', '["notags"]') OR manual_edited_at IS NULL)`;
+  } else if (filter === 'unedited') {
+    extraWhere = ` AND manual_edited_at IS NULL`;
+  }
+
+  const countRow = await env.DB.prepare(`SELECT COUNT(*) as total FROM ${table} WHERE ${scopeCol} = ? ${extraWhere}`).bind(scopeKey).first();
+  const { results } = await env.DB.prepare(
+    `SELECT id, url, title, notes, tags, image_url, site_name, manual_edited_at, last_edited_by_name, created_at
+     FROM ${table} WHERE ${scopeCol} = ? ${extraWhere}
+     ORDER BY created_at DESC LIMIT ? OFFSET ?`
+  ).bind(scopeKey, limit, offset).all();
+
+  const links = (results || []).map((r) => ({
+    ...r,
+    tags: (() => { try { return JSON.parse(r.tags || '[]'); } catch { return []; } })(),
+  }));
+
+  return Response.json({
+    success: true,
+    scope,
+    scope_key: scopeKey,
+    total: Number(countRow?.total || 0),
+    links,
+  }, { headers: corsHeaders });
+}
+
+async function handleRunCleanerBatch(request, user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  if (!(await isInstanceOwnerUserAsync(user, env))) {
+    return deny(corsHeaders, 'DB Cleaner is GOD rank only', 'GOD_ONLY');
+  }
+  let body = {};
+  try { body = await request.json(); } catch (_) {}
+
+  const scope = String(body.scope || 'community').toLowerCase();
+  const scopeKey = scope === 'personal' ? user.id : String(body.community_id || '').trim();
+  const mode = String(body.mode || 'ai').toLowerCase(); // 'ai' | 'script'
+  const dryRun = Boolean(body.dry_run);
+  const scrapeUrls = body.scrape !== false;
+  const ids = Array.isArray(body.ids) ? body.ids.map(String).slice(0, 25) : [];
+
+  if (!scopeKey || !ids.length) {
+    return Response.json({ success: false, error: 'scope_key and non-empty ids required' }, { status: 400, headers: corsHeaders });
+  }
+
+  const table = scope === 'personal' ? 'personal_links' : 'links';
+  const scopeCol = scope === 'personal' ? 'user_id' : 'community_id';
+  const blRules = await getBlacklistRules(env, scope, scopeKey);
+  const cfg = mode === 'ai' ? await getInstanceAiConfig(env).catch(() => null) : null;
+  const actorLabel = await resolveActorTgLabel(env, user);
+
+  await ensureLinkMetaColumns(env);
+  await ensureSearchColumns(env);
+
+  const items = [];
+  let fixed = 0;
+  let unchanged = 0;
+  let failed = 0;
+
+  for (const id of ids) {
+    try {
+      const row = await env.DB.prepare(`SELECT * FROM ${table} WHERE id = ? AND ${scopeCol} = ?`).bind(id, scopeKey).first();
+      if (!row) { unchanged++; continue; }
+
+      let scrapedMeta = null;
+      if (scrapeUrls && /^https?:\/\//i.test(row.url || '')) {
+        try { scrapedMeta = await scrapeLinkMetadata(row.url, env); } catch (_) { scrapedMeta = null; }
+      }
+
+      let existingTags = [];
+      try { existingTags = JSON.parse(row.tags || '[]'); } catch (_) { existingTags = []; }
+
+      let aiResult = null;
+      if (mode === 'ai' && cfg?.api_key) {
+        aiResult = await describeAndTagLink(env, row.url, {
+          title: scrapedMeta?.title || row.title || '',
+          notes: scrapedMeta?.description || row.notes || '',
+          content: scrapedMeta?.content || '',
+        }, { config: cfg, scrape: false, reviewTags: existingTags, maxTags: 8 }).catch(() => null);
+      }
+
+      const norm = normalizeLinkRecord(row, {
+        aiResult,
+        scrapedMeta,
+        blacklistedTags: blRules.tagSet,
+        maxTags: 8,
+      });
+
+      const previewItem = {
+        id: row.id,
+        changed: norm.changed,
+        changedFields: norm.changedFields,
+        usedAi: Boolean(aiResult?.usedAi),
+        before: { url: row.url, title: row.title || '', notes: row.notes || '', tags: existingTags },
+        after: { url: norm.url, title: norm.title, notes: norm.notes, tags: norm.tags },
+      };
+
+      if (!norm.changed) {
+        unchanged++;
+        items.push(previewItem);
+        continue;
+      }
+
+      if (!dryRun) {
+        let finalUrl = norm.url;
+        let finalHash = generateUrlHash(finalUrl);
+        if (finalUrl !== row.url) {
+          const clash = await findExistingLink(env, table, scopeCol, scopeKey, finalUrl, row.id);
+          if (clash) {
+            finalUrl = row.url;
+            finalHash = row.url_hash;
+          }
+        }
+        const editedAt = Date.now();
+        const editorName = aiResult?.usedAi ? `AI (${actorLabel})` : `Cleaner (${actorLabel})`;
+        await env.DB.prepare(
+          `UPDATE ${table}
+           SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?,
+               manual_edited_at = ?, last_edited_by = ?, last_edited_by_name = ?,
+               metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL
+           WHERE id = ?`
+        ).bind(finalUrl, finalHash, norm.title, norm.notes, JSON.stringify(norm.tags), editedAt, user.id, editorName, row.id).run();
+      }
+      fixed++;
+      items.push(previewItem);
+    } catch (err) {
+      failed++;
+      items.push({ id, error: err?.message || 'Error' });
+    }
+  }
+
+  if (!dryRun && fixed > 0) {
+    markMeiliScopeDirty(env, scope, scopeKey);
+    await logActivityEvent(env, {
+      action: `🧹 GUI DB Cleaner (${mode.toUpperCase()})`,
+      actorUser: user,
+      details: `Fixed: ${fixed} · Unchanged: ${unchanged} · Failed: ${failed} (${scope})`,
+      scope,
+      scopeKey,
+    });
+  }
+
+  return Response.json({
+    success: true,
+    dry_run: dryRun,
+    mode: cfg?.api_key && mode === 'ai' ? 'ai' : 'script',
+    fixed,
+    unchanged,
+    failed,
+    items,
+  }, { headers: corsHeaders });
 }
 
 async function handleAdminGetLinks(url, user, env, corsHeaders) {
@@ -8013,10 +8532,12 @@ async function handlePostPersonalLinksBatch(request, userId, env, corsHeaders) {
   const dupes = [];
   const failed = [];
   const seenHashes = new Set();
+  const blRules = await getBlacklistRules(env, 'personal', userId);
   for (const raw of items) {
     const rawUrl = typeof raw?.url === 'string' ? raw.url.trim() : '';
     if (!/^https?:\/\//i.test(rawUrl)) { failed.push({ url: rawUrl || '(empty)', error: 'BAD_URL' }); continue; }
     if (isInternalTelegramMessageUrl(rawUrl)) { failed.push({ url: rawUrl, error: 'INTERNAL_TG_LINK' }); continue; }
+    if (checkUrlBlacklisted(rawUrl, blRules)) { failed.push({ url: rawUrl, error: 'BLACKLISTED_URL' }); continue; }
     const urlHash = generateUrlHash(rawUrl);
     if (seenHashes.has(urlHash)) { dupes.push(rawUrl); continue; }
     seenHashes.add(urlHash);
@@ -8024,10 +8545,11 @@ async function handlePostPersonalLinksBatch(request, userId, env, corsHeaders) {
     if (existing) { dupes.push(rawUrl); continue; }
     // Dump payloads already carry real titles — title-only fast path, no scrape.
     const title = String(raw.title || '').trim().slice(0, 300);
+    const rawTags = filterBlacklistedTags(Array.isArray(raw.tags) ? raw.tags : [], blRules).slice(0, 10);
     inserted.push({
       id: batchLinkId('pl'),
       url: rawUrl, url_hash: urlHash, title,
-      notes: '', tags: Array.isArray(raw.tags) ? raw.tags.slice(0, 10) : [],
+      notes: '', tags: rawTags,
       created_at: now, added_by_user_id: userId, added_by_name: displayName,
     });
   }
@@ -8107,20 +8629,23 @@ async function handlePostCommunityLinksBatch(request, user, env, corsHeaders) {
   const dupes = [];
   const failed = [];
   const seenHashes = new Set();
+  const blRules = await getBlacklistRules(env, 'community', communityId);
   for (const raw of items) {
     const rawUrl = typeof raw?.url === 'string' ? raw.url.trim() : '';
     if (!/^https?:\/\//i.test(rawUrl)) { failed.push({ url: rawUrl || '(empty)', error: 'BAD_URL' }); continue; }
     if (isInternalTelegramMessageUrl(rawUrl)) { failed.push({ url: rawUrl, error: 'INTERNAL_TG_LINK' }); continue; }
+    if (checkUrlBlacklisted(rawUrl, blRules)) { failed.push({ url: rawUrl, error: 'BLACKLISTED_URL' }); continue; }
     const urlHash = generateUrlHash(rawUrl);
     if (seenHashes.has(urlHash)) { dupes.push(rawUrl); continue; }
     seenHashes.add(urlHash);
     const existing = await findExistingLink(env, 'links', 'community_id', communityId, rawUrl);
     if (existing) { dupes.push(rawUrl); continue; }
     const title = String(raw.title || '').trim().slice(0, 300);
+    const rawTags = filterBlacklistedTags(Array.isArray(raw.tags) ? raw.tags : [], blRules).slice(0, 10);
     inserted.push({
       id: batchLinkId('link'),
       community_id: communityId, url: rawUrl, url_hash: urlHash, title,
-      notes: '', tags: Array.isArray(raw.tags) ? raw.tags.slice(0, 10) : [],
+      notes: '', tags: rawTags,
       created_at: now, added_by_name: displayName, added_by_user_id: user.id,
     });
   }
@@ -8174,6 +8699,12 @@ async function handlePostPersonalLink(request, userId, env, corsHeaders) {
   if (isInternalTelegramMessageUrl(rawUrl)) {
     return Response.json({ success: false, error: 'Internal Telegram message links (t.me/c/...) cannot be saved', code: 'INVALID_URL' }, { status: 400, headers: corsHeaders });
   }
+  const blPersonal = await getBlacklistRules(env, 'personal', userId);
+  if (checkUrlBlacklisted(rawUrl, blPersonal)) {
+    return Response.json({ success: false, error: 'This domain or URL is blacklisted', code: 'BLACKLISTED_URL' }, { status: 400, headers: corsHeaders });
+  }
+  const safePostTags = filterBlacklistedTags(Array.isArray(body.tags) ? body.tags : [], blPersonal);
+  body.tags = safePostTags;
   // notes without real http links skip scrape
   const isNote = rawUrl.startsWith('note://') || !/^https?:\/\//i.test(rawUrl);
   const urlHash = generateUrlHash(rawUrl);
@@ -8237,16 +8768,35 @@ async function handleDeletePersonalLink(request, userOrId, env, corsHeaders) {
   const isGod = await isInstanceOwnerUserAsync(user, env);
   const body = await request.json();
   if (isGod) {
-    const existing = await env.DB.prepare('SELECT user_id FROM personal_links WHERE id = ?').bind(body.id).first();
+    const existing = await env.DB.prepare('SELECT user_id, title, url FROM personal_links WHERE id = ?').bind(body.id).first();
     if (existing) {
       await env.DB.prepare('DELETE FROM personal_links WHERE id = ?').bind(body.id).run();
       markMeiliScopeDirty(env, 'personal', existing.user_id);
+      await logActivityEvent(env, {
+        action: '🗑 Personal link deleted',
+        actorUser: user,
+        title: existing.title || '',
+        url: existing.url || '',
+        scope: 'personal',
+        scopeKey: existing.user_id,
+      });
     }
   } else {
+    const existing = await env.DB.prepare('SELECT title, url FROM personal_links WHERE id = ? AND user_id = ?').bind(body.id, userId).first().catch(() => null);
     await env.DB.prepare(
       'DELETE FROM personal_links WHERE id = ? AND user_id = ?'
     ).bind(body.id, userId).run();
     markMeiliScopeDirty(env, 'personal', userId);
+    if (existing) {
+      await logActivityEvent(env, {
+        action: '🗑 Personal link deleted',
+        actorUser: user,
+        title: existing.title || '',
+        url: existing.url || '',
+        scope: 'personal',
+        scopeKey: userId,
+      });
+    }
   }
   return Response.json({ success: true }, { headers: corsHeaders });
 }
@@ -8279,8 +8829,12 @@ async function handlePatchPersonalLink(request, userOrId, env, corsHeaders) {
   let imageUrl = existing.image_url;
   let siteName = existing.site_name;
 
+  const blPersonalPatch = await getBlacklistRules(env, 'personal', targetUserId);
   if (body.url != null && String(body.url).trim()) {
     url = String(body.url).trim();
+    if (checkUrlBlacklisted(url, blPersonalPatch)) {
+      return Response.json({ success: false, error: 'This domain or URL is blacklisted', code: 'BLACKLISTED_URL' }, { status: 400, headers: corsHeaders });
+    }
     urlHash = generateUrlHash(url);
     // prevent collision with another personal link
     const clash = await findExistingLink(env, 'personal_links', 'user_id', targetUserId, url, id);
@@ -8300,7 +8854,7 @@ async function handlePatchPersonalLink(request, userOrId, env, corsHeaders) {
       }
     }
     if (Array.isArray(t)) {
-      tags = JSON.stringify(t.map(x => String(x).trim().replace(/^#+/, '')).filter(Boolean));
+      tags = JSON.stringify(filterBlacklistedTags(t.map(x => String(x).trim().replace(/^#+/, '')).filter(Boolean), blPersonalPatch));
     } else {
       tags = JSON.stringify([]);
     }
@@ -8336,6 +8890,16 @@ async function handlePatchPersonalLink(request, userOrId, env, corsHeaders) {
 
   let parsedPersonalTags;
   try { parsedPersonalTags = JSON.parse(tags); } catch (_) { parsedPersonalTags = []; }
+
+  await logActivityEvent(env, {
+    action: '✏️ Personal link edited',
+    actorUser: user,
+    title,
+    url,
+    details: parsedPersonalTags.length ? `Tags: ${parsedPersonalTags.map((t) => '#' + t).join(' ')}` : '',
+    scope: 'personal',
+    scopeKey: targetUserId,
+  });
 
   return Response.json({
     success: true,
@@ -8382,8 +8946,12 @@ async function handlePatchCommunityLink(request, user, env, corsHeaders) {
   let imageUrl = existing.image_url;
   let siteName = existing.site_name;
 
+  const blCommPatch = await getBlacklistRules(env, 'community', existing.community_id);
   if (body.url != null && String(body.url).trim()) {
     url = String(body.url).trim();
+    if (checkUrlBlacklisted(url, blCommPatch)) {
+      return Response.json({ success: false, error: 'This domain or URL is blacklisted', code: 'BLACKLISTED_URL' }, { status: 400, headers: corsHeaders });
+    }
     urlHash = generateUrlHash(url);
     const clash = await findExistingLink(env, 'links', 'community_id', existing.community_id, url, id);
     if (clash) {
@@ -8402,7 +8970,7 @@ async function handlePatchCommunityLink(request, user, env, corsHeaders) {
       }
     }
     if (Array.isArray(t)) {
-      tags = JSON.stringify(t.map(x => String(x).trim().replace(/^#+/, '')).filter(Boolean));
+      tags = JSON.stringify(filterBlacklistedTags(t.map(x => String(x).trim().replace(/^#+/, '')).filter(Boolean), blCommPatch));
     } else {
       tags = JSON.stringify([]);
     }
@@ -8436,6 +9004,16 @@ async function handlePatchCommunityLink(request, user, env, corsHeaders) {
 
   let parsedCommunityTags;
   try { parsedCommunityTags = JSON.parse(tags); } catch (_) { parsedCommunityTags = []; }
+
+  await logActivityEvent(env, {
+    action: '✏️ Community link edited',
+    actorUser: user,
+    title,
+    url,
+    details: parsedCommunityTags.length ? `Tags: ${parsedCommunityTags.map((t) => '#' + t).join(' ')}` : '',
+    scope: 'community',
+    scopeKey: existing.community_id,
+  });
 
   return Response.json({
     success: true,
@@ -8534,13 +9112,16 @@ function richSearchRowHtml(row, botUsername = '', buttonsHtml = '') {
   return '<li>' + inner + (buttonsHtml ? '<br>' + buttonsHtml : '') + '</li>';
 }
 
-/** Per-result Edit/Delete buttons (in-body, like the website card actions).
- *  Callback data stays under the 64-byte limit: search:{edit,del}:id:idx. */
-function searchRowButtons(sessionId, idx) {
-  return richButtonRow([
+/** Per-result card actions (in-body, matching website card actions).
+ *  Callback data stays under the 64-byte limit: search:{edit,bm,del,ai}:id:idx. */
+function searchRowButtons(sessionId, idx, { isGod = false } = {}) {
+  const btns = [
     { label: '✏️ Edit', data: `search:edit:${sessionId}:${idx}` },
+    { label: '🔖 Save', data: `search:bm:${sessionId}:${idx}` },
     { label: '🗑 Delete', data: `search:del:${sessionId}:${idx}` },
-  ]);
+  ];
+  if (isGod) btns.push({ label: '✦ AI', data: `search:ai:${sessionId}:${idx}` });
+  return richButtonRow(btns);
 }
 
 /** Manual tag entry, same rule as the website editor: strip #s, keep order,
@@ -8617,6 +9198,9 @@ function telegramSearchRowHtml(row, botUsername = '') {
     bits.push(boldHtml('Tags:') + ' ' + tags.slice(0, 8).map(t => tagLinkHtmlSync(String(t).toLowerCase(), botUsername)).filter(Boolean).join(' '));
   } else {
     bits.push(boldHtml('Tags:') + ' ' + italicHtml('(untagged — /forcetags adds these)'));
+  }
+  if (row.last_edited_by_name) {
+    bits.push(italicHtml(`Edited by ${row.last_edited_by_name}`));
   }
   if (row.source_posts?.length) {
     for (const post of row.source_posts) {
@@ -8727,8 +9311,9 @@ async function getTelegramSearchPage(env, session) {
   try {
     await env.DB.prepare('UPDATE telegram_search_sessions SET hit_ids = ? WHERE id = ?').bind(JSON.stringify(hitIds), session.id).run().catch(() => {});
   } catch (_) {}
+  const sessionIsGod = isGodTgId(session.tg_user_id, env);
   const html = hits.length
-    ? `${header}\n<p><i>${escHtml(session.query)}</i></p>\n<ol>${hits.map((r, i) => richSearchRowHtml(r, botUsername, searchRowButtons(session.id, i))).join('')}</ol>`
+    ? `${header}\n<p><i>${escHtml(session.query)}</i></p>\n<ol>${hits.map((r, i) => richSearchRowHtml(r, botUsername, searchRowButtons(session.id, i, { isGod: sessionIsGod }))).join('')}</ol>`
     : `${header}\n<p>${escHtml(session.query ? 'No matching saved items.' : 'Enter a search query.')}</p>`;
   // Thin cloned rows upgrade in the background, same as website search —
   // bot-found links get their descriptions and AI tags too.
@@ -8857,8 +9442,31 @@ async function findPersonalBotForOwner(env, ownerUserId) {
   ).bind(ownerUserId, ownerUserId).first();
 }
 
-/** Resolve the configured log channel and the bot token that owns it. */
-async function getConfiguredLogTarget(env, ownerUserId = null) {
+/** Resolve human-readable Telegram name/username for activity logging (Item 17). */
+async function resolveActorTgLabel(env, user, tgUser = null) {
+  if (tgUser) {
+    const uname = tgUser.username ? `@${tgUser.username}` : '';
+    const full = [tgUser.first_name, tgUser.last_name].filter(Boolean).join(' ').trim();
+    return full && uname ? `${full} (${uname})` : (uname || full || String(tgUser.id || 'Telegram User'));
+  }
+  if (!user) return 'Unknown User';
+  try {
+    const row = user.id
+      ? await env.DB.prepare('SELECT display_name, username, provider, provider_id, telegram_api_id FROM users WHERE id = ?').bind(String(user.id)).first()
+      : null;
+    const u = row || user;
+    const name = u.display_name || '';
+    const uname = u.username ? `@${u.username.replace(/^@/, '')}` : '';
+    if (name && uname) return `${name} (${uname})`;
+    return uname || name || u.provider_id || user.id || 'User';
+  } catch {
+    return user.display_name || user.username || user.id || 'User';
+  }
+}
+
+/** Resolve the configured log channel and the bot token that owns it.
+ *  Falls back to the community's bound log_channel_id or any GOD owner's /setlog channel. */
+async function getConfiguredLogTarget(env, ownerUserId = null, communityId = null) {
   try {
     await ensureBotBindingColumns(env);
     let binding = null;
@@ -8871,7 +9479,35 @@ async function getConfiguredLogTarget(env, ownerUserId = null) {
           ORDER BY CASE WHEN COALESCE(scope,'personal')='personal' THEN 0 ELSE 1 END, created_at DESC LIMIT 1`
       ).bind(ownerUserId, ownerUserId).first();
     }
-    // no unscoped fallback: don't leak another user's channel
+    if (!binding && communityId) {
+      binding = await env.DB.prepare(
+        `SELECT log_channel_id, bot_token, scope FROM community_bots
+          WHERE platform = 'telegram'
+            AND community_id = ?
+            AND log_channel_id IS NOT NULL AND log_channel_id != ''
+          ORDER BY created_at DESC LIMIT 1`
+      ).bind(String(communityId)).first();
+    }
+    if (!binding) {
+      const ownerIds = parseIdList(env.TG_OWNER_IDS || '');
+      if (ownerIds.length > 0) {
+        const ph = ownerIds.map(() => '?').join(',');
+        const godUsers = await env.DB.prepare(
+          `SELECT id FROM users WHERE (provider = 'telegram' AND provider_id IN (${ph})) OR telegram_api_id IN (${ph})`
+        ).bind(...ownerIds.map(String), ...ownerIds.map(String)).all().catch(() => ({ results: [] }));
+        const godIds = (godUsers?.results || []).map((g) => g.id).filter(Boolean);
+        if (godIds.length) {
+          const gph = godIds.map(() => '?').join(',');
+          binding = await env.DB.prepare(
+            `SELECT log_channel_id, bot_token, scope FROM community_bots
+              WHERE platform = 'telegram'
+                AND (created_by IN (${gph}) OR user_id IN (${gph}))
+                AND log_channel_id IS NOT NULL AND log_channel_id != ''
+              ORDER BY CASE WHEN COALESCE(scope,'personal')='personal' THEN 0 ELSE 1 END, created_at DESC LIMIT 1`
+          ).bind(...godIds, ...godIds).first().catch(() => null);
+        }
+      }
+    }
     if (!binding?.log_channel_id) return null;
     const token = (binding.bot_token && await decryptBotToken(env, binding.bot_token)) || env.TELEGRAM_BOT_TOKEN;
     if (!token) return null;
@@ -8880,11 +9516,27 @@ async function getConfiguredLogTarget(env, ownerUserId = null) {
 }
 
 /** Send operational events only to the explicitly configured log channel. */
-async function sendConfiguredLog(env, text, ownerUserId = null, target = null) {
-  const logTarget = target || await getConfiguredLogTarget(env, ownerUserId);
+async function sendConfiguredLog(env, text, ownerUserId = null, target = null, communityId = null) {
+  const logTarget = target || await getConfiguredLogTarget(env, ownerUserId, communityId);
   if (!logTarget?.channelId || !logTarget.token) return false;
   const result = await sendTelegramFormatted(logTarget.token, logTarget.channelId, text).catch(() => null);
   return !!result?.ok;
+}
+
+/** Structured audit entry sent to `/setlog` channel for edits, deletes, and activities (Item 17). */
+async function logActivityEvent(env, { action, actorUser = null, tgUser = null, title = '', url = '', details = '', scope = '', scopeKey = '' }) {
+  try {
+    const actorLabel = await resolveActorTgLabel(env, actorUser, tgUser);
+    const lines = [
+      `${boldHtml(action)}`,
+      `👤 ${boldHtml('By:')} ${escHtml(actorLabel)}`,
+      scope ? `📂 ${boldHtml('Scope:')} ${escHtml(scope)}${scopeKey ? ` (${escHtml(String(scopeKey).slice(0, 24))})` : ''}` : '',
+      title ? `📌 ${escHtml(String(title).slice(0, 140))}` : '',
+      url ? `🔗 ${linkHtml(url, String(url).slice(0, 120))}` : '',
+      details ? `📝 ${escHtml(String(details).slice(0, 300))}` : '',
+    ].filter(Boolean);
+    await sendConfiguredLog(env, lines.join('\n'), actorUser?.id || null, null, scope === 'community' ? scopeKey : null);
+  } catch (_) {}
 }
 
 async function logWebsiteAuthFailure(env, provider, reason, subject = '') {
@@ -9037,6 +9689,11 @@ async function saveCommunityUrlDirect(env, token, binding, rawUrl, senderName, a
   if (!(await ensureMember(communityId, athenaUser.id, env))) {
     await sendTelegramMessage(token, chatId,
       `Join first: /community_join ${communityId}\n(Login on website, then run this command.)`, threadId);
+    return;
+  }
+  const blRules = await getBlacklistRules(env, 'community', communityId);
+  if (checkUrlBlacklisted(rawUrl, blRules)) {
+    await sendTelegramFormatted(token, chatId, `${boldHtml('🚫')} Blacklisted URL skipped: ${codeHtml(rawUrl)}`, threadId);
     return;
   }
   const urlHash = generateUrlHash(rawUrl);
@@ -10395,6 +11052,10 @@ async function savePersonalUrl(env, userId, rawUrl, senderName, userNotes = '', 
   if (isInternalTelegramMessageUrl(rawUrl)) {
     return { duplicate: true, error: 'Internal Telegram message links (t.me/c/...) cannot be saved' };
   }
+  const blRules = await getBlacklistRules(env, 'personal', userId);
+  if (checkUrlBlacklisted(rawUrl, blRules)) {
+    return { duplicate: false, error: 'This domain or URL is blacklisted' };
+  }
   const urlHash = generateUrlHash(rawUrl);
   const existing = await findExistingLink(env, 'personal_links', 'user_id', userId, rawUrl);
   if (existing) return { duplicate: true, existing };
@@ -10547,7 +11208,7 @@ function helpTextForSection(section, isGod = false) {
       richParagraph('<b>Moderation (staff)</b>'),
       cmd(6, `${codeHtml('/delete')} ${codeHtml('<url>')}`, 'Remove a link from the community brain (reply to a result works too).'),
       cmd(7, `${codeHtml('/edit')} ${codeHtml('<url>')} | notes: …`, 'Fix a title or notes.'),
-      cmd(8, `${codeHtml('/topic')} ${codeHtml('<id>|off|here')}`, 'A reply lock, not a clone. The bot only answers inside the locked topic until ' + codeHtml('/topic off') + '. To copy a topic into a brain use ' + codeHtml('/topic link') + ' below.'),
+      cmd(8, `${codeHtml('/blacklist')} ${codeHtml('url|tag|list|remove')}`, 'Block unwanted domains or tags across Athena.'),
       cmd(9, `${codeHtml('/kick')} ${codeHtml('<@user|id>')}`, 'Remove a member\'s access — they can rejoin later.'),
       cmd(10, `${codeHtml('/admin')} · ${codeHtml('/demote')}`, 'Promote or demote — reply to the member\'s message. Owner/GOD only.'),
       spacer,
@@ -10972,6 +11633,14 @@ export async function runForcetagsReview(env, { token, chatId, forumThreadId = n
     }).catch(() => {});
   };
 
+  const blCache = new Map();
+  const getBlCached = async (tbl, colKey) => {
+    const sc = tbl === 'personal_links' ? 'personal' : 'community';
+    const k = `${sc}:${colKey}`;
+    if (!blCache.has(k)) blCache.set(k, await getBlacklistRules(env, sc, colKey).catch(() => ({ entries: [], urls: [], tags: [] })));
+    return blCache.get(k);
+  };
+
   const processTargets = async (targets) => {
     for (const t of targets) {
       try {
@@ -11035,7 +11704,7 @@ export async function runForcetagsReview(env, { token, chatId, forumThreadId = n
         }
         const platforms = result.facts?.software ? (result.facts.platforms || []) : [];
         if (platforms.length >= 2 && !newTags.includes('multiplatform')) newTags.push('multiplatform');
-        newTags = [...new Set(newTags)].slice(0, 8);
+        newTags = filterBlacklistedTags([...new Set(newTags)], await getBlCached(t.table, t.col)).slice(0, 8);
         if (!newTags.length) newTags = ['website'];
 
         // Tags-column only: title/notes stay exactly as the user left them.
@@ -11096,6 +11765,13 @@ export async function runForcetagsReview(env, { token, chatId, forumThreadId = n
         await processTargets(targets);
         await editProgress(targets.length);
         await sendTelegramRichMessage(token, chatId, buildReport(targets.length >= BATCH), forumThreadId);
+        await logActivityEvent(env, {
+          action: '🏷 /forcetags completed',
+          tgUser: tgUserId ? { id: tgUserId } : null,
+          details: `reviewed=${st.done}, changed=${st.changed}, ai=${st.aiHits}, rules=${st.ruleHits}`,
+          scope,
+          scopeKey: communityId || '',
+        });
       } catch (e) {
         await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} Retag failed: ${escHtml(String(e?.message || e).slice(0, 200))}`, forumThreadId).catch(() => {});
       }
@@ -11112,6 +11788,13 @@ export async function runForcetagsReview(env, { token, chatId, forumThreadId = n
           await editProgress(null);
         }
         await sendTelegramRichMessage(token, chatId, buildReport(false), forumThreadId);
+        await logActivityEvent(env, {
+          action: '🏷 /forcetags all completed',
+          tgUser: tgUserId ? { id: tgUserId } : null,
+          details: `reviewed=${st.done}, changed=${st.changed}, ai=${st.aiHits}, rules=${st.ruleHits}`,
+          scope,
+          scopeKey: communityId || '',
+        });
       } catch (e) {
         await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} Sweep failed: ${escHtml(String(e?.message || e).slice(0, 200))}`, forumThreadId).catch(() => {});
       }
@@ -11262,10 +11945,81 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
     }
-    // ---- Per-result Edit / Delete (same DB rows the website edits).
-    //  The editor lives in THIS message: Edit opens the 4-section form here,
-    //  field buttons stage values from the user's next message, Save writes
-    //  the row exactly like the website editor (manual lock included).
+    // ---- Per-result Bookmark / AI Enrich / Edit / Delete (same DB rows the website uses).
+    if (action === 'bm') {
+      const parts = data.split(':');
+      const idx = Number(parts[3]);
+      const hit = await resolveSearchHit(env, session, idx);
+      if (!hit) {
+        await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Result expired — run /search again', show_alert: true }).catch(() => {});
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      if (!callbackUser?.id) {
+        await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Login on website once to save bookmarks', show_alert: true }).catch(() => {});
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      try {
+        const res = await toggleUserBookmark(env, callbackUser.id, {
+          linkId: hit.id,
+          scope: session.scope,
+          scopeKey: session.scope_key,
+          url: hit.url,
+          title: hit.title,
+        });
+        await telegramApi(token, 'answerCallbackQuery', {
+          callback_query_id: cq.id,
+          text: res.bookmarked ? '🔖 Saved to your bookmarks' : 'Removed from bookmarks',
+        }).catch(() => {});
+      } catch (_) {
+        await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Bookmark failed', show_alert: true }).catch(() => {});
+      }
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    if (action === 'ai') {
+      const parts = data.split(':');
+      if (!isGodTgId(tgUserId, env) && !(callbackUser && await isInstanceOwnerUserAsync(callbackUser, env))) {
+        await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'AI card rewrite is GOD rank only', show_alert: true }).catch(() => {});
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      const idx = Number(parts[3]);
+      const hit = await resolveSearchHit(env, session, idx);
+      if (!hit || !hit.url) {
+        await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Result expired — run /search again', show_alert: true }).catch(() => {});
+        return new Response('OK', { status: 200, headers: corsHeaders });
+      }
+      await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: '✦ Scraping & rewriting card with AI…' }).catch(() => {});
+      try {
+        const cleanUrl = normalizeCleanUrl(hit.url) || hit.url;
+        let scrapedMeta = null;
+        if (/^https?:\/\//i.test(cleanUrl)) {
+          try { scrapedMeta = await scrapeLinkMetadata(cleanUrl, env); } catch (_) { scrapedMeta = null; }
+        }
+        let existingTags = [];
+        try { existingTags = typeof hit.tags === 'string' ? JSON.parse(hit.tags || '[]') : (hit.tags || []); } catch (_) { existingTags = []; }
+        const seedMeta = {
+          title: cleanCleanerTitle(scrapedMeta?.title || hit.title, cleanUrl) || hit.title || '',
+          notes: cleanBoilerplateText(scrapedMeta?.description || hit.notes || '', cleanUrl) || hit.notes || '',
+          content: scrapedMeta?.content || [hit.notes, hit.title, existingTags.join(' ')].filter(Boolean).join('\n'),
+        };
+        const generated = await describeAndTagLink(env, cleanUrl, seedMeta, { maxTags: 8, scrape: false, reviewTags: existingTags });
+        const blRules = await getBlacklistRules(env, session.scope, session.scope_key);
+        const safeTags = filterBlacklistedTags(generated.tags || [], blRules).slice(0, 8);
+        const updTitle = cleanCleanerTitle(generated.title || seedMeta.title, cleanUrl) || seedMeta.title;
+        const updNotes = cleanBoilerplateText(generated.description || seedMeta.notes || '', cleanUrl) || seedMeta.notes || '';
+        const editedAt = Date.now();
+        const tbl = session.scope === 'personal' ? 'personal_links' : 'links';
+        await ensureLinkMetaColumns(env);
+        await ensureSearchColumns(env);
+        await env.DB.prepare(
+          `UPDATE ${tbl} SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, last_edited_by = ?, last_edited_by_name = ?, manual_edited_at = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
+        ).bind(cleanUrl, generateUrlHash(cleanUrl), updTitle, updNotes, JSON.stringify(safeTags), 'AI', 'AI', editedAt, hit.id).run();
+        markMeiliScopeDirty(env, session.scope, session.scope_key);
+        await logActivityEvent(env, { action: '✦ Card AI-enriched (TG)', tgUser: cq.from, title: updTitle, url: cleanUrl, scope: session.scope, scopeKey: session.scope_key });
+        const view = await getTelegramSearchPage(env, session);
+        await editTelegramRichMessage(token, chatId, msgId, view.html, threadId, searchRichButtonRow(session.id, view.page, view.total));
+      } catch (_) {}
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
     if (action === 'edit' || action === 'del' || action === 'ef' || action === 'esv' || action === 'ecx') {
       const parts = data.split(':');
       if (session.scope === 'personal') {
@@ -11307,6 +12061,15 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
             await env.DB.prepare('DELETE FROM link_votes WHERE link_id = ?').bind(hit.id).run().catch(() => {});
           }
           markMeiliScopeDirty(env, session.scope, session.scope_key);
+          await logActivityEvent(env, {
+            action: '🗑 Link deleted (TG search)',
+            actorUser: callbackUser,
+            tgUser: cq.from,
+            title: hit.title,
+            url: hit.url,
+            scope: session.scope,
+            scopeKey: session.scope_key,
+          });
         } catch (_) {
           await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Delete failed', show_alert: true }).catch(() => {});
           return new Response('OK', { status: 200, headers: corsHeaders });
@@ -11393,6 +12156,15 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
           }
         }
         markMeiliScopeDirty(env, session.scope, session.scope_key);
+        await logActivityEvent(env, {
+          action: '✏️ Link edited (TG search)',
+          actorUser: callbackUser,
+          tgUser: cq.from,
+          title,
+          url,
+          scope: session.scope,
+          scopeKey: session.scope_key,
+        });
         await clearEditState();
         await renderSearchPage('Saved — locked from /structure');
         return new Response('OK', { status: 200, headers: corsHeaders });
@@ -15235,26 +16007,30 @@ async function structureDatabase(env, { onProgress = null, scope = null, scopeId
               stats.merged++;
             }
 
-            let keepUrl = canonicalStoredUrl(keeper.url) || keeper.url;
+            let keepUrl = canonicalStoredUrl(normalizeCleanUrl(keeper.url) || keeper.url) || normalizeCleanUrl(keeper.url) || keeper.url;
             if (urlQualityScore(keepUrl) < 60 && contentNoteUrls.length > 0) {
               if (!resolvedImage && isDirectImageUrl(keepUrl)) resolvedImage = keepUrl;
-              keepUrl = contentNoteUrls[0];
+              keepUrl = normalizeCleanUrl(contentNoteUrls[0]) || contentNoteUrls[0];
               stats.urlNormalized++;
             }
             const keepHash = generateUrlHash(keepUrl);
 
             let keepTitle = candidateTitles.find(ti => ti && !isWeakTitle(ti, keepUrl)) || candidateTitles[0] || '';
-            keepTitle = cleanTitleText(keepTitle);
+            keepTitle = cleanCleanerTitle(cleanTitleText(keepTitle), keepUrl) || cleanTitleText(keepTitle);
 
             let rawNotes = candidateNotes.find(n => n && !isHashtagOnlyNotes(n)) || candidateNotes[0] || '';
-            let keepNotes = cleanAllNotes(rawNotes, keepUrl, keepTitle, nameRe);
+            let keepNotes = cleanBoilerplateText(cleanAllNotes(rawNotes, keepUrl, keepTitle, nameRe), keepUrl);
 
             if (isWeakTitle(keepTitle, keepUrl) && rawNotes) {
               const hint = extractTitleFromNoteText(rawNotes, keepUrl);
               if (hint) keepTitle = hint;
             }
 
-            const keepTags = cleanTagsForStructure(allTagCandidates, keepUrl, keepTitle, keepNotes);
+            const blStruct = await getBlacklistRules(env, t.name === 'links' ? 'community' : 'personal', row.scope_id).catch(() => ({ entries: [], urls: [], tags: [] }));
+            const keepTags = filterBlacklistedTags(
+              cleanTagsForStructure(allTagCandidates, keepUrl, keepTitle, keepNotes),
+              blStruct
+            );
 
             if (!keepNotes) {
               try {
@@ -15263,8 +16039,12 @@ async function structureDatabase(env, { onProgress = null, scope = null, scopeId
                   { config: aiCfg, maxTags: 8, scrape: true });
                 const desc = String(filled?.description || '').replace(/\s+/g, ' ').trim().slice(0, 600);
                 if (desc) {
-                  keepNotes = cleanAllNotes(desc, keepUrl, keepTitle, nameRe) || desc.slice(0, 600);
+                  keepNotes = cleanBoilerplateText(cleanAllNotes(desc, keepUrl, keepTitle, nameRe) || desc.slice(0, 600), keepUrl);
                   if (keepNotes) stats.descFilled++;
+                }
+                if (!keepTitle || isWeakTitle(keepTitle, keepUrl)) {
+                  const aiT = cleanCleanerTitle(filled?.title || '', keepUrl);
+                  if (aiT) keepTitle = aiT;
                 }
               } catch (_) {}
             }
@@ -15309,13 +16089,23 @@ async function structureDatabase(env, { onProgress = null, scope = null, scopeId
             stats.urlNormalized++;
           }
 
-          let updTitle = cleanTitleText(row.title);
-          let updNotes = cleanAllNotes(row.notes, row.url, row.title, nameRe);
+          const cleanNonDup = normalizeCleanUrl(row.url) || row.url;
+          if (cleanNonDup && cleanNonDup !== row.url) {
+            row.url = cleanNonDup;
+            row.url_hash = generateUrlHash(cleanNonDup);
+            stats.urlNormalized++;
+          }
+          let updTitle = cleanCleanerTitle(cleanTitleText(row.title), row.url) || cleanTitleText(row.title);
+          let updNotes = cleanBoilerplateText(cleanAllNotes(row.notes, row.url, row.title, nameRe), row.url);
           if (isWeakTitle(updTitle, row.url) && row.notes) {
             const hint = extractTitleFromNoteText(row.notes, row.url);
             if (hint) updTitle = hint;
           }
-          const updTags = cleanTagsForStructure(rowTagCandidates(row), row.url, row.title, row.notes);
+          const blRow = await getBlacklistRules(env, t.name === 'links' ? 'community' : 'personal', row.scope_id).catch(() => ({ entries: [], urls: [], tags: [] }));
+          const updTags = filterBlacklistedTags(
+            cleanTagsForStructure(rowTagCandidates(row), row.url, updTitle || row.title, updNotes || row.notes),
+            blRow
+          );
           const tagsChanged = JSON.stringify(updTags) !== JSON.stringify(rawTagList(row.tags));
           if (!updNotes) {
             try {
@@ -15324,8 +16114,12 @@ async function structureDatabase(env, { onProgress = null, scope = null, scopeId
                 { config: aiCfg, maxTags: 8, scrape: true });
               const desc = String(filled?.description || '').replace(/\s+/g, ' ').trim().slice(0, 600);
               if (desc) {
-                updNotes = cleanAllNotes(desc, row.url, updTitle || row.title, nameRe) || desc.slice(0, 600);
+                updNotes = cleanBoilerplateText(cleanAllNotes(desc, row.url, updTitle || row.title, nameRe) || desc.slice(0, 600), row.url);
                 if (updNotes && updNotes !== row.notes) stats.descFilled++;
+              }
+              if (!updTitle || isWeakTitle(updTitle, row.url)) {
+                const aiT = cleanCleanerTitle(filled?.title || '', row.url);
+                if (aiT) updTitle = aiT;
               }
             } catch (_) {}
           }
@@ -15771,7 +16565,10 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   const forumThreadId = msg.message_thread_id != null ? Number(msg.message_thread_id) : null;
 
   let parts = text.split(/\s+/);
-  let cmd = (parts[0] || '').toLowerCase().replace(/@\w+$/, '');
+  const rawCmdToken = String(parts[0] || '');
+  const mentionMatch = rawCmdToken.match(/^\/[a-zA-Z0-9_]+@(\w+)$/);
+  const targetBotMention = mentionMatch ? mentionMatch[1].toLowerCase() : '';
+  let cmd = rawCmdToken.toLowerCase().replace(/@\w+$/, '');
   // if first token is a URL, not a command
   if (cmd.startsWith('http')) cmd = '';
   const rest = cmd.startsWith('/') ? text.slice(parts[0].length).trim() : text;
@@ -15779,6 +16576,19 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
 
   let binding = await findTelegramBinding(env, chatId, tgUserId);
   let token = (await tokenForBindingAsync(binding, env)) || env.TELEGRAM_BOT_TOKEN;
+  // Ignore commands explicitly addressed to a different @botusername in shared groups
+  if (targetBotMention) {
+    let selfUsername = String(binding?.bot_username || '').replace(/^@/, '').toLowerCase();
+    if (!selfUsername && token) {
+      try {
+        const me = await telegramApi(token, 'getMe');
+        if (me?.ok && me.result?.username) selfUsername = String(me.result.username).toLowerCase();
+      } catch (_) {}
+    }
+    if (selfUsername && targetBotMention !== selfUsername) {
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+  }
   // Channel posts have no sender identity: real-time indexing only, and only
   // for channels linked to a community via /channel_link. Bots cannot reply
   // in channels, so this path is silent by necessity.
@@ -15879,19 +16689,12 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     } catch (_) {}
   }
 
-  // Topic lock: whole bot in this group (commands + dumps + ban checks). Only
-  // /topic can run outside the locked topic. This gate MUST run before the
-  // presence/ban block — otherwise a message in the wrong topic still gets a
-  // "you are banned" reply, which looks like the bot is broken.
-  // In forum General, message_thread_id is often missing — treat as "not locked topic".
+  // Topic locking removed (Item 6): bots work across all forum topics;
+  // multi-bot groups disambiguate via /command@botusername handled above.
   const isGroupChatEarly = String(msg.chat?.type || '').includes('group') || chatId.startsWith('-');
   if (isGroupChatEarly && binding?.topic_id) {
-    const locked = String(binding.topic_id);
-    const here = forumThreadId != null ? String(forumThreadId) : null;
-    const isTopicCmd = cmd === '/topic';
-    if (here !== locked && !isTopicCmd) {
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
+    await env.DB.prepare('UPDATE community_bots SET topic_id = NULL WHERE id = ?').bind(binding.id).run().catch(() => {});
+    binding.topic_id = null;
   }
 
   // Telegram's "Anonymous Admin" (id 1087968824, @GroupAnonymousBot) posts as a
@@ -16160,7 +16963,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   const dumpLinkMode = (binding?.dump_link_mode || 'smart').toLowerCase();
 
   const STAFF_OR_ABOVE = new Set([
-    '/delete', '/edit', '/topic', '/dumpall', '/admin', '/demote', '/kick',
+    '/delete', '/edit', '/dumpall', '/blacklist', '/admin', '/demote', '/kick',
     '/personal', '/community', '/mode', '/community_verify', '/verify_community', '/communityverify',
     '/community_delete', '/delete_community', '/cdelete',
     // every /clear_db alias must be listed, or the alias skips this gate entirely
@@ -16421,6 +17224,56 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       'Open the website → Communities to see it and dump links.',
       'AI & /search: all ranks (community). Personal brain: GOD only. Settings: GOD only.'
     ].join('\n'), forumThreadId);
+     return new Response('OK', { status: 200, headers: corsHeaders });
+   }
+
+   // ---- /blacklist <url|tag|list|remove> <pattern> ----
+   if (cmd === '/blacklist') {
+     const bScope = (!isGroupChatEarly && (!binding || binding.scope === 'personal')) ? 'personal' : 'community';
+     const bScopeKey = bScope === 'personal' ? (athenaUser?.id || '') : (binding?.community_id || '');
+     if (bScope === 'personal' && !isGod) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Personal blacklist is GOD rank only.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (bScope === 'community' && (!bScopeKey || (!isCommAdmin && !isGod))) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🔒')} Admin/Owner rank required to manage community blacklist.`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const bParts = rest.trim().split(/\s+/).filter(Boolean);
+     const sub = (bParts[0] || 'list').toLowerCase();
+     if (sub === 'list' || !bParts.length) {
+       const rules = await getBlacklistRules(env, bScope, bScopeKey);
+       const rows = (rules.entries || []).slice(0, 40);
+       const textOut = rows.length
+         ? `${boldHtml('🚫 Blacklist')} (${escHtml(bScope)})\n` + rows.map((r) => `• [${escHtml(r.kind)}] ${codeHtml(r.pattern)}`).join('\n')
+         : `${boldHtml('🚫 Blacklist')} (${escHtml(bScope)})\nNo rules set.\nUsage: ${codeHtml('/blacklist url <domain>')} · ${codeHtml('/blacklist tag <tag>')} · ${codeHtml('/blacklist remove <pattern>')}`;
+       await sendTelegramFormatted(token, chatId, textOut, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     if (sub === 'remove' || sub === 'rm' || sub === 'del') {
+       const pat = bParts.slice(1).join(' ').trim();
+       if (!pat) {
+         await sendTelegramFormatted(token, chatId, `Usage: ${codeHtml('/blacklist remove <pattern>')}`, forumThreadId);
+         return new Response('OK', { status: 200, headers: corsHeaders });
+       }
+       const ok = await removeBlacklistEntry(env, { scope: bScope, scopeKey: bScopeKey, pattern: pat });
+       await logActivityEvent(env, { action: '♻️ Blacklist removed (TG)', actorUser: athenaUser, tgUser: from, details: pat, scope: bScope, scopeKey: bScopeKey });
+       await sendTelegramFormatted(token, chatId, ok ? `${boldHtml('✅')} Removed ${codeHtml(pat)} from blacklist.` : `${boldHtml('⚠️')} Pattern not found: ${codeHtml(pat)}`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     const kind = sub === 'tag' ? 'tag' : 'url';
+     const pat = (sub === 'url' || sub === 'tag' || sub === 'add' ? bParts.slice(1) : bParts).join(' ').trim();
+     if (!pat) {
+       await sendTelegramFormatted(token, chatId, `Usage: ${codeHtml('/blacklist url <domain-or-url>')} or ${codeHtml('/blacklist tag <tag>')}`, forumThreadId);
+       return new Response('OK', { status: 200, headers: corsHeaders });
+     }
+     try {
+       const entry = await addBlacklistEntry(env, { scope: bScope, scopeKey: bScopeKey, kind, pattern: pat, createdBy: athenaUser?.id || tgUserId });
+       await logActivityEvent(env, { action: '🚫 Blacklist added (TG)', actorUser: athenaUser, tgUser: from, details: `[${entry.kind}] ${entry.pattern}`, scope: bScope, scopeKey: bScopeKey });
+       await sendTelegramFormatted(token, chatId, `${boldHtml('🚫')} Blacklisted [${escHtml(entry.kind)}]: ${codeHtml(entry.pattern)}`, forumThreadId);
+     } catch (e) {
+       await sendTelegramFormatted(token, chatId, `${boldHtml('❌')} ${escHtml(e?.message || 'Failed')}`, forumThreadId);
+     }
      return new Response('OK', { status: 200, headers: corsHeaders });
    }
 
@@ -17587,107 +18440,18 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
-// ---- /topic <id> | off | (show) — simple lock for this community ----
+// ---- /topic (removed — clear any legacy lock and report multi-topic support) ----
   if (cmd === '/topic') {
-    const args = rest.trim().split(/\s+/).filter(Boolean);
-    const msgThreadId = msg.message_thread_id != null ? String(msg.message_thread_id) : null;
-    const isGroup = String(msg.chat?.type || '').includes('group') || chatId.startsWith('-');
-
-    // Resolve target binding: group binding or DM + community id/name
-    let targetBinding = null;
-    let topicArg = '';
-
-    if (isGroup && binding?.community_id) {
-      targetBinding = binding;
-      topicArg = args[0] || '';
-    } else if (!isGroup && athenaUser) {
-      // DM: /topic <community> <topicId>  OR  /topic <topicId> if only one community
-      if (args.length >= 2) {
-        const c = await resolveCommunityByIdOrName(env, athenaUser.id, args[0]);
-        if (!c) {
-          await sendTelegramMessage(token, chatId, `Community not found: ${args[0]}`, forumThreadId);
-          return new Response('OK', { status: 200, headers: corsHeaders });
-        }
-        targetBinding = await env.DB.prepare(
-          `SELECT * FROM community_bots WHERE community_id = ? AND COALESCE(scope,'community') = 'community' LIMIT 1`
-        ).bind(c.id).first();
-        topicArg = args[1];
-      } else if (args.length === 1 && !/^\d+$/.test(args[0]) && !['off', 'clear', 'here', 'this'].includes(args[0].toLowerCase())) {
-        // show status for named community
-        const c = await resolveCommunityByIdOrName(env, athenaUser.id, args[0]);
-        if (!c) {
-          await sendTelegramMessage(token, chatId, `Not found: ${args[0]}`, forumThreadId);
-          return new Response('OK', { status: 200, headers: corsHeaders });
-        }
-        targetBinding = await env.DB.prepare(
-          `SELECT * FROM community_bots WHERE community_id = ? LIMIT 1`
-        ).bind(c.id).first();
-        topicArg = '';
-      } else {
-        const { results } = await env.DB.prepare(
-          `SELECT b.* FROM community_bots b
-           INNER JOIN communities c ON c.id = b.community_id
-           WHERE (b.created_by = ? OR b.user_id = ?) AND COALESCE(b.scope,'community') = 'community'
-           ORDER BY b.created_at DESC`
-        ).bind(athenaUser.id, athenaUser.id).all();
-        const list = results || [];
-        if (list.length === 1) {
-          targetBinding = list[0];
-          topicArg = args[0] || '';
-        } else if (!args.length) {
-          const lines = list.map(b => `${b.group_name || b.community_id} | topic=${b.topic_id || 'OFF'}`);
-          await sendTelegramMessage(token, chatId,
-            lines.length
-              ? `Topics:\n${lines.join('\n')}\n\n/topic <community id|name> <topic_id>`
-              : 'No communities. /community_verify in a group first.', forumThreadId);
-          return new Response('OK', { status: 200, headers: corsHeaders });
-        } else {
-          await sendTelegramMessage(token, chatId, 'Usage (DM): /topic <community id|name> <topic_id>\nOr /topic off for a community.', forumThreadId);
-          return new Response('OK', { status: 200, headers: corsHeaders });
-        }
-      }
-    } else if (isGroup && !binding?.community_id) {
-      await sendTelegramMessage(token, chatId, 'Group not verified. Owner: /community_verify first.', forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
+    if (binding?.id && binding.topic_id) {
+      await env.DB.prepare(`UPDATE community_bots SET topic_id = NULL WHERE id = ?`).bind(binding.id).run().catch(() => {});
     }
-
-    if (!targetBinding?.id) {
-      await sendTelegramMessage(token, chatId, 'No community bot binding found.', forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-
-    const canManage = await isBotOwnerTg(env, targetBinding, tgUserId, athenaUser)
-      || (targetBinding.community_id && await isTgUserCommunityStaff(env, targetBinding.community_id, tgUserId, athenaUser));
-    const currentTopic = targetBinding.topic_id ? String(targetBinding.topic_id) : null;
-
-    if (!topicArg) {
-      await sendTelegramMessage(token, chatId,
-        currentTopic
-          ? `Topic lock ON: ${currentTopic}\nThe bot only answers in that topic — this is not a clone binding.\n/topic off to clear · /clone to clone a topic into a brain`
-          : `Topic lock OFF (whole group).\nThe bot answers in every topic — this is not a clone binding.\n/topic <id> to lock · /clone to clone a topic into a brain${msgThreadId ? `\nThis topic id: ${msgThreadId}` : ''}`, forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-
-    if (!canManage) {
-      await sendTelegramMessage(token, chatId, 'Only owner/admins can set /topic.', forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-
-    if (['off', 'clear', '0', 'none', 'disable'].includes(topicArg.toLowerCase())) {
-      await env.DB.prepare(`UPDATE community_bots SET topic_id = NULL WHERE id = ?`).bind(targetBinding.id).run();
-      await sendTelegramMessage(token, chatId, 'Topic lock cleared — whole group.', forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-
-    let topicId = ['here', 'this', 'current'].includes(topicArg.toLowerCase())
-      ? msgThreadId
-      : topicArg.replace(/[^\d]/g, '');
-    if (!topicId) {
-      await sendTelegramMessage(token, chatId, 'Usage: /topic <topic_id> | /topic here | /topic off\nTo clone a topic into a brain: /topic link', forumThreadId);
-      return new Response('OK', { status: 200, headers: corsHeaders });
-    }
-    await env.DB.prepare(`UPDATE community_bots SET topic_id = ? WHERE id = ?`).bind(topicId, targetBinding.id).run();
-    await sendTelegramMessage(token, chatId, `Topic lock set: ${topicId}\nThe bot now answers only in that topic. Links posted in other topics are ignored until /topic off.`, forumThreadId);
+    const botMention = binding?.bot_username ? `@${binding.bot_username}` : '';
+    await sendTelegramFormatted(
+      token,
+      chatId,
+      `${boldHtml('💬 Topic locking is disabled.')}\nThe bot now responds in every topic. In multi-bot groups, address commands directly with ${codeHtml(`/search${botMention} <query>`)} (or ${codeHtml(`/ai${botMention} <question>`)}).`,
+      forumThreadId
+    );
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
@@ -18028,10 +18792,10 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
 
 Rules:
 1. NEVER say the brain is empty if BRAIN CONTEXT lists any items — use them.
-2. By default give concise, direct answers. When the user says "in detail", "detailed", "explain", or asks for more depth, be thorough and comprehensive.
+2. By default give concise, direct answers. When the user says "in detail", "detailed", "explain", or asks for more depth, give thorough detail.
 3. Answer DIRECTLY. NEVER include "Thinking", numbered analysis steps, evaluation of items, or meta-commentary about your reasoning. Start immediately with the answer.
-4. When an uploaded DOCUMENT answers the question, read its relevant sections and present them clearly. Cite as [#n].
-5. Recommend saved URLs when applicable. Cite as [#n].
+4. Embed cited URLs inline right where you mention them using Markdown links \`[Title](url)\` along with a brief contextual description (1 sentence). For uploaded documents, cite \`**[Document Title]**\`. NEVER append a bare wall of raw URLs or \`[#n]\` source list at the end unless a section specifically summarizes multiple tools cleanly with descriptions.
+5. Also include \`[#n]\` only if a link has no URL (e.g. a document), never leave dangling \`[#n]\` tags without context.
 6. Stay strictly grounded in BRAIN CONTEXT; never invent facts not present in it.
 
 `;
@@ -18067,49 +18831,31 @@ Rules:
           }
         }
 
-       // Rich text: full markdown → Telegram HTML (headers, lists, quotes,
-       // code blocks, tables, bold/italic/strike, links, citations)
-       const aiHtml = mdToTelegramHtml(content || '(empty)');
+       // Inline clickable links: replace any residual [#n] or [n] markers inside
+       // the answer text directly with clickable HTML links (no bottom URL dump!).
+       let inlineContent = String(content || '(empty)').replace(/\[#?(\d+)\]/g, (full, numStr) => {
+         const idx = parseInt(numStr, 10) - 1;
+         const d = docs[idx];
+         if (!d) return '';
+         const label = String(d.title || titleFromUrl(d.url || '') || `Source ${numStr}`).replace(/[[\]]/g, '');
+         return d.url ? `[${label}](${d.url})` : `**${label}**`;
+       });
+       const aiHtml = mdToTelegramHtml(inlineContent);
        let msg = `${boldHtml('🧠 AI Answer')}\n\n${aiHtml}`;
 
-       // Find cited sources in the answer (e.g., [#1], [#2])
-       const citedIndices = new Set();
-       const citeRegex = /\[#(\d+)\]/g;
-       let citeMatch;
-       while ((citeMatch = citeRegex.exec(content || '')) !== null) {
-         citedIndices.add(parseInt(citeMatch[1], 10) - 1); // 0-based index
-       }
-       // Also check for [#n] without brackets
-       const citeRegex2 = /\[(\d+)\]/g;
-       while ((citeMatch = citeRegex2.exec(content || '')) !== null) {
-         citedIndices.add(parseInt(citeMatch[1], 10) - 1);
-       }
-
-       // Separate main cited sources from other sources
-       const mainSources = [];
-        docs.forEach((d, i) => {
-         const t = d.title || titleFromUrl(d.url || '');
-         const isDoc = d.isDocument || d.type === 'document';
-         const sourceLine = isDoc ? `📄 ${t}` : (d.url ? `🔗 ${t}\n${d.url}` : null);
-         if (!sourceLine) return;
-         if (citedIndices.has(i)) mainSources.push(sourceLine);
-       });
-
-       // Only CITED sources are shown — unrelated matches are never appended.
-       // The rest stay one tap away behind a paginated "Next ▶" button that
-       // reuses the /search session machinery (same query, same scope).
-       if (mainSources.length) {
-         msg += `\n\n${mainSources.join('\n')}`;
-       }
+       // If neither Markdown inline links nor [#n] markers linked any URL, include
+       // at most the top 2 contextual matches inline cleanly (not a bare wall of URLs).
+       const hasInlineHref = /<a\s+href=/i.test(aiHtml);
        let aiSessionId = null;
-       if (!mainSources.length && docs.length) {
-         const allSources = docs.slice(0, 3).map((d) => {
-           const t = d.title || titleFromUrl(d.url || '');
-           const isDoc = d.isDocument || d.type === 'document';
-           return isDoc ? `📄 ${t}` : (d.url ? `🔗 ${t}\n${d.url}` : null);
+       if (!hasInlineHref && docs.length) {
+         const topInline = docs.slice(0, 2).map((d) => {
+           const t = escHtml(d.title || titleFromUrl(d.url || ''));
+           const snippet = escHtml(String(d.notes || '').replace(/\s+/g, ' ').trim().slice(0, 110));
+           const itemHead = d.url ? `• ${linkHtml(d.url, t)}` : `• 📄 ${boldHtml(t)}`;
+           return snippet ? `${itemHead} — ${italicHtml(snippet)}` : itemHead;
          }).filter(Boolean);
-         if (allSources.length) {
-           msg += `\n\n${boldHtml('📚 Top matches:')}\n${allSources.join('\n')}`;
+         if (topInline.length) {
+           msg += `\n\n${topInline.join('\n')}`;
          }
        }
        // Paginate the full candidate list behind the button.
@@ -18362,6 +19108,14 @@ Rules:
         ].join('\n');
         if (statusId) await telegramApi(token, 'deleteMessage', { chat_id: chatId, message_id: statusId }).catch(() => {});
         await sendTelegramRichMessage(token, chatId, lines, forumThreadId);
+        await logActivityEvent(env, {
+          action: '🧹 /structure completed',
+          actorUser: athenaUser,
+          tgUser: from,
+          details: `scanned=${stats.scanned}, merged=${stats.merged}, urls=${stats.urlNormalized}, notes=${stats.notesCleaned}, titles=${stats.titlesCleaned}, tags=${stats.tagsCleaned}, filled=${stats.descFilled || 0}`,
+          scope: structScope || 'all',
+          scopeKey: structScopeId || '',
+        });
       } catch (e) {
         await sendTelegramFormatted(token, chatId, `${boldHtml('❌ Structure failed:')} ${codeHtml(escHtml(String(e?.message || e)).slice(0, 160))}`, forumThreadId);
       }
@@ -18490,6 +19244,13 @@ Rules:
         ].join('\n');
         if (statusId) await telegramApi(token, 'deleteMessage', { chat_id: chatId, message_id: statusId }).catch(() => {});
         await sendTelegramRichMessage(token, chatId, lines, forumThreadId);
+        await logActivityEvent(env, {
+          action: '📥 /import completed',
+          actorUser: athenaUser,
+          tgUser: from,
+          details: `links=${report.linksInserted}, personal=${report.personalInserted}, docs=${report.docsInserted}`,
+          scope: 'all',
+        });
       } catch (e) {
         if (statusId) await telegramApi(token, 'deleteMessage', { chat_id: chatId, message_id: statusId }).catch(() => {});
         await sendTelegramFormatted(token, chatId, `${boldHtml('❌ Import failed:')} ${codeHtml(escHtml(String(e?.message || e)).slice(0, 160))}`, forumThreadId);
@@ -18639,6 +19400,15 @@ Rules:
     }
     const storeScopeKey = scope === 'personal' ? athenaUser.id : binding.community_id;
     markMeiliScopeDirty(env, scope, storeScopeKey);
+    await logActivityEvent(env, {
+      action: '✏️ Link edited (TG /edit)',
+      actorUser: athenaUser,
+      tgUser: from,
+      title: title || hit.title,
+      url: hit.url,
+      scope,
+      scopeKey: storeScopeKey,
+    });
     await sendTelegramMessage(token, chatId,
       `Updated:\nTitle: ${title || '(untitled)'}\nURL: ${hit.url}\nNotes: ${String(notes || '(empty)')}`, forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
@@ -18703,6 +19473,7 @@ Rules:
         }
         const del = await deletePersonalUrl(env, athenaUser.id, rawUrl);
         if (del.found) {
+          await logActivityEvent(env, { action: '🗑 Link deleted (TG /delete)', actorUser: athenaUser, tgUser: from, url: rawUrl, scope: 'personal', scopeKey: athenaUser.id });
           await sendTelegramMessage(token, chatId, `Deleted from personal: ${rawUrl}`, forumThreadId);
         } else {
           const add = await savePersonalUrl(env, athenaUser.id, rawUrl, senderName);
@@ -18740,12 +19511,18 @@ Rules:
         }
         const del = await deleteCommunityUrl(env, binding.community_id, rawUrl);
         if (del.found) {
+          await logActivityEvent(env, { action: '🗑 Link deleted (TG /delete)', actorUser: athenaUser, tgUser: from, url: rawUrl, scope: 'community', scopeKey: binding.community_id });
           await sendTelegramMessage(token, chatId, `Deleted from community: ${rawUrl}`, forumThreadId);
         } else {
           // not present → propose as community dump (approve flow) or direct add for staff?
           // User said same as website: if not present add it. Staff can add directly.
           if (isInternalTelegramMessageUrl(rawUrl)) {
             await sendTelegramMessage(token, chatId, 'Internal Telegram message links (t.me/c/...) cannot be saved.', forumThreadId);
+            continue;
+          }
+          const blRules = await getBlacklistRules(env, 'community', binding.community_id);
+          if (checkUrlBlacklisted(rawUrl, blRules)) {
+            await sendTelegramFormatted(token, chatId, `${boldHtml('🚫')} Blacklisted URL skipped: ${codeHtml(rawUrl)}`, forumThreadId);
             continue;
           }
           const urlHash = generateUrlHash(rawUrl);
@@ -20480,13 +21257,10 @@ async function describeAndTagLink(env, rawUrl, meta = {}, { config, maxTags = 8,
     } catch (_) { ai = null; }
   }
 
-  // Rules first, model fills the tail: what the page plainly is always lands
-  // in the same slots, so the same link keeps the same core tags and the
-  // model can only add context it noticed — never rename the type or drop
-  // the deterministic base. This keeps /forcetags idempotent without losing
-  // the model's eye for topic nuance.
+  // AI-first when configured so context-aware tags lead; deterministic facts
+  // fill any remaining slots and remain the offline/fallback baseline.
   const ruleTags = tagsFromFacts(facts);
-  const candidate = [...ruleTags, ...(ai?.tags || [])];
+  const candidate = ai?.tags?.length ? [...ai.tags, ...ruleTags] : ruleTags;
   const verdict = validateTags(candidate, {
     vocabulary: facts.contextualTerms || [],
     banned: nameBansFor(rawUrl, title),

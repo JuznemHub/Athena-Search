@@ -4,7 +4,12 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#0a0a0a">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Athena | Second Brain Search</title>
+  <link rel="manifest" href="./manifest.json">
+  <link rel="apple-touch-icon" href="./src/assets/athena-icon-192.png">
   <link rel="icon" type="image/png" sizes="64x64" href="./src/assets/athena-favicon.png?v=1.0.70">
   <meta name="description" content="One bar: search, dump, and AI answers from your markdown brain.">
   <script>
@@ -95,6 +100,10 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 11a9 9 0 0 1 9 9"></path><path d="M4 4a16 16 0 0 1 16 16"></path><circle cx="5" cy="19" r="1.5"></circle></svg>
         <span class="feed-nav-label">Feed</span>
         <span id="feedNavBadge" class="feed-nav-badge hidden">0</span>
+      </button>
+      <button type="button" id="bookmarksNavBtn" class="icon-btn bookmarks-nav-btn" title="Saved Bookmarks" aria-label="Saved Bookmarks">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>
+        <span class="bookmarks-nav-label">Saved</span>
       </button>
       <div class="mode-badge" id="modeBadge">
         <span class="pulse-dot" id="modePulse"></span>
@@ -236,6 +245,8 @@
               <p class="section-desc">Inspect, filter, and edit links across the database with full audit history.</p>
             </div>
             <div class="wiki-header-actions">
+              <button type="button" id="adminCleanerOpenBtn" class="btn btn-primary btn-sm hidden" title="Owner-only GUI DB Cleaner">✦ AI DB Cleaner</button>
+              <button type="button" id="adminBlacklistOpenBtn" class="btn btn-secondary btn-sm hidden" title="Manage URL and Tag Blacklist">🚫 Blacklist</button>
               <button type="button" class="athena-tour-launch" id="adminDbTourBtn" aria-haspopup="dialog" aria-controls="athenaTour">Database tour</button>
               <button type="button" id="adminDbCloseBtn" class="btn btn-secondary btn-sm admin-back-btn">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
@@ -598,6 +609,7 @@
                 </button>
                 <ul class="dropdown-menu hidden" id="freshrssSortMenu" role="menu">
                   <li class="item active" data-sort="id" data-order="DESC"><button type="button">Freshly received first</button></li>
+                  <li class="item" data-sort="unread" data-order="DESC"><button type="button">Unread first</button></li>
                   <li class="item" data-sort="date" data-order="DESC"><button type="button">Publication date (Newest)</button></li>
                   <li class="item" data-sort="date" data-order="ASC"><button type="button">Publication date (Oldest)</button></li>
                   <li class="item" data-sort="title" data-order="ASC"><button type="button">Article title A to Z</button></li>
@@ -879,6 +891,30 @@
         <button id="communityScopeBtn" class="scope-btn">Community</button>
       </div>
     </div>
+
+    <!-- Mobile App Bottom Navigation Shell -->
+    <nav id="mobileBottomNav" class="mobile-bottom-nav" aria-label="Mobile Navigation">
+      <button type="button" class="mobile-nav-item active" data-mnav="search" aria-label="Search">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <span>Search</span>
+      </button>
+      <button type="button" class="mobile-nav-item" data-mnav="feed" aria-label="Feed">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 11a9 9 0 0 1 9 9"></path><path d="M4 4a16 16 0 0 1 16 16"></path><circle cx="5" cy="19" r="1.5"></circle></svg>
+        <span>Feed</span>
+      </button>
+      <button type="button" class="mobile-nav-item" data-mnav="wiki" aria-label="Wiki">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+        <span>Wiki</span>
+      </button>
+      <button type="button" class="mobile-nav-item" data-mnav="bookmarks" aria-label="Saved">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>
+        <span>Saved</span>
+      </button>
+      <button type="button" class="mobile-nav-item" data-mnav="settings" aria-label="Settings">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        <span>Settings</span>
+      </button>
+    </nav>
   </div>
 
 
@@ -1007,6 +1043,7 @@
             <option value="deepseek">DeepSeek</option>
             <option value="custom">Custom endpoint</option>
           </select>
+          <div id="aiProviderInfoCard" class="ai-provider-info-card"></div>
         </div>
         <div class="form-group">
           <label for="aiBaseUrl">API base URL</label>
@@ -1018,8 +1055,14 @@
             <input type="text" id="aiModel" placeholder="deepseek-v4-flash" style="flex:1;">
              <button type="button" id="aiLoadModelsBtn" class="btn btn-secondary" title="Fetch the model list from the provider (GOD)">Models…</button>
              <button type="button" id="aiRefreshModelsBtn" class="btn btn-secondary" title="Refresh the live model list (GOD)" aria-label="Refresh model list">↻</button>
+             <button type="button" id="aiPingProviderBtn" class="btn btn-secondary" title="Measure provider endpoint latency">Ping</button>
           </div>
           <div id="aiModelPicker" class="hidden" style="margin-top:8px;">
+             <div class="ai-model-tier-tabs" id="aiModelTierTabs" role="tablist" aria-label="Filter models by pricing">
+               <button type="button" class="btn btn-secondary btn-sm active" data-tier="all" role="tab">All</button>
+               <button type="button" class="btn btn-secondary btn-sm" data-tier="free" role="tab">Free</button>
+               <button type="button" class="btn btn-secondary btn-sm" data-tier="paid" role="tab">Paid</button>
+             </div>
              <input type="text" id="aiModelFilter" placeholder="Filter models…" style="width:100%;">
              <div id="aiModelList" class="model-list" role="listbox" aria-label="Provider models"></div>
              <div id="aiModelPager" class="status-msg" style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:8px;"></div>
@@ -1171,6 +1214,128 @@
             <div class="wiki-share-links-loading">Loading share links…</div>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Saved Bookmarks Modal -->
+  <div id="bookmarksModal" class="wiki-modal hidden" role="dialog" aria-modal="true" aria-labelledby="bookmarksModalTitle">
+    <div class="wiki-modal-backdrop" id="bookmarksModalBackdrop"></div>
+    <div class="wiki-modal-card athena-modal-wide">
+      <div class="wiki-modal-header">
+        <div class="wiki-modal-title-group">
+          <span class="wiki-modal-icon">🔖</span>
+          <div>
+            <h3 id="bookmarksModalTitle">Saved Bookmarks</h3>
+            <p class="wiki-modal-desc">Your personal bookmarked links from Search and AI Answers.</p>
+          </div>
+        </div>
+        <button type="button" id="bookmarksCloseBtn" class="icon-btn wiki-modal-close" aria-label="Close bookmarks">&times;</button>
+      </div>
+      <div class="wiki-modal-body">
+        <input type="text" id="bookmarksFilterInput" class="input input-sm" placeholder="Filter bookmarks…" autocomplete="off">
+        <div id="bookmarksModalList" class="athena-modal-scroll-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Owner-only GUI DB Cleaner Modal -->
+  <div id="dbCleanerModal" class="wiki-modal hidden" role="dialog" aria-modal="true" aria-labelledby="dbCleanerTitle">
+    <div class="wiki-modal-backdrop" id="dbCleanerBackdrop"></div>
+    <div class="wiki-modal-card athena-modal-wide">
+      <div class="wiki-modal-header">
+        <div class="wiki-modal-title-group">
+          <span class="wiki-modal-icon">✦</span>
+          <div>
+            <h3 id="dbCleanerTitle">AI Database Cleaner</h3>
+            <p class="wiki-modal-desc">Zero-deletion URL normalization, boilerplate stripping, AI metadata enrichment, and deduplication.</p>
+          </div>
+        </div>
+        <button type="button" id="dbCleanerCloseBtn" class="icon-btn wiki-modal-close" aria-label="Close cleaner">&times;</button>
+      </div>
+      <div class="wiki-modal-body">
+        <div class="cleaner-controls-grid">
+          <div class="admin-ctrl-group">
+            <label for="cleanerScopeSelect">Scope</label>
+            <select id="cleanerScopeSelect" class="input input-sm">
+              <option value="community">Community</option>
+              <option value="personal">Personal</option>
+            </select>
+          </div>
+          <div class="admin-ctrl-group" id="cleanerCommWrap">
+            <label for="cleanerCommunitySelect">Community</label>
+            <select id="cleanerCommunitySelect" class="input input-sm"></select>
+          </div>
+          <div class="admin-ctrl-group">
+            <label for="cleanerModeSelect">Mode</label>
+            <select id="cleanerModeSelect" class="input input-sm">
+              <option value="ai">AI-Native + Rules (recommended)</option>
+              <option value="script">Deterministic Script Only</option>
+            </select>
+          </div>
+          <div class="admin-ctrl-group">
+            <label for="cleanerFilterSelect">Filter</label>
+            <select id="cleanerFilterSelect" class="input input-sm">
+              <option value="all">All non-manual rows</option>
+              <option value="backfill">#backfill tag only</option>
+              <option value="untagged">Untagged rows only</option>
+            </select>
+          </div>
+        </div>
+        <div class="cleaner-action-bar">
+          <button type="button" id="cleanerScanBtn" class="btn btn-secondary btn-sm">Scan Candidates</button>
+          <button type="button" id="cleanerBackupBtn" class="btn btn-secondary btn-sm">Export Backup JSON</button>
+          <button type="button" id="cleanerStartBtn" class="btn btn-primary btn-sm" disabled>Start Live Clean</button>
+          <button type="button" id="cleanerPauseBtn" class="btn btn-secondary btn-sm hidden">Pause</button>
+          <button type="button" id="cleanerResumeBtn" class="btn btn-primary btn-sm hidden">Resume Saved Run</button>
+        </div>
+        <div id="cleanerProgressWrap" class="cleaner-progress hidden">
+          <div class="cleaner-progress-bar"><div id="cleanerProgressFill" class="cleaner-progress-fill" style="width:0%"></div></div>
+          <div id="cleanerStatusText" class="status-msg"></div>
+        </div>
+        <div id="cleanerDiffList" class="athena-modal-scroll-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- URL & Tag Blacklist Manager Modal -->
+  <div id="blacklistModal" class="wiki-modal hidden" role="dialog" aria-modal="true" aria-labelledby="blacklistModalTitle">
+    <div class="wiki-modal-backdrop" id="blacklistBackdrop"></div>
+    <div class="wiki-modal-card athena-modal-wide">
+      <div class="wiki-modal-header">
+        <div class="wiki-modal-title-group">
+          <span class="wiki-modal-icon">🚫</span>
+          <div>
+            <h3 id="blacklistModalTitle">URL & Tag Blacklist</h3>
+            <p class="wiki-modal-desc">Blocked domains, URL patterns, and tags are excluded everywhere across Search, RSS, Bot, and /structure.</p>
+          </div>
+        </div>
+        <button type="button" id="blacklistCloseBtn" class="icon-btn wiki-modal-close" aria-label="Close blacklist">&times;</button>
+      </div>
+      <div class="wiki-modal-body">
+        <div class="cleaner-controls-grid">
+          <div class="admin-ctrl-group">
+            <label for="blacklistScopeSelect">Scope</label>
+            <select id="blacklistScopeSelect" class="input input-sm">
+              <option value="community">Community</option>
+              <option value="personal">Personal (GOD)</option>
+              <option value="global">Global (GOD)</option>
+            </select>
+          </div>
+          <div class="admin-ctrl-group">
+            <label for="blacklistKindSelect">Type</label>
+            <select id="blacklistKindSelect" class="input input-sm">
+              <option value="url">URL / Domain</option>
+              <option value="tag">Tag</option>
+            </select>
+          </div>
+          <div class="admin-ctrl-group" style="flex:2">
+            <label for="blacklistPatternInput">Pattern</label>
+            <input type="text" id="blacklistPatternInput" class="input input-sm" placeholder="e.g. spam-site.com or #notags" autocomplete="off">
+          </div>
+          <button type="button" id="blacklistAddBtn" class="btn btn-primary btn-sm">Add Rule</button>
+        </div>
+        <div id="blacklistEntriesList" class="athena-modal-scroll-list"></div>
       </div>
     </div>
   </div>

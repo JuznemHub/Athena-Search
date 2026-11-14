@@ -51,6 +51,8 @@ document.addEventListener('DOMContentLoaded', () => {
     conversationHistory: [],
     notifications: [],
     unreadNotifs: 0,
+    bookmarks: [],
+    bookmarkedUrls: new Set(),
     hostedMode: isHosted,
     authConfig: null,
     hasSearched: false,
@@ -803,6 +805,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const wikiShareBtn = $('wikiShareBtn');
     if (wikiShareBtn) wikiShareBtn.classList.toggle('hidden', !god);
 
+    const cleanerOpenBtn = $('adminCleanerOpenBtn');
+    if (cleanerOpenBtn) cleanerOpenBtn.classList.toggle('hidden', !god);
+    const blacklistOpenBtn = $('adminBlacklistOpenBtn');
+    if (blacklistOpenBtn) blacklistOpenBtn.classList.toggle('hidden', !(god || isStaff));
+    updateAiProviderInfoCard();
+
     const wipeWrap = $('wipePersonalWrap');
     const wipeBtn = $('wipePersonalBtn');
     if (wipeWrap) {
@@ -900,6 +908,7 @@ document.addEventListener('DOMContentLoaded', () => {
     await step('community admins', () => loadCommunityAdmins());
     await step('tags', () => loadMainTags());
     await step('notifications', () => loadNotifications());
+    await step('bookmarks', () => loadBookmarks());
 
     // These must run even if every fetch above failed, or there is no usable UI.
     try {
@@ -909,6 +918,7 @@ document.addEventListener('DOMContentLoaded', () => {
       updateScopeUI();
       renderHome();
       startLiveSync();
+      handleShareTargetParams();
       if (window.location.hash === '#db' || window.location.hash === '#admin') {
         openAdminDb();
       } else if (window.location.hash === '#wiki') {
@@ -916,6 +926,7 @@ document.addEventListener('DOMContentLoaded', () => {
       } else if (window.location.hash === '#feed' || window.location.hash === '#rss') {
         openFeed();
       }
+      syncMobileBottomNav();
     } catch (err) {
       console.error('[athena] render failed:', err);
     }
@@ -1869,6 +1880,19 @@ document.addEventListener('DOMContentLoaded', () => {
             <button type="button" class="g-tag-chip g-tag-empty" data-tag="notags" title="Untagged link — click to filter">#notags</button>
            </div>`;
 
+      const bmActive = typeof isUrlBookmarked === 'function' && isUrlBookmarked(item.url);
+      const bmBtnHtml = (state.currentUser && item.url) ? `
+        <button type="button" class="btn btn-secondary btn-sm bookmark-link-btn ${bmActive ? 'is-bookmarked' : ''}" data-id="${escapeHtml(item.id)}" data-url="${escapeHtml(item.url)}" data-title="${escapeHtml(item.title || '')}" title="${bmActive ? 'Remove bookmark' : 'Save bookmark'}">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="${bmActive ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+          <span>${bmActive ? 'Saved' : 'Save'}</span>
+        </button>` : '';
+
+      const aiStarBtnHtml = (typeof isGod === 'function' && isGod()) ? `
+        <button type="button" class="btn btn-secondary btn-sm ai-enrich-btn" data-id="${escapeHtml(item.id)}" title="Re-scrape URL and enrich metadata with AI (GOD only)">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/></svg>
+          <span>AI</span>
+        </button>` : '';
+
       const editBtnHtml = canEdit ? `
         <button type="button" class="btn btn-secondary btn-sm edit-link-btn" data-id="${escapeHtml(item.id)}" title="Edit link and tags">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
@@ -1881,8 +1905,10 @@ document.addEventListener('DOMContentLoaded', () => {
           <span>Delete</span>
         </button>` : '';
 
-      const cardActionsHtml = (canEdit || canDelete) ? `
+      const cardActionsHtml = (bmBtnHtml || aiStarBtnHtml || editBtnHtml || delBtnHtml) ? `
         <div class="g-card-actions">
+          ${bmBtnHtml}
+          ${aiStarBtnHtml}
           ${editBtnHtml}
           ${delBtnHtml}
         </div>` : '';
@@ -1940,6 +1966,28 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         renderMainTags();
         runSearch();
+      });
+    });
+
+    resultsList.querySelectorAll('.bookmark-link-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await toggleBookmark({
+          link_id: btn.dataset.id,
+          scope: state.scope,
+          scope_key: state.scope === 'community' ? state.activeCommunity : '',
+          url: btn.dataset.url,
+          title: btn.dataset.title
+        }, btn);
+      });
+    });
+
+    resultsList.querySelectorAll('.ai-enrich-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await enrichLinkWithAi(btn.dataset.id, state.scope, btn, 'search');
       });
     });
 
@@ -2450,7 +2498,31 @@ document.addEventListener('DOMContentLoaded', () => {
           a.title = 'Download file';
           a.addEventListener('click', (e) => { e.preventDefault(); downloadDocument(s); });
         }
-        aiSources.appendChild(a);
+        if (s.url && state.currentUser) {
+          const wrap = document.createElement('span');
+          wrap.className = 'ai-source-chip-group';
+          const bmBtn = document.createElement('button');
+          bmBtn.type = 'button';
+          bmBtn.className = `ai-source-bm-btn ${isUrlBookmarked(s.url) ? 'is-bookmarked' : ''}`;
+          bmBtn.title = isUrlBookmarked(s.url) ? 'Remove bookmark' : 'Bookmark source';
+          bmBtn.textContent = '🔖';
+          bmBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            toggleBookmark({
+              link_id: s.id || '',
+              scope: state.scope,
+              scope_key: state.scope === 'community' ? state.activeCommunity : '',
+              url: s.url,
+              title: s.title || s.url
+            }, bmBtn);
+          });
+          wrap.appendChild(a);
+          wrap.appendChild(bmBtn);
+          aiSources.appendChild(wrap);
+        } else {
+          aiSources.appendChild(a);
+        }
       });
       renderGoogleResults(result.results || result.sources || [], q);
     } catch (err) {
@@ -2608,6 +2680,37 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     loadAiErrors(false);
     updateAiFreeBadge();
+    updateAiProviderInfoCard();
+  }
+
+  let aiProviderLatency = '';
+
+  function updateAiProviderInfoCard() {
+    const card = $('aiProviderInfoCard');
+    if (!card) return;
+    const presetKey = $('aiPreset')?.value || 'custom';
+    const preset = window.AthenaAI?.PRESETS?.[presetKey];
+    const base = ($('aiBaseUrl')?.value || preset?.baseUrl || '').trim();
+    const model = ($('aiModel')?.value || preset?.model || '').trim();
+    const mode = ($('aiMode')?.value || preset?.mode || 'openai').trim();
+    let host = '—';
+    try { if (base) host = new URL(base).host; } catch (_) { host = base || '—'; }
+    const tier = preset?.tier || (presetKey === 'custom' ? 'BYOK' : 'Standard');
+    const tierCls = /free/i.test(tier) ? 'tier-free' : (/local/i.test(tier) ? 'tier-local' : 'tier-paid');
+    const rateNote = preset?.rateNote || 'Provider limits vary by account tier and model.';
+    card.innerHTML = `
+      <div class="ai-provider-card-head">
+        <strong>${escapeHtml(preset?.label || presetKey)}</strong>
+        <span class="ai-tier-pill ${tierCls}">${escapeHtml(tier)}</span>
+        ${aiProviderLatency ? `<span class="ai-latency-pill">${escapeHtml(aiProviderLatency)}</span>` : ''}
+      </div>
+      <div class="ai-provider-card-meta">
+        <span>Host: <code>${escapeHtml(host)}</code></span>
+        <span>Protocol: <code>${escapeHtml(mode)}</code></span>
+        ${model ? `<span>Model: <code>${escapeHtml(model)}</code></span>` : ''}
+      </div>
+      <div class="ai-provider-card-note">${escapeHtml(rateNote)}</div>
+    `;
   }
 
   function renderSteroidCaps(on, caps) {
@@ -2629,7 +2732,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (base && (p.baseUrl || name === 'custom')) base.value = p.baseUrl || base.value;
     if (model && p.model) model.value = p.model;
     if (mode && p.mode) mode.value = p.mode;
+    aiProviderLatency = '';
     updateAiFreeBadge();
+    updateAiProviderInfoCard();
   }
 
   async function updateAiFreeBadge() {
@@ -2664,6 +2769,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let aiModelCatalog = null;
   let aiModelCatalogKey = '';
   let aiModelPage = 0;
+  let aiModelTierFilter = 'all';
   const AI_MODEL_PAGE_SIZE = 100;
 
   async function loadAiModels(force = false) {
@@ -2710,7 +2816,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!list || !aiModelCatalog) return;
     const pager = $('aiModelPager');
     const f = (filterText || '').toLowerCase();
-    const items = aiModelCatalog.filter((m) => !f || m.id.toLowerCase().includes(f) || (m.name || '').toLowerCase().includes(f));
+    const items = aiModelCatalog.filter((m) => {
+      if (aiModelTierFilter === 'free' && !m.free) return false;
+      if (aiModelTierFilter === 'paid' && m.free) return false;
+      return !f || m.id.toLowerCase().includes(f) || (m.name || '').toLowerCase().includes(f);
+    });
     if (!items.length) {
       list.innerHTML = '<div class="model-item status-msg">No models match.</div>';
       if (pager) pager.innerHTML = '';
@@ -2737,7 +2847,7 @@ document.addEventListener('DOMContentLoaded', () => {
     list.querySelectorAll('.model-item[data-model]').forEach((el) => {
       const pick = () => {
         const model = $('aiModel');
-        if (model) { model.value = el.dataset.model; updateAiFreeBadge(); }
+        if (model) { model.value = el.dataset.model; updateAiFreeBadge(); updateAiProviderInfoCard(); }
       };
       el.addEventListener('click', pick);
       el.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); pick(); } });
@@ -3025,6 +3135,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.location.hash !== '#db') {
       window.history.pushState(null, '', '#db');
     }
+    if (typeof syncMobileBottomNav === 'function') syncMobileBottomNav('db');
 
     if (!isStaffRank()) {
       renderAdminDbLockedView();
@@ -3075,6 +3186,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.location.hash === '#db' || window.location.hash === '#admin') {
       window.history.pushState(null, '', window.location.pathname + window.location.search);
     }
+    if (typeof syncMobileBottomNav === 'function') syncMobileBottomNav('search');
   }
 
   async function loadAdminDbLinks() {
@@ -3274,6 +3386,13 @@ document.addEventListener('DOMContentLoaded', () => {
             <span>${site ? escapeHtml(site) + ' · ' : ''}${escapeHtml(displayUrl)}</span>
           </div>
           <div class="admin-card-actions">
+            ${item.url ? `<button type="button" class="btn btn-secondary btn-sm admin-card-bm-btn ${isUrlBookmarked(item.url) ? 'is-bookmarked' : ''}" data-id="${escapeHtml(item.id)}" data-url="${escapeHtml(item.url)}" data-title="${escapeHtml(item.title || '')}" title="Bookmark link">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="${isUrlBookmarked(item.url) ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" style="vertical-align:middle;"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+            </button>` : ''}
+            ${isGod() ? `<button type="button" class="btn btn-secondary btn-sm admin-card-ai-btn ai-enrich-btn" data-id="${escapeHtml(item.id)}" title="Re-scrape URL and enrich metadata with AI (GOD only)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px;"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/></svg>
+              AI
+            </button>` : ''}
             <button type="button" class="btn btn-secondary btn-sm admin-card-edit-btn" data-id="${escapeHtml(item.id)}" title="Edit link">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px;"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
               Edit
@@ -3327,6 +3446,28 @@ document.addEventListener('DOMContentLoaded', () => {
         adminDbState.tag = tag;
         adminDbState.page = 1;
         loadAdminDbLinks();
+      });
+    });
+
+    listEl.querySelectorAll('.admin-card-bm-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await toggleBookmark({
+          link_id: btn.dataset.id,
+          scope: adminDbState.scope,
+          scope_key: adminDbState.scope === 'community' ? adminDbState.communityId : '',
+          url: btn.dataset.url,
+          title: btn.dataset.title
+        }, btn);
+      });
+    });
+
+    listEl.querySelectorAll('.admin-card-ai-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await enrichLinkWithAi(btn.dataset.id, adminDbState.scope, btn, 'admin');
       });
     });
 
@@ -3737,6 +3878,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.location.hash !== '#wiki') {
       window.location.hash = '#wiki';
     }
+    if (typeof syncMobileBottomNav === 'function') syncMobileBottomNav('wiki');
 
     const shareBtn = $('wikiShareBtn');
     if (shareBtn) {
@@ -3794,6 +3936,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.location.hash === '#wiki') {
       history.pushState('', document.title, window.location.pathname + window.location.search);
     }
+    if (typeof syncMobileBottomNav === 'function') syncMobileBottomNav('search');
   }
 
   async function loadWikiData() {
@@ -4843,6 +4986,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.location.hash !== '#feed' && window.location.hash !== '#rss') {
       window.location.hash = '#feed';
     }
+    if (typeof syncMobileBottomNav === 'function') syncMobileBottomNav('feed');
 
     // Resolve active feed scope: support Personal DB ('personal') and Community DB
     const validCommunityIds = new Set((state.communities || []).map((c) => c.id));
@@ -4885,6 +5029,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.location.hash === '#feed' || window.location.hash === '#rss') {
       history.pushState('', document.title, window.location.pathname + window.location.search);
     }
+    if (typeof syncMobileBottomNav === 'function') syncMobileBottomNav('search');
   }
 
   function setFeedViewMode(mode) {
@@ -5500,6 +5645,9 @@ document.addEventListener('DOMContentLoaded', () => {
                   <button type="button" class="pzp-ai-summarize-btn" data-action="summarize" title="Generate concise AI summary">
                     <span>AI Summary</span>
                   </button>
+                  <button type="button" class="pzp-ai-summarize-btn pzp-scrape-btn" data-action="scrape-article" title="Fetch full article text from source page">
+                    <span>Scrape Full Article</span>
+                  </button>
                   <button type="button" class="pzp-label-btn" data-action="label-modal" title="Add or edit custom labels">
                     <img class="icon" src="/assets/freshrss/label.svg" alt="" style="width:13px;height:13px;">
                     <span>Labels${userLabels.length ? ` (${userLabels.length})` : ''}</span>
@@ -5634,6 +5782,34 @@ document.addEventListener('DOMContentLoaded', () => {
       fluxEl.querySelector('[data-action="summarize"]')?.addEventListener('click', (e) => {
         e.stopPropagation();
         openAiSummaryModal(article);
+      });
+
+      // Scrape Full Article
+      fluxEl.querySelector('[data-action="scrape-article"]')?.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const btn = e.currentTarget;
+        if (btn) {
+          btn.disabled = true;
+          btn.innerHTML = '<span>Scraping…</span>';
+        }
+        try {
+          const { res, data } = await api('/api/feed/article/scrape', {
+            method: 'POST',
+            body: JSON.stringify({ article_id: artId })
+          });
+          if (res?.ok && data?.success && data.content) {
+            article.content = data.content;
+            if (data.title && !article.title) article.title = data.title;
+            showToast(data.scraped ? 'Full article extracted from source' : 'Loaded cached article content');
+            renderFeedArticles();
+          } else {
+            showToast(data?.error || 'Could not scrape article content', true);
+            if (btn) { btn.disabled = false; btn.innerHTML = '<span>Scrape Full Article</span>'; }
+          }
+        } catch (err) {
+          showToast(err.message || 'Scrape failed', true);
+          if (btn) { btn.disabled = false; btn.innerHTML = '<span>Scrape Full Article</span>'; }
+        }
       });
 
       // Tag filter
@@ -6744,6 +6920,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (sideDrawer) sideDrawer.classList.remove('active');
       if (drawerOverlay) drawerOverlay.classList.remove('active');
       document.body.style.overflow = '';
+      syncMobileBottomNav();
     }
     if (hamburgerBtn) {
       hamburgerBtn.addEventListener('click', (e) => {
@@ -6873,11 +7050,16 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (notifBellBtn) {
-      notifBellBtn.addEventListener('click', async (e) => {
+      notifBellBtn.addEventListener('click', (e) => {
+        e.preventDefault();
         e.stopPropagation();
-        await loadNotifications();
-        renderNotifications();
-        notifPanel?.classList.toggle('hidden');
+        if (!notifPanel) return;
+        const willOpen = notifPanel.classList.contains('hidden');
+        notifPanel.classList.toggle('hidden', !willOpen);
+        if (willOpen) {
+          renderNotifications();
+          loadNotifications().then(() => renderNotifications()).catch(() => {});
+        }
       });
     }
     if (closeNotifBtn) {
@@ -7089,12 +7271,56 @@ document.addEventListener('DOMContentLoaded', () => {
     const aiBaseUrlEl = $('aiBaseUrl');
     const aiModelEl = $('aiModel');
     if (aiBaseUrlEl) {
-      aiBaseUrlEl.addEventListener('change', updateAiFreeBadge);
-      aiBaseUrlEl.addEventListener('input', () => { clearTimeout(window._freeBadgeTimer); window._freeBadgeTimer = setTimeout(updateAiFreeBadge, 700); });
+      aiBaseUrlEl.addEventListener('change', () => { updateAiFreeBadge(); updateAiProviderInfoCard(); });
+      aiBaseUrlEl.addEventListener('input', () => { clearTimeout(window._freeBadgeTimer); window._freeBadgeTimer = setTimeout(() => { updateAiFreeBadge(); updateAiProviderInfoCard(); }, 700); });
     }
     if (aiModelEl) {
-      aiModelEl.addEventListener('change', updateAiFreeBadge);
-      aiModelEl.addEventListener('input', () => { clearTimeout(window._freeBadgeTimer); window._freeBadgeTimer = setTimeout(updateAiFreeBadge, 700); });
+      aiModelEl.addEventListener('change', () => { updateAiFreeBadge(); updateAiProviderInfoCard(); });
+      aiModelEl.addEventListener('input', () => { clearTimeout(window._freeBadgeTimer); window._freeBadgeTimer = setTimeout(() => { updateAiFreeBadge(); updateAiProviderInfoCard(); }, 700); });
+    }
+    const aiModeEl = $('aiMode');
+    if (aiModeEl) aiModeEl.addEventListener('change', updateAiProviderInfoCard);
+    const aiPingProviderBtn = $('aiPingProviderBtn');
+    if (aiPingProviderBtn) {
+      aiPingProviderBtn.addEventListener('click', async () => {
+        const base = $('aiBaseUrl')?.value.trim() || '';
+        const key = $('aiApiKey')?.value.trim() || '';
+        aiPingProviderBtn.disabled = true;
+        const origText = aiPingProviderBtn.textContent;
+        aiPingProviderBtn.textContent = 'Pinging…';
+        const t0 = performance.now();
+        try {
+          const qs = new URLSearchParams();
+          if (base && key) qs.set('base', base);
+          const { res, data } = await api(`/api/ai/models${qs.toString() ? `?${qs}` : ''}`, key ? { headers: { 'x-ai-key': key } } : {});
+          const ms = Math.round(performance.now() - t0);
+          if (res?.ok && data?.success !== false) {
+            aiProviderLatency = `${ms} ms · ${Array.isArray(data?.models) ? data.models.length : 0} models`;
+            showToast(`Provider reachable (${ms} ms)`);
+          } else {
+            aiProviderLatency = `${ms} ms · error`;
+            showToast(data?.error || `HTTP ${res?.status || '?'}`, true);
+          }
+        } catch (err) {
+          aiProviderLatency = 'unreachable';
+          showToast(err.message || 'Ping failed', true);
+        } finally {
+          aiPingProviderBtn.disabled = false;
+          aiPingProviderBtn.textContent = origText;
+          updateAiProviderInfoCard();
+        }
+      });
+    }
+    const aiModelTierTabs = $('aiModelTierTabs');
+    if (aiModelTierTabs) {
+      aiModelTierTabs.querySelectorAll('button[data-tier]').forEach((tabBtn) => {
+        tabBtn.addEventListener('click', () => {
+          aiModelTierFilter = tabBtn.dataset.tier || 'all';
+          aiModelPage = 0;
+          aiModelTierTabs.querySelectorAll('button[data-tier]').forEach((b) => b.classList.toggle('active', b === tabBtn));
+          renderModelList($('aiModelFilter')?.value || '');
+        });
+      });
     }
     const aiLoadModelsBtn = $('aiLoadModelsBtn');
     if (aiLoadModelsBtn) aiLoadModelsBtn.addEventListener('click', () => loadAiModels(false));
@@ -7188,9 +7414,598 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       });
     }
+    setupFeatureModalsAndMobileNav();
+  }
+
+  function isUrlBookmarked(url) {
+    if (!url) return false;
+    return state.bookmarkedUrls.has(String(url).trim().toLowerCase());
+  }
+
+  async function loadBookmarks() {
+    if (!state.currentUser) return;
+    try {
+      const { res, data } = await api('/api/bookmarks');
+      if (res?.ok && data?.success && Array.isArray(data.bookmarks)) {
+        state.bookmarks = data.bookmarks;
+        state.bookmarkedUrls = new Set(data.bookmarks.map((b) => String(b.url || '').trim().toLowerCase()).filter(Boolean));
+      }
+    } catch (_) {}
+  }
+
+  async function toggleBookmark({ link_id, scope, scope_key, url, title }, btn) {
+    if (!state.currentUser) {
+      showToast('Login required to save bookmarks', true);
+      return;
+    }
+    const norm = String(url || '').trim().toLowerCase();
+    const currentlySaved = norm && state.bookmarkedUrls.has(norm);
+    if (btn) btn.disabled = true;
+    try {
+      if (currentlySaved) {
+        const existing = state.bookmarks.find((b) => String(b.url || '').trim().toLowerCase() === norm);
+        const { res, data } = await api('/api/bookmarks', {
+          method: 'DELETE',
+          body: JSON.stringify({ id: existing?.id, url })
+        });
+        if (!res?.ok || !data?.success) throw new Error(data?.error || 'Could not remove bookmark');
+        state.bookmarkedUrls.delete(norm);
+        state.bookmarks = state.bookmarks.filter((b) => String(b.url || '').trim().toLowerCase() !== norm);
+        showToast('Bookmark removed');
+      } else {
+        const { res, data } = await api('/api/bookmarks', {
+          method: 'POST',
+          body: JSON.stringify({ link_id, scope, scope_key, url, title })
+        });
+        if (!res?.ok || !data?.success) throw new Error(data?.error || 'Could not save bookmark');
+        await loadBookmarks();
+        showToast('Saved to bookmarks');
+      }
+      if (btn) {
+        const savedNow = isUrlBookmarked(url);
+        btn.classList.toggle('is-bookmarked', savedNow);
+        if (btn.classList.contains('bookmark-link-btn')) {
+          const span = btn.querySelector('span');
+          const svg = btn.querySelector('svg');
+          if (span) span.textContent = savedNow ? 'Saved' : 'Save';
+          if (svg) svg.setAttribute('fill', savedNow ? 'currentColor' : 'none');
+        }
+      }
+      if ($('bookmarksModal') && !$('bookmarksModal').classList.contains('hidden')) {
+        renderBookmarksModal();
+      }
+    } catch (err) {
+      showToast(err.message || 'Bookmark failed', true);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function renderBookmarksModal() {
+    const listEl = $('bookmarksModalList');
+    if (!listEl) return;
+    const q = ($('bookmarksFilterInput')?.value || '').trim().toLowerCase();
+    const items = (state.bookmarks || []).filter((b) => {
+      if (!q) return true;
+      return `${b.title || ''} ${b.url || ''} ${b.notes || ''}`.toLowerCase().includes(q);
+    });
+    if (!items.length) {
+      listEl.innerHTML = `<div class="empty-state"><p>${q ? 'No saved bookmarks match your filter.' : 'No bookmarks saved yet. Click Save on any search or AI result.'}</p></div>`;
+      return;
+    }
+    listEl.innerHTML = items.map((b) => `
+      <div class="bookmark-row" data-bm-id="${escapeHtml(b.id)}">
+        <div class="bookmark-row-main">
+          <a href="${safeHref(b.url || '#')}" target="_blank" rel="noopener noreferrer" class="bookmark-row-title">${escapeHtml(b.title || b.url || 'Untitled')}</a>
+          <div class="bookmark-row-url">${escapeHtml(b.url || '')}</div>
+          ${b.notes ? `<div class="bookmark-row-notes">${escapeHtml(String(b.notes).slice(0, 180))}</div>` : ''}
+        </div>
+        <button type="button" class="btn btn-secondary btn-sm bookmark-remove-btn" data-id="${escapeHtml(b.id)}" data-url="${escapeHtml(b.url || '')}">Remove</button>
+      </div>
+    `).join('');
+    listEl.querySelectorAll('.bookmark-remove-btn').forEach((btn) => {
+      btn.addEventListener('click', () => toggleBookmark({ url: btn.dataset.url }, btn));
+    });
+  }
+
+  async function openBookmarksModal() {
+    const modal = $('bookmarksModal');
+    if (!modal) return;
+    modal.classList.remove('hidden');
+    syncMobileBottomNav('bookmarks');
+    await loadBookmarks();
+    renderBookmarksModal();
+  }
+
+  async function enrichLinkWithAi(id, scope, btn, viewKind) {
+    if (!isGod()) {
+      showToast('GOD rank required for single-card AI enrich', true);
+      return;
+    }
+    if (btn) {
+      btn.disabled = true;
+      btn.classList.add('is-busy');
+    }
+    try {
+      const { res, data } = await api('/api/links/ai-enrich-one', {
+        method: 'POST',
+        body: JSON.stringify({ id, scope })
+      });
+      if (!res?.ok || !data?.success || !data.link) {
+        throw new Error(data?.error || 'AI enrich failed');
+      }
+      const updated = data.link;
+      const list = scope === 'community' ? state.communityLinks : state.personalLinks;
+      const idx = list.findIndex((l) => l.id === id);
+      if (idx >= 0) {
+        list[idx] = {
+          ...list[idx],
+          __sd: undefined,
+          url: updated.url || list[idx].url,
+          title: updated.title ?? list[idx].title,
+          notes: updated.notes ?? list[idx].notes,
+          tags: Array.isArray(updated.tags) ? updated.tags : list[idx].tags,
+          manualEditedAt: updated.manual_edited_at || Date.now(),
+          lastEditedBy: updated.last_edited_by || 'ai',
+          lastEditedByName: updated.last_edited_by_name || 'AI'
+        };
+      }
+      showToast('Enriched metadata · Last edited by AI');
+      wikiState.dirty = true;
+      if (viewKind === 'admin') {
+        await loadAdminDbLinks();
+      } else {
+        await loadMainTags();
+        runSearch();
+      }
+    } catch (err) {
+      showToast(err.message || 'AI enrich failed', true);
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('is-busy');
+      }
+    }
+  }
+
+  const CLEANER_CHECKPOINT_KEY = 'athena_cleaner_checkpoint';
+  let cleanerState = {
+    candidates: [],
+    ids: [],
+    offset: 0,
+    processed: 0,
+    updated: 0,
+    paused: false,
+    running: false,
+    diffs: []
+  };
+
+  function populateCleanerCommunities() {
+    const sel = $('cleanerCommunitySelect');
+    const wrap = $('cleanerCommWrap');
+    const scope = $('cleanerScopeSelect')?.value || 'community';
+    if (wrap) wrap.style.display = scope === 'community' ? 'block' : 'none';
+    if (!sel) return;
+    const comms = state.communities || [];
+    sel.innerHTML = comms.map((c) => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name || c.id)}</option>`).join('');
+    if (adminDbState.communityId && comms.some((c) => c.id === adminDbState.communityId)) {
+      sel.value = adminDbState.communityId;
+    } else if (state.activeCommunity && comms.some((c) => c.id === state.activeCommunity)) {
+      sel.value = state.activeCommunity;
+    }
+  }
+
+  function renderCleanerDiffs(diffs) {
+    const listEl = $('cleanerDiffList');
+    if (!listEl) return;
+    if (!diffs || !diffs.length) {
+      listEl.innerHTML = '<div class="cleaner-empty">No diffs previewed yet. Click Scan Candidates first.</div>';
+      return;
+    }
+    listEl.innerHTML = diffs.map((d) => {
+      const beforeTags = (d.before?.tags || []).map((t) => `#${t}`).join(' ') || '(none)';
+      const afterTags = (d.after?.tags || []).map((t) => `#${t}`).join(' ') || '(none)';
+      return `
+        <div class="cleaner-diff-row">
+          <div class="cleaner-diff-col">
+            <div class="cleaner-diff-label">Before (${escapeHtml(d.id)})</div>
+            <div class="cleaner-diff-title">${escapeHtml(d.before?.title || '(untitled)')}</div>
+            <div class="cleaner-diff-url">${escapeHtml(d.before?.url || '')}</div>
+            <div class="cleaner-diff-tags">${escapeHtml(beforeTags)}</div>
+          </div>
+          <div class="cleaner-diff-col cleaner-diff-after">
+            <div class="cleaner-diff-label">After</div>
+            <div class="cleaner-diff-title">${escapeHtml(d.after?.title || '(untitled)')}</div>
+            <div class="cleaner-diff-url">${escapeHtml(d.after?.url || '')}</div>
+            <div class="cleaner-diff-tags">${escapeHtml(afterTags)}</div>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function updateCleanerProgressUI() {
+    const wrap = $('cleanerProgressWrap');
+    const fill = $('cleanerProgressFill');
+    const txt = $('cleanerStatusText');
+    const pauseBtn = $('cleanerPauseBtn');
+    const resumeBtn = $('cleanerResumeBtn');
+    const total = cleanerState.ids.length || cleanerState.candidates.length || 0;
+    const pct = total > 0 ? Math.min(100, Math.round((cleanerState.offset / total) * 100)) : 0;
+    if (wrap) wrap.classList.toggle('hidden', total === 0 && !cleanerState.running);
+    if (fill) fill.style.width = `${pct}%`;
+    if (txt) {
+      txt.textContent = `${cleanerState.offset}/${total} scanned · ${cleanerState.updated} updated${cleanerState.paused ? ' · Paused' : ''}`;
+    }
+    if (pauseBtn) pauseBtn.disabled = !cleanerState.running;
+    if (resumeBtn) {
+      let hasCheckpoint = false;
+      try { hasCheckpoint = Boolean(localStorage.getItem(CLEANER_CHECKPOINT_KEY)); } catch (_) {}
+      resumeBtn.disabled = cleanerState.running || (!cleanerState.paused && !hasCheckpoint);
+    }
+  }
+
+  async function scanCleanerCandidates() {
+    if (!isGod()) return showToast('GOD rank only', true);
+    const scope = $('cleanerScopeSelect')?.value || 'community';
+    const communityId = $('cleanerCommunitySelect')?.value || '';
+    const filter = $('cleanerFilterSelect')?.value || 'all';
+    const mode = $('cleanerModeSelect')?.value || 'ai';
+    const scanBtn = $('cleanerScanBtn');
+    if (scanBtn) scanBtn.disabled = true;
+    try {
+      const qs = new URLSearchParams({ scope, filter, limit: '100' });
+      if (scope === 'community' && communityId) qs.set('community_id', communityId);
+      const { res, data } = await api(`/api/admin/cleaner/candidates?${qs.toString()}`);
+      if (!res?.ok || !data?.success) throw new Error(data?.error || 'Scan failed');
+      cleanerState.candidates = data.candidates || [];
+      cleanerState.ids = cleanerState.candidates.map((c) => c.id);
+      cleanerState.offset = 0;
+      cleanerState.processed = 0;
+      cleanerState.updated = 0;
+      cleanerState.paused = false;
+      cleanerState.diffs = [];
+      $('cleanerBackupBtn').disabled = cleanerState.candidates.length === 0;
+      $('cleanerStartBtn').disabled = cleanerState.candidates.length === 0;
+      if (cleanerState.ids.length > 0) {
+        const previewIds = cleanerState.ids.slice(0, 10);
+        const { res: dryRes, data: dryData } = await api('/api/admin/cleaner/run', {
+          method: 'POST',
+          body: JSON.stringify({ scope, community_id: communityId, mode, dry_run: true, ids: previewIds })
+        });
+        if (dryRes?.ok && dryData?.success && Array.isArray(dryData.diffs)) {
+          cleanerState.diffs = dryData.diffs;
+        }
+      }
+      renderCleanerDiffs(cleanerState.diffs);
+      updateCleanerProgressUI();
+      showToast(`Found ${data.total ?? cleanerState.candidates.length} cleaner candidates`);
+    } catch (err) {
+      showToast(err.message || 'Scan failed', true);
+    } finally {
+      if (scanBtn) scanBtn.disabled = false;
+    }
+  }
+
+  function exportCleanerBackup() {
+    if (!cleanerState.candidates.length) {
+      showToast('Scan candidates first to export backup', true);
+      return;
+    }
+    const payload = {
+      exported_at: new Date().toISOString(),
+      scope: $('cleanerScopeSelect')?.value || 'community',
+      community_id: $('cleanerCommunitySelect')?.value || '',
+      count: cleanerState.candidates.length,
+      candidates: cleanerState.candidates
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `athena-cleaner-backup-${Date.now()}.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+    showToast(`Exported ${cleanerState.candidates.length} links backup`);
+  }
+
+  async function runCleanerBatches(resume = false) {
+    if (!isGod()) return showToast('GOD rank only', true);
+    if (resume) {
+      try {
+        const raw = localStorage.getItem(CLEANER_CHECKPOINT_KEY);
+        if (raw) {
+          const saved = JSON.parse(raw);
+          if (Array.isArray(saved.ids) && saved.ids.length) {
+            cleanerState.ids = saved.ids;
+            cleanerState.offset = Number(saved.offset || 0);
+            cleanerState.processed = Number(saved.processed || 0);
+            cleanerState.updated = Number(saved.updated || 0);
+            cleanerState.diffs = Array.isArray(saved.diffs) ? saved.diffs : [];
+            if ($('cleanerScopeSelect') && saved.scope) $('cleanerScopeSelect').value = saved.scope;
+            populateCleanerCommunities();
+            if ($('cleanerCommunitySelect') && saved.communityId) $('cleanerCommunitySelect').value = saved.communityId;
+            if ($('cleanerModeSelect') && saved.mode) $('cleanerModeSelect').value = saved.mode;
+          }
+        }
+      } catch (_) {}
+    } else {
+      cleanerState.offset = 0;
+      cleanerState.processed = 0;
+      cleanerState.updated = 0;
+      cleanerState.diffs = [];
+    }
+    if (!cleanerState.ids.length) return showToast('No cleaner targets loaded', true);
+    const scope = $('cleanerScopeSelect')?.value || 'community';
+    const communityId = $('cleanerCommunitySelect')?.value || '';
+    const mode = $('cleanerModeSelect')?.value || 'ai';
+    cleanerState.running = true;
+    cleanerState.paused = false;
+    $('cleanerStartBtn').disabled = true;
+    updateCleanerProgressUI();
+
+    while (cleanerState.offset < cleanerState.ids.length) {
+      if (cleanerState.paused) break;
+      const chunk = cleanerState.ids.slice(cleanerState.offset, cleanerState.offset + 10);
+      try {
+        const { res, data } = await api('/api/admin/cleaner/run', {
+          method: 'POST',
+          body: JSON.stringify({ scope, community_id: communityId, mode, dry_run: false, ids: chunk })
+        });
+        if (!res?.ok || !data?.success) throw new Error(data?.error || 'Cleaner batch failed');
+        cleanerState.offset += chunk.length;
+        cleanerState.processed += Number(data.processed || chunk.length);
+        cleanerState.updated += Number(data.updated || 0);
+        if (Array.isArray(data.diffs) && data.diffs.length) {
+          cleanerState.diffs = [...cleanerState.diffs, ...data.diffs].slice(-60);
+          renderCleanerDiffs(cleanerState.diffs);
+        }
+        try {
+          localStorage.setItem(CLEANER_CHECKPOINT_KEY, JSON.stringify({
+            scope,
+            communityId,
+            mode,
+            ids: cleanerState.ids,
+            offset: cleanerState.offset,
+            processed: cleanerState.processed,
+            updated: cleanerState.updated,
+            diffs: cleanerState.diffs
+          }));
+        } catch (_) {}
+        updateCleanerProgressUI();
+      } catch (err) {
+        cleanerState.paused = true;
+        showToast(err.message || 'Cleaner paused on error', true);
+        break;
+      }
+    }
+
+    cleanerState.running = false;
+    $('cleanerStartBtn').disabled = false;
+    if (!cleanerState.paused && cleanerState.offset >= cleanerState.ids.length) {
+      try { localStorage.removeItem(CLEANER_CHECKPOINT_KEY); } catch (_) {}
+      showToast(`Cleaner finished: ${cleanerState.updated} links updated`);
+      loadAdminDbLinks();
+      loadMainTags();
+    }
+    updateCleanerProgressUI();
+  }
+
+  function openDbCleanerModal() {
+    if (!isGod()) return showToast('DB Cleaner is GOD rank only', true);
+    const modal = $('dbCleanerModal');
+    if (!modal) return;
+    populateCleanerCommunities();
+    updateCleanerProgressUI();
+    modal.classList.remove('hidden');
+  }
+
+  async function loadBlacklistEntries() {
+    const listEl = $('blacklistEntriesList');
+    if (!listEl) return;
+    const scope = $('blacklistScopeSelect')?.value || 'community';
+    const commId = scope === 'community' ? (adminDbState.communityId || state.activeCommunity || '') : '';
+    listEl.innerHTML = '<div class="empty-state"><p>Loading blacklist rules…</p></div>';
+    try {
+      const qs = new URLSearchParams({ scope });
+      if (commId) qs.set('community_id', commId);
+      const { res, data } = await api(`/api/blacklist?${qs.toString()}`);
+      if (!res?.ok || !data?.success) throw new Error(data?.error || 'Could not load blacklist');
+      const entries = data.entries || [];
+      if (!entries.length) {
+        listEl.innerHTML = '<div class="empty-state"><p>No blacklist entries in this scope yet.</p></div>';
+        return;
+      }
+      listEl.innerHTML = entries.map((e) => `
+        <div class="blacklist-row">
+          <div class="blacklist-row-meta">
+            <span class="blacklist-kind-pill">${escapeHtml(e.kind || 'url')}</span>
+            <code class="blacklist-pattern">${escapeHtml(e.pattern || '')}</code>
+            ${e.reason ? `<span class="blacklist-reason">${escapeHtml(e.reason)}</span>` : ''}
+          </div>
+          <button type="button" class="btn btn-secondary btn-sm blacklist-del-btn" data-id="${escapeHtml(e.id)}" data-pattern="${escapeHtml(e.pattern || '')}" data-scope="${escapeHtml(e.scope || scope)}">Remove</button>
+        </div>
+      `).join('');
+      listEl.querySelectorAll('.blacklist-del-btn').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          try {
+            const { res: delRes, data: delData } = await api('/api/blacklist', {
+              method: 'DELETE',
+              body: JSON.stringify({
+                id: btn.dataset.id,
+                scope: btn.dataset.scope,
+                community_id: commId,
+                pattern: btn.dataset.pattern
+              })
+            });
+            if (!delRes?.ok || !delData?.success) throw new Error(delData?.error || 'Remove failed');
+            showToast('Blacklist rule removed');
+            await loadBlacklistEntries();
+          } catch (err) {
+            showToast(err.message || 'Remove failed', true);
+            btn.disabled = false;
+          }
+        });
+      });
+    } catch (err) {
+      listEl.innerHTML = `<div class="empty-state"><p>${escapeHtml(err.message || 'Load failed')}</p></div>`;
+    }
+  }
+
+  function openBlacklistModal() {
+    if (!isGod() && !isStaffRank()) return showToast('Admin or GOD required', true);
+    const modal = $('blacklistModal');
+    const scopeSel = $('blacklistScopeSelect');
+    if (scopeSel) {
+      const globalOpt = scopeSel.querySelector('option[value="global"]');
+      if (globalOpt) globalOpt.disabled = !isGod();
+      if (!isGod() && scopeSel.value === 'global') scopeSel.value = 'community';
+    }
+    if (modal) modal.classList.remove('hidden');
+    loadBlacklistEntries();
+  }
+
+  function syncMobileBottomNav(explicitTab) {
+    const nav = $('mobileBottomNav');
+    if (!nav) return;
+    let active = explicitTab;
+    if (!active) {
+      if (!$('bookmarksModal')?.classList.contains('hidden')) active = 'bookmarks';
+      else if (sideDrawer?.classList.contains('active')) active = 'settings';
+      else if ($('feedView') && !$('feedView').classList.contains('hidden')) active = 'feed';
+      else if ($('wikiView') && !$('wikiView').classList.contains('hidden')) active = 'wiki';
+      else active = 'search';
+    }
+    nav.querySelectorAll('button[data-mnav]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.mnav === active);
+    });
+  }
+
+  function handleShareTargetParams() {
+    const params = new URLSearchParams(window.location.search);
+    const sharedUrl = params.get('share_url') || '';
+    const sharedText = params.get('share_text') || '';
+    const sharedTitle = params.get('share_title') || '';
+    const combined = [sharedTitle, sharedText, sharedUrl].filter(Boolean).join(' ').trim();
+    if (!combined) return;
+    setMode('dump');
+    if (searchInput) {
+      searchInput.value = sharedUrl || combined;
+      clearSearchBtn?.classList.remove('hidden');
+      searchInput.focus();
+    }
+    showToast('Shared item ready in Dump bar — press Enter to save');
+    params.delete('share_url');
+    params.delete('share_text');
+    params.delete('share_title');
+    const cleanSearch = params.toString();
+    history.replaceState(null, '', window.location.pathname + (cleanSearch ? `?${cleanSearch}` : '') + window.location.hash);
+  }
+
+  function setupFeatureModalsAndMobileNav() {
+    $('bookmarksNavBtn')?.addEventListener('click', openBookmarksModal);
+    $('bookmarksCloseBtn')?.addEventListener('click', () => {
+      $('bookmarksModal')?.classList.add('hidden');
+      syncMobileBottomNav();
+    });
+    $('bookmarksModalBackdrop')?.addEventListener('click', () => {
+      $('bookmarksModal')?.classList.add('hidden');
+      syncMobileBottomNav();
+    });
+    $('bookmarksFilterInput')?.addEventListener('input', renderBookmarksModal);
+
+    $('adminCleanerOpenBtn')?.addEventListener('click', openDbCleanerModal);
+    $('dbCleanerCloseBtn')?.addEventListener('click', () => $('dbCleanerModal')?.classList.add('hidden'));
+    $('dbCleanerBackdrop')?.addEventListener('click', () => $('dbCleanerModal')?.classList.add('hidden'));
+    $('cleanerScopeSelect')?.addEventListener('change', populateCleanerCommunities);
+    $('cleanerScanBtn')?.addEventListener('click', scanCleanerCandidates);
+    $('cleanerBackupBtn')?.addEventListener('click', exportCleanerBackup);
+    $('cleanerStartBtn')?.addEventListener('click', () => runCleanerBatches(false));
+    $('cleanerPauseBtn')?.addEventListener('click', () => {
+      cleanerState.paused = true;
+      updateCleanerProgressUI();
+      showToast('Pausing after current batch…');
+    });
+    $('cleanerResumeBtn')?.addEventListener('click', () => runCleanerBatches(true));
+
+    $('adminBlacklistOpenBtn')?.addEventListener('click', openBlacklistModal);
+    $('blacklistCloseBtn')?.addEventListener('click', () => $('blacklistModal')?.classList.add('hidden'));
+    $('blacklistBackdrop')?.addEventListener('click', () => $('blacklistModal')?.classList.add('hidden'));
+    $('blacklistScopeSelect')?.addEventListener('change', loadBlacklistEntries);
+    $('blacklistAddBtn')?.addEventListener('click', async () => {
+      const scope = $('blacklistScopeSelect')?.value || 'community';
+      const kind = $('blacklistKindSelect')?.value || 'url';
+      const pattern = $('blacklistPatternInput')?.value.trim() || '';
+      if (!pattern) return showToast('Enter a URL, domain, or tag pattern', true);
+      const commId = scope === 'community' ? (adminDbState.communityId || state.activeCommunity || '') : '';
+      try {
+        const { res, data } = await api('/api/blacklist', {
+          method: 'POST',
+          body: JSON.stringify({ scope, community_id: commId, kind, pattern })
+        });
+        if (!res?.ok || !data?.success) throw new Error(data?.error || 'Could not add rule');
+        if ($('blacklistPatternInput')) $('blacklistPatternInput').value = '';
+        showToast('Blacklist rule added');
+        await loadBlacklistEntries();
+      } catch (err) {
+        showToast(err.message || 'Add failed', true);
+      }
+    });
+
+    const mobileNav = $('mobileBottomNav');
+    if (mobileNav) {
+      mobileNav.querySelectorAll('button[data-mnav]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const tab = btn.dataset.mnav;
+          $('bookmarksModal')?.classList.add('hidden');
+          if (tab === 'feed') {
+            openFeed();
+          } else if (tab === 'wiki') {
+            openWiki();
+          } else if (tab === 'bookmarks') {
+            openBookmarksModal();
+          } else if (tab === 'settings') {
+            if (sideDrawer) sideDrawer.classList.add('active');
+            if (drawerOverlay) drawerOverlay.classList.add('active');
+            syncMobileBottomNav('settings');
+          } else {
+            if ($('feedView') && !$('feedView').classList.contains('hidden')) closeFeed();
+            if ($('wikiView') && !$('wikiView').classList.contains('hidden')) closeWiki();
+            if ($('adminDbView') && !$('adminDbView').classList.contains('hidden')) closeAdminDb();
+            if (sideDrawer?.classList.contains('active')) {
+              sideDrawer.classList.remove('active');
+              drawerOverlay?.classList.remove('active');
+              document.body.style.overflow = '';
+            }
+            syncMobileBottomNav('search');
+            searchInput?.focus();
+          }
+        });
+      });
+    }
+
+    // Touch swipe left to close mobile settings drawer
+    if (sideDrawer) {
+      let touchStartX = 0;
+      sideDrawer.addEventListener('touchstart', (e) => {
+        touchStartX = e.touches?.[0]?.clientX || 0;
+      }, { passive: true });
+      sideDrawer.addEventListener('touchend', (e) => {
+        const dx = (e.changedTouches?.[0]?.clientX || 0) - touchStartX;
+        if (dx < -60) {
+          sideDrawer.classList.remove('active');
+          drawerOverlay?.classList.remove('active');
+          document.body.style.overflow = '';
+          syncMobileBottomNav();
+        }
+      }, { passive: true });
+    }
   }
 
   async function init() {
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('./sw.js').catch(() => {});
+    }
     // Must run before anything talks to the API, including the login buttons.
     await adoptInstanceBackend();
     setupEventListeners();

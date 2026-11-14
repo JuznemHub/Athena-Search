@@ -12,7 +12,7 @@
     "build": "node scripts/stamp-version.js",
     "check:version": "node scripts/stamp-version.js --check",
     "check": "npm run lint && npm run check:version",
-    "test:unit": "node scripts/test-retrieval.mjs && node scripts/test-admin-db.mjs && node scripts/test-wiki.mjs && node scripts/test-stats-pagination.mjs && node scripts/test-tag-search.mjs && node scripts/test-feed.mjs && node scripts/test-theme.mjs && node scripts/test-dump-failures.mjs && node scripts/test-view-transitions.mjs && node scripts/test-glass-blur.mjs && node scripts/test-link-previews.mjs && node scripts/test-page-tour.mjs && node scripts/test-reporting-and-edits.mjs",
+    "test:unit": "node scripts/test-retrieval.mjs && node scripts/test-admin-db.mjs && node scripts/test-wiki.mjs && node scripts/test-stats-pagination.mjs && node scripts/test-tag-search.mjs && node scripts/test-feed.mjs && node scripts/test-theme.mjs && node scripts/test-dump-failures.mjs && node scripts/test-view-transitions.mjs && node scripts/test-glass-blur.mjs && node scripts/test-link-previews.mjs && node scripts/test-page-tour.mjs && node scripts/test-reporting-and-edits.mjs && node scripts/test-todayy-features.mjs",
     "lint:slop": "bash scripts/anti-slop.sh"
   },
   "dependencies": {

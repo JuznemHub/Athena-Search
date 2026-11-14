@@ -464,23 +464,31 @@ export function classifyLink(link, taxonomy = DEFAULT_FMHY_CATEGORIES) {
     for (const sub of (cat.subheadings || [])) {
       let score = 0;
 
-      // Tag matches (+12 pts each, ignore generic backfill/website for scoring)
-      if (Array.isArray(sub.tags)) {
-        for (const t of sub.tags) {
-          const tNorm = t.toLowerCase();
-          if (tNorm !== 'backfill' && tNorm !== 'website' && tNorm !== 'notags' && tagSet.has(tNorm)) {
-            score += 12;
-          }
+      // Primary context: title (+9), URL (+7), description/notes (+5)
+      if (Array.isArray(sub.keywords)) {
+        for (const kw of sub.keywords) {
+          const kwNorm = String(kw || '').toLowerCase();
+          if (!kwNorm) continue;
+          if (titleLower.includes(kwNorm)) score += 9;
+          if (urlLower.includes(kwNorm)) score += 7;
+          if (notesLower.includes(kwNorm)) score += 5;
         }
       }
 
-      // Keyword matches in title (+6), url (+4), notes (+3)
-      if (Array.isArray(sub.keywords)) {
-        for (const kw of sub.keywords) {
-          const kwNorm = kw.toLowerCase();
-          if (titleLower.includes(kwNorm)) score += 6;
-          if (urlLower.includes(kwNorm)) score += 4;
-          if (notesLower.includes(kwNorm)) score += 3;
+      // Secondary signal: tags (+3 each, ignore noisy ingest/generic tags)
+      if (Array.isArray(sub.tags)) {
+        for (const t of sub.tags) {
+          const tNorm = String(t || '').toLowerCase();
+          if (
+            tNorm !== 'backfill' &&
+            tNorm !== 'website' &&
+            tNorm !== 'notags' &&
+            tNorm !== 'opensource' &&
+            tNorm !== 'open-source' &&
+            tagSet.has(tNorm)
+          ) {
+            score += 3;
+          }
         }
       }
 
@@ -492,7 +500,7 @@ export function classifyLink(link, taxonomy = DEFAULT_FMHY_CATEGORIES) {
     }
   }
 
-  if (bestScore >= 4 && bestCat && bestSub) {
+  if (bestScore >= 5 && bestCat && bestSub) {
     return { categoryId: bestCat, subheadingId: bestSub };
   }
 
