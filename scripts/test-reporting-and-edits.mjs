@@ -148,7 +148,13 @@ async function runTests() {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options = {}) => {
     const urlStr = String(url);
-    if (urlStr.includes('api.telegram.org')) {
+    let parsedUrl = null;
+    try {
+      parsedUrl = new URL(urlStr);
+    } catch {
+      parsedUrl = null;
+    }
+    if (parsedUrl?.hostname === 'api.telegram.org') {
       const body = options.body ? JSON.parse(options.body) : {};
       sentTelegramMessages.push({ url: urlStr, body });
       return new Response(JSON.stringify({ ok: true, result: { message_id: 12345 } }), { status: 200 });
@@ -429,7 +435,7 @@ async function runTests() {
     const promotedRow = await mockDb.prepare('SELECT * FROM links WHERE id = ?').bind('link_standalone_promo').first();
     assert.equal(promotedRow.url, 'https://github.com/testorg/standalone-app', 'Standalone link must be promoted to the content destination URL');
     assert.equal(promotedRow.image_url, 'https://telegra.ph/file/standalone_tool.png', 'Original image asset URL becomes image_url');
-    assert.equal(promotedRow.notes.includes('https://github.com/testorg/standalone-app'), false, 'Redundant bare URL must be cleaned from notes');
+    assert.equal(promotedRow.notes, 'Source code available at', 'Redundant bare URL must be cleaned from notes');
 
     // Test 10: Tag taxonomy rejection of generic open-source and classification of Project GLD
     const vOpenSource = validateTags(['open-source', 'opensource', 'game', 'tool']);
