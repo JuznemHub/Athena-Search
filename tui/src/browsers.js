@@ -122,6 +122,9 @@ const CHROME_ROOTS = [
   ['Opera', ['.config', 'opera']],
   ['Opera (Flatpak)', ['.var', 'app', 'com.opera.Opera', 'config', 'opera']],
   ['Vivaldi', ['.config', 'vivaldi']],
+  ['Thorium', ['.config', 'thorium']],
+  ['Ungoogled Chromium', ['.config', 'chromium-ungoogled']],
+  ['Helium', ['.config', 'net.imput.helium']],
   ['Arc', ['Library', 'Application Support', 'Arc', 'User Data']],
 ];
 
@@ -131,6 +134,11 @@ const FIREFOX_ROOTS = [
   ['.config', 'mozilla', 'firefox'],
   ['.var', 'app', 'org.mozilla.firefox', '.mozilla', 'firefox'],
   ['snap', 'firefox', 'common', '.mozilla', 'firefox'],
+  ['.zen'],
+  ['.var', 'app', 'io.github.zen_browser.zen', '.zen'],
+  ['.floorp'],
+  ['.librewolf'],
+  ['.var', 'app', 'io.gitlab.librewolf-community', '.librewolf'],
 ];
 
 // moz_bookmarks special roots (internal titles) → user-facing names.
@@ -142,11 +150,15 @@ function chromeCandidateFiles(home) {
     const base = path.join(home, ...dirs);
     if (!fs.existsSync(base)) continue;
     try {
+      // Opera keeps Bookmarks at the profile root (no profile subdir).
+      const rootFile = path.join(base, 'Bookmarks');
+      if (fs.existsSync(rootFile)) {
+        out.push([name, rootFile]);
+      }
       for (const dir of fs.readdirSync(base)) {
         const file = path.join(base, dir, 'Bookmarks');
-        // Opera keeps Bookmarks at the profile root (no profile subdir).
-        if (fs.existsSync(file) || fs.existsSync(path.join(base, 'Bookmarks'))) {
-          out.push([dir === 'Bookmarks' ? name : `${name} · ${dir}`, file]);
+        if (fs.existsSync(file)) {
+          out.push([`${name} · ${dir}`, file]);
         }
       }
     } catch { /* unreadable root */ }

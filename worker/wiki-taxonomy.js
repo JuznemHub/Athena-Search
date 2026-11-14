@@ -125,7 +125,12 @@ export const DEFAULT_FMHY_CATEGORIES = [
         title: 'PC Gaming & Repacks',
         description: 'Game stores, repacks, patches, and game compatibility trackers.',
         tags: ['game', 'gaming', 'steam', 'epic', 'gog', 'repack'],
-        keywords: ['fitgirl', 'dodi', 'repack', 'steam', 'gog', 'steamunlocked', 'itch.io', 'game download', 'crackwatch']
+        keywords: [
+          'fitgirl', 'dodi', 'repack', 'steam', 'gog', 'steamunlocked', 'itch.io',
+          'game download', 'crackwatch', 'game launcher', 'game library',
+          'game manager', 'game downloader', 'pc game', 'pc games', 'pc gaming',
+          'playnite', 'heroic games', 'lutris', 'launchbox', 'hydra launcher'
+        ]
       },
       {
         id: 'gaming-tools',
@@ -464,25 +469,39 @@ export function classifyLink(link, taxonomy = DEFAULT_FMHY_CATEGORIES) {
     for (const sub of (cat.subheadings || [])) {
       let score = 0;
 
-      // Tag matches (+12 pts each, ignore generic backfill/website for scoring)
-      if (Array.isArray(sub.tags)) {
-        for (const t of sub.tags) {
-          const tNorm = t.toLowerCase();
-          if (tNorm !== 'backfill' && tNorm !== 'website' && tNorm !== 'notags' && tagSet.has(tNorm)) {
-            score += 12;
-          }
+      // Primary context: title (+9), URL (+7), description/notes (+5)
+      let kwScore = 0;
+      if (Array.isArray(sub.keywords)) {
+        for (const kw of sub.keywords) {
+          const kwNorm = String(kw || '').toLowerCase();
+          if (!kwNorm) continue;
+          if (titleLower.includes(kwNorm)) kwScore += 12;
+          if (urlLower.includes(kwNorm)) kwScore += 9;
+          if (notesLower.includes(kwNorm)) kwScore += 6;
         }
       }
 
-      // Keyword matches in title (+6), url (+4), notes (+3)
-      if (Array.isArray(sub.keywords)) {
-        for (const kw of sub.keywords) {
-          const kwNorm = kw.toLowerCase();
-          if (titleLower.includes(kwNorm)) score += 6;
-          if (urlLower.includes(kwNorm)) score += 4;
-          if (notesLower.includes(kwNorm)) score += 3;
+      // Secondary signal: tags (+2 each, ignore noisy ingest/generic tags).
+      // Any contextual keyword hit gets a +20 tier boost so stray tags like
+      // #cloud cannot override an explicit title/url/notes match.
+      let tagScore = 0;
+      if (Array.isArray(sub.tags)) {
+        for (const t of sub.tags) {
+          const tNorm = String(t || '').toLowerCase();
+          if (
+            tNorm !== 'backfill' &&
+            tNorm !== 'website' &&
+            tNorm !== 'notags' &&
+            tNorm !== 'opensource' &&
+            tNorm !== 'open-source' &&
+            tagSet.has(tNorm)
+          ) {
+            tagScore += 2;
+          }
         }
       }
+      if (kwScore > 0) score += kwScore + 20 + tagScore;
+      else score += tagScore;
 
       if (score > bestScore) {
         bestScore = score;
@@ -492,7 +511,7 @@ export function classifyLink(link, taxonomy = DEFAULT_FMHY_CATEGORIES) {
     }
   }
 
-  if (bestScore >= 4 && bestCat && bestSub) {
+  if (bestScore >= 5 && bestCat && bestSub) {
     return { categoryId: bestCat, subheadingId: bestSub };
   }
 

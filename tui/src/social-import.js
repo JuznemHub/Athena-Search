@@ -361,6 +361,27 @@ export function extractZip(zip, dest) {
   return { ok: false, error: 'need python3 or unzip to extract the archive' };
 }
 
+export const REDDIT_GUIDE_STEPS = [
+  '1. Install Reddit-Fetch:',
+  '   git clone https://github.com/akashpandey/Reddit-Fetch ~/Reddit-Fetch',
+  '   cd ~/Reddit-Fetch && pip install -e .',
+  '2. Create a Reddit script app (https://www.reddit.com/prefs/apps):',
+  '   - Type: script · Redirect URI: http://localhost:8080',
+  '3. Generate OAuth tokens & fetch saves:',
+  '   python3 -m reddit_fetch.generate_tokens && reddit-fetcher',
+  '4. Or skip CLI setup by setting REDDIT_EXPORT_PATH=/path/to/saved_posts.json',
+];
+
+export const X_GUIDE_STEPS = [
+  '1. Request your official archive on X:',
+  '   Settings → Your account → Download an archive of your data',
+  '2. Point this wizard at the downloaded .zip (or extracted folder containing data/*.js).',
+  '3. Optional TweetNook CLI workflow (https://github.com/GezerWezer/TweetNook):',
+  '   tweetnook import x-archive ~/Downloads/twitter-archive.zip',
+  '   tweetnook export json --collection all --out ~/Downloads/tweetnook.json',
+  '4. Or skip prompts via X_ARCHIVE_PATH=/path/to/twitter-archive',
+];
+
 /**
  * Guided Reddit setup. Reuses the stored path when it still exists, otherwise
  * states the prerequisites up front, then walks: checkout → .env → OAuth
@@ -371,12 +392,8 @@ export async function ensureRedditExport({ prompt, say, state, confirm }) {
   if (state.redditExportPath && exists(state.redditExportPath)) {
     return socialSourceFor(state.redditExportPath, 'Reddit saved posts');
   }
-  say('Reddit import needs three one-time things from you:');
-  say('  1. Reddit-Fetch on disk: git clone https://github.com/akashpandey/Reddit-Fetch');
-  say('  2. A Reddit app (https://www.reddit.com/prefs/apps, type script) — its ID, secret, your username');
-  say('  3. One browser click when the login URL prints below');
-  say('Once those are done the TUI does everything else: writes .env, logs in, fetches, remembers the path.');
-  if (confirm && !(await confirm('Start Reddit setup?'))) return null;
+  for (const line of REDDIT_GUIDE_STEPS) say(line);
+  if (confirm && !(await confirm('Start Reddit setup or supply saved_posts path?'))) return null;
   const tools = toolStatus();
   let checkout = state.redditCheckout && exists(state.redditCheckout)
     ? state.redditCheckout
@@ -384,9 +401,13 @@ export async function ensureRedditExport({ prompt, say, state, confirm }) {
   if (!checkout) {
     say(`Clone it first: git clone https://github.com/akashpandey/Reddit-Fetch "${path.join(os.homedir(), 'Reddit-Fetch')}"`);
     if (!tools.git) say('git is not installed — install it, or download the ZIP from GitHub.');
-    const given = await prompt('Path to Reddit-Fetch checkout', { hint: '~/Reddit-Fetch' });
+    const given = await prompt('Path to Reddit-Fetch folder or saved_posts.json', { hint: '~/Reddit-Fetch' });
     if (!given) return null;
     const resolved = given.startsWith('~/') ? path.join(os.homedir(), given.slice(2)) : path.resolve(given);
+    if (/saved_posts\.(json|html)$/i.test(resolved) && exists(resolved)) {
+      state.redditExportPath = resolved;
+      return socialSourceFor(resolved, 'Reddit saved posts');
+    }
     if (!exists(path.join(resolved, 'reddit_fetch', 'api.py'))) {
       say('That folder has no reddit_fetch/api.py — cancelled.');
       return null;
@@ -441,9 +462,7 @@ export async function ensureXArchive({ prompt, say, state, confirm }) {
   if (state.xArchivePath && exists(state.xArchivePath)) {
     return socialSourceFor(state.xArchivePath, 'X archive');
   }
-  say('X import needs one thing from you:');
-  say('  1. Your archive ZIP from X → Settings → Your account → Download an archive of your data');
-  say('Once you point at it the TUI does everything else: extracts, reads, remembers the folder.');
+  for (const line of X_GUIDE_STEPS) say(line);
   if (confirm && !(await confirm('Start X setup?'))) return null;
   const tools = toolStatus();
   say('Tip: request the archive now if you have not — X emails it later; come back with the ZIP.');

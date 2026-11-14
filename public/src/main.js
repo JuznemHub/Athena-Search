@@ -51,6 +51,8 @@ document.addEventListener('DOMContentLoaded', () => {
     conversationHistory: [],
     notifications: [],
     unreadNotifs: 0,
+    bookmarks: [],
+    bookmarkedUrls: new Set(),
     hostedMode: isHosted,
     authConfig: null,
     hasSearched: false,
@@ -161,14 +163,33 @@ document.addEventListener('DOMContentLoaded', () => {
     // outright once the backend is on a different origin. Cross-origin auth
     // travels in the Authorization header; the default ('same-origin') still
     // sends the HttpOnly session cookie when the backend IS this origin.
-    const res = await fetch(`${API_BASE}${path}`, {
-      ...options,
-      headers: {
-        ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
-        ...authHeaders(options.headers || {}),
-        ...(state.wikiShareToken ? { 'X-Wiki-Share-Token': state.wikiShareToken } : {})
+    const timeoutMs = options.timeoutMs ?? 20000;
+    const { timeoutMs: _ignoredTimeout, signal: userSignal, ...fetchOpts } = options;
+    let signal = userSignal;
+    let timeoutId = null;
+    if (!signal && timeoutMs > 0) {
+      if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+        signal = AbortSignal.timeout(timeoutMs);
+      } else if (typeof AbortController !== 'undefined') {
+        const ac = new AbortController();
+        signal = ac.signal;
+        timeoutId = setTimeout(() => ac.abort(new Error('Request timed out')), timeoutMs);
       }
-    });
+    }
+    let res;
+    try {
+      res = await fetch(`${API_BASE}${path}`, {
+        ...fetchOpts,
+        ...(signal ? { signal } : {}),
+        headers: {
+          ...(fetchOpts.body && !(fetchOpts.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
+          ...authHeaders(fetchOpts.headers || {}),
+          ...(state.wikiShareToken ? { 'X-Wiki-Share-Token': state.wikiShareToken } : {})
+        }
+      });
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
     const data = await res.json().catch(() => ({}));
     if (res.status === 401 || data.code === 'AUTH_REQUIRED') {
       if (!state.publicWikiMode) {
@@ -205,16 +226,54 @@ document.addEventListener('DOMContentLoaded', () => {
     appRoot.classList.remove('hidden');
   }
 
-  // --- Modal: replaces native confirm() with a themed, focus-trapped dialog ---
+  // --- Modal: uses native <dialog>.showModal() (top layer + inert outside + Esc) with fallback ---
   function showModal({ title = 'Confirm', message = '', confirmText = 'Confirm', cancelText = 'Cancel', danger = false }) {
     return new Promise((resolve) => {
       const prevActive = document.activeElement;
+      const probe = typeof document.createElement === 'function' ? document.createElement('dialog') : null;
+      if (probe && typeof probe.showModal === 'function') {
+        probe.className = 'modal modal-dialog';
+        probe.setAttribute('aria-labelledby', 'athenaModalTitle');
+        probe.setAttribute('aria-describedby', 'athenaModalMessage');
+        probe.innerHTML = `
+          <h3 id="athenaModalTitle" class="modal-title">${escapeHtml(title)}</h3>
+          <p id="athenaModalMessage" class="modal-message">${escapeHtml(message)}</p>
+          <div class="modal-actions">
+            <button type="button" class="btn btn-secondary" data-modal-cancel>${escapeHtml(cancelText)}</button>
+            <button type="button" class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-modal-ok>${escapeHtml(confirmText)}</button>
+          </div>`;
+        let settled = false;
+        const finish = (val) => {
+          if (settled) return;
+          settled = true;
+          if (probe.open) probe.close(val ? 'confirm' : 'cancel');
+          probe.returnValue = '';
+          probe.remove();
+          if (prevActive && prevActive.focus) prevActive.focus();
+          resolve(val);
+        };
+        probe.querySelector('[data-modal-cancel]').addEventListener('click', () => finish(false));
+        probe.querySelector('[data-modal-ok]').addEventListener('click', () => finish(true));
+        probe.addEventListener('cancel', (e) => {
+          e.preventDefault();
+          finish(false);
+        });
+        probe.addEventListener('click', (e) => {
+          if (e.target === probe) finish(false);
+        });
+        probe.addEventListener('close', () => finish(probe.returnValue === 'confirm'));
+        document.body.appendChild(probe);
+        probe.showModal();
+        probe.querySelector(danger ? '[data-modal-cancel]' : '[data-modal-ok]').focus();
+        return;
+      }
+
       const overlay = document.createElement('div');
       overlay.className = 'modal-overlay';
       overlay.innerHTML = `
         <div class="modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
           <h3 class="modal-title">${escapeHtml(title)}</h3>
-          <p class="modal-message">${message}</p>
+          <p class="modal-message">${escapeHtml(message)}</p>
           <div class="modal-actions">
             <button type="button" class="btn btn-secondary" data-modal-cancel>${escapeHtml(cancelText)}</button>
             <button type="button" class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-modal-ok>${escapeHtml(confirmText)}</button>
@@ -241,15 +300,20 @@ document.addEventListener('DOMContentLoaded', () => {
       overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) done(false); });
       document.addEventListener('keydown', onKey);
       document.body.appendChild(overlay);
-      overlay.querySelector(danger ? '[data-modal-ok]' : '[data-modal-cancel]').focus();
+      overlay.querySelector(danger ? '[data-modal-cancel]' : '[data-modal-ok]').focus();
     });
   }
 
+  let toastTimer = null;
   function showToast(message, isWarning = false) {
     toast.textContent = message;
     toast.style.borderColor = isWarning ? 'var(--warning-color)' : 'var(--border-highlight)';
     toast.classList.remove('hidden');
-    setTimeout(() => toast.classList.add('hidden'), 3500);
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      toast.classList.add('hidden');
+      toastTimer = null;
+    }, 3500);
   }
 
   function escapeHtml(str) {
@@ -803,6 +867,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const wikiShareBtn = $('wikiShareBtn');
     if (wikiShareBtn) wikiShareBtn.classList.toggle('hidden', !god);
 
+    const cleanerOpenBtn = $('adminCleanerOpenBtn');
+    if (cleanerOpenBtn) cleanerOpenBtn.classList.toggle('hidden', !god);
+    const blacklistOpenBtn = $('adminBlacklistOpenBtn');
+    if (blacklistOpenBtn) blacklistOpenBtn.classList.toggle('hidden', !(god || isStaff));
+    updateAiProviderInfoCard();
+
     const wipeWrap = $('wipePersonalWrap');
     const wipeBtn = $('wipePersonalBtn');
     if (wipeWrap) {
@@ -900,6 +970,7 @@ document.addEventListener('DOMContentLoaded', () => {
     await step('community admins', () => loadCommunityAdmins());
     await step('tags', () => loadMainTags());
     await step('notifications', () => loadNotifications());
+    await step('bookmarks', () => loadBookmarks());
 
     // These must run even if every fetch above failed, or there is no usable UI.
     try {
@@ -909,6 +980,7 @@ document.addEventListener('DOMContentLoaded', () => {
       updateScopeUI();
       renderHome();
       startLiveSync();
+      handleShareTargetParams();
       if (window.location.hash === '#db' || window.location.hash === '#admin') {
         openAdminDb();
       } else if (window.location.hash === '#wiki') {
@@ -916,6 +988,7 @@ document.addEventListener('DOMContentLoaded', () => {
       } else if (window.location.hash === '#feed' || window.location.hash === '#rss') {
         openFeed();
       }
+      syncMobileBottomNav();
     } catch (err) {
       console.error('[athena] render failed:', err);
     }
@@ -930,18 +1003,59 @@ document.addEventListener('DOMContentLoaded', () => {
   let liveSyncBusy = false;
   let liveSyncListenersBound = false;
   let lastSyncFingerprint = '';
+  let lastFocusSyncAt = 0;
+
+  function isInlineEditingActive() {
+    return Boolean(
+      resultsList?.querySelector('.edit-panel:not(.hidden)') ||
+      $('adminDbList')?.querySelector('.edit-panel:not(.hidden)')
+    );
+  }
+
+  function isSecondaryViewOpen() {
+    const adminOpen = $('adminDbView') && !$('adminDbView').classList.contains('hidden');
+    const wikiOpen = $('wikiView') && !$('wikiView').classList.contains('hidden');
+    const feedOpen = $('feedView') && !$('feedView').classList.contains('hidden');
+    const modalOpen = Boolean(
+      document.querySelector('dialog[open]') ||
+      document.querySelector('.wiki-modal:not(.hidden)') ||
+      document.querySelector('.modal-overlay')
+    );
+    return Boolean(adminOpen || wikiOpen || feedOpen || modalOpen);
+  }
+
+  function hasActiveMainFilters() {
+    return Boolean(
+      searchInput.value.trim() ||
+      state.filterTag ||
+      (state.filterStatus && state.filterStatus !== 'all') ||
+      (state.filterSort && state.filterSort !== 'created_desc')
+    );
+  }
+
   function corpusFingerprint() {
     const p = state.personalLinks || [];
     const c = state.communityLinks || [];
     const pd = state.personalDocuments || [];
     const cd = state.communityDocuments || [];
-    const newest = list => list.reduce((m, x) => Math.max(m, Number(x.created_at || x.createdAt || 0)), 0);
-    return `${p.length}:${newest(p)}:${pd.length}:${newest(pd)}|${c.length}:${newest(c)}:${cd.length}:${newest(cd)}|${state.activeCommunity || ''}`;
+    const stamp = list => list.reduce((m, x) => Math.max(
+      m,
+      Number(x.created_at || x.createdAt || 0),
+      Number(x.manual_edited_at || x.manualEditedAt || 0)
+    ), 0);
+    return `${p.length}:${stamp(p)}:${pd.length}:${stamp(pd)}|${c.length}:${stamp(c)}:${cd.length}:${stamp(cd)}|${state.activeCommunity || ''}|${state.scope || ''}`;
   }
+
   async function refreshLiveData(opts = {}) {
     // No sessionToken check: a same-origin login authenticates with the HttpOnly
     // cookie alone, so currentUser is the only reliable signal.
     if (!state.currentUser) return;
+    if (document.visibilityState === 'hidden' && !opts.forceUi) return;
+    if (opts.fromFocus) {
+      const now = Date.now();
+      if (now - lastFocusSyncAt < 1500) return;
+      lastFocusSyncAt = now;
+    }
     if (liveSyncBusy) return;
     liveSyncBusy = true;
     try {
@@ -955,9 +1069,12 @@ document.addEventListener('DOMContentLoaded', () => {
       const fp = corpusFingerprint();
       const changed = fp !== lastSyncFingerprint;
       lastSyncFingerprint = fp;
-      if (changed || opts.forceUi) {
-        if (state.mode === 'search') {
-          if (state.hasSearched && searchInput.value.trim()) runSearch();
+      // Never wipe or replace active editing panels, secondary views (DB/Wiki/Feed),
+      // or already-populated results when nothing in the corpus actually changed.
+      if (state.mode === 'search' && !isInlineEditingActive() && !isSecondaryViewOpen()) {
+        const listMissing = resultsList.children.length === 0 && corpus().length > 0;
+        if (changed || (opts.forceUi && listMissing)) {
+          if (hasActiveMainFilters()) runSearch();
           else renderHome();
         }
       }
@@ -973,9 +1090,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!liveSyncListenersBound) {
       liveSyncListenersBound = true;
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') refreshLiveData({ forceUi: true });
+        if (document.visibilityState === 'visible') refreshLiveData({ forceUi: true, fromFocus: true });
       });
-      window.addEventListener('focus', () => refreshLiveData({ forceUi: true }));
+      window.addEventListener('focus', () => refreshLiveData({ forceUi: true, fromFocus: true }));
     }
   }
 
@@ -1261,10 +1378,13 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     try {
-      const { data } = await api(`/api/links?community_id=${encodeURIComponent(state.activeCommunity)}`);
-      state.communityLinks = (data.links || []).map(normalizeLink);
-    } catch (_) {
-      state.communityLinks = [];
+      const { res, data } = await api(`/api/links?community_id=${encodeURIComponent(state.activeCommunity)}`);
+      if (res?.ok && Array.isArray(data?.links)) {
+        state.communityLinks = data.links.map(normalizeLink);
+      }
+    } catch (err) {
+      // Preserve previously loaded links across transient focus/network blips.
+      if (!err?.auth) console.warn('loadCommunityLinksIfAny', err);
     }
   }
 
@@ -1627,6 +1747,10 @@ document.addEventListener('DOMContentLoaded', () => {
         ? 'Search personal notes & links'
         : 'Search community set';
       aiAnswerCard.classList.add('hidden');
+      if (state.authReady) {
+        if (hasActiveMainFilters()) runSearch();
+        else renderHome();
+      }
     } else if (mode === 'dump') {
       modeBadgeText.textContent = 'Dump';
       modePulse.style.background = 'var(--success-color)';
@@ -1683,16 +1807,83 @@ document.addEventListener('DOMContentLoaded', () => {
     document.body.classList.toggle('results-active', compact);
   }
 
+  let homeFallbackSeq = 0;
   function renderHome() {
+    if (state.mode && state.mode !== 'search') return;
+    aiAnswerCard.classList.add('hidden');
+
+    if (state.scope === 'community' && !state.activeCommunity) {
+      compactHero(false);
+      resultsList.innerHTML = '';
+      resultsMeta.classList.add('hidden');
+      emptyState.classList.remove('hidden');
+      emptyStateText.innerHTML = state.communities.length
+        ? 'Select a community from the bar above to view its saved links.'
+        : 'No communities yet. Join one in Telegram (<code>/community_join &lt;id&gt;</code>) or switch to Personal scope.';
+      return;
+    }
+
+    const items = filterLinks(corpus(), '');
+    if (items.length > 0) {
+      const total = Math.max(items.length, Number(state.tagStats?.total || 0));
+      renderGoogleResults(items, '', total);
+      return;
+    }
+
+    // If tags/corpus stats show links exist on the server (or we haven't pulled this scope yet),
+    // fetch unfiltered links directly so initial DB view never stalls empty without a tag.
+    if (state.currentUser && state.tagStats?.total > 0) {
+      const seq = ++homeFallbackSeq;
+      const capturedSearchSeq = typeof searchSeq === 'number' ? searchSeq : 0;
+      compactHero(true);
+      emptyState.classList.add('hidden');
+      resultsMeta.classList.add('hidden');
+      resultsList.innerHTML = Array.from({ length: 3 }).map(() => `
+        <article class="g-result g-result-skeleton" aria-hidden="true">
+          <div class="skeleton sk-cite"></div>
+          <div class="skeleton sk-title"></div>
+          <div class="skeleton sk-line"></div>
+          <div class="skeleton sk-line sk-short"></div>
+        </article>`).join('');
+      const params = new URLSearchParams({ scope: state.scope, sort: state.filterSort || 'created_desc' });
+      if (state.filterStatus && state.filterStatus !== 'all') params.set('edited', state.filterStatus);
+      if (state.scope === 'community' && state.activeCommunity) params.set('community_id', state.activeCommunity);
+      api(`/api/links/search?${params.toString()}`)
+        .then(({ res, data }) => {
+          if (seq !== homeFallbackSeq || capturedSearchSeq !== searchSeq || state.mode !== 'search' || hasActiveMainFilters()) return;
+          if (res?.ok && data?.success && Array.isArray(data.links)) {
+            const loaded = data.links.map(normalizeLink);
+            if (state.scope === 'community') state.communityLinks = loaded;
+            else state.personalLinks = loaded;
+            lastSyncFingerprint = corpusFingerprint();
+            const merged = filterLinks(corpus(), '');
+            if (merged.length > 0) {
+              renderGoogleResults(merged, '', Number(data.total || merged.length));
+              return;
+            }
+          }
+          compactHero(false);
+          resultsList.innerHTML = '';
+          emptyState.classList.remove('hidden');
+          emptyStateText.innerHTML = `Could not load links in ${escapeHtml(state.scope)}. Check your connection or <button type="button" class="btn btn-secondary btn-sm empty-retry-btn">Retry</button>`;
+          emptyStateText.querySelector('.empty-retry-btn')?.addEventListener('click', () => renderHome());
+        })
+        .catch(() => {
+          if (seq !== homeFallbackSeq || capturedSearchSeq !== searchSeq || state.mode !== 'search' || hasActiveMainFilters()) return;
+          compactHero(false);
+          resultsList.innerHTML = '';
+          emptyState.classList.remove('hidden');
+          emptyStateText.innerHTML = `Could not load links in ${escapeHtml(state.scope)}. Check Settings &rarr; Backend or <button type="button" class="btn btn-secondary btn-sm empty-retry-btn">Retry</button>`;
+          emptyStateText.querySelector('.empty-retry-btn')?.addEventListener('click', () => renderHome());
+        });
+      return;
+    }
+
     compactHero(false);
     resultsList.innerHTML = '';
     resultsMeta.classList.add('hidden');
-    aiAnswerCard.classList.add('hidden');
     emptyState.classList.remove('hidden');
-    const n = corpus().length;
-    emptyStateText.innerHTML = n
-      ? `<strong>${n}</strong> items in ${state.scope}. Type to search, or switch to Dump / AI.`
-      : 'Paste a link or note in <strong>Dump</strong>, then search or ask AI.';
+    emptyStateText.innerHTML = `No saved links in <strong>${escapeHtml(state.scope)}</strong> yet. Switch to <strong>Dump</strong> to save a link, note, or file.`;
   }
 
   function filterLinks(links, query) {
@@ -1792,19 +1983,39 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!items.length) {
       emptyState.classList.remove('hidden');
       resultsMeta.classList.add('hidden');
-      emptyStateText.innerHTML = query
-        ? `No results for <strong>${escapeHtml(query)}</strong>`
-        : 'No items yet.';
+      const hasFilters = Boolean(query || state.filterTag || (state.filterStatus && state.filterStatus !== 'all'));
+      if (query) {
+        emptyStateText.innerHTML = `No saved links matched <strong>${escapeHtml(query)}</strong>${state.filterTag ? ` under <strong>#${escapeHtml(state.filterTag)}</strong>` : ''}. Try fewer keywords or <button type="button" class="btn btn-secondary btn-sm empty-clear-filters-btn">Clear search &amp; filters</button>`;
+      } else if (state.filterTag || (state.filterStatus && state.filterStatus !== 'all')) {
+        const desc = [
+          state.filterTag ? `#${escapeHtml(state.filterTag)}` : '',
+          state.filterStatus && state.filterStatus !== 'all' ? `${escapeHtml(state.filterStatus)} status` : ''
+        ].filter(Boolean).join(' · ');
+        emptyStateText.innerHTML = `No links match <strong>${desc}</strong>. <button type="button" class="btn btn-secondary btn-sm empty-clear-filters-btn">Clear filters</button>`;
+      } else {
+        emptyStateText.innerHTML = `No saved links in <strong>${escapeHtml(state.scope)}</strong> yet. Switch to <strong>Dump</strong> to add a link or note.`;
+      }
+      if (hasFilters) {
+        emptyStateText.querySelector('.empty-clear-filters-btn')?.addEventListener('click', () => {
+          searchInput.value = '';
+          clearSearchBtn?.classList.add('hidden');
+          state.filterTag = '';
+          state.filterStatus = 'all';
+          if ($('mainStatusSelect')) $('mainStatusSelect').value = 'all';
+          renderMainTags();
+          renderHome();
+        });
+      }
       return;
     }
     emptyState.classList.add('hidden');
     resultsMeta.classList.remove('hidden');
-    resultsMeta.textContent = `About ${items.length} result${items.length === 1 ? '' : 's'}${query ? ` for “${query}”` : ''}${corpusTotal != null ? ` · ${corpusTotal} saved items searched` : ''}`;
+    const filterSummary = state.filterTag ? ` in #${state.filterTag}` : '';
+    resultsMeta.textContent = `${items.length} link${items.length === 1 ? '' : 's'}${query ? ` for “${query}”` : filterSummary}${corpusTotal != null && corpusTotal !== items.length ? ` · ${corpusTotal} total in scope` : ''}`;
 
     const isCommunity = state.scope === 'community';
-    // Owner/admin only: everyone else sees no edit/delete affordance, and the
-    // server rejects the call with "Only owner/admins can edit or delete".
-    const canModerate = state.scope === 'personal' || isStaffRank() || isCommunityStaff();
+    const canEdit = !!state.currentUser;
+    const canDelete = state.scope === 'personal' || isStaffRank() || isCommunityStaff();
 
     items.forEach(item => {
       const card = document.createElement('article');
@@ -1856,7 +2067,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const editAuditHtml = item.manualEditedAt
         ? `<div class="g-audit-row">
             <span class="admin-edit-badge" title="Manually edited">
-              ✏️ Last edited by <strong>${escapeHtml(item.lastEditedByName || 'Admin')}</strong> · ${escapeHtml(formatDateTime(item.manualEditedAt))}
+              Edited by <strong>${escapeHtml(item.lastEditedByName || 'Admin')}</strong> · ${escapeHtml(formatDateTime(item.manualEditedAt))}
             </span>
            </div>`
         : '';
@@ -1870,16 +2081,37 @@ document.addEventListener('DOMContentLoaded', () => {
             <button type="button" class="g-tag-chip g-tag-empty" data-tag="notags" title="Untagged link — click to filter">#notags</button>
            </div>`;
 
-      const cardActionsHtml = canModerate ? `
+      const bmActive = typeof isUrlBookmarked === 'function' && isUrlBookmarked(item.url);
+      const bmBtnHtml = (state.currentUser && item.url) ? `
+        <button type="button" class="btn btn-secondary btn-sm bookmark-link-btn ${bmActive ? 'is-bookmarked' : ''}" data-id="${escapeHtml(item.id)}" data-url="${escapeHtml(item.url)}" data-title="${escapeHtml(item.title || '')}" title="${bmActive ? 'Remove bookmark' : 'Save bookmark'}">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="${bmActive ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+          <span>${bmActive ? 'Saved' : 'Save'}</span>
+        </button>` : '';
+
+      const aiStarBtnHtml = (typeof isGod === 'function' && isGod()) ? `
+        <button type="button" class="btn btn-secondary btn-sm ai-enrich-btn" data-id="${escapeHtml(item.id)}" title="Re-scrape URL and enrich metadata with AI (GOD only)">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/></svg>
+          <span>AI</span>
+        </button>` : '';
+
+      const editBtnHtml = canEdit ? `
+        <button type="button" class="btn btn-secondary btn-sm edit-link-btn" data-id="${escapeHtml(item.id)}" title="Edit link and tags">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+          <span>Edit</span>
+        </button>` : '';
+
+      const delBtnHtml = canDelete ? `
+        <button type="button" class="btn btn-sm g-card-del-btn del-link-btn" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(item.title || item.url || 'this link')}" title="Delete link from database">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+          <span>Delete</span>
+        </button>` : '';
+
+      const cardActionsHtml = (bmBtnHtml || aiStarBtnHtml || editBtnHtml || delBtnHtml) ? `
         <div class="g-card-actions">
-          <button type="button" class="btn btn-secondary btn-sm edit-link-btn" data-id="${escapeHtml(item.id)}" title="Edit link and tags">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-            <span>Edit</span>
-          </button>
-          <button type="button" class="btn btn-sm g-card-del-btn del-link-btn" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(item.title || item.url || 'this link')}" title="Delete link from database">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
-            <span>Delete</span>
-          </button>
+          ${bmBtnHtml}
+          ${aiStarBtnHtml}
+          ${editBtnHtml}
+          ${delBtnHtml}
         </div>` : '';
 
       card.innerHTML = `
@@ -1912,7 +2144,7 @@ document.addEventListener('DOMContentLoaded', () => {
           <div class="edit-panel-actions">
             <button type="button" class="btn btn-primary btn-sm edit-save">Save</button>
             <button type="button" class="btn btn-secondary btn-sm edit-cancel">Cancel</button>
-            <button type="button" class="btn btn-sm g-card-del-btn edit-delete">Delete</button>
+            ${canDelete ? '<button type="button" class="btn btn-sm g-card-del-btn edit-delete">Delete</button>' : ''}
           </div>
         </div>
       `;
@@ -1935,6 +2167,28 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         renderMainTags();
         runSearch();
+      });
+    });
+
+    resultsList.querySelectorAll('.bookmark-link-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await toggleBookmark({
+          link_id: btn.dataset.id,
+          scope: state.scope,
+          scope_key: state.scope === 'community' ? state.activeCommunity : '',
+          url: btn.dataset.url,
+          title: btn.dataset.title
+        }, btn);
+      });
+    });
+
+    resultsList.querySelectorAll('.ai-enrich-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await enrichLinkWithAi(btn.dataset.id, state.scope, btn, 'search');
       });
     });
 
@@ -2011,6 +2265,7 @@ document.addEventListener('DOMContentLoaded', () => {
               lastEditedByName: data.last_edited_by_name || state.currentUser?.displayName || state.currentUser?.username || 'Admin'
             };
           }
+          lastSyncFingerprint = corpusFingerprint();
           showToast('Link updated in database');
           wikiState.dirty = true;
           if ($('wikiView') && !$('wikiView').classList.contains('hidden')) {
@@ -2020,8 +2275,12 @@ document.addEventListener('DOMContentLoaded', () => {
           card?.classList.remove('editing');
           card?.classList.add('edited-flash');
           setTimeout(() => card?.classList.remove('edited-flash'), 1200);
-          await loadMainTags();
-          runSearch();
+          await loadMainTags().catch(() => {});
+          if (hasActiveMainFilters()) {
+            await runSearch();
+          } else {
+            renderHome();
+          }
         } catch (err) {
           showToast(err.message || 'Edit failed', true);
         } finally {
@@ -2035,7 +2294,12 @@ document.addEventListener('DOMContentLoaded', () => {
       const isComm = state.scope === 'community';
       const item = (isComm ? state.communityLinks : state.personalLinks).find(l => l.id === id);
       const label = item?.title || item?.url || 'this link';
-      if (!window.confirm(`Delete "${String(label).slice(0, 80)}" from the database? This cannot be undone.`)) return;
+      if (!(await showModal({
+        title: 'Delete link',
+        message: `Delete "${String(label).slice(0, 80)}" from the database? This cannot be undone.`,
+        confirmText: 'Delete',
+        danger: true
+      }))) return;
       if (btn) btn.disabled = true;
       try {
         const path = isComm ? '/api/links' : '/api/personal-links';
@@ -2051,13 +2315,18 @@ document.addEventListener('DOMContentLoaded', () => {
         const list = isComm ? state.communityLinks : state.personalLinks;
         const idx = list.findIndex(l => l.id === id);
         if (idx >= 0) list.splice(idx, 1);
+        lastSyncFingerprint = corpusFingerprint();
         showToast('Link deleted from database');
         wikiState.dirty = true;
         if ($('wikiView') && !$('wikiView').classList.contains('hidden')) {
           loadWikiData();
         }
-        await loadMainTags();
-        runSearch();
+        await loadMainTags().catch(() => {});
+        if (hasActiveMainFilters()) {
+          await runSearch();
+        } else {
+          renderHome();
+        }
       } catch (err) {
         showToast(err.message || 'Delete failed', true);
         if (btn) btn.disabled = false;
@@ -2364,9 +2633,10 @@ document.addEventListener('DOMContentLoaded', () => {
     let newChatBtn = document.getElementById('newChatBtn');
     if (!newChatBtn) {
       newChatBtn = document.createElement('button');
+      newChatBtn.type = 'button';
       newChatBtn.id = 'newChatBtn';
       newChatBtn.className = 'new-chat-btn';
-      newChatBtn.textContent = '✦ New chat';
+      newChatBtn.textContent = 'New chat';
       newChatBtn.addEventListener('click', () => {
         state.conversationHistory = [];
         aiAnswerText.innerHTML = '';
@@ -2445,7 +2715,32 @@ document.addEventListener('DOMContentLoaded', () => {
           a.title = 'Download file';
           a.addEventListener('click', (e) => { e.preventDefault(); downloadDocument(s); });
         }
-        aiSources.appendChild(a);
+        if (s.url && state.currentUser) {
+          const wrap = document.createElement('span');
+          wrap.className = 'ai-source-chip-group';
+          const bmBtn = document.createElement('button');
+          bmBtn.type = 'button';
+          bmBtn.className = `ai-source-bm-btn ${isUrlBookmarked(s.url) ? 'is-bookmarked' : ''}`;
+          bmBtn.title = isUrlBookmarked(s.url) ? 'Remove bookmark' : 'Bookmark source';
+          bmBtn.setAttribute('aria-label', bmBtn.title);
+          bmBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>';
+          bmBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            toggleBookmark({
+              link_id: s.id || '',
+              scope: state.scope,
+              scope_key: state.scope === 'community' ? state.activeCommunity : '',
+              url: s.url,
+              title: s.title || s.url
+            }, bmBtn);
+          });
+          wrap.appendChild(a);
+          wrap.appendChild(bmBtn);
+          aiSources.appendChild(wrap);
+        } else {
+          aiSources.appendChild(a);
+        }
       });
       renderGoogleResults(result.results || result.sources || [], q);
     } catch (err) {
@@ -2467,7 +2762,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const hasThinking = msg.thinking && msg.thinking.trim();
         html += `<div class="chat-msg chat-assistant">`;
         if (hasThinking) {
-          html += `<details class="thinking-block"><summary><span class="thinking-icon">🧠</span> Thinking</summary><div class="thinking-content">${escapeHtml(msg.thinking)}</div></details>`;
+          html += `<details class="thinking-block"><summary>Thinking</summary><div class="thinking-content">${escapeHtml(msg.thinking)}</div></details>`;
         }
         html += `<div class="chat-answer-content">${renderMarkdownLite(msg.content)}</div></div>`;
       }
@@ -2603,6 +2898,37 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     loadAiErrors(false);
     updateAiFreeBadge();
+    updateAiProviderInfoCard();
+  }
+
+  let aiProviderLatency = '';
+
+  function updateAiProviderInfoCard() {
+    const card = $('aiProviderInfoCard');
+    if (!card) return;
+    const presetKey = $('aiPreset')?.value || 'custom';
+    const preset = window.AthenaAI?.PRESETS?.[presetKey];
+    const base = ($('aiBaseUrl')?.value || preset?.baseUrl || '').trim();
+    const model = ($('aiModel')?.value || preset?.model || '').trim();
+    const mode = ($('aiMode')?.value || preset?.mode || 'openai').trim();
+    let host = '—';
+    try { if (base) host = new URL(base).host; } catch (_) { host = base || '—'; }
+    const tier = preset?.tier || (presetKey === 'custom' ? 'BYOK' : 'Standard');
+    const tierCls = /free/i.test(tier) ? 'tier-free' : (/local/i.test(tier) ? 'tier-local' : 'tier-paid');
+    const rateNote = preset?.rateNote || 'Provider limits vary by account tier and model.';
+    card.innerHTML = `
+      <div class="ai-provider-card-head">
+        <strong>${escapeHtml(preset?.label || presetKey)}</strong>
+        <span class="ai-tier-pill ${tierCls}">${escapeHtml(tier)}</span>
+        ${aiProviderLatency ? `<span class="ai-latency-pill">${escapeHtml(aiProviderLatency)}</span>` : ''}
+      </div>
+      <div class="ai-provider-card-meta">
+        <span>Host: <code>${escapeHtml(host)}</code></span>
+        <span>Protocol: <code>${escapeHtml(mode)}</code></span>
+        ${model ? `<span>Model: <code>${escapeHtml(model)}</code></span>` : ''}
+      </div>
+      <div class="ai-provider-card-note">${escapeHtml(rateNote)}</div>
+    `;
   }
 
   function renderSteroidCaps(on, caps) {
@@ -2624,7 +2950,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (base && (p.baseUrl || name === 'custom')) base.value = p.baseUrl || base.value;
     if (model && p.model) model.value = p.model;
     if (mode && p.mode) mode.value = p.mode;
+    aiProviderLatency = '';
     updateAiFreeBadge();
+    updateAiProviderInfoCard();
   }
 
   async function updateAiFreeBadge() {
@@ -2659,6 +2987,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let aiModelCatalog = null;
   let aiModelCatalogKey = '';
   let aiModelPage = 0;
+  let aiModelTierFilter = 'all';
   const AI_MODEL_PAGE_SIZE = 100;
 
   async function loadAiModels(force = false) {
@@ -2705,7 +3034,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!list || !aiModelCatalog) return;
     const pager = $('aiModelPager');
     const f = (filterText || '').toLowerCase();
-    const items = aiModelCatalog.filter((m) => !f || m.id.toLowerCase().includes(f) || (m.name || '').toLowerCase().includes(f));
+    const items = aiModelCatalog.filter((m) => {
+      if (aiModelTierFilter === 'free' && !m.free) return false;
+      if (aiModelTierFilter === 'paid' && m.free) return false;
+      return !f || m.id.toLowerCase().includes(f) || (m.name || '').toLowerCase().includes(f);
+    });
     if (!items.length) {
       list.innerHTML = '<div class="model-item status-msg">No models match.</div>';
       if (pager) pager.innerHTML = '';
@@ -2732,7 +3065,7 @@ document.addEventListener('DOMContentLoaded', () => {
     list.querySelectorAll('.model-item[data-model]').forEach((el) => {
       const pick = () => {
         const model = $('aiModel');
-        if (model) { model.value = el.dataset.model; updateAiFreeBadge(); }
+        if (model) { model.value = el.dataset.model; updateAiFreeBadge(); updateAiProviderInfoCard(); }
       };
       el.addEventListener('click', pick);
       el.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); pick(); } });
@@ -3020,6 +3353,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.location.hash !== '#db') {
       window.history.pushState(null, '', '#db');
     }
+    if (typeof syncMobileBottomNav === 'function') syncMobileBottomNav('db');
 
     if (!isStaffRank()) {
       renderAdminDbLockedView();
@@ -3070,16 +3404,23 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.location.hash === '#db' || window.location.hash === '#admin') {
       window.history.pushState(null, '', window.location.pathname + window.location.search);
     }
+    if (typeof syncMobileBottomNav === 'function') syncMobileBottomNav('search');
   }
 
   async function loadAdminDbLinks() {
-    if (adminDbState.loading) return;
+    const seq = (adminDbState.requestSeq = (adminDbState.requestSeq || 0) + 1);
+    if (adminDbState.abortController) {
+      try { adminDbState.abortController.abort(); } catch (_) {}
+      adminDbState.abortController = null;
+    }
+    const ac = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    adminDbState.abortController = ac;
     adminDbState.loading = true;
     const listEl = $('adminDbList');
     const countBadge = $('adminDbCountBadge');
     if (countBadge) countBadge.textContent = 'Fetching links…';
     if (listEl && !adminDbState.links.length) {
-      listEl.innerHTML = '<div class="empty-state"><p>Loading database links…</p></div>';
+      listEl.innerHTML = '<div class="empty-state" role="status"><p>Loading database links…</p></div>';
     }
 
     try {
@@ -3096,7 +3437,8 @@ document.addEventListener('DOMContentLoaded', () => {
       if (adminDbState.tag) qParams.set('tag', adminDbState.tag);
       if (adminDbState.q) qParams.set('q', adminDbState.q);
 
-      const { res, data } = await api(`/api/admin/links?${qParams.toString()}`);
+      const { res, data } = await api(`/api/admin/links?${qParams.toString()}`, ac ? { signal: ac.signal } : {});
+      if (seq !== adminDbState.requestSeq) return;
       if (!res.ok || !data.success) {
         if (res.status === 403 || data?.code === 'ADMIN_ONLY') {
           renderAdminDbLockedView(data?.error);
@@ -3104,7 +3446,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         showToast(data.error || 'Failed to load database links', true);
         if (countBadge) countBadge.textContent = 'Failed to load records';
-        if (listEl) listEl.innerHTML = `<div class="empty-state"><p>${escapeHtml(data.error || 'Access denied or failed to load.')}</p></div>`;
+        if (listEl && !adminDbState.links.length) {
+          listEl.innerHTML = `<div class="empty-state"><p>${escapeHtml(data.error || 'Access denied or failed to load.')}</p><div class="empty-state-action"><button type="button" class="btn btn-secondary btn-sm admin-retry-btn">Retry</button></div></div>`;
+          listEl.querySelector('.admin-retry-btn')?.addEventListener('click', () => loadAdminDbLinks());
+        }
         return;
       }
 
@@ -3114,6 +3459,13 @@ document.addEventListener('DOMContentLoaded', () => {
       adminDbState.totalPages = data.totalPages || 1;
       adminDbState.tags = data.tags || [];
       adminDbState.communities = data.communities || [];
+
+      if (adminDbState.page > 1 && adminDbState.links.length === 0 && adminDbState.total > 0) {
+        adminDbState.page = Math.max(1, adminDbState.totalPages);
+        adminDbState.loading = false;
+        await loadAdminDbLinks();
+        return;
+      }
 
       const commSel = $('adminDbCommunity');
       if (commSel && adminDbState.communities.length) {
@@ -3130,11 +3482,18 @@ document.addEventListener('DOMContentLoaded', () => {
       renderAdminDbSummary();
       renderAdminDbPagination();
     } catch (err) {
+      if (seq !== adminDbState.requestSeq || err?.name === 'AbortError' || err?.auth) return;
       showToast(err.message || 'Error fetching database records', true);
       if (countBadge) countBadge.textContent = 'Failed to load records';
-      if (listEl) listEl.innerHTML = `<div class="empty-state"><p>${escapeHtml(err.message || 'Failed to load.')}</p></div>`;
+      if (listEl && !adminDbState.links.length) {
+        listEl.innerHTML = `<div class="empty-state"><p>${escapeHtml(err.message || 'Could not load records.')}</p><div class="empty-state-action"><button type="button" class="btn btn-secondary btn-sm admin-retry-btn">Retry</button></div></div>`;
+        listEl.querySelector('.admin-retry-btn')?.addEventListener('click', () => loadAdminDbLinks());
+      }
     } finally {
-      adminDbState.loading = false;
+      if (seq === adminDbState.requestSeq) {
+        adminDbState.loading = false;
+        adminDbState.abortController = null;
+      }
     }
   }
 
@@ -3217,12 +3576,27 @@ document.addEventListener('DOMContentLoaded', () => {
     const listEl = $('adminDbList');
     if (!listEl) return;
     if (!adminDbState.links.length) {
-      const emptyMsg = (adminDbState.scope === 'community' && !adminDbState.communities.length)
+      const noAccess = adminDbState.scope === 'community' && !adminDbState.communities.length;
+      const hasAdminFilters = Boolean(adminDbState.q || adminDbState.tag || adminDbState.status !== 'all');
+      const emptyMsg = noAccess
         ? 'No communities found where you have admin permissions.'
-        : 'No links matched your query or filters.';
+        : hasAdminFilters
+          ? 'No links matched your query or filters in this scope.'
+          : 'No links saved in this database yet.';
       listEl.innerHTML = `<div class="empty-state">
         <p>${escapeHtml(emptyMsg)}</p>
+        ${!noAccess && hasAdminFilters ? '<div class="empty-state-action"><button type="button" class="btn btn-secondary btn-sm admin-reset-filters-btn">Reset filters</button></div>' : ''}
       </div>`;
+      listEl.querySelector('.admin-reset-filters-btn')?.addEventListener('click', () => {
+        adminDbState.tag = '';
+        adminDbState.q = '';
+        adminDbState.status = 'all';
+        adminDbState.page = 1;
+        if ($('adminDbSearchInput')) $('adminDbSearchInput').value = '';
+        if ($('adminDbStatus')) $('adminDbStatus').value = 'all';
+        $('adminDbClearSearch')?.classList.add('hidden');
+        loadAdminDbLinks();
+      });
       return;
     }
 
@@ -3249,7 +3623,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const auditHtml = item.manual_edited_at
         ? `<span class="admin-edit-badge" title="Manually edited">
-            ✏️ Last edited by <strong>${escapeHtml(item.last_edited_by_name || 'Admin')}</strong> · ${escapeHtml(formatDateTime(item.manual_edited_at))}
+            Edited by <strong>${escapeHtml(item.last_edited_by_name || 'Admin')}</strong> · ${escapeHtml(formatDateTime(item.manual_edited_at))}
            </span>`
         : `<span style="color:var(--text-muted)">Unedited · Original version</span>`;
 
@@ -3269,6 +3643,13 @@ document.addEventListener('DOMContentLoaded', () => {
             <span>${site ? escapeHtml(site) + ' · ' : ''}${escapeHtml(displayUrl)}</span>
           </div>
           <div class="admin-card-actions">
+            ${item.url ? `<button type="button" class="btn btn-secondary btn-sm admin-card-bm-btn ${isUrlBookmarked(item.url) ? 'is-bookmarked' : ''}" data-id="${escapeHtml(item.id)}" data-url="${escapeHtml(item.url)}" data-title="${escapeHtml(item.title || '')}" title="Bookmark link">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="${isUrlBookmarked(item.url) ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" style="vertical-align:middle;"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+            </button>` : ''}
+            ${isGod() ? `<button type="button" class="btn btn-secondary btn-sm admin-card-ai-btn ai-enrich-btn" data-id="${escapeHtml(item.id)}" title="Re-scrape URL and enrich metadata with AI (GOD only)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px;"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/></svg>
+              AI
+            </button>` : ''}
             <button type="button" class="btn btn-secondary btn-sm admin-card-edit-btn" data-id="${escapeHtml(item.id)}" title="Edit link">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px;"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
               Edit
@@ -3325,6 +3706,28 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     });
 
+    listEl.querySelectorAll('.admin-card-bm-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await toggleBookmark({
+          link_id: btn.dataset.id,
+          scope: adminDbState.scope,
+          scope_key: adminDbState.scope === 'community' ? adminDbState.communityId : '',
+          url: btn.dataset.url,
+          title: btn.dataset.title
+        }, btn);
+      });
+    });
+
+    listEl.querySelectorAll('.admin-card-ai-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await enrichLinkWithAi(btn.dataset.id, adminDbState.scope, btn, 'admin');
+      });
+    });
+
     listEl.querySelectorAll('.admin-card-del-btn, .admin-panel-del-btn').forEach(btn => {
       btn.addEventListener('click', async (e) => {
         e.preventDefault();
@@ -3332,7 +3735,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const id = btn.dataset.id;
         const itemTitle = btn.dataset.title || 'this link';
         if (!id) return;
-        if (!confirm(`Delete "${itemTitle}" permanently from database?`)) return;
+        if (!(await showModal({
+          title: 'Delete link',
+          message: `Delete "${String(itemTitle).slice(0, 80)}" permanently from database?`,
+          confirmText: 'Delete',
+          danger: true
+        }))) return;
 
         btn.disabled = true;
         try {
@@ -3353,9 +3761,12 @@ document.addEventListener('DOMContentLoaded', () => {
           const list = isComm ? state.communityLinks : state.personalLinks;
           const mainIdx = list.findIndex(l => l.id === id);
           if (mainIdx >= 0) list.splice(mainIdx, 1);
-          const topSearch = $('searchInput');
-          if (topSearch?.value?.trim()) {
-            try { runSearch(); } catch (_) {}
+          lastSyncFingerprint = corpusFingerprint();
+          if (state.mode === 'search' && state.scope === adminDbState.scope) {
+            try {
+              if (hasActiveMainFilters()) runSearch();
+              else renderHome();
+            } catch (_) {}
           }
           await loadAdminDbLinks();
         } catch (err) {
@@ -3449,6 +3860,7 @@ document.addEventListener('DOMContentLoaded', () => {
             };
           }
 
+          lastSyncFingerprint = corpusFingerprint();
           showToast('Link updated in database');
           wikiState.dirty = true;
           if ($('wikiView') && !$('wikiView').classList.contains('hidden')) {
@@ -3457,9 +3869,11 @@ document.addEventListener('DOMContentLoaded', () => {
           panel.classList.add('hidden');
           card?.classList.remove('editing');
 
-          const topSearch = $('searchInput');
-          if (topSearch?.value?.trim()) {
-            try { runSearch(); } catch (_) {}
+          if (state.mode === 'search' && state.scope === adminDbState.scope) {
+            try {
+              if (hasActiveMainFilters()) runSearch();
+              else renderHome();
+            } catch (_) {}
           }
 
           // Reload admin DB links so tag cloud, decremented counts, and cards refresh with fresh server data
@@ -3732,6 +4146,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.location.hash !== '#wiki') {
       window.location.hash = '#wiki';
     }
+    if (typeof syncMobileBottomNav === 'function') syncMobileBottomNav('wiki');
 
     const shareBtn = $('wikiShareBtn');
     if (shareBtn) {
@@ -3789,6 +4204,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.location.hash === '#wiki') {
       history.pushState('', document.title, window.location.pathname + window.location.search);
     }
+    if (typeof syncMobileBottomNav === 'function') syncMobileBottomNav('search');
   }
 
   async function loadWikiData() {
@@ -4216,7 +4632,7 @@ document.addEventListener('DOMContentLoaded', () => {
               ).join('');
 
               const auditBadge = l.manual_edited_at
-                ? `<span class="admin-edit-badge" title="Manually edited">✏️ ${escapeHtml(l.last_edited_by_name || 'Admin')} · ${escapeHtml(formatDateTime(l.manual_edited_at))}</span>`
+                ? `<span class="admin-edit-badge" title="Manually edited">Edited by ${escapeHtml(l.last_edited_by_name || 'Admin')} · ${escapeHtml(formatDateTime(l.manual_edited_at))}</span>`
                 : '';
 
               const linkCat = allCatMap.get(l.category);
@@ -4838,6 +5254,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.location.hash !== '#feed' && window.location.hash !== '#rss') {
       window.location.hash = '#feed';
     }
+    if (typeof syncMobileBottomNav === 'function') syncMobileBottomNav('feed');
 
     // Resolve active feed scope: support Personal DB ('personal') and Community DB
     const validCommunityIds = new Set((state.communities || []).map((c) => c.id));
@@ -4880,6 +5297,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.location.hash === '#feed' || window.location.hash === '#rss') {
       history.pushState('', document.title, window.location.pathname + window.location.search);
     }
+    if (typeof syncMobileBottomNav === 'function') syncMobileBottomNav('search');
   }
 
   function setFeedViewMode(mode) {
@@ -5176,7 +5594,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
       gearMenu?.querySelector('[data-feed-action="delete"]')?.addEventListener('click', async () => {
         gearMenu.classList.add('hidden');
-        if (!confirm(`Unsubscribe from "${feedTitle}" and remove its cached stream items?`)) return;
+        if (!(await showModal({
+          title: 'Unsubscribe from feed',
+          message: `Unsubscribe from "${feedTitle}" and remove its cached stream items?`,
+          confirmText: 'Unsubscribe',
+          danger: true
+        }))) return;
         try {
           const { res, data } = await api('/api/feed', {
             method: 'DELETE',
@@ -5495,6 +5918,9 @@ document.addEventListener('DOMContentLoaded', () => {
                   <button type="button" class="pzp-ai-summarize-btn" data-action="summarize" title="Generate concise AI summary">
                     <span>AI Summary</span>
                   </button>
+                  <button type="button" class="pzp-ai-summarize-btn pzp-scrape-btn" data-action="scrape-article" title="Fetch full article text from source page">
+                    <span>Scrape Full Article</span>
+                  </button>
                   <button type="button" class="pzp-label-btn" data-action="label-modal" title="Add or edit custom labels">
                     <img class="icon" src="/assets/freshrss/label.svg" alt="" style="width:13px;height:13px;">
                     <span>Labels${userLabels.length ? ` (${userLabels.length})` : ''}</span>
@@ -5629,6 +6055,34 @@ document.addEventListener('DOMContentLoaded', () => {
       fluxEl.querySelector('[data-action="summarize"]')?.addEventListener('click', (e) => {
         e.stopPropagation();
         openAiSummaryModal(article);
+      });
+
+      // Scrape Full Article
+      fluxEl.querySelector('[data-action="scrape-article"]')?.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const btn = e.currentTarget;
+        if (btn) {
+          btn.disabled = true;
+          btn.innerHTML = '<span>Scraping…</span>';
+        }
+        try {
+          const { res, data } = await api('/api/feed/article/scrape', {
+            method: 'POST',
+            body: JSON.stringify({ article_id: artId })
+          });
+          if (res?.ok && data?.success && data.content) {
+            article.content = data.content;
+            if (data.title && !article.title) article.title = data.title;
+            showToast(data.scraped ? 'Full article extracted from source' : 'Loaded cached article content');
+            renderFeedArticles();
+          } else {
+            showToast(data?.error || 'Could not scrape article content', true);
+            if (btn) { btn.disabled = false; btn.innerHTML = '<span>Scrape Full Article</span>'; }
+          }
+        } catch (err) {
+          showToast(err.message || 'Scrape failed', true);
+          if (btn) { btn.disabled = false; btn.innerHTML = '<span>Scrape Full Article</span>'; }
+        }
       });
 
       // Tag filter
@@ -6698,6 +7152,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     dialog.addEventListener('close', () => {
       if (dialog.open) return;
+      dialog.returnValue = '';
       if (onClose) onClose();
       else launcher?.focus();
       onClose = null;
@@ -6739,6 +7194,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (sideDrawer) sideDrawer.classList.remove('active');
       if (drawerOverlay) drawerOverlay.classList.remove('active');
       document.body.style.overflow = '';
+      syncMobileBottomNav();
     }
     if (hamburgerBtn) {
       hamburgerBtn.addEventListener('click', (e) => {
@@ -6868,27 +7324,51 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (notifBellBtn) {
-      notifBellBtn.addEventListener('click', async () => {
-        await loadNotifications();
-        renderNotifications();
-        notifPanel?.classList.toggle('hidden');
+      notifBellBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!notifPanel) return;
+        const willOpen = notifPanel.classList.contains('hidden');
+        notifPanel.classList.toggle('hidden', !willOpen);
+        if (willOpen) {
+          renderNotifications();
+          loadNotifications().then(() => renderNotifications()).catch(() => {});
+        }
       });
     }
     if (closeNotifBtn) {
-      closeNotifBtn.addEventListener('click', () => notifPanel?.classList.add('hidden'));
+      closeNotifBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        notifPanel?.classList.add('hidden');
+      });
     }
+    document.addEventListener('click', (e) => {
+      if (notifPanel && !notifPanel.classList.contains('hidden')) {
+        if (!notifPanel.contains(e.target) && !notifBellBtn?.contains(e.target)) {
+          notifPanel.classList.add('hidden');
+        }
+      }
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && notifPanel && !notifPanel.classList.contains('hidden')) {
+        notifPanel.classList.add('hidden');
+      }
+    });
 
     searchBarBox.addEventListener('submit', onSubmit);
 
     searchInput.addEventListener('input', () => {
       clearSearchBtn.classList.toggle('hidden', !searchInput.value);
-      if (state.mode === 'search' && state.hasSearched) runSearch();
+      if (state.mode === 'search') runSearch();
     });
 
     clearSearchBtn.addEventListener('click', () => {
       searchInput.value = '';
       clearSearchBtn.classList.add('hidden');
-      if (state.mode === 'search') renderHome();
+      if (state.mode === 'search') {
+        if (hasActiveMainFilters()) runSearch();
+        else renderHome();
+      }
       searchInput.focus();
     });
 
@@ -7068,12 +7548,56 @@ document.addEventListener('DOMContentLoaded', () => {
     const aiBaseUrlEl = $('aiBaseUrl');
     const aiModelEl = $('aiModel');
     if (aiBaseUrlEl) {
-      aiBaseUrlEl.addEventListener('change', updateAiFreeBadge);
-      aiBaseUrlEl.addEventListener('input', () => { clearTimeout(window._freeBadgeTimer); window._freeBadgeTimer = setTimeout(updateAiFreeBadge, 700); });
+      aiBaseUrlEl.addEventListener('change', () => { updateAiFreeBadge(); updateAiProviderInfoCard(); });
+      aiBaseUrlEl.addEventListener('input', () => { clearTimeout(window._freeBadgeTimer); window._freeBadgeTimer = setTimeout(() => { updateAiFreeBadge(); updateAiProviderInfoCard(); }, 700); });
     }
     if (aiModelEl) {
-      aiModelEl.addEventListener('change', updateAiFreeBadge);
-      aiModelEl.addEventListener('input', () => { clearTimeout(window._freeBadgeTimer); window._freeBadgeTimer = setTimeout(updateAiFreeBadge, 700); });
+      aiModelEl.addEventListener('change', () => { updateAiFreeBadge(); updateAiProviderInfoCard(); });
+      aiModelEl.addEventListener('input', () => { clearTimeout(window._freeBadgeTimer); window._freeBadgeTimer = setTimeout(() => { updateAiFreeBadge(); updateAiProviderInfoCard(); }, 700); });
+    }
+    const aiModeEl = $('aiMode');
+    if (aiModeEl) aiModeEl.addEventListener('change', updateAiProviderInfoCard);
+    const aiPingProviderBtn = $('aiPingProviderBtn');
+    if (aiPingProviderBtn) {
+      aiPingProviderBtn.addEventListener('click', async () => {
+        const base = $('aiBaseUrl')?.value.trim() || '';
+        const key = $('aiApiKey')?.value.trim() || '';
+        aiPingProviderBtn.disabled = true;
+        const origText = aiPingProviderBtn.textContent;
+        aiPingProviderBtn.textContent = 'Pinging…';
+        const t0 = performance.now();
+        try {
+          const qs = new URLSearchParams();
+          if (base && key) qs.set('base', base);
+          const { res, data } = await api(`/api/ai/models${qs.toString() ? `?${qs}` : ''}`, key ? { headers: { 'x-ai-key': key } } : {});
+          const ms = Math.round(performance.now() - t0);
+          if (res?.ok && data?.success !== false) {
+            aiProviderLatency = `${ms} ms · ${Array.isArray(data?.models) ? data.models.length : 0} models`;
+            showToast(`Provider reachable (${ms} ms)`);
+          } else {
+            aiProviderLatency = `${ms} ms · error`;
+            showToast(data?.error || `HTTP ${res?.status || '?'}`, true);
+          }
+        } catch (err) {
+          aiProviderLatency = 'unreachable';
+          showToast(err.message || 'Ping failed', true);
+        } finally {
+          aiPingProviderBtn.disabled = false;
+          aiPingProviderBtn.textContent = origText;
+          updateAiProviderInfoCard();
+        }
+      });
+    }
+    const aiModelTierTabs = $('aiModelTierTabs');
+    if (aiModelTierTabs) {
+      aiModelTierTabs.querySelectorAll('button[data-tier]').forEach((tabBtn) => {
+        tabBtn.addEventListener('click', () => {
+          aiModelTierFilter = tabBtn.dataset.tier || 'all';
+          aiModelPage = 0;
+          aiModelTierTabs.querySelectorAll('button[data-tier]').forEach((b) => b.classList.toggle('active', b === tabBtn));
+          renderModelList($('aiModelFilter')?.value || '');
+        });
+      });
     }
     const aiLoadModelsBtn = $('aiLoadModelsBtn');
     if (aiLoadModelsBtn) aiLoadModelsBtn.addEventListener('click', () => loadAiModels(false));
@@ -7167,9 +7691,706 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       });
     }
+    setupFeatureModalsAndMobileNav();
+  }
+
+  function isUrlBookmarked(url) {
+    if (!url) return false;
+    return state.bookmarkedUrls.has(String(url).trim().toLowerCase());
+  }
+
+  async function loadBookmarks() {
+    if (!state.currentUser) return;
+    try {
+      const { res, data } = await api('/api/bookmarks');
+      if (res?.ok && data?.success && Array.isArray(data.bookmarks)) {
+        state.bookmarks = data.bookmarks;
+        state.bookmarkedUrls = new Set(data.bookmarks.map((b) => String(b.url || '').trim().toLowerCase()).filter(Boolean));
+      }
+    } catch (_) {}
+  }
+
+  async function toggleBookmark({ link_id, scope, scope_key, url, title }, btn) {
+    if (!state.currentUser) {
+      showToast('Login required to save bookmarks', true);
+      return;
+    }
+    const norm = String(url || '').trim().toLowerCase();
+    const currentlySaved = norm && state.bookmarkedUrls.has(norm);
+    if (btn) btn.disabled = true;
+    try {
+      if (currentlySaved) {
+        const existing = state.bookmarks.find((b) => String(b.url || '').trim().toLowerCase() === norm);
+        const { res, data } = await api('/api/bookmarks', {
+          method: 'DELETE',
+          body: JSON.stringify({ id: existing?.id, url })
+        });
+        if (!res?.ok || !data?.success) throw new Error(data?.error || 'Could not remove bookmark');
+        state.bookmarkedUrls.delete(norm);
+        state.bookmarks = state.bookmarks.filter((b) => String(b.url || '').trim().toLowerCase() !== norm);
+        showToast('Bookmark removed');
+      } else {
+        const { res, data } = await api('/api/bookmarks', {
+          method: 'POST',
+          body: JSON.stringify({ link_id, scope, scope_key, url, title })
+        });
+        if (!res?.ok || !data?.success) throw new Error(data?.error || 'Could not save bookmark');
+        await loadBookmarks();
+        showToast('Saved to bookmarks');
+      }
+      if (btn) {
+        const savedNow = isUrlBookmarked(url);
+        btn.classList.toggle('is-bookmarked', savedNow);
+        if (btn.classList.contains('bookmark-link-btn')) {
+          const span = btn.querySelector('span');
+          const svg = btn.querySelector('svg');
+          if (span) span.textContent = savedNow ? 'Saved' : 'Save';
+          if (svg) svg.setAttribute('fill', savedNow ? 'currentColor' : 'none');
+        }
+      }
+      if ($('bookmarksModal') && !$('bookmarksModal').classList.contains('hidden')) {
+        renderBookmarksModal();
+      }
+    } catch (err) {
+      showToast(err.message || 'Bookmark failed', true);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function renderBookmarksModal() {
+    const listEl = $('bookmarksModalList');
+    if (!listEl) return;
+    const q = ($('bookmarksFilterInput')?.value || '').trim().toLowerCase();
+    const items = (state.bookmarks || []).filter((b) => {
+      if (!q) return true;
+      return `${b.title || ''} ${b.url || ''} ${b.notes || ''}`.toLowerCase().includes(q);
+    });
+    if (!items.length) {
+      listEl.innerHTML = `<div class="empty-state"><p>${q ? 'No saved bookmarks match your filter.' : 'No bookmarks saved yet. Click Save on any search or AI result.'}</p></div>`;
+      return;
+    }
+    listEl.innerHTML = items.map((b) => `
+      <div class="bookmark-row" data-bm-id="${escapeHtml(b.id)}">
+        <div class="bookmark-row-main">
+          <a href="${safeHref(b.url || '#')}" target="_blank" rel="noopener noreferrer" class="bookmark-row-title">${escapeHtml(b.title || b.url || 'Untitled')}</a>
+          <div class="bookmark-row-url">${escapeHtml(b.url || '')}</div>
+          ${b.notes ? `<div class="bookmark-row-notes">${escapeHtml(String(b.notes).slice(0, 180))}</div>` : ''}
+        </div>
+        <button type="button" class="btn btn-secondary btn-sm bookmark-remove-btn" data-id="${escapeHtml(b.id)}" data-url="${escapeHtml(b.url || '')}">Remove</button>
+      </div>
+    `).join('');
+    listEl.querySelectorAll('.bookmark-remove-btn').forEach((btn) => {
+      btn.addEventListener('click', () => toggleBookmark({ url: btn.dataset.url }, btn));
+    });
+  }
+
+  async function openBookmarksModal() {
+    const modal = $('bookmarksModal');
+    if (!modal) return;
+    modal.classList.remove('hidden');
+    syncMobileBottomNav('bookmarks');
+    await loadBookmarks();
+    renderBookmarksModal();
+  }
+
+  async function enrichLinkWithAi(id, scope, btn, viewKind) {
+    if (!isGod()) {
+      showToast('GOD rank required for single-card AI enrich', true);
+      return;
+    }
+    if (btn) {
+      btn.disabled = true;
+      btn.classList.add('is-busy');
+    }
+    try {
+      const { res, data } = await api('/api/links/ai-enrich-one', {
+        method: 'POST',
+        body: JSON.stringify({ id, scope })
+      });
+      if (!res?.ok || !data?.success || !data.link) {
+        throw new Error(data?.error || 'AI enrich failed');
+      }
+      const updated = data.link;
+      const list = scope === 'community' ? state.communityLinks : state.personalLinks;
+      const idx = list.findIndex((l) => l.id === id);
+      if (idx >= 0) {
+        list[idx] = {
+          ...list[idx],
+          __sd: undefined,
+          url: updated.url || list[idx].url,
+          title: updated.title ?? list[idx].title,
+          notes: updated.notes ?? list[idx].notes,
+          tags: Array.isArray(updated.tags) ? updated.tags : list[idx].tags,
+          manualEditedAt: updated.manual_edited_at || Date.now(),
+          lastEditedBy: updated.last_edited_by || 'ai',
+          lastEditedByName: updated.last_edited_by_name || 'AI'
+        };
+      }
+      showToast('Enriched metadata · Last edited by AI');
+      wikiState.dirty = true;
+      if (viewKind === 'admin') {
+        await loadAdminDbLinks();
+      } else {
+        await loadMainTags();
+        runSearch();
+      }
+    } catch (err) {
+      showToast(err.message || 'AI enrich failed', true);
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('is-busy');
+      }
+    }
+  }
+
+  const CLEANER_CHECKPOINT_KEY = 'athena_cleaner_checkpoint';
+  let cleanerState = {
+    scopeKey: '',
+    total: 0,
+    candidates: [],
+    ids: [],
+    offset: 0,
+    processed: 0,
+    updated: 0,
+    failed: 0,
+    paused: false,
+    running: false,
+    diffs: []
+  };
+
+  function populateCleanerCommunities() {
+    const sel = $('cleanerCommunitySelect');
+    const wrap = $('cleanerCommWrap');
+    const scope = $('cleanerScopeSelect')?.value || 'community';
+    if (wrap) wrap.style.display = scope === 'community' ? 'block' : 'none';
+    if (!sel) return;
+    const comms = state.communities || [];
+    sel.innerHTML = comms.map((c) => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name || c.id)}</option>`).join('');
+    if (adminDbState.communityId && comms.some((c) => c.id === adminDbState.communityId)) {
+      sel.value = adminDbState.communityId;
+    } else if (state.activeCommunity && comms.some((c) => c.id === state.activeCommunity)) {
+      sel.value = state.activeCommunity;
+    }
+  }
+
+  function renderCleanerDiffs(diffs) {
+    const listEl = $('cleanerDiffList');
+    if (!listEl) return;
+    if (!diffs || !diffs.length) {
+      listEl.innerHTML = '<div class="cleaner-empty">No diffs previewed yet. Click Scan Candidates first.</div>';
+      return;
+    }
+    listEl.innerHTML = diffs.map((d) => {
+      if (d.error) {
+        return `
+          <div class="cleaner-diff-row">
+            <div class="cleaner-diff-col">
+              <div class="cleaner-diff-label">Error (${escapeHtml(d.id || '?')})</div>
+              <div class="cleaner-diff-url">${escapeHtml(d.error)}</div>
+            </div>
+          </div>
+        `;
+      }
+      const beforeTags = (d.before?.tags || []).map((t) => `#${t}`).join(' ') || '(none)';
+      const afterTags = (d.after?.tags || []).map((t) => `#${t}`).join(' ') || '(none)';
+      const fields = Array.isArray(d.changedFields) && d.changedFields.length
+        ? d.changedFields.join(', ')
+        : (d.changed === false ? 'no changes' : 'updated');
+      const beforeNotes = String(d.before?.notes || '').trim();
+      const afterNotes = String(d.after?.notes || '').trim();
+      return `
+        <div class="cleaner-diff-row">
+          <div class="cleaner-diff-col">
+            <div class="cleaner-diff-label">Before (${escapeHtml(d.id)})</div>
+            <div class="cleaner-diff-title">${escapeHtml(d.before?.title || '(untitled)')}</div>
+            <div class="cleaner-diff-url">${escapeHtml(d.before?.url || '')}</div>
+            ${beforeNotes ? `<div class="cleaner-diff-url">${escapeHtml(beforeNotes.slice(0, 120))}</div>` : ''}
+            <div class="cleaner-diff-tags">${escapeHtml(beforeTags)}</div>
+          </div>
+          <div class="cleaner-diff-col cleaner-diff-after">
+            <div class="cleaner-diff-label">After · ${escapeHtml(fields)}${d.usedAi ? ' · AI' : ''}</div>
+            <div class="cleaner-diff-title">${escapeHtml(d.after?.title || '(untitled)')}</div>
+            <div class="cleaner-diff-url">${escapeHtml(d.after?.url || '')}</div>
+            ${afterNotes ? `<div class="cleaner-diff-url">${escapeHtml(afterNotes.slice(0, 120))}</div>` : ''}
+            <div class="cleaner-diff-tags">${escapeHtml(afterTags)}</div>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function loadCleanerCheckpoint() {
+    try {
+      const raw = localStorage.getItem(CLEANER_CHECKPOINT_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed?.ids) && parsed.ids.length ? parsed : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function updateCleanerProgressUI(statusOverride = '') {
+    const wrap = $('cleanerProgressWrap');
+    const fill = $('cleanerProgressFill');
+    const txt = $('cleanerStatusText');
+    const pauseBtn = $('cleanerPauseBtn');
+    const resumeBtn = $('cleanerResumeBtn');
+    const savedCheckpoint = loadCleanerCheckpoint();
+    const total = cleanerState.ids.length || cleanerState.candidates.length || 0;
+    const pct = total > 0 ? Math.min(100, Math.round((cleanerState.offset / total) * 100)) : 0;
+    if (wrap) wrap.classList.toggle('hidden', total === 0 && !cleanerState.running && !statusOverride);
+    if (fill) fill.style.width = `${pct}%`;
+    if (txt) {
+      if (statusOverride) {
+        txt.textContent = statusOverride;
+      } else {
+        const failPart = cleanerState.failed ? ` · ${cleanerState.failed} failed` : '';
+        txt.textContent = `${cleanerState.offset}/${total} processed · ${cleanerState.updated} updated${failPart}${cleanerState.paused ? ' · Paused' : ''}`;
+      }
+    }
+    if (pauseBtn) {
+      const showPause = cleanerState.running && !cleanerState.paused;
+      pauseBtn.classList.toggle('hidden', !showPause);
+      pauseBtn.disabled = !showPause;
+    }
+    if (resumeBtn) {
+      const canResume = !cleanerState.running && (cleanerState.paused || Boolean(savedCheckpoint)) && (cleanerState.offset < total || Boolean(savedCheckpoint));
+      resumeBtn.classList.toggle('hidden', !canResume);
+      resumeBtn.disabled = !canResume;
+    }
+  }
+
+  async function scanCleanerCandidates() {
+    if (!isGod()) return showToast('GOD rank only', true);
+    const scope = $('cleanerScopeSelect')?.value || 'community';
+    const communityId = $('cleanerCommunitySelect')?.value || '';
+    const filter = $('cleanerFilterSelect')?.value || 'unedited';
+    const mode = $('cleanerModeSelect')?.value || 'ai';
+    const scanBtn = $('cleanerScanBtn');
+    if (scanBtn) scanBtn.disabled = true;
+    try {
+      const pageSize = 200;
+      let offset = 0;
+      let total = 0;
+      let resolvedScopeKey = communityId;
+      const allLinks = [];
+
+      while (true) {
+        const qs = new URLSearchParams({ scope, filter, limit: String(pageSize), offset: String(offset) });
+        if (scope === 'community' && resolvedScopeKey) qs.set('community_id', resolvedScopeKey);
+        const { res, data } = await api(`/api/admin/cleaner/candidates?${qs.toString()}`);
+        if (!res?.ok || !data?.success) throw new Error(data?.error || 'Scan failed');
+        const pageLinks = Array.isArray(data.links) ? data.links : (Array.isArray(data.candidates) ? data.candidates : []);
+        if (offset === 0) {
+          total = Number(data.total ?? pageLinks.length);
+          if (data.scope_key) resolvedScopeKey = data.scope_key;
+        }
+        if (!pageLinks.length) break;
+        allLinks.push(...pageLinks);
+        offset += pageLinks.length;
+        updateCleanerProgressUI(`Scanning candidates… ${allLinks.length}/${total || allLinks.length}`);
+        if (allLinks.length >= total || pageLinks.length < pageSize) break;
+      }
+
+      cleanerState.scopeKey = resolvedScopeKey;
+      cleanerState.total = total || allLinks.length;
+      cleanerState.candidates = allLinks;
+      cleanerState.ids = allLinks.map((c) => c.id);
+      cleanerState.offset = 0;
+      cleanerState.processed = 0;
+      cleanerState.updated = 0;
+      cleanerState.failed = 0;
+      cleanerState.paused = false;
+      cleanerState.diffs = [];
+      if ($('cleanerBackupBtn')) $('cleanerBackupBtn').disabled = cleanerState.candidates.length === 0;
+      if ($('cleanerStartBtn')) $('cleanerStartBtn').disabled = cleanerState.candidates.length === 0;
+
+      if (cleanerState.ids.length > 0) {
+        const previewIds = cleanerState.ids.slice(0, 10);
+        const { res: dryRes, data: dryData } = await api('/api/admin/cleaner/run', {
+          method: 'POST',
+          body: JSON.stringify({ scope, community_id: resolvedScopeKey, mode, dry_run: true, ids: previewIds })
+        });
+        const dryItems = Array.isArray(dryData?.items) ? dryData.items : (Array.isArray(dryData?.diffs) ? dryData.diffs : []);
+        if (dryRes?.ok && dryData?.success && dryItems.length) {
+          cleanerState.diffs = dryItems;
+        }
+      }
+      renderCleanerDiffs(cleanerState.diffs);
+      updateCleanerProgressUI();
+      showToast(`Found ${cleanerState.candidates.length} cleaner candidates`);
+    } catch (err) {
+      showToast(err.message || 'Scan failed', true);
+    } finally {
+      if (scanBtn) scanBtn.disabled = false;
+    }
+  }
+
+  function exportCleanerBackup() {
+    if (!cleanerState.candidates.length) {
+      showToast('Scan candidates first to export backup', true);
+      return;
+    }
+    const payload = {
+      exported_at: new Date().toISOString(),
+      scope: $('cleanerScopeSelect')?.value || 'community',
+      community_id: cleanerState.scopeKey || $('cleanerCommunitySelect')?.value || '',
+      count: cleanerState.candidates.length,
+      candidates: cleanerState.candidates
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `athena-cleaner-backup-${Date.now()}.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+    showToast(`Exported ${cleanerState.candidates.length} links backup`);
+  }
+
+  async function runCleanerBatches(resume = false) {
+    if (!isGod()) return showToast('GOD rank only', true);
+    if (cleanerState.running) return;
+    if (resume) {
+      const saved = loadCleanerCheckpoint();
+      if (saved) {
+        cleanerState.ids = saved.ids;
+        cleanerState.offset = Number(saved.offset || 0);
+        cleanerState.processed = Number(saved.processed || 0);
+        cleanerState.updated = Number(saved.updated || 0);
+        cleanerState.failed = Number(saved.failed || 0);
+        cleanerState.scopeKey = String(saved.scopeKey || saved.communityId || '');
+        cleanerState.diffs = Array.isArray(saved.diffs) ? saved.diffs : [];
+        if ($('cleanerScopeSelect') && saved.scope) $('cleanerScopeSelect').value = saved.scope;
+        populateCleanerCommunities();
+        if ($('cleanerCommunitySelect') && cleanerState.scopeKey) $('cleanerCommunitySelect').value = cleanerState.scopeKey;
+        if ($('cleanerModeSelect') && saved.mode) $('cleanerModeSelect').value = saved.mode;
+        renderCleanerDiffs(cleanerState.diffs);
+      }
+    } else {
+      cleanerState.offset = 0;
+      cleanerState.processed = 0;
+      cleanerState.updated = 0;
+      cleanerState.failed = 0;
+      cleanerState.diffs = [];
+    }
+    if (!cleanerState.ids.length) return showToast('No cleaner targets loaded', true);
+    const scope = $('cleanerScopeSelect')?.value || 'community';
+    const communityId = cleanerState.scopeKey || $('cleanerCommunitySelect')?.value || '';
+    const mode = $('cleanerModeSelect')?.value || 'ai';
+    cleanerState.running = true;
+    cleanerState.paused = false;
+    if ($('cleanerStartBtn')) $('cleanerStartBtn').disabled = true;
+    if ($('cleanerScanBtn')) $('cleanerScanBtn').disabled = true;
+    updateCleanerProgressUI();
+
+    const onOffline = () => {
+      if (cleanerState.running && !cleanerState.paused) {
+        cleanerState.paused = true;
+        updateCleanerProgressUI('Offline — paused safely with checkpoint');
+      }
+    };
+    window.addEventListener('offline', onOffline);
+
+    try {
+      while (cleanerState.offset < cleanerState.ids.length) {
+        if (cleanerState.paused) break;
+        const chunk = cleanerState.ids.slice(cleanerState.offset, cleanerState.offset + 10);
+        let batchData = null;
+        let lastErr = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (cleanerState.paused) break;
+          try {
+            const { res, data } = await api('/api/admin/cleaner/run', {
+              method: 'POST',
+              body: JSON.stringify({ scope, community_id: communityId, mode, dry_run: false, ids: chunk })
+            });
+            if (res?.status === 429 || (res?.status >= 500 && res.status < 600)) {
+              const waitSec = Math.min(15, Math.max(1, parseInt(res.headers?.get('Retry-After') || String(2 ** attempt), 10) || (2 ** attempt)));
+              updateCleanerProgressUI(`Rate limit / server busy (${res.status}) — retrying in ${waitSec}s…`);
+              await new Promise((r) => setTimeout(r, waitSec * 1000));
+              continue;
+            }
+            if (!res?.ok || !data?.success) throw new Error(data?.error || 'Cleaner batch failed');
+            batchData = data;
+            break;
+          } catch (err) {
+            lastErr = err;
+            if (attempt < 2) {
+              await new Promise((r) => setTimeout(r, 1000 * (2 ** attempt)));
+            }
+          }
+        }
+        if (cleanerState.paused) break;
+        if (!batchData) {
+          cleanerState.paused = true;
+          showToast(lastErr?.message || 'Cleaner paused on error', true);
+          break;
+        }
+
+        const batchItems = Array.isArray(batchData.items) ? batchData.items : (Array.isArray(batchData.diffs) ? batchData.diffs : []);
+        const fixedCount = Number(batchData.fixed ?? batchData.updated ?? 0);
+        const failedCount = Number(batchData.failed ?? 0);
+        cleanerState.offset += chunk.length;
+        cleanerState.processed += Number(batchData.processed ?? chunk.length);
+        cleanerState.updated += fixedCount;
+        cleanerState.failed += failedCount;
+
+        const changedItems = batchItems.filter((it) => it.changed || it.error);
+        if (changedItems.length) {
+          cleanerState.diffs = [...cleanerState.diffs, ...changedItems].slice(-60);
+          renderCleanerDiffs(cleanerState.diffs);
+        }
+        try {
+          localStorage.setItem(CLEANER_CHECKPOINT_KEY, JSON.stringify({
+            scope,
+            communityId,
+            scopeKey: communityId,
+            mode,
+            ids: cleanerState.ids,
+            offset: cleanerState.offset,
+            processed: cleanerState.processed,
+            updated: cleanerState.updated,
+            failed: cleanerState.failed,
+            diffs: cleanerState.diffs
+          }));
+        } catch (_) {}
+        updateCleanerProgressUI();
+      }
+    } finally {
+      window.removeEventListener('offline', onOffline);
+      cleanerState.running = false;
+      if ($('cleanerStartBtn')) $('cleanerStartBtn').disabled = cleanerState.ids.length === 0;
+      if ($('cleanerScanBtn')) $('cleanerScanBtn').disabled = false;
+    }
+
+    if (!cleanerState.paused && cleanerState.offset >= cleanerState.ids.length) {
+      try { localStorage.removeItem(CLEANER_CHECKPOINT_KEY); } catch (_) {}
+      showToast(`Cleaner finished: ${cleanerState.updated} links updated`);
+      loadAdminDbLinks();
+      loadMainTags();
+    }
+    updateCleanerProgressUI();
+  }
+
+  function openDbCleanerModal() {
+    if (!isGod()) return showToast('DB Cleaner is GOD rank only', true);
+    const modal = $('dbCleanerModal');
+    if (!modal) return;
+    populateCleanerCommunities();
+    updateCleanerProgressUI();
+    modal.classList.remove('hidden');
+  }
+
+  async function loadBlacklistEntries() {
+    const listEl = $('blacklistEntriesList');
+    if (!listEl) return;
+    const scope = $('blacklistScopeSelect')?.value || 'community';
+    const commId = scope === 'community' ? (adminDbState.communityId || state.activeCommunity || '') : '';
+    listEl.innerHTML = '<div class="empty-state"><p>Loading blacklist rules…</p></div>';
+    try {
+      const qs = new URLSearchParams({ scope });
+      if (commId) qs.set('community_id', commId);
+      const { res, data } = await api(`/api/blacklist?${qs.toString()}`);
+      if (!res?.ok || !data?.success) throw new Error(data?.error || 'Could not load blacklist');
+      const entries = data.entries || [];
+      if (!entries.length) {
+        listEl.innerHTML = '<div class="empty-state"><p>No blacklist entries in this scope yet.</p></div>';
+        return;
+      }
+      listEl.innerHTML = entries.map((e) => `
+        <div class="blacklist-row">
+          <div class="blacklist-row-meta">
+            <span class="blacklist-kind-pill">${escapeHtml(e.kind || 'url')}</span>
+            <code class="blacklist-pattern">${escapeHtml(e.pattern || '')}</code>
+            ${e.reason ? `<span class="blacklist-reason">${escapeHtml(e.reason)}</span>` : ''}
+          </div>
+          <button type="button" class="btn btn-secondary btn-sm blacklist-del-btn" data-id="${escapeHtml(e.id)}" data-pattern="${escapeHtml(e.pattern || '')}" data-scope="${escapeHtml(e.scope || scope)}">Remove</button>
+        </div>
+      `).join('');
+      listEl.querySelectorAll('.blacklist-del-btn').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          try {
+            const { res: delRes, data: delData } = await api('/api/blacklist', {
+              method: 'DELETE',
+              body: JSON.stringify({
+                id: btn.dataset.id,
+                scope: btn.dataset.scope,
+                community_id: commId,
+                pattern: btn.dataset.pattern
+              })
+            });
+            if (!delRes?.ok || !delData?.success) throw new Error(delData?.error || 'Remove failed');
+            showToast('Blacklist rule removed');
+            await loadBlacklistEntries();
+          } catch (err) {
+            showToast(err.message || 'Remove failed', true);
+            btn.disabled = false;
+          }
+        });
+      });
+    } catch (err) {
+      listEl.innerHTML = `<div class="empty-state"><p>${escapeHtml(err.message || 'Load failed')}</p></div>`;
+    }
+  }
+
+  function openBlacklistModal() {
+    if (!isGod() && !isStaffRank()) return showToast('Admin or GOD required', true);
+    const modal = $('blacklistModal');
+    const scopeSel = $('blacklistScopeSelect');
+    if (scopeSel) {
+      const globalOpt = scopeSel.querySelector('option[value="global"]');
+      if (globalOpt) globalOpt.disabled = !isGod();
+      if (!isGod() && scopeSel.value === 'global') scopeSel.value = 'community';
+    }
+    if (modal) modal.classList.remove('hidden');
+    loadBlacklistEntries();
+  }
+
+  function syncMobileBottomNav(explicitTab) {
+    const nav = $('mobileBottomNav');
+    if (!nav) return;
+    let active = explicitTab;
+    if (!active) {
+      if (!$('bookmarksModal')?.classList.contains('hidden')) active = 'bookmarks';
+      else if (sideDrawer?.classList.contains('active')) active = 'settings';
+      else if ($('feedView') && !$('feedView').classList.contains('hidden')) active = 'feed';
+      else if ($('wikiView') && !$('wikiView').classList.contains('hidden')) active = 'wiki';
+      else active = 'search';
+    }
+    nav.querySelectorAll('button[data-mnav]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.mnav === active);
+    });
+  }
+
+  function handleShareTargetParams() {
+    const params = new URLSearchParams(window.location.search);
+    const sharedUrl = params.get('share_url') || '';
+    const sharedText = params.get('share_text') || '';
+    const sharedTitle = params.get('share_title') || '';
+    const combined = [sharedTitle, sharedText, sharedUrl].filter(Boolean).join(' ').trim();
+    if (!combined) return;
+    setMode('dump');
+    if (searchInput) {
+      searchInput.value = sharedUrl || combined;
+      clearSearchBtn?.classList.remove('hidden');
+      searchInput.focus();
+    }
+    showToast('Shared item ready in Dump bar — press Enter to save');
+    params.delete('share_url');
+    params.delete('share_text');
+    params.delete('share_title');
+    const cleanSearch = params.toString();
+    history.replaceState(null, '', window.location.pathname + (cleanSearch ? `?${cleanSearch}` : '') + window.location.hash);
+  }
+
+  function setupFeatureModalsAndMobileNav() {
+    $('bookmarksNavBtn')?.addEventListener('click', openBookmarksModal);
+    $('bookmarksCloseBtn')?.addEventListener('click', () => {
+      $('bookmarksModal')?.classList.add('hidden');
+      syncMobileBottomNav();
+    });
+    $('bookmarksModalBackdrop')?.addEventListener('click', () => {
+      $('bookmarksModal')?.classList.add('hidden');
+      syncMobileBottomNav();
+    });
+    $('bookmarksFilterInput')?.addEventListener('input', renderBookmarksModal);
+
+    $('adminCleanerOpenBtn')?.addEventListener('click', openDbCleanerModal);
+    $('dbCleanerCloseBtn')?.addEventListener('click', () => $('dbCleanerModal')?.classList.add('hidden'));
+    $('dbCleanerBackdrop')?.addEventListener('click', () => $('dbCleanerModal')?.classList.add('hidden'));
+    $('cleanerScopeSelect')?.addEventListener('change', populateCleanerCommunities);
+    $('cleanerScanBtn')?.addEventListener('click', scanCleanerCandidates);
+    $('cleanerBackupBtn')?.addEventListener('click', exportCleanerBackup);
+    $('cleanerStartBtn')?.addEventListener('click', () => runCleanerBatches(false));
+    $('cleanerPauseBtn')?.addEventListener('click', () => {
+      cleanerState.paused = true;
+      updateCleanerProgressUI();
+      showToast('Pausing after current batch…');
+    });
+    $('cleanerResumeBtn')?.addEventListener('click', () => runCleanerBatches(true));
+
+    $('adminBlacklistOpenBtn')?.addEventListener('click', openBlacklistModal);
+    $('blacklistCloseBtn')?.addEventListener('click', () => $('blacklistModal')?.classList.add('hidden'));
+    $('blacklistBackdrop')?.addEventListener('click', () => $('blacklistModal')?.classList.add('hidden'));
+    $('blacklistScopeSelect')?.addEventListener('change', loadBlacklistEntries);
+    $('blacklistAddBtn')?.addEventListener('click', async () => {
+      const scope = $('blacklistScopeSelect')?.value || 'community';
+      const kind = $('blacklistKindSelect')?.value || 'url';
+      const pattern = $('blacklistPatternInput')?.value.trim() || '';
+      if (!pattern) return showToast('Enter a URL, domain, or tag pattern', true);
+      const commId = scope === 'community' ? (adminDbState.communityId || state.activeCommunity || '') : '';
+      try {
+        const { res, data } = await api('/api/blacklist', {
+          method: 'POST',
+          body: JSON.stringify({ scope, community_id: commId, kind, pattern })
+        });
+        if (!res?.ok || !data?.success) throw new Error(data?.error || 'Could not add rule');
+        if ($('blacklistPatternInput')) $('blacklistPatternInput').value = '';
+        showToast('Blacklist rule added');
+        await loadBlacklistEntries();
+      } catch (err) {
+        showToast(err.message || 'Add failed', true);
+      }
+    });
+
+    const mobileNav = $('mobileBottomNav');
+    if (mobileNav) {
+      mobileNav.querySelectorAll('button[data-mnav]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const tab = btn.dataset.mnav;
+          $('bookmarksModal')?.classList.add('hidden');
+          if (tab === 'feed') {
+            openFeed();
+          } else if (tab === 'wiki') {
+            openWiki();
+          } else if (tab === 'bookmarks') {
+            openBookmarksModal();
+          } else if (tab === 'settings') {
+            if (sideDrawer) sideDrawer.classList.add('active');
+            if (drawerOverlay) drawerOverlay.classList.add('active');
+            syncMobileBottomNav('settings');
+          } else {
+            if ($('feedView') && !$('feedView').classList.contains('hidden')) closeFeed();
+            if ($('wikiView') && !$('wikiView').classList.contains('hidden')) closeWiki();
+            if ($('adminDbView') && !$('adminDbView').classList.contains('hidden')) closeAdminDb();
+            if (sideDrawer?.classList.contains('active')) {
+              sideDrawer.classList.remove('active');
+              drawerOverlay?.classList.remove('active');
+              document.body.style.overflow = '';
+            }
+            syncMobileBottomNav('search');
+            searchInput?.focus();
+          }
+        });
+      });
+    }
+
+    // Touch swipe left to close mobile settings drawer
+    if (sideDrawer) {
+      let touchStartX = 0;
+      sideDrawer.addEventListener('touchstart', (e) => {
+        touchStartX = e.touches?.[0]?.clientX || 0;
+      }, { passive: true });
+      sideDrawer.addEventListener('touchend', (e) => {
+        const dx = (e.changedTouches?.[0]?.clientX || 0) - touchStartX;
+        if (dx < -60) {
+          sideDrawer.classList.remove('active');
+          drawerOverlay?.classList.remove('active');
+          document.body.style.overflow = '';
+          syncMobileBottomNav();
+        }
+      }, { passive: true });
+    }
   }
 
   async function init() {
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('./sw.js').catch(() => {});
+    }
     // Must run before anything talks to the API, including the login buttons.
     await adoptInstanceBackend();
     setupEventListeners();
