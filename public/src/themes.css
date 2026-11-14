@@ -706,9 +706,8 @@ body::before {
   .theme-bar { display: none !important; }
   .mode-badge { display: none !important; }
   .brand-logo .logo-text { font-size: 0.95rem !important; }
-  .scope-switch-container { left: 50% !important; right: auto !important; transform: translateX(-50%); }
   .scope-switch { width: min(300px, calc(100vw - 28px)); }
-  .scope-btn { flex: 1; justify-content: center; }
+  .scope-btn { flex: 1; justify-content: center; min-height: 44px; }
   .side-drawer { width: 100% !important; }
   /* Under 16px, iOS Safari zooms the page on focus and never zooms back. */
   .search-bar-box input, .search-bar-box #searchInput,
@@ -716,7 +715,7 @@ body::before {
   .edit-panel input, .edit-panel textarea,
   .input, .chat-followup-input { font-size: 16px !important; }
   .mode-pills { width: 100%; }
-  .mode-pill { flex: 1; text-align: center; font-size: 0.8rem; }
+  .mode-pill { flex: 1; text-align: center; font-size: 0.8rem; min-height: 44px; }
   .notif-panel { right: max(12px, env(safe-area-inset-right)) !important; left: max(12px, env(safe-area-inset-left)); width: auto !important; }
 }
 
@@ -727,7 +726,7 @@ body::before {
 
 @media (pointer: coarse) {
   .icon-btn, .theme-bar .theme-chip { min-height: 44px; min-width: 44px; }
-  .mode-pill { min-height: 40px; }
+  .mode-pill { min-height: 44px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -793,7 +792,7 @@ body::before {
 @media (max-width: 480px) {
   .top-bar { gap: 4px; padding-inline: 8px; }
   .brand-logo .logo-text { display: none; }
-  .admin-nav-label, .wiki-nav-label, .feed-nav-label { display: none; }
+  .admin-nav-label, .wiki-nav-label, .feed-nav-label, .bookmarks-nav-label { display: none; }
 }
 
 /* Glass controls keep a visible rim while their contents remain high contrast. */

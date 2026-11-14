@@ -163,14 +163,33 @@ document.addEventListener('DOMContentLoaded', () => {
     // outright once the backend is on a different origin. Cross-origin auth
     // travels in the Authorization header; the default ('same-origin') still
     // sends the HttpOnly session cookie when the backend IS this origin.
-    const res = await fetch(`${API_BASE}${path}`, {
-      ...options,
-      headers: {
-        ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
-        ...authHeaders(options.headers || {}),
-        ...(state.wikiShareToken ? { 'X-Wiki-Share-Token': state.wikiShareToken } : {})
+    const timeoutMs = options.timeoutMs ?? 20000;
+    const { timeoutMs: _ignoredTimeout, signal: userSignal, ...fetchOpts } = options;
+    let signal = userSignal;
+    let timeoutId = null;
+    if (!signal && timeoutMs > 0) {
+      if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+        signal = AbortSignal.timeout(timeoutMs);
+      } else if (typeof AbortController !== 'undefined') {
+        const ac = new AbortController();
+        signal = ac.signal;
+        timeoutId = setTimeout(() => ac.abort(new Error('Request timed out')), timeoutMs);
       }
-    });
+    }
+    let res;
+    try {
+      res = await fetch(`${API_BASE}${path}`, {
+        ...fetchOpts,
+        ...(signal ? { signal } : {}),
+        headers: {
+          ...(fetchOpts.body && !(fetchOpts.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
+          ...authHeaders(fetchOpts.headers || {}),
+          ...(state.wikiShareToken ? { 'X-Wiki-Share-Token': state.wikiShareToken } : {})
+        }
+      });
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
     const data = await res.json().catch(() => ({}));
     if (res.status === 401 || data.code === 'AUTH_REQUIRED') {
       if (!state.publicWikiMode) {
@@ -207,16 +226,54 @@ document.addEventListener('DOMContentLoaded', () => {
     appRoot.classList.remove('hidden');
   }
 
-  // --- Modal: replaces native confirm() with a themed, focus-trapped dialog ---
+  // --- Modal: uses native <dialog>.showModal() (top layer + inert outside + Esc) with fallback ---
   function showModal({ title = 'Confirm', message = '', confirmText = 'Confirm', cancelText = 'Cancel', danger = false }) {
     return new Promise((resolve) => {
       const prevActive = document.activeElement;
+      const probe = typeof document.createElement === 'function' ? document.createElement('dialog') : null;
+      if (probe && typeof probe.showModal === 'function') {
+        probe.className = 'modal modal-dialog';
+        probe.setAttribute('aria-labelledby', 'athenaModalTitle');
+        probe.setAttribute('aria-describedby', 'athenaModalMessage');
+        probe.innerHTML = `
+          <h3 id="athenaModalTitle" class="modal-title">${escapeHtml(title)}</h3>
+          <p id="athenaModalMessage" class="modal-message">${escapeHtml(message)}</p>
+          <div class="modal-actions">
+            <button type="button" class="btn btn-secondary" data-modal-cancel>${escapeHtml(cancelText)}</button>
+            <button type="button" class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-modal-ok>${escapeHtml(confirmText)}</button>
+          </div>`;
+        let settled = false;
+        const finish = (val) => {
+          if (settled) return;
+          settled = true;
+          if (probe.open) probe.close(val ? 'confirm' : 'cancel');
+          probe.returnValue = '';
+          probe.remove();
+          if (prevActive && prevActive.focus) prevActive.focus();
+          resolve(val);
+        };
+        probe.querySelector('[data-modal-cancel]').addEventListener('click', () => finish(false));
+        probe.querySelector('[data-modal-ok]').addEventListener('click', () => finish(true));
+        probe.addEventListener('cancel', (e) => {
+          e.preventDefault();
+          finish(false);
+        });
+        probe.addEventListener('click', (e) => {
+          if (e.target === probe) finish(false);
+        });
+        probe.addEventListener('close', () => finish(probe.returnValue === 'confirm'));
+        document.body.appendChild(probe);
+        probe.showModal();
+        probe.querySelector(danger ? '[data-modal-cancel]' : '[data-modal-ok]').focus();
+        return;
+      }
+
       const overlay = document.createElement('div');
       overlay.className = 'modal-overlay';
       overlay.innerHTML = `
         <div class="modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
           <h3 class="modal-title">${escapeHtml(title)}</h3>
-          <p class="modal-message">${message}</p>
+          <p class="modal-message">${escapeHtml(message)}</p>
           <div class="modal-actions">
             <button type="button" class="btn btn-secondary" data-modal-cancel>${escapeHtml(cancelText)}</button>
             <button type="button" class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-modal-ok>${escapeHtml(confirmText)}</button>
@@ -243,15 +300,20 @@ document.addEventListener('DOMContentLoaded', () => {
       overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) done(false); });
       document.addEventListener('keydown', onKey);
       document.body.appendChild(overlay);
-      overlay.querySelector(danger ? '[data-modal-ok]' : '[data-modal-cancel]').focus();
+      overlay.querySelector(danger ? '[data-modal-cancel]' : '[data-modal-ok]').focus();
     });
   }
 
+  let toastTimer = null;
   function showToast(message, isWarning = false) {
     toast.textContent = message;
     toast.style.borderColor = isWarning ? 'var(--warning-color)' : 'var(--border-highlight)';
     toast.classList.remove('hidden');
-    setTimeout(() => toast.classList.add('hidden'), 3500);
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      toast.classList.add('hidden');
+      toastTimer = null;
+    }, 3500);
   }
 
   function escapeHtml(str) {
@@ -941,18 +1003,59 @@ document.addEventListener('DOMContentLoaded', () => {
   let liveSyncBusy = false;
   let liveSyncListenersBound = false;
   let lastSyncFingerprint = '';
+  let lastFocusSyncAt = 0;
+
+  function isInlineEditingActive() {
+    return Boolean(
+      resultsList?.querySelector('.edit-panel:not(.hidden)') ||
+      $('adminDbList')?.querySelector('.edit-panel:not(.hidden)')
+    );
+  }
+
+  function isSecondaryViewOpen() {
+    const adminOpen = $('adminDbView') && !$('adminDbView').classList.contains('hidden');
+    const wikiOpen = $('wikiView') && !$('wikiView').classList.contains('hidden');
+    const feedOpen = $('feedView') && !$('feedView').classList.contains('hidden');
+    const modalOpen = Boolean(
+      document.querySelector('dialog[open]') ||
+      document.querySelector('.wiki-modal:not(.hidden)') ||
+      document.querySelector('.modal-overlay')
+    );
+    return Boolean(adminOpen || wikiOpen || feedOpen || modalOpen);
+  }
+
+  function hasActiveMainFilters() {
+    return Boolean(
+      searchInput.value.trim() ||
+      state.filterTag ||
+      (state.filterStatus && state.filterStatus !== 'all') ||
+      (state.filterSort && state.filterSort !== 'created_desc')
+    );
+  }
+
   function corpusFingerprint() {
     const p = state.personalLinks || [];
     const c = state.communityLinks || [];
     const pd = state.personalDocuments || [];
     const cd = state.communityDocuments || [];
-    const newest = list => list.reduce((m, x) => Math.max(m, Number(x.created_at || x.createdAt || 0)), 0);
-    return `${p.length}:${newest(p)}:${pd.length}:${newest(pd)}|${c.length}:${newest(c)}:${cd.length}:${newest(cd)}|${state.activeCommunity || ''}`;
+    const stamp = list => list.reduce((m, x) => Math.max(
+      m,
+      Number(x.created_at || x.createdAt || 0),
+      Number(x.manual_edited_at || x.manualEditedAt || 0)
+    ), 0);
+    return `${p.length}:${stamp(p)}:${pd.length}:${stamp(pd)}|${c.length}:${stamp(c)}:${cd.length}:${stamp(cd)}|${state.activeCommunity || ''}|${state.scope || ''}`;
   }
+
   async function refreshLiveData(opts = {}) {
     // No sessionToken check: a same-origin login authenticates with the HttpOnly
     // cookie alone, so currentUser is the only reliable signal.
     if (!state.currentUser) return;
+    if (document.visibilityState === 'hidden' && !opts.forceUi) return;
+    if (opts.fromFocus) {
+      const now = Date.now();
+      if (now - lastFocusSyncAt < 1500) return;
+      lastFocusSyncAt = now;
+    }
     if (liveSyncBusy) return;
     liveSyncBusy = true;
     try {
@@ -966,9 +1069,12 @@ document.addEventListener('DOMContentLoaded', () => {
       const fp = corpusFingerprint();
       const changed = fp !== lastSyncFingerprint;
       lastSyncFingerprint = fp;
-      if (changed || opts.forceUi) {
-        if (state.mode === 'search') {
-          if (state.hasSearched && searchInput.value.trim()) runSearch();
+      // Never wipe or replace active editing panels, secondary views (DB/Wiki/Feed),
+      // or already-populated results when nothing in the corpus actually changed.
+      if (state.mode === 'search' && !isInlineEditingActive() && !isSecondaryViewOpen()) {
+        const listMissing = resultsList.children.length === 0 && corpus().length > 0;
+        if (changed || (opts.forceUi && listMissing)) {
+          if (hasActiveMainFilters()) runSearch();
           else renderHome();
         }
       }
@@ -984,9 +1090,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!liveSyncListenersBound) {
       liveSyncListenersBound = true;
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') refreshLiveData({ forceUi: true });
+        if (document.visibilityState === 'visible') refreshLiveData({ forceUi: true, fromFocus: true });
       });
-      window.addEventListener('focus', () => refreshLiveData({ forceUi: true }));
+      window.addEventListener('focus', () => refreshLiveData({ forceUi: true, fromFocus: true }));
     }
   }
 
@@ -1272,10 +1378,13 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     try {
-      const { data } = await api(`/api/links?community_id=${encodeURIComponent(state.activeCommunity)}`);
-      state.communityLinks = (data.links || []).map(normalizeLink);
-    } catch (_) {
-      state.communityLinks = [];
+      const { res, data } = await api(`/api/links?community_id=${encodeURIComponent(state.activeCommunity)}`);
+      if (res?.ok && Array.isArray(data?.links)) {
+        state.communityLinks = data.links.map(normalizeLink);
+      }
+    } catch (err) {
+      // Preserve previously loaded links across transient focus/network blips.
+      if (!err?.auth) console.warn('loadCommunityLinksIfAny', err);
     }
   }
 
@@ -1638,6 +1747,10 @@ document.addEventListener('DOMContentLoaded', () => {
         ? 'Search personal notes & links'
         : 'Search community set';
       aiAnswerCard.classList.add('hidden');
+      if (state.authReady) {
+        if (hasActiveMainFilters()) runSearch();
+        else renderHome();
+      }
     } else if (mode === 'dump') {
       modeBadgeText.textContent = 'Dump';
       modePulse.style.background = 'var(--success-color)';
@@ -1694,16 +1807,83 @@ document.addEventListener('DOMContentLoaded', () => {
     document.body.classList.toggle('results-active', compact);
   }
 
+  let homeFallbackSeq = 0;
   function renderHome() {
+    if (state.mode && state.mode !== 'search') return;
+    aiAnswerCard.classList.add('hidden');
+
+    if (state.scope === 'community' && !state.activeCommunity) {
+      compactHero(false);
+      resultsList.innerHTML = '';
+      resultsMeta.classList.add('hidden');
+      emptyState.classList.remove('hidden');
+      emptyStateText.innerHTML = state.communities.length
+        ? 'Select a community from the bar above to view its saved links.'
+        : 'No communities yet. Join one in Telegram (<code>/community_join &lt;id&gt;</code>) or switch to Personal scope.';
+      return;
+    }
+
+    const items = filterLinks(corpus(), '');
+    if (items.length > 0) {
+      const total = Math.max(items.length, Number(state.tagStats?.total || 0));
+      renderGoogleResults(items, '', total);
+      return;
+    }
+
+    // If tags/corpus stats show links exist on the server (or we haven't pulled this scope yet),
+    // fetch unfiltered links directly so initial DB view never stalls empty without a tag.
+    if (state.currentUser && state.tagStats?.total > 0) {
+      const seq = ++homeFallbackSeq;
+      const capturedSearchSeq = typeof searchSeq === 'number' ? searchSeq : 0;
+      compactHero(true);
+      emptyState.classList.add('hidden');
+      resultsMeta.classList.add('hidden');
+      resultsList.innerHTML = Array.from({ length: 3 }).map(() => `
+        <article class="g-result g-result-skeleton" aria-hidden="true">
+          <div class="skeleton sk-cite"></div>
+          <div class="skeleton sk-title"></div>
+          <div class="skeleton sk-line"></div>
+          <div class="skeleton sk-line sk-short"></div>
+        </article>`).join('');
+      const params = new URLSearchParams({ scope: state.scope, sort: state.filterSort || 'created_desc' });
+      if (state.filterStatus && state.filterStatus !== 'all') params.set('edited', state.filterStatus);
+      if (state.scope === 'community' && state.activeCommunity) params.set('community_id', state.activeCommunity);
+      api(`/api/links/search?${params.toString()}`)
+        .then(({ res, data }) => {
+          if (seq !== homeFallbackSeq || capturedSearchSeq !== searchSeq || state.mode !== 'search' || hasActiveMainFilters()) return;
+          if (res?.ok && data?.success && Array.isArray(data.links)) {
+            const loaded = data.links.map(normalizeLink);
+            if (state.scope === 'community') state.communityLinks = loaded;
+            else state.personalLinks = loaded;
+            lastSyncFingerprint = corpusFingerprint();
+            const merged = filterLinks(corpus(), '');
+            if (merged.length > 0) {
+              renderGoogleResults(merged, '', Number(data.total || merged.length));
+              return;
+            }
+          }
+          compactHero(false);
+          resultsList.innerHTML = '';
+          emptyState.classList.remove('hidden');
+          emptyStateText.innerHTML = `Could not load links in ${escapeHtml(state.scope)}. Check your connection or <button type="button" class="btn btn-secondary btn-sm empty-retry-btn">Retry</button>`;
+          emptyStateText.querySelector('.empty-retry-btn')?.addEventListener('click', () => renderHome());
+        })
+        .catch(() => {
+          if (seq !== homeFallbackSeq || capturedSearchSeq !== searchSeq || state.mode !== 'search' || hasActiveMainFilters()) return;
+          compactHero(false);
+          resultsList.innerHTML = '';
+          emptyState.classList.remove('hidden');
+          emptyStateText.innerHTML = `Could not load links in ${escapeHtml(state.scope)}. Check Settings &rarr; Backend or <button type="button" class="btn btn-secondary btn-sm empty-retry-btn">Retry</button>`;
+          emptyStateText.querySelector('.empty-retry-btn')?.addEventListener('click', () => renderHome());
+        });
+      return;
+    }
+
     compactHero(false);
     resultsList.innerHTML = '';
     resultsMeta.classList.add('hidden');
-    aiAnswerCard.classList.add('hidden');
     emptyState.classList.remove('hidden');
-    const n = corpus().length;
-    emptyStateText.innerHTML = n
-      ? `<strong>${n}</strong> items in ${state.scope}. Type to search, or switch to Dump / AI.`
-      : 'Paste a link or note in <strong>Dump</strong>, then search or ask AI.';
+    emptyStateText.innerHTML = `No saved links in <strong>${escapeHtml(state.scope)}</strong> yet. Switch to <strong>Dump</strong> to save a link, note, or file.`;
   }
 
   function filterLinks(links, query) {
@@ -1803,14 +1983,35 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!items.length) {
       emptyState.classList.remove('hidden');
       resultsMeta.classList.add('hidden');
-      emptyStateText.innerHTML = query
-        ? `No results for <strong>${escapeHtml(query)}</strong>`
-        : 'No items yet.';
+      const hasFilters = Boolean(query || state.filterTag || (state.filterStatus && state.filterStatus !== 'all'));
+      if (query) {
+        emptyStateText.innerHTML = `No saved links matched <strong>${escapeHtml(query)}</strong>${state.filterTag ? ` under <strong>#${escapeHtml(state.filterTag)}</strong>` : ''}. Try fewer keywords or <button type="button" class="btn btn-secondary btn-sm empty-clear-filters-btn">Clear search &amp; filters</button>`;
+      } else if (state.filterTag || (state.filterStatus && state.filterStatus !== 'all')) {
+        const desc = [
+          state.filterTag ? `#${escapeHtml(state.filterTag)}` : '',
+          state.filterStatus && state.filterStatus !== 'all' ? `${escapeHtml(state.filterStatus)} status` : ''
+        ].filter(Boolean).join(' · ');
+        emptyStateText.innerHTML = `No links match <strong>${desc}</strong>. <button type="button" class="btn btn-secondary btn-sm empty-clear-filters-btn">Clear filters</button>`;
+      } else {
+        emptyStateText.innerHTML = `No saved links in <strong>${escapeHtml(state.scope)}</strong> yet. Switch to <strong>Dump</strong> to add a link or note.`;
+      }
+      if (hasFilters) {
+        emptyStateText.querySelector('.empty-clear-filters-btn')?.addEventListener('click', () => {
+          searchInput.value = '';
+          clearSearchBtn?.classList.add('hidden');
+          state.filterTag = '';
+          state.filterStatus = 'all';
+          if ($('mainStatusSelect')) $('mainStatusSelect').value = 'all';
+          renderMainTags();
+          renderHome();
+        });
+      }
       return;
     }
     emptyState.classList.add('hidden');
     resultsMeta.classList.remove('hidden');
-    resultsMeta.textContent = `About ${items.length} result${items.length === 1 ? '' : 's'}${query ? ` for “${query}”` : ''}${corpusTotal != null ? ` · ${corpusTotal} saved items searched` : ''}`;
+    const filterSummary = state.filterTag ? ` in #${state.filterTag}` : '';
+    resultsMeta.textContent = `${items.length} link${items.length === 1 ? '' : 's'}${query ? ` for “${query}”` : filterSummary}${corpusTotal != null && corpusTotal !== items.length ? ` · ${corpusTotal} total in scope` : ''}`;
 
     const isCommunity = state.scope === 'community';
     const canEdit = !!state.currentUser;
@@ -1866,7 +2067,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const editAuditHtml = item.manualEditedAt
         ? `<div class="g-audit-row">
             <span class="admin-edit-badge" title="Manually edited">
-              ✏️ Last edited by <strong>${escapeHtml(item.lastEditedByName || 'Admin')}</strong> · ${escapeHtml(formatDateTime(item.manualEditedAt))}
+              Edited by <strong>${escapeHtml(item.lastEditedByName || 'Admin')}</strong> · ${escapeHtml(formatDateTime(item.manualEditedAt))}
             </span>
            </div>`
         : '';
@@ -2064,6 +2265,7 @@ document.addEventListener('DOMContentLoaded', () => {
               lastEditedByName: data.last_edited_by_name || state.currentUser?.displayName || state.currentUser?.username || 'Admin'
             };
           }
+          lastSyncFingerprint = corpusFingerprint();
           showToast('Link updated in database');
           wikiState.dirty = true;
           if ($('wikiView') && !$('wikiView').classList.contains('hidden')) {
@@ -2073,8 +2275,12 @@ document.addEventListener('DOMContentLoaded', () => {
           card?.classList.remove('editing');
           card?.classList.add('edited-flash');
           setTimeout(() => card?.classList.remove('edited-flash'), 1200);
-          await loadMainTags();
-          runSearch();
+          await loadMainTags().catch(() => {});
+          if (hasActiveMainFilters()) {
+            await runSearch();
+          } else {
+            renderHome();
+          }
         } catch (err) {
           showToast(err.message || 'Edit failed', true);
         } finally {
@@ -2088,7 +2294,12 @@ document.addEventListener('DOMContentLoaded', () => {
       const isComm = state.scope === 'community';
       const item = (isComm ? state.communityLinks : state.personalLinks).find(l => l.id === id);
       const label = item?.title || item?.url || 'this link';
-      if (!window.confirm(`Delete "${String(label).slice(0, 80)}" from the database? This cannot be undone.`)) return;
+      if (!(await showModal({
+        title: 'Delete link',
+        message: `Delete "${String(label).slice(0, 80)}" from the database? This cannot be undone.`,
+        confirmText: 'Delete',
+        danger: true
+      }))) return;
       if (btn) btn.disabled = true;
       try {
         const path = isComm ? '/api/links' : '/api/personal-links';
@@ -2104,13 +2315,18 @@ document.addEventListener('DOMContentLoaded', () => {
         const list = isComm ? state.communityLinks : state.personalLinks;
         const idx = list.findIndex(l => l.id === id);
         if (idx >= 0) list.splice(idx, 1);
+        lastSyncFingerprint = corpusFingerprint();
         showToast('Link deleted from database');
         wikiState.dirty = true;
         if ($('wikiView') && !$('wikiView').classList.contains('hidden')) {
           loadWikiData();
         }
-        await loadMainTags();
-        runSearch();
+        await loadMainTags().catch(() => {});
+        if (hasActiveMainFilters()) {
+          await runSearch();
+        } else {
+          renderHome();
+        }
       } catch (err) {
         showToast(err.message || 'Delete failed', true);
         if (btn) btn.disabled = false;
@@ -2417,9 +2633,10 @@ document.addEventListener('DOMContentLoaded', () => {
     let newChatBtn = document.getElementById('newChatBtn');
     if (!newChatBtn) {
       newChatBtn = document.createElement('button');
+      newChatBtn.type = 'button';
       newChatBtn.id = 'newChatBtn';
       newChatBtn.className = 'new-chat-btn';
-      newChatBtn.textContent = '✦ New chat';
+      newChatBtn.textContent = 'New chat';
       newChatBtn.addEventListener('click', () => {
         state.conversationHistory = [];
         aiAnswerText.innerHTML = '';
@@ -2505,7 +2722,8 @@ document.addEventListener('DOMContentLoaded', () => {
           bmBtn.type = 'button';
           bmBtn.className = `ai-source-bm-btn ${isUrlBookmarked(s.url) ? 'is-bookmarked' : ''}`;
           bmBtn.title = isUrlBookmarked(s.url) ? 'Remove bookmark' : 'Bookmark source';
-          bmBtn.textContent = '🔖';
+          bmBtn.setAttribute('aria-label', bmBtn.title);
+          bmBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>';
           bmBtn.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -2544,7 +2762,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const hasThinking = msg.thinking && msg.thinking.trim();
         html += `<div class="chat-msg chat-assistant">`;
         if (hasThinking) {
-          html += `<details class="thinking-block"><summary><span class="thinking-icon">🧠</span> Thinking</summary><div class="thinking-content">${escapeHtml(msg.thinking)}</div></details>`;
+          html += `<details class="thinking-block"><summary>Thinking</summary><div class="thinking-content">${escapeHtml(msg.thinking)}</div></details>`;
         }
         html += `<div class="chat-answer-content">${renderMarkdownLite(msg.content)}</div></div>`;
       }
@@ -3190,13 +3408,19 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function loadAdminDbLinks() {
-    if (adminDbState.loading) return;
+    const seq = (adminDbState.requestSeq = (adminDbState.requestSeq || 0) + 1);
+    if (adminDbState.abortController) {
+      try { adminDbState.abortController.abort(); } catch (_) {}
+      adminDbState.abortController = null;
+    }
+    const ac = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    adminDbState.abortController = ac;
     adminDbState.loading = true;
     const listEl = $('adminDbList');
     const countBadge = $('adminDbCountBadge');
     if (countBadge) countBadge.textContent = 'Fetching links…';
     if (listEl && !adminDbState.links.length) {
-      listEl.innerHTML = '<div class="empty-state"><p>Loading database links…</p></div>';
+      listEl.innerHTML = '<div class="empty-state" role="status"><p>Loading database links…</p></div>';
     }
 
     try {
@@ -3213,7 +3437,8 @@ document.addEventListener('DOMContentLoaded', () => {
       if (adminDbState.tag) qParams.set('tag', adminDbState.tag);
       if (adminDbState.q) qParams.set('q', adminDbState.q);
 
-      const { res, data } = await api(`/api/admin/links?${qParams.toString()}`);
+      const { res, data } = await api(`/api/admin/links?${qParams.toString()}`, ac ? { signal: ac.signal } : {});
+      if (seq !== adminDbState.requestSeq) return;
       if (!res.ok || !data.success) {
         if (res.status === 403 || data?.code === 'ADMIN_ONLY') {
           renderAdminDbLockedView(data?.error);
@@ -3221,7 +3446,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         showToast(data.error || 'Failed to load database links', true);
         if (countBadge) countBadge.textContent = 'Failed to load records';
-        if (listEl) listEl.innerHTML = `<div class="empty-state"><p>${escapeHtml(data.error || 'Access denied or failed to load.')}</p></div>`;
+        if (listEl && !adminDbState.links.length) {
+          listEl.innerHTML = `<div class="empty-state"><p>${escapeHtml(data.error || 'Access denied or failed to load.')}</p><div class="empty-state-action"><button type="button" class="btn btn-secondary btn-sm admin-retry-btn">Retry</button></div></div>`;
+          listEl.querySelector('.admin-retry-btn')?.addEventListener('click', () => loadAdminDbLinks());
+        }
         return;
       }
 
@@ -3231,6 +3459,13 @@ document.addEventListener('DOMContentLoaded', () => {
       adminDbState.totalPages = data.totalPages || 1;
       adminDbState.tags = data.tags || [];
       adminDbState.communities = data.communities || [];
+
+      if (adminDbState.page > 1 && adminDbState.links.length === 0 && adminDbState.total > 0) {
+        adminDbState.page = Math.max(1, adminDbState.totalPages);
+        adminDbState.loading = false;
+        await loadAdminDbLinks();
+        return;
+      }
 
       const commSel = $('adminDbCommunity');
       if (commSel && adminDbState.communities.length) {
@@ -3247,11 +3482,18 @@ document.addEventListener('DOMContentLoaded', () => {
       renderAdminDbSummary();
       renderAdminDbPagination();
     } catch (err) {
+      if (seq !== adminDbState.requestSeq || err?.name === 'AbortError' || err?.auth) return;
       showToast(err.message || 'Error fetching database records', true);
       if (countBadge) countBadge.textContent = 'Failed to load records';
-      if (listEl) listEl.innerHTML = `<div class="empty-state"><p>${escapeHtml(err.message || 'Failed to load.')}</p></div>`;
+      if (listEl && !adminDbState.links.length) {
+        listEl.innerHTML = `<div class="empty-state"><p>${escapeHtml(err.message || 'Could not load records.')}</p><div class="empty-state-action"><button type="button" class="btn btn-secondary btn-sm admin-retry-btn">Retry</button></div></div>`;
+        listEl.querySelector('.admin-retry-btn')?.addEventListener('click', () => loadAdminDbLinks());
+      }
     } finally {
-      adminDbState.loading = false;
+      if (seq === adminDbState.requestSeq) {
+        adminDbState.loading = false;
+        adminDbState.abortController = null;
+      }
     }
   }
 
@@ -3334,12 +3576,27 @@ document.addEventListener('DOMContentLoaded', () => {
     const listEl = $('adminDbList');
     if (!listEl) return;
     if (!adminDbState.links.length) {
-      const emptyMsg = (adminDbState.scope === 'community' && !adminDbState.communities.length)
+      const noAccess = adminDbState.scope === 'community' && !adminDbState.communities.length;
+      const hasAdminFilters = Boolean(adminDbState.q || adminDbState.tag || adminDbState.status !== 'all');
+      const emptyMsg = noAccess
         ? 'No communities found where you have admin permissions.'
-        : 'No links matched your query or filters.';
+        : hasAdminFilters
+          ? 'No links matched your query or filters in this scope.'
+          : 'No links saved in this database yet.';
       listEl.innerHTML = `<div class="empty-state">
         <p>${escapeHtml(emptyMsg)}</p>
+        ${!noAccess && hasAdminFilters ? '<div class="empty-state-action"><button type="button" class="btn btn-secondary btn-sm admin-reset-filters-btn">Reset filters</button></div>' : ''}
       </div>`;
+      listEl.querySelector('.admin-reset-filters-btn')?.addEventListener('click', () => {
+        adminDbState.tag = '';
+        adminDbState.q = '';
+        adminDbState.status = 'all';
+        adminDbState.page = 1;
+        if ($('adminDbSearchInput')) $('adminDbSearchInput').value = '';
+        if ($('adminDbStatus')) $('adminDbStatus').value = 'all';
+        $('adminDbClearSearch')?.classList.add('hidden');
+        loadAdminDbLinks();
+      });
       return;
     }
 
@@ -3366,7 +3623,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const auditHtml = item.manual_edited_at
         ? `<span class="admin-edit-badge" title="Manually edited">
-            ✏️ Last edited by <strong>${escapeHtml(item.last_edited_by_name || 'Admin')}</strong> · ${escapeHtml(formatDateTime(item.manual_edited_at))}
+            Edited by <strong>${escapeHtml(item.last_edited_by_name || 'Admin')}</strong> · ${escapeHtml(formatDateTime(item.manual_edited_at))}
            </span>`
         : `<span style="color:var(--text-muted)">Unedited · Original version</span>`;
 
@@ -3478,7 +3735,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const id = btn.dataset.id;
         const itemTitle = btn.dataset.title || 'this link';
         if (!id) return;
-        if (!confirm(`Delete "${itemTitle}" permanently from database?`)) return;
+        if (!(await showModal({
+          title: 'Delete link',
+          message: `Delete "${String(itemTitle).slice(0, 80)}" permanently from database?`,
+          confirmText: 'Delete',
+          danger: true
+        }))) return;
 
         btn.disabled = true;
         try {
@@ -3499,9 +3761,12 @@ document.addEventListener('DOMContentLoaded', () => {
           const list = isComm ? state.communityLinks : state.personalLinks;
           const mainIdx = list.findIndex(l => l.id === id);
           if (mainIdx >= 0) list.splice(mainIdx, 1);
-          const topSearch = $('searchInput');
-          if (topSearch?.value?.trim()) {
-            try { runSearch(); } catch (_) {}
+          lastSyncFingerprint = corpusFingerprint();
+          if (state.mode === 'search' && state.scope === adminDbState.scope) {
+            try {
+              if (hasActiveMainFilters()) runSearch();
+              else renderHome();
+            } catch (_) {}
           }
           await loadAdminDbLinks();
         } catch (err) {
@@ -3595,6 +3860,7 @@ document.addEventListener('DOMContentLoaded', () => {
             };
           }
 
+          lastSyncFingerprint = corpusFingerprint();
           showToast('Link updated in database');
           wikiState.dirty = true;
           if ($('wikiView') && !$('wikiView').classList.contains('hidden')) {
@@ -3603,9 +3869,11 @@ document.addEventListener('DOMContentLoaded', () => {
           panel.classList.add('hidden');
           card?.classList.remove('editing');
 
-          const topSearch = $('searchInput');
-          if (topSearch?.value?.trim()) {
-            try { runSearch(); } catch (_) {}
+          if (state.mode === 'search' && state.scope === adminDbState.scope) {
+            try {
+              if (hasActiveMainFilters()) runSearch();
+              else renderHome();
+            } catch (_) {}
           }
 
           // Reload admin DB links so tag cloud, decremented counts, and cards refresh with fresh server data
@@ -4364,7 +4632,7 @@ document.addEventListener('DOMContentLoaded', () => {
               ).join('');
 
               const auditBadge = l.manual_edited_at
-                ? `<span class="admin-edit-badge" title="Manually edited">✏️ ${escapeHtml(l.last_edited_by_name || 'Admin')} · ${escapeHtml(formatDateTime(l.manual_edited_at))}</span>`
+                ? `<span class="admin-edit-badge" title="Manually edited">Edited by ${escapeHtml(l.last_edited_by_name || 'Admin')} · ${escapeHtml(formatDateTime(l.manual_edited_at))}</span>`
                 : '';
 
               const linkCat = allCatMap.get(l.category);
@@ -5326,7 +5594,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
       gearMenu?.querySelector('[data-feed-action="delete"]')?.addEventListener('click', async () => {
         gearMenu.classList.add('hidden');
-        if (!confirm(`Unsubscribe from "${feedTitle}" and remove its cached stream items?`)) return;
+        if (!(await showModal({
+          title: 'Unsubscribe from feed',
+          message: `Unsubscribe from "${feedTitle}" and remove its cached stream items?`,
+          confirmText: 'Unsubscribe',
+          danger: true
+        }))) return;
         try {
           const { res, data } = await api('/api/feed', {
             method: 'DELETE',
@@ -6879,6 +7152,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     dialog.addEventListener('close', () => {
       if (dialog.open) return;
+      dialog.returnValue = '';
       if (onClose) onClose();
       else launcher?.focus();
       onClose = null;
@@ -7085,13 +7359,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
     searchInput.addEventListener('input', () => {
       clearSearchBtn.classList.toggle('hidden', !searchInput.value);
-      if (state.mode === 'search' && state.hasSearched) runSearch();
+      if (state.mode === 'search') runSearch();
     });
 
     clearSearchBtn.addEventListener('click', () => {
       searchInput.value = '';
       clearSearchBtn.classList.add('hidden');
-      if (state.mode === 'search') renderHome();
+      if (state.mode === 'search') {
+        if (hasActiveMainFilters()) runSearch();
+        else renderHome();
+      }
       searchInput.focus();
     });
 

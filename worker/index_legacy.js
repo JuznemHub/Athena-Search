@@ -866,6 +866,24 @@ function isLikelyTelegramBotApiId(id) {
   return /^\d{5,15}$/.test(s);
 }
 
+/** Strict positive numeric Telegram user ID (never negative group/channel IDs). */
+function isDirectTelegramUserId(id) {
+  const s = String(id ?? '').trim();
+  return /^[1-9]\d*$/.test(s);
+}
+
+function filterDirectTelegramUserIds(ids) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of (ids || [])) {
+    const s = String(raw ?? '').trim();
+    if (!isDirectTelegramUserId(s) || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
 function isInstanceOwnerUser(user, env) {
   if (!user) return false;
   if (!ownerListsConfigured(env)) return true;
@@ -2311,32 +2329,8 @@ async function handleTelegramWebAppAuth(request, env, corsHeaders, url) {
       return Response.json({ success: false, error: BANNED_SITE_MSG, code: 'SITE_BANNED' }, { status: 403, headers: corsHeaders });
     }
     const sessionToken = await createSession(user.id, env);
-     // Notify GOD rank about website login (Telegram + website notification)
-     try {
-       const ownerIds = parseIdList(env.TG_OWNER_IDS || '');
-       const loginLabel = user.username ? `@${user.username}` : (user.display_name || user.id);
-       const loginTgId = user.telegram_api_id || '';
-       const loginMsg = `🌐 ${loginLabel}${loginTgId ? ` | ${loginTgId}` : ''} logged in to website`;
-       // Website notification for GOD users
-       const { results: godUsers } = await env.DB.prepare(
-         `SELECT id FROM users WHERE telegram_api_id IN (${ownerIds.map(() => '?').join(',') || "''"})`
-       ).bind(...ownerIds.map(String)).all().catch(() => ({ results: [] }));
-       for (const god of (godUsers || [])) {
-         await createNotification(env, { userId: god.id, type: 'login', title: 'Website Login', body: loginMsg }).catch(() => {});
-       }
-         const notifyText = `🌐 ${boldHtml(loginLabel)}${loginTgId ? ` | ${codeHtml(String(loginTgId))}` : ''} logged in to website`;
-        const logTarget = await getConfiguredLogTarget(env, godUsers?.[0]?.id);
-        if (logTarget) {
-          await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id, logTarget);
-        } else {
-          for (const ownerId of ownerIds) {
-            if (ownerId && env.TELEGRAM_BOT_TOKEN) {
-              await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
-            }
-          }
-        }
-      } catch (_) {}
-      const owner = await isInstanceOwnerUserAsync(user, env);
+    await notifyWebsiteLogin(env, user);
+    const owner = await isInstanceOwnerUserAsync(user, env);
     const elevated = owner || (await isElevatedUser(user, env));
     const cookieMaxAge = Math.floor(SESSION_TTL_MS / 1000);
     return Response.json({
@@ -3625,7 +3619,7 @@ async function notifyCommunityStaff(env, communityId, { type, title, body, paylo
       } catch (_) {}
     }
     const dmText = `🔔 ${boldHtml(title)}\n${escHtml(body || '')}`;
-    for (const tgId of dmTargets) {
+    for (const tgId of filterDirectTelegramUserIds(dmTargets)) {
       try {
         await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, tgId, dmText);
       } catch (_) {}
@@ -9553,6 +9547,34 @@ async function logWebsiteAuthFailure(env, provider, reason, subject = '') {
   await sendConfiguredLog(env, details);
 }
 
+/** Notify GOD rank + configured `/setlog` target when a user logs into Athena Web. */
+async function notifyWebsiteLogin(env, user) {
+  if (!user) return;
+  try {
+    const ownerIds = parseIdList(env.TG_OWNER_IDS || '');
+    const loginLabel = user.username ? `@${user.username}` : (user.display_name || user.id);
+    const loginTgId = user.telegram_api_id || '';
+    const loginMsg = `🌐 ${loginLabel}${loginTgId ? ` | ${loginTgId}` : ''} logged in to website`;
+    const { results: godUsers } = await env.DB.prepare(
+      `SELECT id FROM users WHERE telegram_api_id IN (${ownerIds.map(() => '?').join(',') || "''"})`
+    ).bind(...ownerIds.map(String)).all().catch(() => ({ results: [] }));
+    for (const god of (godUsers || [])) {
+      await createNotification(env, { userId: god.id, type: 'login', title: 'Website Login', body: loginMsg }).catch(() => {});
+    }
+    const notifyText = `🌐 ${boldHtml(loginLabel)}${loginTgId ? ` | ${codeHtml(String(loginTgId))}` : ''} logged in to website`;
+    const logTarget = await getConfiguredLogTarget(env, godUsers?.[0]?.id);
+    if (logTarget) {
+      await sendConfiguredLog(env, notifyText, godUsers?.[0]?.id, logTarget);
+    } else {
+      for (const ownerId of ownerIds) {
+        if (ownerId && env.TELEGRAM_BOT_TOKEN) {
+          await sendTelegramFormatted(env.TELEGRAM_BOT_TOKEN, ownerId, notifyText).catch(() => {});
+        }
+      }
+    }
+  } catch (_) {}
+}
+
 async function logOperationalEvent(env, title, details, ownerUserId = null, target = null) {
   const text = [boldHtml(title), details ? escHtml(details) : ''].filter(Boolean).join('\n');
   await sendConfiguredLog(env, text, ownerUserId, target);
@@ -15106,8 +15128,9 @@ async function persistCloneComponent(env, { job, sink, message, classification, 
     let result, status = 'saved', category = null;
     try {
       result = await save();
-      if (!result || result.error || (!result.saved && !result.duplicate && !result.path)) throw new Error(result?.error || 'CONTENT_SAVE_FAILED');
-      if (result.duplicate) status = 'duplicate';
+      if (!result || result.error || (!result.saved && !result.duplicate && !result.path && !result.blacklisted)) throw new Error(result?.error || 'CONTENT_SAVE_FAILED');
+      if (result.blacklisted) status = 'blacklisted';
+      else if (result.duplicate) status = 'duplicate';
     } catch (error) {
       const failure = cloneFailure(error);
       // A sustained flood is an account-level stop, not an item failure: the
@@ -15124,7 +15147,7 @@ async function persistCloneComponent(env, { job, sink, message, classification, 
         result?.saved || result?.id || null, result?.path || null, status, category, job.id).run());
     if (status === 'saved') countCloneSave(item, key, classification.media, result);
     else if (status === 'duplicate') item.duplicates++;
-    else recordCloneFailure(item, category);
+    else if (status !== 'blacklisted') recordCloneFailure(item, category);
     return true;
   } catch (error) {
     const failureCat = cloneFailure(error).category;
@@ -15199,6 +15222,11 @@ async function saveBackfillLink(env, job, sink, message, url, classification = n
   const table = personal ? 'personal_links' : 'links';
   const key = personal ? job.user_id : job.community_id;
   const column = personal ? 'user_id' : 'community_id';
+  const blRules = await getBlacklistRules(env, personal ? 'personal' : 'community', key)
+    .catch(() => ({ entries: [], urlPatterns: [], tagSet: new Set() }));
+  if (checkUrlBlacklisted(url, blRules)) {
+    return { blacklisted: true, reason: 'BLACKLISTED_URL' };
+  }
   await ensureLinkMetaColumns(env).catch(() => {});
   await ensureTransferColumns(env).catch(() => {});
   const existing = await findExistingLink(env, table, column, key, url);
@@ -15226,10 +15254,13 @@ async function saveBackfillLink(env, job, sink, message, url, classification = n
     const seedTitle = titleHint || titleFromUrl(url);
     const seedNotes = cleanAllNotes(noteText, url, seedTitle, await loadLinkNamePattern(env).catch(() => null));
     const tagged = await describeAndTagLink(env, url, { title: seedTitle, notes: seedNotes || noteText }, { config: null, maxTags: 8, scrape: true });
-    const finalTags = mergePipelineTags({
-      manual: normalizeTagList(extractHashtags(noteText)),
-      generated: tagged.tags, facts: tagged.facts, rawUrl: url, title: seedTitle,
-    });
+    const finalTags = filterBlacklistedTags(
+      mergePipelineTags({
+        manual: normalizeTagList(extractHashtags(noteText)),
+        generated: tagged.tags, facts: tagged.facts, rawUrl: url, title: seedTitle,
+      }),
+      blRules
+    );
     let finalTitle = seedTitle;
     if (isWeakTitle(finalTitle, url) && tagged.title && !isWeakTitle(tagged.title, url)) finalTitle = String(tagged.title).slice(0, 200);
     else if (isWeakTitle(finalTitle, url) && titleHint) finalTitle = titleHint.slice(0, 200);
@@ -17089,6 +17120,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         user.telegram_api_id = tgId;
       } catch (_) {}
       if (await isUserFullySiteBanned(env, user)) {
+        await logWebsiteAuthFailure(env, 'Telegram Bot', 'user is fully banned', username ? `@${username}` : tgId);
         await sendTelegramFormatted(token, chatId, `🚫 ${boldHtml('Access Denied:')} You are not a member of any community Telegram group or channel (or banned). Join a verified group or channel first, then log in.`, forumThreadId);
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
@@ -17096,6 +17128,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
       await env.DB.prepare(
         'UPDATE oauth_states SET code_verifier = ? WHERE state = ?'
       ).bind(`auth:${sessionToken}`, stateToken).run();
+      await notifyWebsiteLogin(env, user);
       await sendTelegramFormatted(token, chatId, `✅ ${boldHtml('Logged in successfully to Athena Web!')}\nYou can now return to your browser tab.`, forumThreadId);
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
@@ -19678,7 +19711,9 @@ Rules:
                 max: 10,
               }).tags;
               if (!tags.length) tags = userTags2;
-              tags = finalizeTags(tags, generated.facts, 10);
+              tags = filterBlacklistedTags(finalizeTags(tags, generated.facts, 10), blRules);
+            } else {
+              tags = filterBlacklistedTags(tags, blRules);
             }
             const savedTitle = generated.title || meta.title;
             const savedNotes = (!isDetailedNotes(meta.notes) && generated.description)
@@ -22427,4 +22462,6 @@ export {
   handlePatchPersonalLink,
   handleDeletePersonalLink,
   shouldAllowTopicLockedMessage,
+  filterDirectTelegramUserIds,
+  notifyWebsiteLogin,
 };

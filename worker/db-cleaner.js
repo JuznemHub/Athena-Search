@@ -97,7 +97,7 @@ export function cleanBoilerplateText(text, url = '') {
   // Strip leading forwarding prefix inline too
   cleaned = cleaned
     .replace(/^(?:forwarded from|via|source)\s*:\s*@?[\w.\-\s]{1,40}(?:\s*[-–|:]\s*)?/i, '')
-    .replace(/\b(?:use this referral code|submit code|referral code|ref code)\s*[:\-]?\s*[a-zA-Z0-9_-]+/gi, '')
+    .replace(/\b(?:use this referral code|submit code|referral code|ref code)\s*[:-]?\s*[a-zA-Z0-9_-]+/gi, '')
     .replace(/\s+/g, ' ')
     .trim();
   // Drop leftover trailing inline hashtags only if the remainder still carries text

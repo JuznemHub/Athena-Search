@@ -194,7 +194,7 @@
               </select>
             </div>
             <button type="button" id="mainTagsToggleBtn" class="btn btn-secondary btn-sm main-tag-toggle-btn" aria-expanded="true" aria-controls="mainTagsCard" title="Toggle tag cloud">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg>
               <span>Tags</span>
             </button>
           </div>
@@ -203,7 +203,7 @@
           <div class="main-tags-card" id="mainTagsCard">
             <div class="main-tags-card-header">
               <div class="main-tags-title">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg>
                 <span>Filter by tag</span>
                 <span class="main-tags-summary" id="mainTagsSummary">Loading tags…</span>
               </div>
@@ -222,8 +222,8 @@
 
         <!-- Google-style results -->
         <div class="results-container" id="resultsContainer">
-          <div class="results-meta hidden" id="resultsMeta"></div>
-          <div class="empty-state" id="emptyState">
+          <div class="results-meta hidden" id="resultsMeta" role="status" aria-live="polite"></div>
+          <div class="empty-state" id="emptyState" role="status" aria-live="polite">
             <p id="emptyStateText">Paste a link or note in <strong>Dump</strong>, then search or ask AI.</p>
           </div>
           <div class="results-list" id="resultsList"></div>
@@ -237,7 +237,7 @@
             <div class="admin-db-heading">
               <div class="admin-badge-wrap">
                 <span class="admin-shield-icon">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
                 </span>
                 <h2>Database Explorer</h2>
                 <span class="rank-chip" id="adminDbRankBadge">Admin & Owner</span>
@@ -245,11 +245,11 @@
               <p class="section-desc">Inspect, filter, and edit links across the database with full audit history.</p>
             </div>
             <div class="wiki-header-actions">
-              <button type="button" id="adminCleanerOpenBtn" class="btn btn-primary btn-sm hidden" title="Owner-only GUI DB Cleaner">✦ AI DB Cleaner</button>
-              <button type="button" id="adminBlacklistOpenBtn" class="btn btn-secondary btn-sm hidden" title="Manage URL and Tag Blacklist">🚫 Blacklist</button>
+              <button type="button" id="adminCleanerOpenBtn" class="btn btn-primary btn-sm hidden" title="Owner-only GUI DB Cleaner">AI DB Cleaner</button>
+              <button type="button" id="adminBlacklistOpenBtn" class="btn btn-secondary btn-sm hidden" title="Manage URL and Tag Blacklist">Blacklist</button>
               <button type="button" class="athena-tour-launch" id="adminDbTourBtn" aria-haspopup="dialog" aria-controls="athenaTour">Database tour</button>
               <button type="button" id="adminDbCloseBtn" class="btn btn-secondary btn-sm admin-back-btn">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
                 <span>Back to Search</span>
               </button>
             </div>
@@ -332,7 +332,9 @@
         <div class="wiki-header">
           <div class="wiki-brand-row">
             <div class="wiki-title-group">
-              <span class="wiki-icon-badge">📖</span>
+              <span class="wiki-icon-badge" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+              </span>
               <div>
                 <h2 id="wikiBrandTitle">Athena Wiki</h2>
                 <p id="wikiBrandTagline" class="wiki-tagline">Curated directory · Live database sync</p>
@@ -341,11 +343,11 @@
             <div class="wiki-header-actions">
               <button type="button" class="athena-tour-launch hidden" id="wikiTourBtn" aria-haspopup="dialog" aria-controls="athenaTour">Wiki tour</button>
               <button type="button" id="wikiShareBtn" class="btn btn-secondary btn-sm wiki-share-btn hidden" title="Generate public shareable link (Owner rank only)">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"></path><polyline points="16 6 12 2 8 6"></polyline><line x1="12" y1="2" x2="12" y2="15"></line></svg>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"></path><polyline points="16 6 12 2 8 6"></polyline><line x1="12" y1="2" x2="12" y2="15"></line></svg>
                 <span>Share</span>
               </button>
               <button type="button" id="wikiAiOrganizeBtn" class="btn btn-secondary btn-sm" title="Let AI organize &amp; refine categories based on database links">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
                 <span>AI Re-organize</span>
               </button>
               <button type="button" id="wikiCloseBtn" class="icon-btn" title="Return to Search" aria-label="Close Wiki">
@@ -696,7 +698,7 @@
           <div id="freshrssSidebarBackdrop" class="freshrss-sidebar-backdrop hidden"></div>
 
           <!-- Main Stream View Area -->
-          <main id="stream" class="normal freshrss-main-stream">
+          <div id="stream" class="normal freshrss-main-stream">
             <div class="freshrss-stream-banner">
               <div class="banner-left">
                 <h1 id="freshrssStreamTitle" class="stream-title">Main stream</h1>
@@ -717,7 +719,7 @@
             <!-- Normal / Reader Articles Stream -->
             <div id="freshrssArticlesList" class="freshrss-articles-container view-normal">
               <div class="freshrss-loading-articles">
-                <div class="freshrss-spinner"></div>
+                <div class="freshrss-spinner" role="progressbar" aria-label="Loading stream"></div>
                 <p>Loading stream…</p>
               </div>
             </div>
@@ -730,7 +732,7 @@
               <button type="button" id="freshrssLoadMoreBtn" class="btn btn-secondary btn-sm">Load more articles</button>
               <span id="freshrssPageInfo" class="page-info">Page 1 of 1</span>
             </div>
-          </main>
+          </div>
 
           <!-- Floating Navigation Buttons (Bottom-Right) -->
           <nav id="nav_entries" class="nav_entries" aria-label="Article navigation">
@@ -895,23 +897,23 @@
     <!-- Mobile App Bottom Navigation Shell -->
     <nav id="mobileBottomNav" class="mobile-bottom-nav" aria-label="Mobile Navigation">
       <button type="button" class="mobile-nav-item active" data-mnav="search" aria-label="Search">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
         <span>Search</span>
       </button>
       <button type="button" class="mobile-nav-item" data-mnav="feed" aria-label="Feed">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 11a9 9 0 0 1 9 9"></path><path d="M4 4a16 16 0 0 1 16 16"></path><circle cx="5" cy="19" r="1.5"></circle></svg>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 11a9 9 0 0 1 9 9"></path><path d="M4 4a16 16 0 0 1 16 16"></path><circle cx="5" cy="19" r="1.5"></circle></svg>
         <span>Feed</span>
       </button>
       <button type="button" class="mobile-nav-item" data-mnav="wiki" aria-label="Wiki">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
         <span>Wiki</span>
       </button>
       <button type="button" class="mobile-nav-item" data-mnav="bookmarks" aria-label="Saved">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>
         <span>Saved</span>
       </button>
       <button type="button" class="mobile-nav-item" data-mnav="settings" aria-label="Settings">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
         <span>Settings</span>
       </button>
     </nav>
@@ -1024,7 +1026,7 @@
       </div>
 
       <div class="drawer-section auth-only" id="aiSettingsSection">
-        <h3>AI assistant <span id="aiLockBadge" class="lock-badge hidden" title="GOD only credentials">🔒</span></h3>
+        <h3>AI assistant <span id="aiLockBadge" class="lock-badge hidden" title="GOD only credentials">GOD only</span></h3>
         <p class="section-desc" id="aiSettingsDesc">Chat available to all ranks. API credentials are set by GOD rank (instance host) only.</p>
         <div id="aiSettingsBody">
         <div class="form-group">
@@ -1105,7 +1107,7 @@
       </div>
 
       <div class="drawer-section auth-only" id="botSettingsSection">
-        <h3>Bot (personal) <span id="botGodBadge" class="lock-badge hidden" title="GOD only edit">🔒</span></h3>
+        <h3>Bot (personal) <span id="botGodBadge" class="lock-badge hidden" title="GOD only edit">GOD only</span></h3>
         <p class="section-desc" id="botSettingsDesc">Visible to all ranks. Only GOD rank can add/change the bot. Communities: <code>/community_verify</code> in group.</p>
         <div id="botSettingsBody">
         <div class="form-group">
@@ -1165,7 +1167,9 @@
     <div class="wiki-modal-card">
       <div class="wiki-modal-header">
         <div class="wiki-modal-title-group">
-          <span class="wiki-modal-icon">🔗</span>
+          <span class="wiki-modal-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          </span>
           <div>
             <h3 id="wikiShareTitle">Share Athena Wiki</h3>
             <p class="wiki-modal-desc">Generate a public read-only link. Anyone with this link can view the wiki without logging in. All other Athena search and database tools remain locked.</p>
@@ -1224,7 +1228,9 @@
     <div class="wiki-modal-card athena-modal-wide">
       <div class="wiki-modal-header">
         <div class="wiki-modal-title-group">
-          <span class="wiki-modal-icon">🔖</span>
+          <span class="wiki-modal-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+          </span>
           <div>
             <h3 id="bookmarksModalTitle">Saved Bookmarks</h3>
             <p class="wiki-modal-desc">Your personal bookmarked links from Search and AI Answers.</p>
@@ -1245,7 +1251,9 @@
     <div class="wiki-modal-card athena-modal-wide">
       <div class="wiki-modal-header">
         <div class="wiki-modal-title-group">
-          <span class="wiki-modal-icon">✦</span>
+          <span class="wiki-modal-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/></svg>
+          </span>
           <div>
             <h3 id="dbCleanerTitle">AI Database Cleaner</h3>
             <p class="wiki-modal-desc">Zero-deletion URL normalization, boilerplate stripping, AI metadata enrichment, and deduplication.</p>
@@ -1305,9 +1313,11 @@
     <div class="wiki-modal-card athena-modal-wide">
       <div class="wiki-modal-header">
         <div class="wiki-modal-title-group">
-          <span class="wiki-modal-icon">🚫</span>
+          <span class="wiki-modal-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><line x1="5.6" y1="5.6" x2="18.4" y2="18.4"/></svg>
+          </span>
           <div>
-            <h3 id="blacklistModalTitle">URL & Tag Blacklist</h3>
+            <h3 id="blacklistModalTitle">URL &amp; Tag Blacklist</h3>
             <p class="wiki-modal-desc">Blocked domains, URL patterns, and tags are excluded everywhere across Search, RSS, Bot, and /structure.</p>
           </div>
         </div>
@@ -1330,7 +1340,7 @@
               <option value="tag">Tag</option>
             </select>
           </div>
-          <div class="admin-ctrl-group" style="flex:2">
+          <div class="admin-ctrl-group blacklist-pattern-group">
             <label for="blacklistPatternInput">Pattern</label>
             <input type="text" id="blacklistPatternInput" class="input input-sm" placeholder="e.g. spam-site.com or #notags" autocomplete="off">
           </div>

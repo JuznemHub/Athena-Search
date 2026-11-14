@@ -125,7 +125,12 @@ export const DEFAULT_FMHY_CATEGORIES = [
         title: 'PC Gaming & Repacks',
         description: 'Game stores, repacks, patches, and game compatibility trackers.',
         tags: ['game', 'gaming', 'steam', 'epic', 'gog', 'repack'],
-        keywords: ['fitgirl', 'dodi', 'repack', 'steam', 'gog', 'steamunlocked', 'itch.io', 'game download', 'crackwatch']
+        keywords: [
+          'fitgirl', 'dodi', 'repack', 'steam', 'gog', 'steamunlocked', 'itch.io',
+          'game download', 'crackwatch', 'game launcher', 'game library',
+          'game manager', 'game downloader', 'pc game', 'pc games', 'pc gaming',
+          'playnite', 'heroic games', 'lutris', 'launchbox', 'hydra launcher'
+        ]
       },
       {
         id: 'gaming-tools',
@@ -465,17 +470,21 @@ export function classifyLink(link, taxonomy = DEFAULT_FMHY_CATEGORIES) {
       let score = 0;
 
       // Primary context: title (+9), URL (+7), description/notes (+5)
+      let kwScore = 0;
       if (Array.isArray(sub.keywords)) {
         for (const kw of sub.keywords) {
           const kwNorm = String(kw || '').toLowerCase();
           if (!kwNorm) continue;
-          if (titleLower.includes(kwNorm)) score += 9;
-          if (urlLower.includes(kwNorm)) score += 7;
-          if (notesLower.includes(kwNorm)) score += 5;
+          if (titleLower.includes(kwNorm)) kwScore += 12;
+          if (urlLower.includes(kwNorm)) kwScore += 9;
+          if (notesLower.includes(kwNorm)) kwScore += 6;
         }
       }
 
-      // Secondary signal: tags (+3 each, ignore noisy ingest/generic tags)
+      // Secondary signal: tags (+2 each, ignore noisy ingest/generic tags).
+      // Any contextual keyword hit gets a +20 tier boost so stray tags like
+      // #cloud cannot override an explicit title/url/notes match.
+      let tagScore = 0;
       if (Array.isArray(sub.tags)) {
         for (const t of sub.tags) {
           const tNorm = String(t || '').toLowerCase();
@@ -487,10 +496,12 @@ export function classifyLink(link, taxonomy = DEFAULT_FMHY_CATEGORIES) {
             tNorm !== 'open-source' &&
             tagSet.has(tNorm)
           ) {
-            score += 3;
+            tagScore += 2;
           }
         }
       }
+      if (kwScore > 0) score += kwScore + 20 + tagScore;
+      else score += tagScore;
 
       if (score > bestScore) {
         bestScore = score;

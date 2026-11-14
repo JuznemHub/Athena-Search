@@ -25,7 +25,12 @@ import { classifyLink } from '../worker/wiki-taxonomy.js';
 import { classifyTags } from '../worker/tag-taxonomy.js';
 import { detectBookmarks } from '../tui/src/browsers.js';
 import { REDDIT_GUIDE_STEPS, X_GUIDE_STEPS } from '../tui/src/social-import.js';
-import { shouldAllowTopicLockedMessage } from '../worker/index_legacy.js';
+import {
+  shouldAllowTopicLockedMessage,
+  filterDirectTelegramUserIds,
+  saveBackfillLink,
+  notifyWebsiteLogin,
+} from '../worker/index_legacy.js';
 
 function makeEnvDb() {
   const db = new DatabaseSync(':memory:');
@@ -47,6 +52,7 @@ function makeEnvDb() {
   return {
     DB: {
       prepare: (sql) => wrapStmt(sql),
+      exec: (sql) => db.exec(sql),
     },
   };
 }
@@ -355,6 +361,304 @@ function makeEnvDb() {
     targetBotMention: 'AthenaBot',
     selfBotUsername: '',
   }), false);
+}
+
+// 10. Context-aware wiki classification (game launchers never hijack into storage/cloud via stray tags)
+{
+  const gld = classifyLink({
+    title: 'Project GLD - Open-source Game Library and Download Manager',
+    url: 'https://github.com/YusefD/Project-GLD',
+    notes: 'Launch, download, and manage your PC games from multiple sources.',
+    tags: ['cloud', 'windows', 'opensource'],
+  });
+  assert.equal(gld.categoryId, 'gaming');
+  assert.equal(gld.subheadingId, 'gaming-pc');
+}
+
+// 11. Report DM targets strictly reject negative group/channel IDs
+{
+  const filtered = filterDirectTelegramUserIds([
+    '-1001987654321',
+    '-55443322',
+    '0',
+    '',
+    null,
+    'not-an-id',
+    '123456789',
+    '987654321',
+    '123456789',
+  ]);
+  assert.deepEqual(filtered, ['123456789', '987654321']);
+}
+
+// 12. Backfill / channel clone enforces URL and tag blacklist
+{
+  const env = makeEnvDb();
+  env.DB.exec(`
+    CREATE TABLE personal_links (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      url TEXT NOT NULL,
+      url_hash TEXT NOT NULL,
+      title TEXT,
+      notes TEXT,
+      tags TEXT,
+      created_at INTEGER,
+      image_url TEXT,
+      site_name TEXT,
+      source_chat_id TEXT,
+      source_message_id TEXT,
+      transfer_id TEXT,
+      metadata_version INTEGER DEFAULT 0,
+      search_blob TEXT
+    );
+  `);
+  await addBlacklistEntry(env, {
+    scope: 'personal',
+    scopeKey: 'u_bl',
+    kind: 'url',
+    pattern: 'evil.example.org',
+    createdBy: 'u_bl',
+  });
+  await addBlacklistEntry(env, {
+    scope: 'personal',
+    scopeKey: 'u_bl',
+    kind: 'tag',
+    pattern: '#spamtag',
+    createdBy: 'u_bl',
+  });
+
+  const job = { id: 'job_bl', user_id: 'u_bl', chat_id: '-100500' };
+  const blocked = await saveBackfillLink(
+    env,
+    job,
+    'personal',
+    { message: 'Check this out #cool', id: 10 },
+    'https://evil.example.org/drop'
+  );
+  assert.equal(blocked.blacklisted, true);
+  assert.equal(blocked.reason, 'BLACKLISTED_URL');
+
+  const allowed = await saveBackfillLink(
+    env,
+    job,
+    'personal',
+    { message: 'Useful utility #mytool #spamtag', id: 11 },
+    'https://example.com/safe-tool'
+  );
+  assert.ok(allowed.saved);
+  const row = await env.DB.prepare('SELECT tags FROM personal_links WHERE id = ?').bind(allowed.saved).first();
+  const savedTags = JSON.parse(row.tags);
+  assert.ok(savedTags.includes('mytool'));
+  assert.ok(!savedTags.includes('spamtag'));
+}
+
+// 13. Website login GOD notification helper records login notification
+{
+  const env = makeEnvDb();
+  env.TG_OWNER_IDS = '999000111';
+  env.DB.exec(`
+    CREATE TABLE users (
+      id TEXT PRIMARY KEY,
+      username TEXT,
+      display_name TEXT,
+      telegram_api_id TEXT
+    );
+    CREATE TABLE notifications (
+      id TEXT PRIMARY KEY,
+      user_id TEXT,
+      community_id TEXT,
+      type TEXT,
+      title TEXT,
+      body TEXT,
+      payload TEXT,
+      read INTEGER DEFAULT 0,
+      created_at INTEGER
+    );
+  `);
+  await env.DB.prepare('INSERT INTO users (id, username, display_name, telegram_api_id) VALUES (?, ?, ?, ?)')
+    .bind('u_god', 'owner', 'Owner', '999000111').run();
+  await notifyWebsiteLogin(env, {
+    id: 'u_alice',
+    username: 'alice',
+    display_name: 'Alice',
+    telegram_api_id: '555666777',
+  });
+  const notif = await env.DB.prepare('SELECT type, title, body FROM notifications WHERE user_id = ?').bind('u_god').first();
+  assert.equal(notif?.type, 'login');
+  assert.equal(notif?.title, 'Website Login');
+  assert.ok(String(notif?.body || '').includes('@alice'));
+}
+
+// 14. Mobile layout & long-link reflow rules (antislop-layoutmobile)
+{
+  const root = path.resolve('.');
+  const styleCss = fs.readFileSync(path.join(root, 'public/src/style.css'), 'utf8');
+  const indexHtml = fs.readFileSync(path.join(root, 'public/index.html'), 'utf8');
+  assert.ok(styleCss.includes('100dvh'));
+  assert.ok(!/\.top-bar \.icon-btn\s*\{[^}]*min-height:\s*34px/i.test(styleCss));
+  assert.ok(styleCss.includes('bottom: calc(76px + env(safe-area-inset-bottom, 0px))'));
+  assert.ok(styleCss.includes('-webkit-line-clamp: 2'));
+  assert.ok(styleCss.includes('@media (hover: hover)'));
+  assert.ok(!indexHtml.includes('style="flex:2"'));
+}
+
+// 15. Unfiltered DB home render, edit-save / admin-load concurrency, and tab-focus resilience
+{
+  const vm = await import('node:vm');
+  const root = path.resolve('.');
+  const mainJs = fs.readFileSync(path.join(root, 'public/src/main.js'), 'utf8');
+  const indexHtml = fs.readFileSync(path.join(root, 'public/index.html'), 'utf8');
+  const styleCss = fs.readFileSync(path.join(root, 'public/src/style.css'), 'utf8');
+  const tourCss = fs.readFileSync(path.join(root, 'public/src/tour.css'), 'utf8');
+
+  const sliceBetween = (start, end) => {
+    const a = mainJs.indexOf(start);
+    const b = mainJs.indexOf(end, a);
+    assert.ok(a >= 0 && b > a, `Expected section: ${start}`);
+    return mainJs.slice(a, b);
+  };
+
+  // Bug 1 + Bug 3 behavior in VM
+  let renderedItems = null;
+  let searchCalls = 0;
+  let editingOpen = false;
+  const linksInMemory = [{ id: 'l1', title: 'Alpha', url: 'https://alpha.test', tags: [] }];
+
+  const ctx = vm.createContext({
+    searchSeq: 0,
+    isGod: () => false,
+    api: async (url) => {
+      if (url.startsWith('/api/links?')) throw new Error('Tab background offline');
+      return { res: { ok: true }, data: { links: [], documents: [], notifications: [] } };
+    },
+    normalizeLink: (x) => x,
+    normalizeDocument: (x) => x,
+    state: {
+      mode: 'search',
+      scope: 'community',
+      activeCommunity: 'c1',
+      communities: [{ id: 'c1', name: 'Comm 1' }],
+      currentUser: { id: 'u1' },
+      personalLinks: [],
+      communityLinks: [...linksInMemory],
+      personalDocuments: [],
+      communityDocuments: [],
+      filterTag: '',
+      filterStatus: 'all',
+      filterSort: 'created_desc',
+      tagStats: { total: 1 }
+    },
+    corpus: () => ctx.state.communityLinks,
+    filterLinks: (items) => items,
+    escapeHtml: (s) => String(s || ''),
+    compactHero() {},
+    renderGoogleResults(items) {
+      renderedItems = items;
+    },
+    renderNotifications() {},
+    loadNotifications: async () => {},
+    resultsList: {
+      children: [{ id: 'card-1' }],
+      innerHTML: '',
+      querySelector: (sel) => (editingOpen && sel.includes('edit-panel')) ? {} : null
+    },
+    resultsMeta: { classList: { add() {}, remove() {} } },
+    aiAnswerCard: { classList: { add() {}, remove() {} } },
+    emptyState: { classList: { add() {}, remove() {} } },
+    emptyStateText: { innerHTML: '' },
+    searchInput: { value: '' },
+    document: { visibilityState: 'visible', querySelector: () => null },
+    $: () => ({ classList: { contains: () => true }, querySelector: () => null }),
+    runSearch() { searchCalls++; },
+    setTimeout,
+    clearTimeout,
+    URLSearchParams,
+    Date,
+    console
+  });
+
+  vm.runInContext(`
+    ${sliceBetween('  // Poll D1 so Telegram dumps appear on the site without manual refresh', '  async function loadNotifications()')}
+    ${sliceBetween('  async function loadPersonalLinks()', '  const DOCUMENT_MAX_BYTES =')}
+    ${sliceBetween('  let homeFallbackSeq = 0;', '  function filterLinks(links, query)')}
+    const origRenderHome = renderHome;
+    renderHome = function() {
+      homeCalls++;
+      return origRenderHome();
+    };
+  `, ctx);
+  ctx.homeCalls = 0;
+
+  // Bug 1: renderHome() renders all corpus links even with no tag selected
+  ctx.renderHome();
+  assert.equal(renderedItems?.length, 1);
+  assert.equal(renderedItems[0].id, 'l1');
+
+  // Bug 3: transient focus error must not wipe communityLinks or clear rendered results
+  ctx.lastSyncFingerprint = ctx.corpusFingerprint();
+  await ctx.refreshLiveData({ forceUi: true, fromFocus: true });
+  assert.equal(ctx.state.communityLinks.length, 1);
+  assert.equal(searchCalls, 0);
+
+  // Even when a background change arrives while editing inline, do not wipe active edit panel
+  editingOpen = true;
+  ctx.state.communityLinks.push({ id: 'l2', title: 'Beta', url: 'https://beta.test', tags: [] });
+  await ctx.refreshLiveData({ forceUi: false });
+  assert.equal(searchCalls, 0);
+
+  // Bug 2: loadAdminDbLinks aborts stale request instead of staying stuck on adminDbState.loading
+  let firstAborted = false;
+  let secondResolved = false;
+  let callIndex = 0;
+  const adminCtx = vm.createContext({
+    adminDbState: {
+      scope: 'community', communityId: 'c1', status: 'all', sort: 'created_desc',
+      tag: '', q: '', page: 1, limit: 25, totalPages: 1, total: 0,
+      links: [{ id: 'existing' }], tags: [], communities: [{ id: 'c1', name: 'Comm' }], loading: false
+    },
+    $: () => ({ textContent: '', innerHTML: '', value: '' }),
+    escapeHtml: (s) => String(s || ''),
+    renderAdminDbTags() {},
+    renderAdminDbLinks() { secondResolved = true; },
+    renderAdminDbSummary() {},
+    renderAdminDbPagination() {},
+    renderAdminDbLockedView() {},
+    showToast() {},
+    URLSearchParams,
+    AbortController,
+    api: async (_url, opts) => {
+      callIndex++;
+      if (callIndex === 1) {
+        return await new Promise((_resolve, reject) => {
+          opts?.signal?.addEventListener('abort', () => {
+            firstAborted = true;
+            const e = new Error('Aborted');
+            e.name = 'AbortError';
+            reject(e);
+          });
+        });
+      }
+      return {
+        res: { ok: true, status: 200 },
+        data: { success: true, links: [{ id: 'fresh-after-save' }], total: 1, page: 1, totalPages: 1, tags: [], communities: [{ id: 'c1', name: 'Comm' }] }
+      };
+    }
+  });
+  vm.runInContext(sliceBetween('  async function loadAdminDbLinks()', '  function renderAdminDbSummary()'), adminCtx);
+  const firstLoad = adminCtx.loadAdminDbLinks();
+  await adminCtx.loadAdminDbLinks();
+  await firstLoad;
+  assert.equal(firstAborted, true);
+  assert.equal(secondResolved, true);
+  assert.equal(adminCtx.adminDbState.loading, false);
+  assert.equal(adminCtx.adminDbState.links[0].id, 'fresh-after-save');
+
+  // Modern Web Guidance & Anti-Slop HTML/CSS checks
+  assert.equal((indexHtml.match(/<main\b/gi) || []).length, 1);
+  assert.ok(styleCss.includes('content-visibility: auto'));
+  assert.ok(styleCss.includes('overscroll-behavior: contain'));
+  assert.ok(tourCss.includes('overscroll-behavior: contain'));
 }
 
 console.log('test-todayy-features.mjs passed');
