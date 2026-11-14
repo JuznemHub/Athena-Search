@@ -1,0 +1,96 @@
+name: FreshRSS Upstream Sync
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync-freshrss:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - name: Sync FreshRSS upstream icons and metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+
+          async function fetchJson(url) {
+            const res = await fetch(url, {
+              headers: {
+                'User-Agent': 'athena-freshrss-sync',
+                'Accept': 'application/vnd.github+json',
+                ...(process.env.GH_TOKEN ? { Authorization: `Bearer ${process.env.GH_TOKEN}` } : {}),
+              },
+            });
+            if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
+            return res.json();
+          }
+
+          (async () => {
+            const rel = await fetchJson('https://api.github.com/repos/FreshRSS/FreshRSS/releases/latest');
+            const tag = rel.tag_name;
+            const iconDir = path.join('public', 'assets', 'freshrss');
+            const icons = fs.readdirSync(iconDir).filter((f) => f.endsWith('.svg'));
+            let updatedIcons = 0;
+
+            for (const file of icons) {
+              const rawUrl = `https://raw.githubusercontent.com/FreshRSS/FreshRSS/${encodeURIComponent(tag)}/p/themes/Mapco/icons/${encodeURIComponent(file)}`;
+              const res = await fetch(rawUrl, { headers: { 'User-Agent': 'athena-freshrss-sync' } });
+              if (!res.ok) continue;
+              const body = await res.text();
+              if (!body.includes('<svg')) continue;
+              const dst = path.join(iconDir, file);
+              const prev = fs.existsSync(dst) ? fs.readFileSync(dst, 'utf8') : '';
+              if (body !== prev) {
+                fs.writeFileSync(dst, body, 'utf8');
+                updatedIcons++;
+              }
+            }
+
+            const manifestPath = path.join('docs', 'freshrss-upstream.json');
+            const prevManifest = fs.existsSync(manifestPath)
+              ? JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+              : {};
+            if (prevManifest.tag_name !== tag || updatedIcons > 0) {
+              const nextManifest = {
+                upstream: 'FreshRSS/FreshRSS',
+                tag_name: tag,
+                published_at: rel.published_at || '',
+                html_url: rel.html_url || '',
+                icons_checked: icons.length,
+                icons_updated: updatedIcons,
+                synced_at: new Date().toISOString(),
+              };
+              fs.writeFileSync(manifestPath, JSON.stringify(nextManifest, null, 2) + '\n', 'utf8');
+              console.log(`Synced FreshRSS ${tag} (${updatedIcons} icon(s) updated).`);
+            } else {
+              console.log(`FreshRSS ${tag} already up to date.`);
+            }
+          })();
+          NODE
+
+      - name: Open PR against dev
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          base: dev
+          branch: chore/freshrss-upstream-sync
+          delete-branch: true
+          commit-message: 'chore(feed): sync FreshRSS upstream assets and release metadata'
+          title: 'chore(feed): sync FreshRSS upstream update'
+          body: |
+            Automated sync against the latest upstream `FreshRSS/FreshRSS` release:
+            - Updated `docs/freshrss-upstream.json` release tracking metadata
+            - Refreshed matching upstream SVG icons in `public/assets/freshrss/` when changed upstream

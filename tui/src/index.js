@@ -13,7 +13,7 @@ import { playIntro, withSpinner } from './anim.js';
 import { keyStream } from './keys.js';
 import { makeClient, ApiError, STORAGE_LABELS, rankOf } from './api.js';
 import { detectBookmarks, loadBookmarks, dedupe, scanDiagnose, filterSynthetic } from './browsers.js';
-import { detectSocialSources, loadSocialLinks, socialScanDiagnose, socialSourceFor, ensureRedditExport, ensureXArchive } from './social-import.js';
+import { REDDIT_GUIDE_STEPS, X_GUIDE_STEPS, detectSocialSources, loadSocialLinks, socialScanDiagnose, socialSourceFor, ensureRedditExport, ensureXArchive } from './social-import.js';
 import { loadConfig, saveConfig } from './config.js';
 import { parseSessionToken } from './session.js';
 import { launchAdvanced } from './opencode-launcher.js';
@@ -292,6 +292,9 @@ async function stepSocial() {
   const ctx = { prompt, say, state, confirm: (q) => confirm(io, theme, q, columns()) };
   const wanted = pick === 0 ? ['reddit'] : pick === 1 ? ['x'] : ['reddit', 'x'];
   for (const kind of wanted) {
+    const title = kind === 'reddit' ? 'Reddit Setup & CLI Usage' : 'X / Twitter Setup & CLI Usage';
+    const guide = kind === 'reddit' ? REDDIT_GUIDE_STEPS : X_GUIDE_STEPS;
+    stderr(box([theme.accent(theme.bold(title)), ...guide.map((line) => theme.dim(line))], theme).join('\n') + '\n');
     try {
       const src = kind === 'reddit' ? await ensureRedditExport(ctx) : await ensureXArchive(ctx);
       if (!src) say(`${kind === 'reddit' ? 'Reddit' : 'X'} skipped.`);

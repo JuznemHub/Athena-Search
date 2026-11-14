@@ -41,12 +41,18 @@
   box-shadow: var(--shadow-main);
 }
 
+.athena-tour:modal {
+  overscroll-behavior: contain;
+}
+
 .athena-tour:not([open]) {
   display: none;
 }
 
 .athena-tour::backdrop {
   background: rgb(0 0 0 / 0.6);
+  overflow: hidden;
+  overscroll-behavior: contain;
 }
 
 .athena-tour-header,
