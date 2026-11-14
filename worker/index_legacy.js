@@ -11213,9 +11213,10 @@ function helpTextForSection(section, isGod = false) {
       richParagraph('<b>Moderation (staff)</b>'),
       cmd(6, `${codeHtml('/delete')} ${codeHtml('<url>')}`, 'Remove a link from the community brain (reply to a result works too).'),
       cmd(7, `${codeHtml('/edit')} ${codeHtml('<url>')} | notes: …`, 'Fix a title or notes.'),
-      cmd(8, `${codeHtml('/blacklist')} ${codeHtml('url|tag|list|remove')}`, 'Block unwanted domains or tags across Athena.'),
-      cmd(9, `${codeHtml('/kick')} ${codeHtml('<@user|id>')}`, 'Remove a member\'s access — they can rejoin later.'),
-      cmd(10, `${codeHtml('/admin')} · ${codeHtml('/demote')}`, 'Promote or demote — reply to the member\'s message. Owner/GOD only.'),
+      cmd(8, `${codeHtml('/topic')} ${codeHtml('<id>|here|off')}`, 'Lock bot replies to one topic (outside it, only ' + codeHtml('/cmd@bot') + ' replies). Use ' + codeHtml('/topic off') + ' for all topics.'),
+      cmd(9, `${codeHtml('/blacklist')} ${codeHtml('url|tag|list|remove')}`, 'Block unwanted domains or tags across Athena.'),
+      cmd(10, `${codeHtml('/kick')} ${codeHtml('<@user|id>')}`, 'Remove a member\'s access — they can rejoin later.'),
+      cmd(11, `${codeHtml('/admin')} · ${codeHtml('/demote')}`, 'Promote or demote — reply to the member\'s message. Owner/GOD only.'),
       spacer,
       richParagraph(`<b>Topics live in 📡 Channels:</b> ${codeHtml('/clone')} inside a topic clones it with history + live follow, ${codeHtml('/topic_list')} lists bindings, ${codeHtml('/topic_unlink')} removes one. <b>Owner danger zone:</b> ${codeHtml('/clear_db <id>')} wipes the community brain · ${codeHtml('/community_delete <id>')} deletes the community (reply ${codeHtml('YES_DELETE_…')} to confirm).`)
     ].join('\n');
@@ -16470,6 +16471,27 @@ async function importBackupSql(env, sqlText, { onProgress = null, targetCommunit
   return report;
 }
 
+function shouldAllowTopicLockedMessage({
+  isGroup = false,
+  lockedTopicId = null,
+  messageThreadId = null,
+  cmd = '',
+  targetBotMention = '',
+  selfBotUsername = '',
+} = {}) {
+  if (!isGroup || !lockedTopicId) return true;
+  const locked = String(lockedTopicId);
+  const here = messageThreadId != null ? String(messageThreadId) : null;
+  if (here === locked) return true;
+  if (cmd === '/topic') return true;
+  const mention = String(targetBotMention || '').replace(/^@/, '').toLowerCase();
+  const self = String(selfBotUsername || '').replace(/^@/, '').toLowerCase();
+  if (cmd && cmd.startsWith('/') && mention && self && mention === self) {
+    return true;
+  }
+  return false;
+}
+
 async function handleTelegramWebhook(update, env, corsHeaders) {
   // Idempotency: ignore Telegram redeliveries of the same update_id (slow scrape/AI replies trigger retries).
   if (isRecentWebhookUpdate(update)) return new Response('OK', { status: 200, headers: corsHeaders });
@@ -16539,6 +16561,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
   const entityUrlsEarly = extractUrlsFromTelegramMessage(msg);
   // /delete as reply — only bare /delete (not random messages that mention delete)
   {
+    const firstTok = (text || '').trim().split(/\s+/)[0] || '';
     const t0 = (text || '').trim().toLowerCase().replace(/@\w+$/, '');
     const bareDelete = t0 === '/delete' || t0.startsWith('/delete@') || t0 === '';
     if (bareDelete && msg.reply_to_message && (t0.startsWith('/delete') || t0 === '')) {
@@ -16547,7 +16570,7 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
         // also entities on the replied message itself
         const more = extractUrlsFromTelegramMessage({ ...msg.reply_to_message, reply_to_message: null });
         const urls = [...new Set([...replyUrls, ...more])];
-        if (urls.length) text = `/delete ${urls.join(' ')}`;
+        if (urls.length) text = `${firstTok} ${urls.join(' ')}`;
         // else leave as bare /delete → usage message (do NOT treat caption as delete target blindly)
       }
     }
@@ -16581,16 +16604,16 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
 
   let binding = await findTelegramBinding(env, chatId, tgUserId);
   let token = (await tokenForBindingAsync(binding, env)) || env.TELEGRAM_BOT_TOKEN;
+  let resolvedSelfBotUsername = String(binding?.bot_username || '').replace(/^@/, '').toLowerCase();
   // Ignore commands explicitly addressed to a different @botusername in shared groups
   if (targetBotMention) {
-    let selfUsername = String(binding?.bot_username || '').replace(/^@/, '').toLowerCase();
-    if (!selfUsername && token) {
+    if (!resolvedSelfBotUsername && token) {
       try {
         const me = await telegramApi(token, 'getMe');
-        if (me?.ok && me.result?.username) selfUsername = String(me.result.username).toLowerCase();
+        if (me?.ok && me.result?.username) resolvedSelfBotUsername = String(me.result.username).toLowerCase();
       } catch (_) {}
     }
-    if (selfUsername && targetBotMention !== selfUsername) {
+    if (resolvedSelfBotUsername && targetBotMention !== resolvedSelfBotUsername) {
       return new Response('OK', { status: 200, headers: corsHeaders });
     }
   }
@@ -16694,12 +16717,19 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     } catch (_) {}
   }
 
-  // Topic locking removed (Item 6): bots work across all forum topics;
-  // multi-bot groups disambiguate via /command@botusername handled above.
+  // Topic lock: when locked to a topic, ignore messages/dumps/bare commands in
+  // other topics — EXCEPT `/topic` (to inspect/unlock) and commands explicitly
+  // addressed to this bot via `/cmd@botusername`, which reply in that topic.
   const isGroupChatEarly = String(msg.chat?.type || '').includes('group') || chatId.startsWith('-');
-  if (isGroupChatEarly && binding?.topic_id) {
-    await env.DB.prepare('UPDATE community_bots SET topic_id = NULL WHERE id = ?').bind(binding.id).run().catch(() => {});
-    binding.topic_id = null;
+  if (!shouldAllowTopicLockedMessage({
+    isGroup: isGroupChatEarly,
+    lockedTopicId: binding?.topic_id,
+    messageThreadId: forumThreadId,
+    cmd,
+    targetBotMention,
+    selfBotUsername: resolvedSelfBotUsername,
+  })) {
+    return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
   // Telegram's "Anonymous Admin" (id 1087968824, @GroupAnonymousBot) posts as a
@@ -18445,18 +18475,109 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
-// ---- /topic (removed — clear any legacy lock and report multi-topic support) ----
+// ---- /topic <id> | off | (show) — simple lock for this community ----
   if (cmd === '/topic') {
-    if (binding?.id && binding.topic_id) {
-      await env.DB.prepare(`UPDATE community_bots SET topic_id = NULL WHERE id = ?`).bind(binding.id).run().catch(() => {});
+    const args = rest.trim().split(/\s+/).filter(Boolean);
+    const msgThreadId = msg.message_thread_id != null ? String(msg.message_thread_id) : null;
+    const isGroup = String(msg.chat?.type || '').includes('group') || chatId.startsWith('-');
+
+    // Resolve target binding: group binding or DM + community id/name
+    let targetBinding = null;
+    let topicArg = '';
+
+    if (isGroup && binding?.community_id) {
+      targetBinding = binding;
+      topicArg = args[0] || '';
+    } else if (!isGroup && athenaUser) {
+      // DM: /topic <community> <topicId>  OR  /topic <topicId> if only one community
+      if (args.length >= 2) {
+        const c = await resolveCommunityByIdOrName(env, athenaUser.id, args[0]);
+        if (!c) {
+          await sendTelegramMessage(token, chatId, `Community not found: ${args[0]}`, forumThreadId);
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        targetBinding = await env.DB.prepare(
+          `SELECT * FROM community_bots WHERE community_id = ? AND COALESCE(scope,'community') = 'community' LIMIT 1`
+        ).bind(c.id).first();
+        topicArg = args[1];
+      } else if (args.length === 1 && !/^\d+$/.test(args[0]) && !['off', 'clear', 'here', 'this'].includes(args[0].toLowerCase())) {
+        // show status for named community
+        const c = await resolveCommunityByIdOrName(env, athenaUser.id, args[0]);
+        if (!c) {
+          await sendTelegramMessage(token, chatId, `Not found: ${args[0]}`, forumThreadId);
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+        targetBinding = await env.DB.prepare(
+          `SELECT * FROM community_bots WHERE community_id = ? LIMIT 1`
+        ).bind(c.id).first();
+        topicArg = '';
+      } else {
+        const { results } = await env.DB.prepare(
+          `SELECT b.* FROM community_bots b
+           INNER JOIN communities c ON c.id = b.community_id
+           WHERE (b.created_by = ? OR b.user_id = ?) AND COALESCE(b.scope,'community') = 'community'
+           ORDER BY b.created_at DESC`
+        ).bind(athenaUser.id, athenaUser.id).all();
+        const list = results || [];
+        if (list.length === 1) {
+          targetBinding = list[0];
+          topicArg = args[0] || '';
+        } else if (!args.length) {
+          const lines = list.map(b => `${b.group_name || b.community_id} | topic=${b.topic_id || 'OFF'}`);
+          await sendTelegramMessage(token, chatId,
+            lines.length
+              ? `Topics:\n${lines.join('\n')}\n\n/topic <community id|name> <topic_id>`
+              : 'No communities. /community_verify in a group first.', forumThreadId);
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        } else {
+          await sendTelegramMessage(token, chatId, 'Usage (DM): /topic <community id|name> <topic_id>\nOr /topic off for a community.', forumThreadId);
+          return new Response('OK', { status: 200, headers: corsHeaders });
+        }
+      }
+    } else if (isGroup && !binding?.community_id) {
+      await sendTelegramMessage(token, chatId, 'Group not verified. Owner: /community_verify first.', forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
     }
-    const botMention = binding?.bot_username ? `@${binding.bot_username}` : '';
-    await sendTelegramFormatted(
-      token,
-      chatId,
-      `${boldHtml('💬 Topic locking is disabled.')}\nThe bot now responds in every topic. In multi-bot groups, address commands directly with ${codeHtml(`/search${botMention} <query>`)} (or ${codeHtml(`/ai${botMention} <question>`)}).`,
-      forumThreadId
-    );
+
+    if (!targetBinding?.id) {
+      await sendTelegramMessage(token, chatId, 'No community bot binding found.', forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+
+    const canManage = await isBotOwnerTg(env, targetBinding, tgUserId, athenaUser)
+      || (targetBinding.community_id && await isTgUserCommunityStaff(env, targetBinding.community_id, tgUserId, athenaUser));
+    const currentTopic = targetBinding.topic_id ? String(targetBinding.topic_id) : null;
+    const mentionHint = targetBinding.bot_username ? `@${String(targetBinding.bot_username).replace(/^@/, '')}` : '@botusername';
+
+    if (!topicArg) {
+      await sendTelegramMessage(token, chatId,
+        currentTopic
+          ? `Topic lock ON: ${currentTopic}\nThe bot answers in that topic, and also replies in other topics when called via /cmd${mentionHint}.\n/topic off to clear · /clone to clone a topic into a brain`
+          : `Topic lock OFF (whole group).\nThe bot answers in every topic — this is not a clone binding.\n/topic <id> or /topic here to lock · /clone to clone a topic into a brain${msgThreadId ? `\nThis topic id: ${msgThreadId}` : ''}`, forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+
+    if (!canManage) {
+      await sendTelegramMessage(token, chatId, 'Only owner/admins can set /topic.', forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+
+    if (['off', 'clear', '0', 'none', 'disable'].includes(topicArg.toLowerCase())) {
+      await env.DB.prepare(`UPDATE community_bots SET topic_id = NULL WHERE id = ?`).bind(targetBinding.id).run();
+      await sendTelegramMessage(token, chatId, 'Topic lock cleared — whole group.', forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+
+    let topicId = ['here', 'this', 'current'].includes(topicArg.toLowerCase())
+      ? msgThreadId
+      : topicArg.replace(/[^\d]/g, '');
+    if (!topicId) {
+      await sendTelegramMessage(token, chatId, 'Usage: /topic <topic_id> | /topic here | /topic off\nTo clone a topic into a brain: /clone', forumThreadId);
+      return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    await env.DB.prepare(`UPDATE community_bots SET topic_id = ? WHERE id = ?`).bind(topicId, targetBinding.id).run();
+    await sendTelegramMessage(token, chatId,
+      `Topic lock set: ${topicId}\nThe bot now listens only in topic ${topicId} (links/messages elsewhere are ignored). Explicit /cmd${mentionHint} commands still reply in any topic until /topic off.`, forumThreadId);
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
@@ -22305,4 +22426,5 @@ export {
   handlePatchCommunityLink,
   handlePatchPersonalLink,
   handleDeletePersonalLink,
+  shouldAllowTopicLockedMessage,
 };

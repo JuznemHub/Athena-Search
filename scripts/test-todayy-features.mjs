@@ -25,6 +25,7 @@ import { classifyLink } from '../worker/wiki-taxonomy.js';
 import { classifyTags } from '../worker/tag-taxonomy.js';
 import { detectBookmarks } from '../tui/src/browsers.js';
 import { REDDIT_GUIDE_STEPS, X_GUIDE_STEPS } from '../tui/src/social-import.js';
+import { shouldAllowTopicLockedMessage } from '../worker/index_legacy.js';
 
 function makeEnvDb() {
   const db = new DatabaseSync(':memory:');
@@ -259,6 +260,101 @@ function makeEnvDb() {
   const tauriConf = JSON.parse(fs.readFileSync(path.join(root, 'src-tauri/tauri.conf.json'), 'utf8'));
   assert.equal(tauriConf.identifier, 'com.athena.search');
   assert.equal(tauriConf.build?.frontendDist, '../public');
+}
+
+// 9. Topic lock gate + /cmd@botusername override in other topics
+{
+  // DM / private chat always allowed
+  assert.equal(shouldAllowTopicLockedMessage({
+    isGroup: false,
+    lockedTopicId: '42',
+    messageThreadId: null,
+    cmd: '',
+  }), true);
+
+  // Unlocked group allows everything
+  assert.equal(shouldAllowTopicLockedMessage({
+    isGroup: true,
+    lockedTopicId: null,
+    messageThreadId: 99,
+    cmd: '',
+  }), true);
+
+  // Locked topic allows plain text, URL dumps, and bare commands inside the locked topic
+  assert.equal(shouldAllowTopicLockedMessage({
+    isGroup: true,
+    lockedTopicId: '42',
+    messageThreadId: 42,
+    cmd: '',
+  }), true);
+  assert.equal(shouldAllowTopicLockedMessage({
+    isGroup: true,
+    lockedTopicId: '42',
+    messageThreadId: 42,
+    cmd: '/search',
+  }), true);
+
+  // Outside locked topic (another topic or General): ignores plain text, URL dumps, and bare commands
+  assert.equal(shouldAllowTopicLockedMessage({
+    isGroup: true,
+    lockedTopicId: '42',
+    messageThreadId: 99,
+    cmd: '',
+  }), false);
+  assert.equal(shouldAllowTopicLockedMessage({
+    isGroup: true,
+    lockedTopicId: '42',
+    messageThreadId: null,
+    cmd: '',
+  }), false);
+  assert.equal(shouldAllowTopicLockedMessage({
+    isGroup: true,
+    lockedTopicId: '42',
+    messageThreadId: 99,
+    cmd: '/search',
+    targetBotMention: '',
+    selfBotUsername: 'athenabot',
+  }), false);
+
+  // /topic itself is allowed anywhere so staff can inspect or unlock
+  assert.equal(shouldAllowTopicLockedMessage({
+    isGroup: true,
+    lockedTopicId: '42',
+    messageThreadId: 99,
+    cmd: '/topic',
+    targetBotMention: '',
+    selfBotUsername: 'athenabot',
+  }), true);
+
+  // Explicit /cmd@athenabotusername is allowed in any topic (case-insensitive)
+  assert.equal(shouldAllowTopicLockedMessage({
+    isGroup: true,
+    lockedTopicId: '42',
+    messageThreadId: 99,
+    cmd: '/search',
+    targetBotMention: 'AthenaBot',
+    selfBotUsername: '@athenabot',
+  }), true);
+
+  // Different bot mention stays ignored (multi-bot isolation)
+  assert.equal(shouldAllowTopicLockedMessage({
+    isGroup: true,
+    lockedTopicId: '42',
+    messageThreadId: 99,
+    cmd: '/search',
+    targetBotMention: 'OtherBot',
+    selfBotUsername: 'athenabot',
+  }), false);
+
+  // Fail-closed when bot username is unknown
+  assert.equal(shouldAllowTopicLockedMessage({
+    isGroup: true,
+    lockedTopicId: '42',
+    messageThreadId: 99,
+    cmd: '/search',
+    targetBotMention: 'AthenaBot',
+    selfBotUsername: '',
+  }), false);
 }
 
 console.log('test-todayy-features.mjs passed');
