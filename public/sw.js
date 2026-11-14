@@ -51,8 +51,9 @@ self.addEventListener('fetch', (event) => {
   }
 
   // Stale-while-revalidate for static styles, scripts, and SVG/PNG icons.
+  // Fall back to ignoring query string (?v=...) so offline reloads match unversioned precached shell assets.
   event.respondWith(
-    caches.match(request).then((cached) => {
+    caches.match(request).then((exact) => exact || caches.match(request, { ignoreSearch: true })).then((cached) => {
       const net = fetch(request)
         .then((res) => {
           if (res.ok) {

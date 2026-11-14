@@ -130,8 +130,10 @@ export async function addBlacklistEntry(env, { scope = 'community', scopeKey = '
 export async function removeBlacklistEntry(env, { id = '', pattern = '', scope = '', scopeKey = '' }) {
   await ensureBlacklistTable(env);
   if (id) {
-    const res = await env.DB.prepare('DELETE FROM blacklist_entries WHERE id = ?').bind(id).run();
-    return Number(res?.meta?.changes ?? res?.changes ?? 1) > 0;
+    const whereScope = scope ? 'AND scope = ? AND scope_key = ?' : '';
+    const binds = scope ? [id, scope, String(scopeKey || '')] : [id];
+    const res = await env.DB.prepare(`DELETE FROM blacklist_entries WHERE id = ? ${whereScope}`).bind(...binds).run();
+    return Number(res?.meta?.changes ?? res?.changes ?? 0) > 0;
   }
   const normUrl = normalizeBlacklistPattern('url', pattern);
   const normTag = normalizeBlacklistPattern('tag', pattern);

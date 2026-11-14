@@ -5582,7 +5582,7 @@ async function handleDeleteBlacklist(request, user, env, corsHeaders) {
   const removed = await removeBlacklistEntry(env, {
     id: String(body.id || ''),
     pattern: String(body.pattern || ''),
-    scope: body.id ? '' : scope,
+    scope: (isGod && !communityId && scope !== 'global' && scope !== 'personal') ? '' : scope,
     scopeKey,
   });
   if (removed) {

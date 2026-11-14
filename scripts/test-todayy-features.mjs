@@ -107,7 +107,7 @@ function makeEnvDb() {
     pattern: 'https://spam.example.org/bad',
     createdBy: 'u1',
   });
-  await addBlacklistEntry(env, {
+  const globalEntry = await addBlacklistEntry(env, {
     scope: 'global',
     scopeKey: '',
     kind: 'tag',
@@ -119,6 +119,15 @@ function makeEnvDb() {
   assert.ok(checkUrlBlacklisted('https://spam.example.org/bad/page', rules));
   assert.equal(checkUrlBlacklisted('https://good.example.org/', rules), null);
   assert.deepEqual(filterBlacklistedTags(['ai', 'bannedtag', 'python'], rules), ['ai', 'python']);
+
+  // Deleting by id with a mismatched scope/scopeKey must not remove global or other-community rules.
+  const crossScopeBlocked = await removeBlacklistEntry(env, {
+    id: globalEntry.id,
+    scope: 'community',
+    scopeKey: 'comm_1',
+  });
+  assert.equal(crossScopeBlocked, false);
+  assert.equal(await removeBlacklistEntry(env, { id: globalEntry.id, scope: 'global', scopeKey: '' }), true);
 
   const removed = await removeBlacklistEntry(env, {
     scope: 'community',
