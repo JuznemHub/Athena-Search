@@ -4324,6 +4324,8 @@ async function handleCreateWikiShareLink(request, user, env, corsHeaders) {
   const communityId = (body.community_id || '').trim();
 
   const DURATION_MAP = {
+    '1h': { ms: 3600 * 1000, label: '1 Hour' },
+    '1d': { ms: 86400 * 1000, label: '24 Hours' },
     '7d': { ms: 7 * 86400 * 1000, label: '7 Days' },
     '15d': { ms: 15 * 86400 * 1000, label: '15 Days' },
     '1m': { ms: 30 * 86400 * 1000, label: '1 Month' },

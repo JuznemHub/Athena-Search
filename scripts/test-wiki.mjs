@@ -82,6 +82,8 @@ for (const tc of testCases) {
 
 // 3. Verify share link duration map & calculation
 const DURATION_MAP = {
+  '1h': { ms: 3600 * 1000, label: '1 Hour' },
+  '1d': { ms: 86400 * 1000, label: '24 Hours' },
   '7d': { ms: 7 * 86400 * 1000, label: '7 Days' },
   '15d': { ms: 15 * 86400 * 1000, label: '15 Days' },
   '1m': { ms: 30 * 86400 * 1000, label: '1 Month' },
@@ -91,6 +93,8 @@ const DURATION_MAP = {
   '1y': { ms: 365 * 86400 * 1000, label: '1 Year' }
 };
 
+assert.equal(DURATION_MAP['1h'].ms, 3600000);
+assert.equal(DURATION_MAP['1d'].ms, 86400000);
 assert.equal(DURATION_MAP['7d'].ms, 7 * 86400000);
 assert.equal(DURATION_MAP['15d'].ms, 15 * 86400000);
 assert.equal(DURATION_MAP['1m'].ms, 30 * 86400000);
@@ -192,5 +196,15 @@ assert.equal(isInternalTelegramMessageUrl('https://t.me/AthenaSearchBot'), false
 assert.equal(isInternalTelegramMessageUrl('https://t.me/durov'), false);
 assert.equal(isInternalTelegramMessageUrl('https://t.me/+AbCdEfGhIj'), false);
 assert.equal(isInternalTelegramMessageUrl('https://example.com/test'), false);
+
+// 7. Verify 1h / 24h share expiry options, public wiki early lock, and Telegram chooser
+const workerLegacyContent = fs.readFileSync(path.join(__dirname, '../worker/index_legacy.js'), 'utf-8');
+assert(workerLegacyContent.includes("'1h': { ms: 3600 * 1000, label: '1 Hour' }"), 'worker must support 1h share links');
+assert(workerLegacyContent.includes("'1d': { ms: 86400 * 1000, label: '24 Hours' }"), 'worker must support 1d (24 Hours) share links');
+assert(htmlContent.includes('value="1h"'), 'index.html must offer 1 Hour share duration');
+assert(htmlContent.includes('value="1d"'), 'index.html must offer 24 Hours share duration');
+assert(htmlContent.includes('data-public-wiki'), 'index.html must apply synchronous data-public-wiki attribute');
+assert(jsContent.includes('formatShareExpiry'), 'main.js must format share link expirations with time precision');
+assert(jsContent.includes('telegramAppChooserBtn'), 'main.js must wire Telegram client chooser button');
 
 console.log('FMHY wiki taxonomy and classification tests passed.');

@@ -553,6 +553,89 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const cfg = state.authConfig || {};
 
+    let activeBotPoll = null;
+    function stopBotLoginPoll() {
+      if (activeBotPoll) {
+        clearInterval(activeBotPoll);
+        activeBotPoll = null;
+      }
+    }
+
+    function startBotLoginPoll(token, triggerBtn, idleLabel) {
+      stopBotLoginPoll();
+      let attempts = 0;
+      activeBotPoll = setInterval(async () => {
+        attempts++;
+        if (attempts > 120) {
+          stopBotLoginPoll();
+          if (triggerBtn) {
+            triggerBtn.disabled = false;
+            triggerBtn.textContent = idleLabel;
+          }
+          showAuthError('Login session timed out. Click again to retry.');
+          return;
+        }
+        try {
+          const pr = await fetch(`${API_BASE}/api/auth/telegram/bot-login-poll?token=${encodeURIComponent(token)}`);
+          const pd = await pr.json();
+          if (pd.status === 'authenticated' && pd.session) {
+            stopBotLoginPoll();
+            await persistSession(pd.session);
+            if (pd.user) {
+              state.currentUser = pd.user;
+              state.isInstanceOwner = !!pd.user.is_god;
+              state.isElevated = !!pd.user.is_elevated;
+            }
+            showLoggedIn();
+            updateUserUI();
+            await bootstrapAppData();
+          } else if (pd.status === 'banned') {
+            stopBotLoginPoll();
+            if (triggerBtn) {
+              triggerBtn.disabled = false;
+              triggerBtn.textContent = idleLabel;
+            }
+            showAuthError(pd.error || 'You are not in any community Telegram group (or banned from all).');
+          } else if (pd.status === 'expired' || pd.status === 'invalid') {
+            stopBotLoginPoll();
+            if (triggerBtn) {
+              triggerBtn.disabled = false;
+              triggerBtn.textContent = idleLabel;
+            }
+            showAuthError('Login session expired. Try again.');
+          }
+        } catch (_) {}
+      }, 1500);
+    }
+
+    function buildTelegramClientLinks(data, cfgObj) {
+      const token = data.token;
+      const startParam = `auth_${token}`;
+      let botUser = cfgObj.botUsername || '';
+      if (!botUser && data.tmeUrl) {
+        const match = String(data.tmeUrl).match(/t\.me\/([^/?#]+)/i);
+        if (match) botUser = match[1];
+      }
+      botUser = String(botUser).replace(/^@/, '');
+      const tmeUrl = data.tmeUrl || (botUser ? `https://t.me/${encodeURIComponent(botUser)}?start=${encodeURIComponent(startParam)}` : '');
+      const tgWebUrl = data.tgWebUrl || (botUser ? `https://web.telegram.org/k/#?tgaddr=${encodeURIComponent(`tg://resolve?domain=${botUser}&start=${startParam}`)}` : tmeUrl);
+      const isAndroid = /Android/i.test(navigator.userAgent || '');
+      const officialUrl = botUser
+        ? (isAndroid
+          ? `intent://resolve?domain=${encodeURIComponent(botUser)}&start=${encodeURIComponent(startParam)}#Intent;scheme=tg;package=org.telegram.messenger;end`
+          : `tg://resolve?domain=${encodeURIComponent(botUser)}&start=${encodeURIComponent(startParam)}`)
+        : tmeUrl;
+      return { officialUrl, tmeUrl, tgWebUrl, command: `/start ${startParam}` };
+    }
+
+    const chooserBtn = $('telegramAppChooserBtn');
+    const chooserCard = $('telegramChooserCard');
+    const choiceOfficial = $('tgChoiceOfficial');
+    const choiceTme = $('tgChoiceTme');
+    const choiceWeb = $('tgChoiceWeb');
+    const choiceCopyBtn = $('tgChoiceCopyBtn');
+    const chooserCommand = $('tgChooserCommand');
+
     if ((cfg.telegramBotEnabled || cfg.botUsername) && telegramWebLoginBtn) {
       telegramWebLoginBtn.classList.remove('hidden');
       telegramWebLoginBtn.disabled = false;
@@ -573,48 +656,53 @@ document.addEventListener('DOMContentLoaded', () => {
           telegramWebLoginBtn.textContent = 'Confirming in Telegram...';
           authGateError.innerHTML = `Confirm login: click START in <a href="${targetUrl}" target="_blank" style="color:var(--accent,#2AABEE);text-decoration:underline;">Telegram Web</a> or <a href="${d.tmeUrl}" target="_blank" style="color:var(--accent,#2AABEE);text-decoration:underline;">Bot</a>.`;
           authGateError.classList.remove('hidden');
-
-          let attempts = 0;
-          const pollInterval = setInterval(async () => {
-            attempts++;
-            if (attempts > 120) {
-              clearInterval(pollInterval);
-              telegramWebLoginBtn.disabled = false;
-              telegramWebLoginBtn.textContent = 'Log in with Telegram Web';
-              showAuthError('Login session timed out. Click again to retry.');
-              return;
-            }
-            try {
-              const pr = await fetch(`${API_BASE}/api/auth/telegram/bot-login-poll?token=${encodeURIComponent(d.token)}`);
-              const pd = await pr.json();
-              if (pd.status === 'authenticated' && pd.session) {
-                clearInterval(pollInterval);
-                await persistSession(pd.session);
-                if (pd.user) {
-                  state.currentUser = pd.user;
-                  state.isInstanceOwner = !!pd.user.is_god;
-                  state.isElevated = !!pd.user.is_elevated;
-                }
-                showLoggedIn();
-                updateUserUI();
-                await bootstrapAppData();
-              } else if (pd.status === 'banned') {
-                clearInterval(pollInterval);
-                telegramWebLoginBtn.disabled = false;
-                telegramWebLoginBtn.textContent = 'Log in with Telegram Web';
-                showAuthError(pd.error || 'You are not in any community Telegram group (or banned from all).');
-              } else if (pd.status === 'expired' || pd.status === 'invalid') {
-                clearInterval(pollInterval);
-                telegramWebLoginBtn.disabled = false;
-                telegramWebLoginBtn.textContent = 'Log in with Telegram Web';
-                showAuthError('Login session expired. Try again.');
-              }
-            } catch (_) {}
-          }, 1500);
+          startBotLoginPoll(d.token, telegramWebLoginBtn, 'Log in with Telegram Web');
         } catch (err) {
           showAuthError(err.message || 'Telegram Web login failed.');
           telegramWebLoginBtn.disabled = false;
           telegramWebLoginBtn.textContent = 'Log in with Telegram Web';
+        }
+      };
+    }
+
+    if ((cfg.telegramBotEnabled || cfg.botUsername) && chooserBtn && chooserCard) {
+      chooserBtn.classList.remove('hidden');
+      chooserBtn.disabled = false;
+      chooserBtn.onclick = async () => {
+        try {
+          chooserBtn.disabled = true;
+          chooserBtn.textContent = 'Preparing client links...';
+          const r = await fetch(`${API_BASE}/api/auth/telegram/bot-login-start`, { method: 'POST' });
+          const d = await r.json();
+          if (!d.success || !d.token) {
+            showAuthError(d.error || 'Could not start Telegram login session.');
+            chooserBtn.disabled = false;
+            chooserBtn.textContent = 'Choose Telegram Client';
+            return;
+          }
+          const links = buildTelegramClientLinks(d, cfg);
+          if (choiceOfficial) choiceOfficial.href = links.officialUrl;
+          if (choiceTme) choiceTme.href = links.tmeUrl;
+          if (choiceWeb) choiceWeb.href = links.tgWebUrl;
+          if (chooserCommand) chooserCommand.textContent = links.command;
+          chooserCard.classList.remove('hidden');
+          chooserBtn.disabled = false;
+          chooserBtn.textContent = 'Refresh Client Links';
+          if (choiceCopyBtn) {
+            choiceCopyBtn.onclick = async () => {
+              try {
+                await navigator.clipboard.writeText(links.command);
+                const prev = choiceCopyBtn.textContent;
+                choiceCopyBtn.textContent = 'Copied';
+                setTimeout(() => { choiceCopyBtn.textContent = prev; }, 1800);
+              } catch (_) {}
+            };
+          }
+          startBotLoginPoll(d.token, chooserBtn, 'Choose Telegram Client');
+        } catch (err) {
+          showAuthError(err.message || 'Could not prepare client chooser.');
+          chooserBtn.disabled = false;
+          chooserBtn.textContent = 'Choose Telegram Client';
         }
       };
     }
@@ -1710,6 +1798,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // ---- Modes / UI ----
 
   function setMode(mode) {
+    if (state.publicWikiMode) return;
     if (mode === 'ai' && !state.authReady) {
       showToast('Auth is still loading — wait a second and click AI again', true);
       return;
@@ -1979,8 +2068,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function renderGoogleResults(items, query, corpusTotal = null) {
     compactHero(true);
+    initResultsListDelegation();
+    if (resultsRenderState.observer) {
+      resultsRenderState.observer.disconnect();
+      resultsRenderState.observer = null;
+    }
     resultsList.innerHTML = '';
+
     if (!items.length) {
+      resultsRenderState.items = [];
+      resultsRenderState.renderedCount = 0;
+      resultsRenderState.itemMap.clear();
       emptyState.classList.remove('hidden');
       resultsMeta.classList.add('hidden');
       const hasFilters = Boolean(query || state.filterTag || (state.filterStatus && state.filterStatus !== 'all'));
@@ -2008,155 +2106,355 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       return;
     }
+
     emptyState.classList.add('hidden');
     resultsMeta.classList.remove('hidden');
-    const filterSummary = state.filterTag ? ` in #${state.filterTag}` : '';
-    resultsMeta.textContent = `${items.length} link${items.length === 1 ? '' : 's'}${query ? ` for “${query}”` : filterSummary}${corpusTotal != null && corpusTotal !== items.length ? ` · ${corpusTotal} total in scope` : ''}`;
 
-    const isCommunity = state.scope === 'community';
-    const canEdit = !!state.currentUser;
-    const canDelete = state.scope === 'personal' || isStaffRank() || isCommunityStaff();
-
+    resultsRenderState.items = items.slice();
+    resultsRenderState.query = query;
+    resultsRenderState.corpusTotal = corpusTotal;
+    resultsRenderState.renderedCount = 0;
+    resultsRenderState.ctx = {
+      isCommunity: state.scope === 'community',
+      canEdit: !!state.currentUser,
+      canDelete: state.scope === 'personal' || isStaffRank() || isCommunityStaff()
+    };
+    resultsRenderState.itemMap = new Map();
     items.forEach(item => {
-      const card = document.createElement('article');
-      card.className = 'g-result';
-      if (item.isDocument) {
-        card.classList.add('g-result-document');
-        const when = formatDateTime(item.createdAt);
-        card.innerHTML = `
-          <div class="g-document-type">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><path d="M14 2v6h6"></path></svg>
-            <span>${highlight(item.mimeType || 'text/plain', query)}</span>
-          </div>
-          <div class="g-title g-document-title">${highlight(item.filename || item.title || 'Untitled document', query)}</div>
-          <p class="g-snippet">${highlight(documentSnippet(item.content, query), query)}</p>
-          <div class="g-meta">${escapeHtml(when)}</div>
-          <button type="button" class="download-doc-btn" data-id="${escapeHtml(item.id)}" title="Download file">⬇ Download</button>`;
-        card.classList.add('g-result-downloadable');
-        card.addEventListener('click', () => downloadDocument(item));
-        resultsList.appendChild(card);
+      if (item && item.id) resultsRenderState.itemMap.set(item.id, item);
+    });
+
+    updateResultsMetaDisplay();
+    appendNextResultBatch();
+  }
+
+  const RESULT_PAGE_SIZE = 40;
+  const resultsRenderState = {
+    items: [],
+    query: '',
+    corpusTotal: null,
+    renderedCount: 0,
+    itemMap: new Map(),
+    ctx: { isCommunity: false, canEdit: false, canDelete: false },
+    observer: null
+  };
+
+  /**
+   * Build the inline edit form on demand when the user opens a card editor.
+   */
+  function buildGoogleEditPanel(item, canDelete) {
+    const panel = document.createElement('div');
+    panel.className = 'edit-panel';
+    panel.dataset.editFor = item.id || '';
+    panel.innerHTML = `
+      <label>Title</label>
+      <input type="text" class="edit-title" value="${escapeHtml(item.title || '')}" />
+      <label>URL</label>
+      <input type="url" class="edit-url" value="${escapeHtml(item.url || '')}" />
+      <label>Description</label>
+      <textarea class="edit-notes" rows="3">${escapeHtml(item.notes || '')}</textarea>
+      <label>Tags (space or comma-separated)</label>
+      <input type="text" class="edit-tags" value="${escapeHtml((item.tags || []).map(t => '#' + t).join(' '))}" placeholder="e.g. #ai #tools #docs" />
+      <div class="edit-panel-actions">
+        <button type="button" class="btn btn-primary btn-sm edit-save">Save</button>
+        <button type="button" class="btn btn-secondary btn-sm edit-cancel">Cancel</button>
+        ${canDelete ? '<button type="button" class="btn btn-sm g-card-del-btn edit-delete">Delete</button>' : ''}
+      </div>
+    `;
+    return panel;
+  }
+
+  /**
+   * Build a single search/home result card without eager hidden form nodes.
+   */
+  function buildGoogleResultCard(item, query, ctx) {
+    const card = document.createElement('article');
+    card.className = 'g-result';
+    if (card.dataset) card.dataset.id = item.id || '';
+
+    if (item.isDocument) {
+      card.classList.add('g-result-document', 'g-result-downloadable');
+      const when = formatDateTime(item.createdAt);
+      card.innerHTML = `
+        <div class="g-document-type">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><path d="M14 2v6h6"></path></svg>
+          <span>${highlight(item.mimeType || 'text/plain', query)}</span>
+        </div>
+        <div class="g-title g-document-title">${highlight(item.filename || item.title || 'Untitled document', query)}</div>
+        <p class="g-snippet">${highlight(documentSnippet(item.content, query), query)}</p>
+        <div class="g-meta">${escapeHtml(when)}</div>
+        <button type="button" class="download-doc-btn" data-id="${escapeHtml(item.id)}" title="Download file">Download</button>`;
+      return card;
+    }
+
+    const displayUrl = item.url
+      ? item.url.replace(/^https?:\/\//, '').replace(/\/$/, '')
+      : 'note · local brain';
+    const href = item.url || '#';
+    const site = item.siteName || '';
+    const desc = (item.notes || '').slice(0, 220) || (item.tags || []).map(t => `#${t}`).join(' ');
+    const who = item.addedBy || item.added_by || '';
+    const plat = providerLabel(item.addedByProvider);
+    const when = formatDateTime(item.createdAt);
+    const preview = renderLinkPreview(item);
+    const host = preview ? '' : previewUrl(item.url)?.hostname;
+    const favicon = host ? `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64` : '';
+
+    const authorLine = ctx.isCommunity
+      ? `<div class="g-author">${plat ? `<span class="plat-tag plat-${plat.toLowerCase()}">${escapeHtml(plat)}</span>` : ''}
+          <span class="g-author-name">${escapeHtml(who || 'member')}</span>
+          <span class="g-author-time">${escapeHtml(when)}</span></div>`
+      : '';
+
+    const voteRow = ctx.isCommunity
+      ? `<div class="g-actions">
+          <button type="button" class="vote-btn up ${item.myVote === 1 ? 'active' : ''}" data-id="${escapeHtml(item.id)}" data-vote="1" title="Upvote">▲ <span>${item.upvotes || 0}</span></button>
+          <button type="button" class="vote-btn down ${item.myVote === -1 ? 'active' : ''}" data-id="${escapeHtml(item.id)}" data-vote="-1" title="Downvote">▼ <span>${item.downvotes || 0}</span></button>
+          <button type="button" class="report-btn" data-id="${escapeHtml(item.id)}" title="Report">Report</button>
+        </div>`
+      : `<div class="g-meta">${escapeHtml(when)}${(item.tags || []).length ? ' · ' + item.tags.map(t => '#' + escapeHtml(t)).join(' ') : ''}</div>`;
+
+    const editAuditHtml = item.manualEditedAt
+      ? `<div class="g-audit-row">
+          <span class="admin-edit-badge" title="Manually edited">
+            Edited by <strong>${escapeHtml(item.lastEditedByName || 'Admin')}</strong> · ${escapeHtml(formatDateTime(item.manualEditedAt))}
+          </span>
+         </div>`
+      : '';
+
+    const tagsList = (item.tags || []).filter(Boolean);
+    const tagsHtml = tagsList.length
+      ? `<div class="g-card-tags">
+          ${tagsList.map(t => `<button type="button" class="g-tag-chip" data-tag="${escapeHtml(t)}">#${escapeHtml(t)}</button>`).join('')}
+         </div>`
+      : `<div class="g-card-tags">
+          <button type="button" class="g-tag-chip g-tag-empty" data-tag="notags" title="Untagged link — click to filter">#notags</button>
+         </div>`;
+
+    const bmActive = typeof isUrlBookmarked === 'function' && isUrlBookmarked(item.url);
+    const bmBtnHtml = (state.currentUser && item.url) ? `
+      <button type="button" class="btn btn-secondary btn-sm bookmark-link-btn ${bmActive ? 'is-bookmarked' : ''}" data-id="${escapeHtml(item.id)}" data-url="${escapeHtml(item.url)}" data-title="${escapeHtml(item.title || '')}" title="${bmActive ? 'Remove bookmark' : 'Save bookmark'}">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="${bmActive ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+        <span>${bmActive ? 'Saved' : 'Save'}</span>
+      </button>` : '';
+
+    const aiStarBtnHtml = (typeof isGod === 'function' && isGod()) ? `
+      <button type="button" class="btn btn-secondary btn-sm ai-enrich-btn" data-id="${escapeHtml(item.id)}" title="Re-scrape URL and enrich metadata with AI (GOD only)">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/></svg>
+        <span>AI</span>
+      </button>` : '';
+
+    const editBtnHtml = ctx.canEdit ? `
+      <button type="button" class="btn btn-secondary btn-sm edit-link-btn" data-id="${escapeHtml(item.id)}" title="Edit link and tags">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+        <span>Edit</span>
+      </button>` : '';
+
+    const delBtnHtml = ctx.canDelete ? `
+      <button type="button" class="btn btn-sm g-card-del-btn del-link-btn" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(item.title || item.url || 'this link')}" title="Delete link from database">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+        <span>Delete</span>
+      </button>` : '';
+
+    const cardActionsHtml = (bmBtnHtml || aiStarBtnHtml || editBtnHtml || delBtnHtml) ? `
+      <div class="g-card-actions">
+        ${bmBtnHtml}
+        ${aiStarBtnHtml}
+        ${editBtnHtml}
+        ${delBtnHtml}
+      </div>` : '';
+
+    card.innerHTML = `
+      ${authorLine}
+      <div class="g-url-row">
+        <div class="g-url-meta">
+          ${favicon
+            ? `<img class="g-favicon-img" src="${safeHref(favicon)}" alt="" width="18" height="18" loading="lazy" decoding="async" referrerpolicy="no-referrer">`
+            : ''}
+          <span class="g-favicon ${favicon ? 'hidden' : ''}"></span>
+          <cite class="g-cite">${site ? escapeHtml(site) + ' · ' : ''}${highlight(displayUrl, query)}</cite>
+        </div>
+        ${cardActionsHtml}
+      </div>
+      <a class="g-title" href="${safeHref(href)}" ${item.url ? 'target="_blank" rel="noopener noreferrer"' : ''}>${highlight(item.title || 'Untitled', query)}</a>
+      ${preview}
+      ${desc ? `<p class="g-snippet">${highlight(desc, query)}</p>` : ''}
+      ${tagsHtml}
+      ${voteRow}
+      ${editAuditHtml}
+    `;
+    return card;
+  }
+
+  function updateResultsMetaDisplay() {
+    if (!resultsMeta) return;
+    const count = resultsRenderState.items.length;
+    const q = resultsRenderState.query;
+    const filterSummary = state.filterTag ? ` in #${state.filterTag}` : '';
+    const total = resultsRenderState.corpusTotal;
+    resultsMeta.textContent = `${count} link${count === 1 ? '' : 's'}${q ? ` for “${q}”` : filterSummary}${total != null && total !== count ? ` · ${total} total in scope` : ''}`;
+  }
+
+  function appendNextResultBatch() {
+    if (!resultsList) return;
+    resultsList.querySelector?.('.results-load-more')?.remove();
+    if (resultsRenderState.observer) {
+      resultsRenderState.observer.disconnect();
+      resultsRenderState.observer = null;
+    }
+
+    const total = resultsRenderState.items.length;
+    if (resultsRenderState.renderedCount >= total) return;
+
+    const end = Math.min(resultsRenderState.renderedCount + RESULT_PAGE_SIZE, total);
+    if (typeof document.createDocumentFragment === 'function') {
+      const frag = document.createDocumentFragment();
+      for (let i = resultsRenderState.renderedCount; i < end; i++) {
+        frag.appendChild(buildGoogleResultCard(resultsRenderState.items[i], resultsRenderState.query, resultsRenderState.ctx));
+      }
+      removeFailedLinkPreviews(frag);
+      resultsList.appendChild(frag);
+    } else {
+      for (let i = resultsRenderState.renderedCount; i < end; i++) {
+        resultsList.appendChild(buildGoogleResultCard(resultsRenderState.items[i], resultsRenderState.query, resultsRenderState.ctx));
+      }
+      removeFailedLinkPreviews(resultsList);
+    }
+    resultsRenderState.renderedCount = end;
+
+    const remaining = total - end;
+    if (remaining > 0) {
+      const moreWrap = document.createElement('div');
+      moreWrap.className = 'results-load-more';
+      const nextCount = Math.min(remaining, RESULT_PAGE_SIZE);
+      moreWrap.innerHTML = `<button type="button" class="btn btn-secondary btn-sm results-show-more-btn">Show ${nextCount} more (${remaining} remaining)</button>`;
+      resultsList.appendChild(moreWrap);
+      if (typeof window !== 'undefined' && 'IntersectionObserver' in window) {
+        resultsRenderState.observer = new IntersectionObserver((entries) => {
+          if (entries.some(e => e.isIntersecting)) {
+            appendNextResultBatch();
+          }
+        }, { rootMargin: '450px' });
+        resultsRenderState.observer.observe(moreWrap);
+      }
+    }
+  }
+
+  async function deleteResultLinkById(id, btn) {
+    const isComm = state.scope === 'community';
+    const item = (isComm ? state.communityLinks : state.personalLinks).find(l => l.id === id);
+    const label = item?.title || item?.url || 'this link';
+    if (!(await showModal({
+      title: 'Delete link',
+      message: `Delete "${String(label).slice(0, 80)}" from the database? This cannot be undone.`,
+      confirmText: 'Delete',
+      danger: true
+    }))) return;
+    if (btn) btn.disabled = true;
+    try {
+      const path = isComm ? '/api/links' : '/api/personal-links';
+      const body = isComm
+        ? JSON.stringify({ id, community_id: state.activeCommunity })
+        : JSON.stringify({ id });
+      const { res, data } = await api(path, { method: 'DELETE', body });
+      if (!res.ok || !data.success) {
+        showToast(data.error || 'Delete failed', true);
+        if (btn) btn.disabled = false;
         return;
       }
-      const displayUrl = item.url
-        ? item.url.replace(/^https?:\/\//, '').replace(/\/$/, '')
-        : 'note · local brain';
-      const href = item.url || '#';
-      const site = item.siteName || '';
-      const desc = (item.notes || '').slice(0, 220) || (item.tags || []).map(t => `#${t}`).join(' ');
-      const who = item.addedBy || item.added_by || '';
-      const plat = providerLabel(item.addedByProvider);
-      const when = formatDateTime(item.createdAt);
-      const preview = renderLinkPreview(item);
-      const host = preview ? '' : previewUrl(item.url)?.hostname;
-      const favicon = host ? `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64` : '';
+      const list = isComm ? state.communityLinks : state.personalLinks;
+      const idx = list.findIndex(l => l.id === id);
+      if (idx >= 0) list.splice(idx, 1);
 
-      const authorLine = isCommunity
-        ? `<div class="g-author">${plat ? `<span class="plat-tag plat-${plat.toLowerCase()}">${escapeHtml(plat)}</span>` : ''}
-            <span class="g-author-name">${escapeHtml(who || 'member')}</span>
-            <span class="g-author-time">${escapeHtml(when)}</span></div>`
-        : '';
+      const viewIdx = resultsRenderState.items.findIndex(l => l.id === id);
+      if (viewIdx >= 0) {
+        resultsRenderState.items.splice(viewIdx, 1);
+        if (viewIdx < resultsRenderState.renderedCount) {
+          resultsRenderState.renderedCount--;
+        }
+      }
+      if (typeof resultsRenderState.corpusTotal === 'number' && resultsRenderState.corpusTotal > 0) {
+        resultsRenderState.corpusTotal--;
+      }
+      resultsRenderState.itemMap.delete(id);
 
-      const voteRow = isCommunity
-        ? `<div class="g-actions">
-            <button type="button" class="vote-btn up ${item.myVote === 1 ? 'active' : ''}" data-id="${escapeHtml(item.id)}" data-vote="1" title="Upvote">▲ <span>${item.upvotes || 0}</span></button>
-            <button type="button" class="vote-btn down ${item.myVote === -1 ? 'active' : ''}" data-id="${escapeHtml(item.id)}" data-vote="-1" title="Downvote">▼ <span>${item.downvotes || 0}</span></button>
-            <button type="button" class="report-btn" data-id="${escapeHtml(item.id)}" title="Report">Report</button>
-          </div>`
-        : `<div class="g-meta">${escapeHtml(when)}${(item.tags || []).length ? ' · ' + item.tags.map(t => '#' + escapeHtml(t)).join(' ') : ''}</div>`;
+      const card = Array.from(resultsList.children).find(el => el.dataset?.id === id);
+      card?.remove();
+      lastSyncFingerprint = corpusFingerprint();
+      showToast('Link deleted from database');
+      wikiState.dirty = true;
+      if ($('wikiView') && !$('wikiView').classList.contains('hidden')) {
+        loadWikiData();
+      }
+      loadMainTags().catch(() => {});
 
-      const editAuditHtml = item.manualEditedAt
-        ? `<div class="g-audit-row">
-            <span class="admin-edit-badge" title="Manually edited">
-              Edited by <strong>${escapeHtml(item.lastEditedByName || 'Admin')}</strong> · ${escapeHtml(formatDateTime(item.manualEditedAt))}
-            </span>
-           </div>`
-        : '';
+      if (!resultsRenderState.items.length) {
+        if (hasActiveMainFilters()) {
+          runSearch();
+        } else {
+          renderHome();
+        }
+        return;
+      }
+      updateResultsMetaDisplay();
+      if (resultsRenderState.renderedCount < Math.min(RESULT_PAGE_SIZE, resultsRenderState.items.length)) {
+        appendNextResultBatch();
+      }
+    } catch (err) {
+      showToast(err.message || 'Delete failed', true);
+      if (btn) btn.disabled = false;
+    }
+  }
 
-      const tagsList = (item.tags || []).filter(Boolean);
-      const tagsHtml = tagsList.length
-        ? `<div class="g-card-tags">
-            ${tagsList.map(t => `<button type="button" class="g-tag-chip" data-tag="${escapeHtml(t)}">#${escapeHtml(t)}</button>`).join('')}
-           </div>`
-        : `<div class="g-card-tags">
-            <button type="button" class="g-tag-chip g-tag-empty" data-tag="notags" title="Untagged link — click to filter">#notags</button>
-           </div>`;
-
-      const bmActive = typeof isUrlBookmarked === 'function' && isUrlBookmarked(item.url);
-      const bmBtnHtml = (state.currentUser && item.url) ? `
-        <button type="button" class="btn btn-secondary btn-sm bookmark-link-btn ${bmActive ? 'is-bookmarked' : ''}" data-id="${escapeHtml(item.id)}" data-url="${escapeHtml(item.url)}" data-title="${escapeHtml(item.title || '')}" title="${bmActive ? 'Remove bookmark' : 'Save bookmark'}">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="${bmActive ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
-          <span>${bmActive ? 'Saved' : 'Save'}</span>
-        </button>` : '';
-
-      const aiStarBtnHtml = (typeof isGod === 'function' && isGod()) ? `
-        <button type="button" class="btn btn-secondary btn-sm ai-enrich-btn" data-id="${escapeHtml(item.id)}" title="Re-scrape URL and enrich metadata with AI (GOD only)">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/></svg>
-          <span>AI</span>
-        </button>` : '';
-
-      const editBtnHtml = canEdit ? `
-        <button type="button" class="btn btn-secondary btn-sm edit-link-btn" data-id="${escapeHtml(item.id)}" title="Edit link and tags">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-          <span>Edit</span>
-        </button>` : '';
-
-      const delBtnHtml = canDelete ? `
-        <button type="button" class="btn btn-sm g-card-del-btn del-link-btn" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(item.title || item.url || 'this link')}" title="Delete link from database">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
-          <span>Delete</span>
-        </button>` : '';
-
-      const cardActionsHtml = (bmBtnHtml || aiStarBtnHtml || editBtnHtml || delBtnHtml) ? `
-        <div class="g-card-actions">
-          ${bmBtnHtml}
-          ${aiStarBtnHtml}
-          ${editBtnHtml}
-          ${delBtnHtml}
-        </div>` : '';
-
-      card.innerHTML = `
-        ${authorLine}
-        <div class="g-url-row">
-          <div class="g-url-meta">
-            ${favicon
-              ? `<img class="g-favicon-img" src="${safeHref(favicon)}" alt="" width="18" height="18" loading="lazy" referrerpolicy="no-referrer" onerror="this.classList.add('hidden');this.nextElementSibling?.classList.remove('hidden')">`
-              : ''}
-            <span class="g-favicon ${favicon ? 'hidden' : ''}"></span>
-            <cite class="g-cite">${site ? escapeHtml(site) + ' · ' : ''}${highlight(displayUrl, query)}</cite>
-          </div>
-          ${cardActionsHtml}
-        </div>
-        <a class="g-title" href="${safeHref(href)}" ${item.url ? 'target="_blank" rel="noopener noreferrer"' : ''}>${highlight(item.title || 'Untitled', query)}</a>
-        ${preview}
-        ${desc ? `<p class="g-snippet">${highlight(desc, query)}</p>` : ''}
-        ${tagsHtml}
-        ${voteRow}
-        ${editAuditHtml}
-        <div class="edit-panel hidden" data-edit-for="${escapeHtml(item.id)}">
-          <label>Title</label>
-          <input type="text" class="edit-title" value="${escapeHtml(item.title || '')}" />
-          <label>URL</label>
-          <input type="url" class="edit-url" value="${escapeHtml(item.url || '')}" />
-          <label>Description</label>
-          <textarea class="edit-notes" rows="3">${escapeHtml(item.notes || '')}</textarea>
-          <label>Tags (space or comma-separated)</label>
-          <input type="text" class="edit-tags" value="${escapeHtml((item.tags || []).map(t => '#' + t).join(' '))}" placeholder="e.g. #ai #tools #docs" />
-          <div class="edit-panel-actions">
-            <button type="button" class="btn btn-primary btn-sm edit-save">Save</button>
-            <button type="button" class="btn btn-secondary btn-sm edit-cancel">Cancel</button>
-            ${canDelete ? '<button type="button" class="btn btn-sm g-card-del-btn edit-delete">Delete</button>' : ''}
-          </div>
-        </div>
-      `;
-      resultsList.appendChild(card);
+  function closeOpenResultPanels(exceptCard) {
+    resultsList.querySelectorAll('.edit-panel').forEach(p => {
+      if (!exceptCard || p.closest('.g-result') !== exceptCard) {
+        p.remove();
+      }
     });
-    removeFailedLinkPreviews(resultsList);
+    resultsList.querySelectorAll('.g-result.editing').forEach(c => {
+      if (c !== exceptCard) c.classList.remove('editing');
+    });
+  }
 
-    resultsList.querySelectorAll('.g-tag-chip').forEach(btn => {
-      btn.addEventListener('click', (e) => {
+  /**
+   * Bind delegated click, keydown, and image-error listeners on resultsList once.
+   */
+  function initResultsListDelegation() {
+    if (!resultsList || typeof resultsList.addEventListener !== 'function' || resultsList.dataset?.delegated) return;
+    if (resultsList.dataset) resultsList.dataset.delegated = '1';
+
+    resultsList.addEventListener('error', (e) => {
+      const target = e.target;
+      if (!(target instanceof HTMLImageElement)) return;
+      if (target.classList.contains('g-favicon-img')) {
+        target.classList.add('hidden');
+        target.nextElementSibling?.classList.remove('hidden');
+      } else if (target.classList.contains('link-preview')) {
+        target.remove();
+      }
+    }, true);
+
+    resultsList.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      const input = e.target.closest?.('.edit-panel input');
+      if (!input) return;
+      e.preventDefault();
+      input.closest('.edit-panel')?.querySelector('.edit-save')?.click();
+    });
+
+    resultsList.addEventListener('click', async (e) => {
+      const showMoreBtn = e.target.closest('.results-show-more-btn');
+      if (showMoreBtn) {
+        appendNextResultBatch();
+        return;
+      }
+
+      const tagBtn = e.target.closest('.g-tag-chip');
+      if (tagBtn) {
         e.preventDefault();
         e.stopPropagation();
-        const tag = btn.dataset.tag;
+        const tag = tagBtn.dataset.tag;
         if (!tag) return;
         if (tag.toLowerCase() === 'notags') {
           state.filterTag = 'notags';
@@ -2167,67 +2465,67 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         renderMainTags();
         runSearch();
-      });
-    });
+        return;
+      }
 
-    resultsList.querySelectorAll('.bookmark-link-btn').forEach(btn => {
-      btn.addEventListener('click', async (e) => {
+      const bmBtn = e.target.closest('.bookmark-link-btn');
+      if (bmBtn) {
         e.preventDefault();
         e.stopPropagation();
         await toggleBookmark({
-          link_id: btn.dataset.id,
+          link_id: bmBtn.dataset.id,
           scope: state.scope,
           scope_key: state.scope === 'community' ? state.activeCommunity : '',
-          url: btn.dataset.url,
-          title: btn.dataset.title
-        }, btn);
-      });
-    });
+          url: bmBtn.dataset.url,
+          title: bmBtn.dataset.title
+        }, bmBtn);
+        return;
+      }
 
-    resultsList.querySelectorAll('.ai-enrich-btn').forEach(btn => {
-      btn.addEventListener('click', async (e) => {
+      const aiBtn = e.target.closest('.ai-enrich-btn');
+      if (aiBtn) {
         e.preventDefault();
         e.stopPropagation();
-        await enrichLinkWithAi(btn.dataset.id, state.scope, btn, 'search');
-      });
-    });
+        await enrichLinkWithAi(aiBtn.dataset.id, state.scope, aiBtn, 'search');
+        return;
+      }
 
-    resultsList.querySelectorAll('.edit-link-btn').forEach(btn => {
-      btn.addEventListener('click', (e) => {
+      const editBtn = e.target.closest('.edit-link-btn');
+      if (editBtn) {
         e.preventDefault();
         e.stopPropagation();
-        const id = btn.dataset.id;
-        const card = btn.closest('.g-result');
-        const panel = card?.querySelector(`.edit-panel[data-edit-for="${CSS.escape(id)}"]`);
-        if (!panel) return;
-        // close others
-        resultsList.querySelectorAll('.edit-panel').forEach(p => {
-          if (p !== panel) p.classList.add('hidden');
-        });
-        resultsList.querySelectorAll('.g-result').forEach(c => c.classList.remove('editing'));
-        panel.classList.toggle('hidden');
-        card.classList.toggle('editing', !panel.classList.contains('hidden'));
-        if (!panel.classList.contains('hidden')) {
-          panel.querySelector('.edit-title')?.focus();
+        const id = editBtn.dataset.id;
+        const card = editBtn.closest('.g-result');
+        const item = resultsRenderState.itemMap.get(id);
+        if (!card || !item) return;
+        const existingPanel = card.querySelector('.edit-panel');
+        closeOpenResultPanels(card);
+        if (existingPanel) {
+          existingPanel.remove();
+          card.classList.remove('editing');
+          return;
         }
-      });
-    });
+        const panel = buildGoogleEditPanel(item, resultsRenderState.ctx.canDelete);
+        card.appendChild(panel);
+        card.classList.add('editing');
+        panel.querySelector('.edit-title')?.focus();
+        return;
+      }
 
-    resultsList.querySelectorAll('.edit-cancel').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const panel = btn.closest('.edit-panel');
-        const card = btn.closest('.g-result');
-        panel?.classList.add('hidden');
+      const cancelBtn = e.target.closest('.edit-cancel');
+      if (cancelBtn) {
+        const card = cancelBtn.closest('.g-result');
+        cancelBtn.closest('.edit-panel')?.remove();
         card?.classList.remove('editing');
-      });
-    });
+        return;
+      }
 
-    resultsList.querySelectorAll('.edit-save').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const panel = btn.closest('.edit-panel');
-        const card = btn.closest('.g-result');
+      const saveBtn = e.target.closest('.edit-save');
+      if (saveBtn) {
+        const panel = saveBtn.closest('.edit-panel');
+        const card = saveBtn.closest('.g-result');
         const id = panel?.dataset.editFor;
-        if (!id || !panel) return;
+        if (!id || !panel || !card) return;
         const title = panel.querySelector('.edit-title')?.value?.trim() || '';
         const url = panel.querySelector('.edit-url')?.value?.trim() || '';
         const notes = panel.querySelector('.edit-notes')?.value?.trim() || '';
@@ -2237,7 +2535,7 @@ document.addEventListener('DOMContentLoaded', () => {
           showToast('Nothing to save', true);
           return;
         }
-        btn.disabled = true;
+        saveBtn.disabled = true;
         try {
           const path = state.scope === 'community' ? '/api/links' : '/api/personal-links';
           const { res, data } = await api(path, {
@@ -2250,155 +2548,117 @@ document.addEventListener('DOMContentLoaded', () => {
           }
           const list = state.scope === 'community' ? state.communityLinks : state.personalLinks;
           const idx = list.findIndex(l => l.id === id);
+          let updatedItem = resultsRenderState.itemMap.get(id) || { id };
+          const patchFields = {
+            __sd: undefined,
+            title: data.title != null ? data.title : title,
+            url: data.url || url,
+            notes: data.notes != null ? data.notes : notes,
+            tags: Array.isArray(data.tags) ? data.tags : tags,
+            imageUrl: data.image_url || updatedItem.imageUrl,
+            siteName: data.site_name || updatedItem.siteName,
+            manualEditedAt: data.manual_edited_at || Date.now(),
+            lastEditedBy: data.last_edited_by || state.currentUser?.id,
+            lastEditedByName: data.last_edited_by_name || state.currentUser?.displayName || state.currentUser?.username || 'Admin'
+          };
           if (idx >= 0) {
-            list[idx] = {
-              ...list[idx],
-              __sd: undefined,
-              title: data.title != null ? data.title : title,
-              url: data.url || url,
-              notes: data.notes != null ? data.notes : notes,
-              tags: Array.isArray(data.tags) ? data.tags : tags,
-              imageUrl: data.image_url || list[idx].imageUrl,
-              siteName: data.site_name || list[idx].siteName,
-              manualEditedAt: data.manual_edited_at || Date.now(),
-              lastEditedBy: data.last_edited_by || state.currentUser?.id,
-              lastEditedByName: data.last_edited_by_name || state.currentUser?.displayName || state.currentUser?.username || 'Admin'
-            };
+            list[idx] = { ...list[idx], ...patchFields };
+            updatedItem = list[idx];
+          } else {
+            updatedItem = { ...updatedItem, ...patchFields };
           }
+          resultsRenderState.itemMap.set(id, updatedItem);
+          const viewIdx = resultsRenderState.items.findIndex(l => l.id === id);
+          if (viewIdx >= 0) resultsRenderState.items[viewIdx] = updatedItem;
+
           lastSyncFingerprint = corpusFingerprint();
           showToast('Link updated in database');
           wikiState.dirty = true;
           if ($('wikiView') && !$('wikiView').classList.contains('hidden')) {
             loadWikiData();
           }
-          panel.classList.add('hidden');
-          card?.classList.remove('editing');
-          card?.classList.add('edited-flash');
-          setTimeout(() => card?.classList.remove('edited-flash'), 1200);
-          await loadMainTags().catch(() => {});
-          if (hasActiveMainFilters()) {
-            await runSearch();
-          } else {
-            renderHome();
-          }
+          const replacementCard = buildGoogleResultCard(updatedItem, resultsRenderState.query, resultsRenderState.ctx);
+          replacementCard.classList.add('edited-flash');
+          card.replaceWith(replacementCard);
+          setTimeout(() => replacementCard.classList.remove('edited-flash'), 1200);
+          loadMainTags().catch(() => {});
         } catch (err) {
           showToast(err.message || 'Edit failed', true);
         } finally {
-          btn.disabled = false;
+          saveBtn.disabled = false;
         }
-      });
-    });
-
-    // Delete from the same DB row the card shows (website + bot stay in sync).
-    const deleteLinkById = async (id, btn) => {
-      const isComm = state.scope === 'community';
-      const item = (isComm ? state.communityLinks : state.personalLinks).find(l => l.id === id);
-      const label = item?.title || item?.url || 'this link';
-      if (!(await showModal({
-        title: 'Delete link',
-        message: `Delete "${String(label).slice(0, 80)}" from the database? This cannot be undone.`,
-        confirmText: 'Delete',
-        danger: true
-      }))) return;
-      if (btn) btn.disabled = true;
-      try {
-        const path = isComm ? '/api/links' : '/api/personal-links';
-        const body = isComm
-          ? JSON.stringify({ id, community_id: state.activeCommunity })
-          : JSON.stringify({ id });
-        const { res, data } = await api(path, { method: 'DELETE', body });
-        if (!res.ok || !data.success) {
-          showToast(data.error || 'Delete failed', true);
-          if (btn) btn.disabled = false;
-          return;
-        }
-        const list = isComm ? state.communityLinks : state.personalLinks;
-        const idx = list.findIndex(l => l.id === id);
-        if (idx >= 0) list.splice(idx, 1);
-        lastSyncFingerprint = corpusFingerprint();
-        showToast('Link deleted from database');
-        wikiState.dirty = true;
-        if ($('wikiView') && !$('wikiView').classList.contains('hidden')) {
-          loadWikiData();
-        }
-        await loadMainTags().catch(() => {});
-        if (hasActiveMainFilters()) {
-          await runSearch();
-        } else {
-          renderHome();
-        }
-      } catch (err) {
-        showToast(err.message || 'Delete failed', true);
-        if (btn) btn.disabled = false;
+        return;
       }
-    };
-    resultsList.querySelectorAll('.del-link-btn').forEach(btn => {
-      btn.addEventListener('click', (e) => {
+
+      const delBtn = e.target.closest('.del-link-btn');
+      if (delBtn) {
         e.preventDefault();
         e.stopPropagation();
-        deleteLinkById(btn.dataset.id, btn);
-      });
-    });
-    resultsList.querySelectorAll('.edit-delete').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const panel = btn.closest('.edit-panel');
-        deleteLinkById(panel?.dataset.editFor, btn);
-      });
-    });
+        deleteResultLinkById(delBtn.dataset.id, delBtn);
+        return;
+      }
 
-    // Enter in title/url saves
-    resultsList.querySelectorAll('.edit-panel input').forEach(inp => {
-      inp.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          inp.closest('.edit-panel')?.querySelector('.edit-save')?.click();
+      const editDelBtn = e.target.closest('.edit-delete');
+      if (editDelBtn) {
+        const panel = editDelBtn.closest('.edit-panel');
+        deleteResultLinkById(panel?.dataset.editFor, editDelBtn);
+        return;
+      }
+
+      const voteBtn = e.target.closest('.vote-btn');
+      if (voteBtn && resultsRenderState.ctx.isCommunity) {
+        const linkId = voteBtn.dataset.id;
+        let vote = parseInt(voteBtn.dataset.vote, 10);
+        const item = state.communityLinks.find(l => l.id === linkId);
+        if (item && item.myVote === vote) vote = 0;
+        try {
+          const { data } = await api('/api/links/vote', {
+            method: 'POST',
+            body: JSON.stringify({ link_id: linkId, vote })
+          });
+          if (data.success && item) {
+            item.upvotes = data.upvotes;
+            item.downvotes = data.downvotes;
+            item.myVote = data.my_vote;
+            resultsRenderState.itemMap.set(linkId, item);
+            const card = voteBtn.closest('.g-result');
+            if (card) {
+              const replacementCard = buildGoogleResultCard(item, resultsRenderState.query, resultsRenderState.ctx);
+              card.replaceWith(replacementCard);
+            }
+          }
+        } catch (err) {
+          showToast(err.message, true);
         }
-      });
-    });
+        return;
+      }
 
-    if (isCommunity) {
-      resultsList.querySelectorAll('.vote-btn').forEach(btn => {
-        btn.addEventListener('click', async () => {
-          const linkId = btn.dataset.id;
-          let vote = parseInt(btn.dataset.vote, 10);
-          const item = state.communityLinks.find(l => l.id === linkId);
-          if (item && item.myVote === vote) vote = 0; // toggle off
-          try {
-            const { data } = await api('/api/links/vote', {
-              method: 'POST',
-              body: JSON.stringify({ link_id: linkId, vote })
-            });
-            if (data.success && item) {
-              item.upvotes = data.upvotes;
-              item.downvotes = data.downvotes;
-              item.myVote = data.my_vote;
-              renderGoogleResults(items.map(i => i.id === linkId ? item : i), query);
-            }
-          } catch (err) {
-            showToast(err.message, true);
+      const reportBtn = e.target.closest('.report-btn');
+      if (reportBtn && resultsRenderState.ctx.isCommunity) {
+        const reason = prompt('Report reason (optional):') || 'Reported';
+        try {
+          const { data } = await api('/api/links/report', {
+            method: 'POST',
+            body: JSON.stringify({ link_id: reportBtn.dataset.id, reason })
+          });
+          if (data.success) {
+            showToast('Reported — owners/admins notified');
+            await loadNotifications();
+          } else {
+            showToast(data.error || 'Report failed', true);
           }
-        });
-      });
-      resultsList.querySelectorAll('.report-btn').forEach(btn => {
-        btn.addEventListener('click', async () => {
-          const reason = prompt('Report reason (optional):') || 'Reported';
-          try {
-            const { data } = await api('/api/links/report', {
-              method: 'POST',
-              body: JSON.stringify({ link_id: btn.dataset.id, reason })
-            });
-            if (data.success) {
-              showToast('Reported — owners/admins notified');
-              await loadNotifications();
-            } else {
-              showToast(data.error || 'Report failed', true);
-            }
-          } catch (err) {
-            showToast(err.message, true);
-          }
-        });
-      });
-    }
+        } catch (err) {
+          showToast(err.message, true);
+        }
+        return;
+      }
+
+      const docCard = e.target.closest('.g-result-downloadable');
+      if (docCard && !e.target.closest('a')) {
+        const item = resultsRenderState.itemMap.get(docCard.dataset.id);
+        if (item) downloadDocument(item);
+      }
+    });
   }
 
   let searchSeq = 0;
@@ -3331,6 +3591,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function openAdminDb() {
+    if (state.publicWikiMode) return;
     const adminView = $('adminDbView');
     const searchWrap = $('searchWrapper');
     const feedView = $('feedView');
@@ -3572,6 +3833,336 @@ document.addEventListener('DOMContentLoaded', () => {
     nextBtn.disabled = adminDbState.page >= adminDbState.totalPages;
   }
 
+  /**
+   * Build the admin edit panel on demand when editing an admin database card.
+   */
+  function buildAdminEditPanel(item) {
+    const panel = document.createElement('div');
+    panel.className = 'edit-panel';
+    panel.dataset.editFor = item.id || '';
+    panel.innerHTML = `
+      <label>Title</label>
+      <input type="text" class="edit-title" value="${escapeHtml(item.title || '')}" />
+      <label>URL</label>
+      <input type="url" class="edit-url" value="${escapeHtml(item.url || '')}" />
+      <label>Description / Notes</label>
+      <textarea class="edit-notes" rows="3">${escapeHtml(item.notes || '')}</textarea>
+      <label>Tags (space or comma-separated)</label>
+      <input type="text" class="edit-tags" value="${escapeHtml((item.tags || []).map(t => '#' + t).join(' '))}" placeholder="e.g. #ai #tools #docs" />
+      <div class="edit-panel-actions">
+        <button type="button" class="btn btn-primary btn-sm admin-save-btn">Save Changes</button>
+        <button type="button" class="btn btn-secondary btn-sm admin-cancel-btn">Cancel</button>
+        <button type="button" class="btn btn-secondary btn-sm admin-panel-del-btn" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(item.title || item.url || 'this link')}" style="margin-left:auto;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px;"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+          Delete Link
+        </button>
+      </div>
+    `;
+    return panel;
+  }
+
+  function buildAdminDbCard(item) {
+    const card = document.createElement('article');
+    card.className = 'admin-card';
+    card.dataset.id = item.id;
+
+    const displayUrl = item.url
+      ? item.url.replace(/^https?:\/\//, '').replace(/\/$/, '')
+      : 'note · local';
+    const href = item.url || '#';
+    const site = item.site_name || '';
+    const when = formatDateTime(item.created_at);
+
+    let favicon = '';
+    try {
+      if (item.url && item.url.startsWith('http')) {
+        const u = new URL(item.url);
+        favicon = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(u.hostname)}&sz=32`;
+      }
+    } catch (_) {}
+
+    const auditHtml = item.manual_edited_at
+      ? `<span class="admin-edit-badge" title="Manually edited">
+          Edited by <strong>${escapeHtml(item.last_edited_by_name || 'Admin')}</strong> · ${escapeHtml(formatDateTime(item.manual_edited_at))}
+         </span>`
+      : `<span style="color:var(--text-muted)">Unedited · Original version</span>`;
+
+    const tagsHtml = (item.tags || []).length
+      ? `<div class="admin-card-tags">
+          ${item.tags.map(t => `<span class="admin-card-tag" data-tag="${escapeHtml(t)}">#${escapeHtml(t)}</span>`).join('')}
+         </div>`
+      : `<div class="admin-card-tags">
+          <span class="admin-card-tag admin-card-notag" data-tag="notags" title="Untagged link — click to view untagged" style="opacity:0.65;font-style:italic;">#notags</span>
+         </div>`;
+
+    card.innerHTML = `
+      ${renderLinkPreview(item)}
+      <div class="admin-card-head">
+        <div class="admin-card-url-row">
+          ${favicon ? `<img src="${safeHref(favicon)}" alt="" width="16" height="16" loading="lazy" decoding="async" referrerpolicy="no-referrer" style="border-radius:3px;">` : ''}
+          <span>${site ? escapeHtml(site) + ' · ' : ''}${escapeHtml(displayUrl)}</span>
+        </div>
+        <div class="admin-card-actions">
+          ${item.url ? `<button type="button" class="btn btn-secondary btn-sm admin-card-bm-btn ${isUrlBookmarked(item.url) ? 'is-bookmarked' : ''}" data-id="${escapeHtml(item.id)}" data-url="${escapeHtml(item.url)}" data-title="${escapeHtml(item.title || '')}" title="Bookmark link">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="${isUrlBookmarked(item.url) ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" style="vertical-align:middle;"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+          </button>` : ''}
+          ${isGod() ? `<button type="button" class="btn btn-secondary btn-sm admin-card-ai-btn ai-enrich-btn" data-id="${escapeHtml(item.id)}" title="Re-scrape URL and enrich metadata with AI (GOD only)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px;"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/></svg>
+            AI
+          </button>` : ''}
+          <button type="button" class="btn btn-secondary btn-sm admin-card-edit-btn" data-id="${escapeHtml(item.id)}" title="Edit link">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px;"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+            Edit
+          </button>
+          <button type="button" class="btn btn-secondary btn-sm admin-card-del-btn" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(item.title || item.url || 'this link')}" title="Delete link">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px;"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+            Delete
+          </button>
+        </div>
+      </div>
+      <a class="admin-card-title" href="${safeHref(href)}" ${item.url ? 'target="_blank" rel="noopener noreferrer"' : ''}>
+        ${escapeHtml(item.title || 'Untitled')}
+      </a>
+      ${item.notes ? `<p class="admin-card-notes">${escapeHtml(item.notes)}</p>` : ''}
+      ${tagsHtml}
+      <div class="admin-audit-bar">
+        <div class="admin-audit-info">
+          <span>Added by <strong>${escapeHtml(item.added_by_name || item.added_by || 'Member')}</strong> · ${escapeHtml(when)}</span>
+          ${auditHtml}
+        </div>
+      </div>
+    `;
+    return card;
+  }
+
+  function closeOpenAdminPanels(listEl, exceptCard) {
+    listEl.querySelectorAll('.edit-panel').forEach(p => {
+      if (!exceptCard || p.closest('.admin-card') !== exceptCard) p.remove();
+    });
+    listEl.querySelectorAll('.admin-card.editing').forEach(c => {
+      if (c !== exceptCard) c.classList.remove('editing');
+    });
+  }
+
+  function initAdminDbDelegation(listEl) {
+    if (!listEl || listEl.dataset.delegated) return;
+    listEl.dataset.delegated = '1';
+
+    listEl.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      const inp = e.target.closest?.('.edit-panel input');
+      if (!inp) return;
+      e.preventDefault();
+      inp.closest('.edit-panel')?.querySelector('.admin-save-btn')?.click();
+    });
+
+    listEl.addEventListener('click', async (e) => {
+      const tagEl = e.target.closest('.admin-card-tag');
+      if (tagEl) {
+        e.preventDefault();
+        e.stopPropagation();
+        const tag = tagEl.dataset.tag;
+        if (!tag) return;
+        adminDbState.tag = tag;
+        adminDbState.page = 1;
+        loadAdminDbLinks();
+        return;
+      }
+
+      const bmBtn = e.target.closest('.admin-card-bm-btn');
+      if (bmBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        await toggleBookmark({
+          link_id: bmBtn.dataset.id,
+          scope: adminDbState.scope,
+          scope_key: adminDbState.scope === 'community' ? adminDbState.communityId : '',
+          url: bmBtn.dataset.url,
+          title: bmBtn.dataset.title
+        }, bmBtn);
+        return;
+      }
+
+      const aiBtn = e.target.closest('.admin-card-ai-btn');
+      if (aiBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        await enrichLinkWithAi(aiBtn.dataset.id, adminDbState.scope, aiBtn, 'admin');
+        return;
+      }
+
+      const delBtn = e.target.closest('.admin-card-del-btn, .admin-panel-del-btn');
+      if (delBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        const id = delBtn.dataset.id;
+        const itemTitle = delBtn.dataset.title || 'this link';
+        if (!id) return;
+        if (!(await showModal({
+          title: 'Delete link',
+          message: `Delete "${String(itemTitle).slice(0, 80)}" permanently from database?`,
+          confirmText: 'Delete',
+          danger: true
+        }))) return;
+
+        delBtn.disabled = true;
+        try {
+          const isComm = adminDbState.scope === 'community';
+          const path = isComm ? '/api/links' : '/api/personal-links';
+          const body = isComm ? { id, community_id: adminDbState.communityId } : { id };
+          const { res, data } = await api(path, {
+            method: 'DELETE',
+            body: JSON.stringify(body)
+          });
+          if (!res.ok || !data.success) {
+            showToast(data.error || 'Delete failed', true);
+            delBtn.disabled = false;
+            return;
+          }
+          showToast('Link deleted from database');
+          wikiState.dirty = true;
+          const adminIdx = adminDbState.links.findIndex(l => l.id === id);
+          if (adminIdx >= 0) adminDbState.links.splice(adminIdx, 1);
+          const list = isComm ? state.communityLinks : state.personalLinks;
+          const mainIdx = list.findIndex(l => l.id === id);
+          if (mainIdx >= 0) list.splice(mainIdx, 1);
+          lastSyncFingerprint = corpusFingerprint();
+          delBtn.closest('.admin-card')?.remove();
+          if (state.mode === 'search' && state.scope === adminDbState.scope) {
+            try {
+              if (hasActiveMainFilters()) runSearch();
+              else renderHome();
+            } catch (_) {}
+          }
+          loadAdminDbLinks().catch(() => {});
+        } catch (err) {
+          showToast(err.message || 'Delete failed', true);
+          delBtn.disabled = false;
+        }
+        return;
+      }
+
+      const editBtn = e.target.closest('.admin-card-edit-btn');
+      if (editBtn) {
+        e.preventDefault();
+        const id = editBtn.dataset.id;
+        const card = editBtn.closest('.admin-card');
+        const item = adminDbState.links.find(l => l.id === id);
+        if (!card || !item) return;
+        const existingPanel = card.querySelector('.edit-panel');
+        closeOpenAdminPanels(listEl, card);
+        if (existingPanel) {
+          existingPanel.remove();
+          card.classList.remove('editing');
+          return;
+        }
+        const panel = buildAdminEditPanel(item);
+        card.appendChild(panel);
+        card.classList.add('editing');
+        panel.querySelector('.edit-title')?.focus();
+        return;
+      }
+
+      const cancelBtn = e.target.closest('.admin-cancel-btn');
+      if (cancelBtn) {
+        const card = cancelBtn.closest('.admin-card');
+        cancelBtn.closest('.edit-panel')?.remove();
+        card?.classList.remove('editing');
+        return;
+      }
+
+      const saveBtn = e.target.closest('.admin-save-btn');
+      if (saveBtn) {
+        const panel = saveBtn.closest('.edit-panel');
+        const card = saveBtn.closest('.admin-card');
+        const id = panel?.dataset.editFor;
+        if (!id || !panel || !card) return;
+
+        const title = panel.querySelector('.edit-title')?.value?.trim() || '';
+        const url = panel.querySelector('.edit-url')?.value?.trim() || '';
+        const notes = panel.querySelector('.edit-notes')?.value?.trim() || '';
+        const tagsVal = panel.querySelector('.edit-tags')?.value?.trim() || '';
+        const tags = tagsVal.split(/[\s,]+/).map(t => t.replace(/^#+/, '').trim()).filter(Boolean);
+
+        if (!url && !title && !notes) {
+          showToast('Nothing to save', true);
+          return;
+        }
+
+        saveBtn.disabled = true;
+        try {
+          const path = adminDbState.scope === 'community' ? '/api/links' : '/api/personal-links';
+          const { res, data } = await api(path, {
+            method: 'PATCH',
+            body: JSON.stringify({ id, title, url, notes, tags })
+          });
+          if (!res.ok || !data.success) {
+            showToast(data.error || 'Edit failed', true);
+            return;
+          }
+
+          let updatedAdminItem = adminDbState.links.find(l => l.id === id);
+          const idx = adminDbState.links.findIndex(l => l.id === id);
+          if (idx >= 0) {
+            adminDbState.links[idx] = {
+              ...adminDbState.links[idx],
+              title: data.title != null ? data.title : title,
+              url: data.url || url,
+              notes: data.notes != null ? data.notes : notes,
+              tags: Array.isArray(data.tags) ? data.tags : tags,
+              manual_edited_at: data.manual_edited_at || Date.now(),
+              last_edited_by: data.last_edited_by || state.currentUser?.id,
+              last_edited_by_name: data.last_edited_by_name || state.currentUser?.displayName || state.currentUser?.username || 'Admin'
+            };
+            updatedAdminItem = adminDbState.links[idx];
+          }
+
+          const list = adminDbState.scope === 'community' ? state.communityLinks : state.personalLinks;
+          const mainIdx = list.findIndex(l => l.id === id);
+          if (mainIdx >= 0) {
+            list[mainIdx] = {
+              ...list[mainIdx],
+              title: data.title != null ? data.title : title,
+              url: data.url || url,
+              notes: data.notes != null ? data.notes : notes,
+              tags: Array.isArray(data.tags) ? data.tags : tags,
+              manualEditedAt: data.manual_edited_at || Date.now(),
+              lastEditedByName: data.last_edited_by_name || state.currentUser?.displayName || state.currentUser?.username || 'Admin'
+            };
+          }
+
+          lastSyncFingerprint = corpusFingerprint();
+          showToast('Link updated in database');
+          wikiState.dirty = true;
+          if ($('wikiView') && !$('wikiView').classList.contains('hidden')) {
+            loadWikiData();
+          }
+          if (updatedAdminItem) {
+            const replacementCard = buildAdminDbCard(updatedAdminItem);
+            replacementCard.classList.add('edited-flash');
+            card.replaceWith(replacementCard);
+            setTimeout(() => replacementCard.classList.remove('edited-flash'), 1200);
+          } else {
+            panel.remove();
+            card.classList.remove('editing');
+          }
+
+          if (state.mode === 'search' && state.scope === adminDbState.scope) {
+            try {
+              if (hasActiveMainFilters()) runSearch();
+              else renderHome();
+            } catch (_) {}
+          }
+          loadAdminDbLinks().catch(() => {});
+        } catch (err) {
+          showToast(err.message || 'Edit failed', true);
+        } finally {
+          saveBtn.disabled = false;
+        }
+      }
+    });
+  }
+
   function renderAdminDbLinks() {
     const listEl = $('adminDbList');
     if (!listEl) return;
@@ -3600,291 +4191,14 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    initAdminDbDelegation(listEl);
     listEl.innerHTML = '';
+    const frag = document.createDocumentFragment();
     adminDbState.links.forEach(item => {
-      const card = document.createElement('article');
-      card.className = 'admin-card';
-      card.dataset.id = item.id;
-
-      const displayUrl = item.url
-        ? item.url.replace(/^https?:\/\//, '').replace(/\/$/, '')
-        : 'note · local';
-      const href = item.url || '#';
-      const site = item.site_name || '';
-      const when = formatDateTime(item.created_at);
-
-      let favicon = '';
-      try {
-        if (item.url && item.url.startsWith('http')) {
-          const u = new URL(item.url);
-          favicon = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(u.hostname)}&sz=32`;
-        }
-      } catch (_) {}
-
-      const auditHtml = item.manual_edited_at
-        ? `<span class="admin-edit-badge" title="Manually edited">
-            Edited by <strong>${escapeHtml(item.last_edited_by_name || 'Admin')}</strong> · ${escapeHtml(formatDateTime(item.manual_edited_at))}
-           </span>`
-        : `<span style="color:var(--text-muted)">Unedited · Original version</span>`;
-
-      const tagsHtml = (item.tags || []).length
-        ? `<div class="admin-card-tags">
-            ${item.tags.map(t => `<span class="admin-card-tag" data-tag="${escapeHtml(t)}">#${escapeHtml(t)}</span>`).join('')}
-           </div>`
-        : `<div class="admin-card-tags">
-            <span class="admin-card-tag admin-card-notag" data-tag="notags" title="Untagged link — click to view untagged" style="opacity:0.65;font-style:italic;">#notags</span>
-           </div>`;
-
-      card.innerHTML = `
-        ${renderLinkPreview(item)}
-        <div class="admin-card-head">
-          <div class="admin-card-url-row">
-            ${favicon ? `<img src="${safeHref(favicon)}" alt="" width="16" height="16" loading="lazy" referrerpolicy="no-referrer" style="border-radius:3px;">` : ''}
-            <span>${site ? escapeHtml(site) + ' · ' : ''}${escapeHtml(displayUrl)}</span>
-          </div>
-          <div class="admin-card-actions">
-            ${item.url ? `<button type="button" class="btn btn-secondary btn-sm admin-card-bm-btn ${isUrlBookmarked(item.url) ? 'is-bookmarked' : ''}" data-id="${escapeHtml(item.id)}" data-url="${escapeHtml(item.url)}" data-title="${escapeHtml(item.title || '')}" title="Bookmark link">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="${isUrlBookmarked(item.url) ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" style="vertical-align:middle;"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
-            </button>` : ''}
-            ${isGod() ? `<button type="button" class="btn btn-secondary btn-sm admin-card-ai-btn ai-enrich-btn" data-id="${escapeHtml(item.id)}" title="Re-scrape URL and enrich metadata with AI (GOD only)">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px;"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/></svg>
-              AI
-            </button>` : ''}
-            <button type="button" class="btn btn-secondary btn-sm admin-card-edit-btn" data-id="${escapeHtml(item.id)}" title="Edit link">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px;"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-              Edit
-            </button>
-            <button type="button" class="btn btn-secondary btn-sm admin-card-del-btn" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(item.title || item.url || 'this link')}" title="Delete link">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px;"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
-              Delete
-            </button>
-          </div>
-        </div>
-        <a class="admin-card-title" href="${safeHref(href)}" ${item.url ? 'target="_blank" rel="noopener noreferrer"' : ''}>
-          ${escapeHtml(item.title || 'Untitled')}
-        </a>
-        ${item.notes ? `<p class="admin-card-notes">${escapeHtml(item.notes)}</p>` : ''}
-        ${tagsHtml}
-        <div class="admin-audit-bar">
-          <div class="admin-audit-info">
-            <span>Added by <strong>${escapeHtml(item.added_by_name || item.added_by || 'Member')}</strong> · ${escapeHtml(when)}</span>
-            ${auditHtml}
-          </div>
-        </div>
-        <div class="edit-panel hidden" data-edit-for="${escapeHtml(item.id)}">
-          <label>Title</label>
-          <input type="text" class="edit-title" value="${escapeHtml(item.title || '')}" />
-          <label>URL</label>
-          <input type="url" class="edit-url" value="${escapeHtml(item.url || '')}" />
-          <label>Description / Notes</label>
-          <textarea class="edit-notes" rows="3">${escapeHtml(item.notes || '')}</textarea>
-          <label>Tags (space or comma-separated)</label>
-          <input type="text" class="edit-tags" value="${escapeHtml((item.tags || []).map(t => '#' + t).join(' '))}" placeholder="e.g. #ai #tools #docs" />
-          <div class="edit-panel-actions">
-            <button type="button" class="btn btn-primary btn-sm admin-save-btn">Save Changes</button>
-            <button type="button" class="btn btn-secondary btn-sm admin-cancel-btn">Cancel</button>
-            <button type="button" class="btn btn-secondary btn-sm admin-panel-del-btn" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(item.title || item.url || 'this link')}" style="margin-left:auto;">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px;"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
-              Delete Link
-            </button>
-          </div>
-        </div>
-      `;
-      listEl.appendChild(card);
+      frag.appendChild(buildAdminDbCard(item));
     });
-    removeFailedLinkPreviews(listEl);
-
-    listEl.querySelectorAll('.admin-card-tag').forEach(tagEl => {
-      tagEl.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const tag = tagEl.dataset.tag;
-        if (!tag) return;
-        adminDbState.tag = tag;
-        adminDbState.page = 1;
-        loadAdminDbLinks();
-      });
-    });
-
-    listEl.querySelectorAll('.admin-card-bm-btn').forEach(btn => {
-      btn.addEventListener('click', async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        await toggleBookmark({
-          link_id: btn.dataset.id,
-          scope: adminDbState.scope,
-          scope_key: adminDbState.scope === 'community' ? adminDbState.communityId : '',
-          url: btn.dataset.url,
-          title: btn.dataset.title
-        }, btn);
-      });
-    });
-
-    listEl.querySelectorAll('.admin-card-ai-btn').forEach(btn => {
-      btn.addEventListener('click', async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        await enrichLinkWithAi(btn.dataset.id, adminDbState.scope, btn, 'admin');
-      });
-    });
-
-    listEl.querySelectorAll('.admin-card-del-btn, .admin-panel-del-btn').forEach(btn => {
-      btn.addEventListener('click', async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const id = btn.dataset.id;
-        const itemTitle = btn.dataset.title || 'this link';
-        if (!id) return;
-        if (!(await showModal({
-          title: 'Delete link',
-          message: `Delete "${String(itemTitle).slice(0, 80)}" permanently from database?`,
-          confirmText: 'Delete',
-          danger: true
-        }))) return;
-
-        btn.disabled = true;
-        try {
-          const isComm = adminDbState.scope === 'community';
-          const path = isComm ? '/api/links' : '/api/personal-links';
-          const body = isComm ? { id, community_id: adminDbState.communityId } : { id };
-          const { res, data } = await api(path, {
-            method: 'DELETE',
-            body: JSON.stringify(body)
-          });
-          if (!res.ok || !data.success) {
-            showToast(data.error || 'Delete failed', true);
-            btn.disabled = false;
-            return;
-          }
-          showToast('Link deleted from database');
-          wikiState.dirty = true;
-          const list = isComm ? state.communityLinks : state.personalLinks;
-          const mainIdx = list.findIndex(l => l.id === id);
-          if (mainIdx >= 0) list.splice(mainIdx, 1);
-          lastSyncFingerprint = corpusFingerprint();
-          if (state.mode === 'search' && state.scope === adminDbState.scope) {
-            try {
-              if (hasActiveMainFilters()) runSearch();
-              else renderHome();
-            } catch (_) {}
-          }
-          await loadAdminDbLinks();
-        } catch (err) {
-          showToast(err.message || 'Delete failed', true);
-          btn.disabled = false;
-        }
-      });
-    });
-
-    listEl.querySelectorAll('.admin-card-edit-btn').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.preventDefault();
-        const id = btn.dataset.id;
-        const card = btn.closest('.admin-card');
-        const panel = card?.querySelector(`.edit-panel[data-edit-for="${CSS.escape(id)}"]`);
-        if (!panel) return;
-        listEl.querySelectorAll('.edit-panel').forEach(p => { if (p !== panel) p.classList.add('hidden'); });
-        listEl.querySelectorAll('.admin-card').forEach(c => c.classList.remove('editing'));
-        panel.classList.toggle('hidden');
-        card.classList.toggle('editing', !panel.classList.contains('hidden'));
-        if (!panel.classList.contains('hidden')) {
-          panel.querySelector('.edit-title')?.focus();
-        }
-      });
-    });
-
-    listEl.querySelectorAll('.admin-cancel-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const panel = btn.closest('.edit-panel');
-        const card = btn.closest('.admin-card');
-        panel?.classList.add('hidden');
-        card?.classList.remove('editing');
-      });
-    });
-
-    listEl.querySelectorAll('.admin-save-btn').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const panel = btn.closest('.edit-panel');
-        const card = btn.closest('.admin-card');
-        const id = panel?.dataset.editFor;
-        if (!id || !panel) return;
-
-        const title = panel.querySelector('.edit-title')?.value?.trim() || '';
-        const url = panel.querySelector('.edit-url')?.value?.trim() || '';
-        const notes = panel.querySelector('.edit-notes')?.value?.trim() || '';
-        const tagsVal = panel.querySelector('.edit-tags')?.value?.trim() || '';
-        const tags = tagsVal.split(/[\s,]+/).map(t => t.replace(/^#+/, '').trim()).filter(Boolean);
-
-        if (!url && !title && !notes) {
-          showToast('Nothing to save', true);
-          return;
-        }
-
-        btn.disabled = true;
-        try {
-          const path = adminDbState.scope === 'community' ? '/api/links' : '/api/personal-links';
-          const { res, data } = await api(path, {
-            method: 'PATCH',
-            body: JSON.stringify({ id, title, url, notes, tags })
-          });
-          if (!res.ok || !data.success) {
-            showToast(data.error || 'Edit failed', true);
-            return;
-          }
-
-          const idx = adminDbState.links.findIndex(l => l.id === id);
-          if (idx >= 0) {
-            adminDbState.links[idx] = {
-              ...adminDbState.links[idx],
-              title: data.title != null ? data.title : title,
-              url: data.url || url,
-              notes: data.notes != null ? data.notes : notes,
-              tags: Array.isArray(data.tags) ? data.tags : tags,
-              manual_edited_at: data.manual_edited_at || Date.now(),
-              last_edited_by: data.last_edited_by || state.currentUser?.id,
-              last_edited_by_name: data.last_edited_by_name || state.currentUser?.displayName || state.currentUser?.username || 'Admin'
-            };
-          }
-
-          const list = adminDbState.scope === 'community' ? state.communityLinks : state.personalLinks;
-          const mainIdx = list.findIndex(l => l.id === id);
-          if (mainIdx >= 0) {
-            list[mainIdx] = {
-              ...list[mainIdx],
-              title: data.title != null ? data.title : title,
-              url: data.url || url,
-              notes: data.notes != null ? data.notes : notes,
-              tags: Array.isArray(data.tags) ? data.tags : tags,
-              manualEditedAt: data.manual_edited_at || Date.now(),
-              lastEditedByName: data.last_edited_by_name || state.currentUser?.displayName || state.currentUser?.username || 'Admin'
-            };
-          }
-
-          lastSyncFingerprint = corpusFingerprint();
-          showToast('Link updated in database');
-          wikiState.dirty = true;
-          if ($('wikiView') && !$('wikiView').classList.contains('hidden')) {
-            loadWikiData();
-          }
-          panel.classList.add('hidden');
-          card?.classList.remove('editing');
-
-          if (state.mode === 'search' && state.scope === adminDbState.scope) {
-            try {
-              if (hasActiveMainFilters()) runSearch();
-              else renderHome();
-            } catch (_) {}
-          }
-
-          // Reload admin DB links so tag cloud, decremented counts, and cards refresh with fresh server data
-          await loadAdminDbLinks();
-        } catch (err) {
-          showToast(err.message || 'Edit failed', true);
-        } finally {
-          btn.disabled = false;
-        }
-      });
-    });
+    removeFailedLinkPreviews(frag);
+    listEl.appendChild(frag);
   }
 
   function setupAdminDbEvents() {
@@ -3900,6 +4214,10 @@ document.addEventListener('DOMContentLoaded', () => {
     $('adminDbCloseBtn')?.addEventListener('click', closeAdminDb);
 
     document.querySelector('.brand-logo')?.addEventListener('click', (e) => {
+      if (state.publicWikiMode) {
+        e.preventDefault();
+        return;
+      }
       const adminView = $('adminDbView');
       const wikiView = $('wikiView');
       if (adminView && !adminView.classList.contains('hidden')) {
@@ -4087,6 +4405,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const tagsToggleBtn = $('mainTagsToggleBtn');
     const tagsCard = $('mainTagsCard');
     if (tagsToggleBtn && tagsCard) {
+      if (window.innerWidth <= 768 && !state.filterTag) {
+        tagsCard.classList.add('hidden');
+        tagsToggleBtn.setAttribute('aria-expanded', 'false');
+      }
       tagsToggleBtn.addEventListener('click', () => {
         const isHidden = tagsCard.classList.toggle('hidden');
         tagsToggleBtn.setAttribute('aria-expanded', String(!isHidden));
@@ -4780,8 +5102,7 @@ document.addEventListener('DOMContentLoaded', () => {
           const fullUrl = `${window.location.origin}/wiki?share=${encodeURIComponent(l.token)}`;
           if (urlInput) urlInput.value = fullUrl;
           if (expiryBadge) {
-            const expDate = new Date(l.expires_at).toLocaleDateString();
-            expiryBadge.textContent = `Expires ${expDate} (${l.duration_label})`;
+            expiryBadge.textContent = `Expires ${formatShareExpiry(l.expires_at)} (${l.duration_label})`;
           }
           if (genBox) genBox.classList.remove('hidden');
           showToast('Shareable link generated! Copied to clipboard.');
@@ -4826,8 +5147,8 @@ document.addEventListener('DOMContentLoaded', () => {
           }
           linksList.innerHTML = data.links.map(item => {
             const fullUrl = `${window.location.origin}/wiki?share=${encodeURIComponent(item.token)}`;
-            const expDate = new Date(item.expires_at).toLocaleDateString();
-            const createdDate = new Date(item.created_at).toLocaleDateString();
+            const expDate = formatShareExpiry(item.expires_at);
+            const createdDate = formatShareExpiry(item.created_at);
             let statusBadge = '<span class="wiki-share-badge-active">Active</span>';
             if (item.is_revoked) {
               statusBadge = '<span class="wiki-share-badge-revoked">Revoked</span>';
@@ -5011,9 +5332,17 @@ document.addEventListener('DOMContentLoaded', () => {
     setupWikiShareModal();
   }
 
+  function formatShareExpiry(ts) {
+    if (!ts) return 'Unknown';
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return 'Unknown';
+    return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  }
+
   async function initPublicWiki(shareToken) {
     state.publicWikiMode = true;
     state.wikiShareToken = shareToken;
+    document.documentElement.setAttribute('data-public-wiki', '1');
     document.body.classList.add('public-wiki-only');
     document.body.classList.add('wiki-active');
 
@@ -5038,8 +5367,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const expEl = $('wikiPublicExpiry');
       if (banner && expEl) {
         banner.classList.remove('hidden');
-        const expDate = new Date(verifyData.expires_at).toLocaleDateString();
-        expEl.textContent = `Valid until ${expDate} · ${escapeHtml(verifyData.duration_label || '')}`;
+        const expDate = formatShareExpiry(verifyData.expires_at);
+        expEl.textContent = `Valid until ${expDate} · ${verifyData.duration_label || ''}`;
       }
 
       const brandTitle = $('wikiBrandTitle');
@@ -5229,6 +5558,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function openFeed() {
+    if (state.publicWikiMode) return;
     const feedView = $('feedView');
     const searchWrapper = $('searchWrapper');
     const resultsContainer = $('resultsContainer');
@@ -7166,7 +7496,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!header) return;
 
     function update() {
-      header.classList.toggle('is-floating', window.scrollY > 24);
+      const scrolled = window.scrollY > 8;
+      header.classList.toggle('is-scrolled', scrolled);
+      header.classList.toggle('is-floating', scrolled);
     }
 
     window.addEventListener('scroll', update, { passive: true });
@@ -7786,6 +8118,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function openBookmarksModal() {
+    if (state.publicWikiMode) return;
     const modal = $('bookmarksModal');
     if (!modal) return;
     modal.classList.remove('hidden');
@@ -8389,15 +8722,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function init() {
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('./sw.js').catch(() => {});
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
     }
+    const urlParams = new URLSearchParams(window.location.search);
+    const shareToken = urlParams.get('share');
+    if (shareToken) {
+      state.publicWikiMode = true;
+      state.wikiShareToken = shareToken;
+      document.documentElement.setAttribute('data-public-wiki', '1');
+      document.body.classList.add('public-wiki-only', 'wiki-active');
+      if (authGate) authGate.classList.add('hidden');
+      if (appRoot) appRoot.classList.remove('hidden');
+      if (sideDrawer) sideDrawer.classList.add('hidden');
+      if (drawerOverlay) drawerOverlay.classList.add('hidden');
+    }
+
     // Must run before anything talks to the API, including the login buttons.
     await adoptInstanceBackend();
     setupEventListeners();
 
-    // Check for public shareable wiki link
-    const urlParams = new URLSearchParams(window.location.search);
-    const shareToken = urlParams.get('share');
     if (shareToken) {
       await initPublicWiki(shareToken);
       return;
