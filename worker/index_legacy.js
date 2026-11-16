@@ -3260,7 +3260,7 @@ async function ensureTelegramWebhook(token, workerOrigin, env) {
   const hook = `${workerOrigin.replace(/\/$/, '')}/api/telegram-webhook`;
   const payload = {
     url: hook,
-    allowed_updates: ['message', 'edited_message', 'channel_post', 'callback_query', 'chat_member', 'my_chat_member']
+    allowed_updates: ['message', 'edited_message', 'channel_post', 'callback_query', 'widget_query', 'shared_widget_query', 'chat_member', 'my_chat_member']
   };
   const secret = env ? await webhookSecret(env) : null;
   if (secret) payload.secret_token = secret;
@@ -9066,18 +9066,480 @@ async function ensureTelegramSearchTable(env) {
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_tg_search_sessions_expiry ON telegram_search_sessions(expires_at)').run().catch(() => {});
   await env.DB.prepare('DELETE FROM telegram_search_sessions WHERE expires_at < ?').bind(Date.now()).run().catch(() => {});
   await env.DB.prepare('ALTER TABLE telegram_search_sessions ADD COLUMN hit_ids TEXT').run().catch(() => {});
-  // Inline per-result editor state: which row is open, which field awaits a
-  // value, the staged draft, and the message holding the form (edited in
-  // place — never a new message).
+  // Inline per-result editor state and Bot API 10.4 widget message tracking.
   for (const sql of [
     'ALTER TABLE telegram_search_sessions ADD COLUMN edit_hit_id TEXT',
     'ALTER TABLE telegram_search_sessions ADD COLUMN edit_idx INTEGER',
     'ALTER TABLE telegram_search_sessions ADD COLUMN edit_field TEXT',
     'ALTER TABLE telegram_search_sessions ADD COLUMN edit_draft TEXT',
     'ALTER TABLE telegram_search_sessions ADD COLUMN edit_msg_id INTEGER',
+    'ALTER TABLE telegram_search_sessions ADD COLUMN widget_msg_id INTEGER',
+    'ALTER TABLE telegram_search_sessions ADD COLUMN doc_ids TEXT',
   ]) {
     try { await env.DB.prepare(sql).run(); } catch (_) {}
   }
+}
+
+const TG_WIDGET_PAGE_SIZE = 3;
+
+function resolvePublicWebsiteUrl(env) {
+  return String(env?.ATHENA_FRONTEND_URL || env?.PUBLIC_ORIGIN || '').trim().replace(/\/+$/, '');
+}
+
+function encodeWidgetPayloadWithinLimit(payload, maxBytes = 1000) {
+  const clone = structuredClone(payload);
+  const byteLen = (v) => new TextEncoder().encode(JSON.stringify(v)).length;
+  if (byteLen(clone) <= maxBytes) return JSON.stringify(clone);
+  if (Array.isArray(clone.r)) {
+    for (const row of clone.r) {
+      if (row.n) row.n = String(row.n).slice(0, 48);
+    }
+    if (byteLen(clone) <= maxBytes) return JSON.stringify(clone);
+    for (const row of clone.r) {
+      row.n = '';
+      if (Array.isArray(row.g)) row.g = row.g.slice(0, 2);
+      if (row.t) row.t = String(row.t).slice(0, 34);
+    }
+    if (byteLen(clone) <= maxBytes) return JSON.stringify(clone);
+    for (const row of clone.r) {
+      row.e = '';
+      if (row.u && String(row.u).length > 96) row.u = String(row.u).slice(0, 96);
+    }
+  }
+  const encoded = JSON.stringify(clone);
+  if (new TextEncoder().encode(encoded).length <= 1024) return encoded;
+  return JSON.stringify({ ok: clone.ok ? 1 : 0, rev: clone.rev || 1, p: clone.p || 0, tp: clone.tp || 1, t: clone.t || 0, r: [] });
+}
+
+async function canMutateSearchHit(env, scope, scopeKey, tgUserId, athenaUser, hit) {
+  const isGod = (tgUserId && isGodTgId(tgUserId, env))
+    || (athenaUser && await isInstanceOwnerUserAsync(athenaUser, env));
+  if (scope === 'personal') {
+    const allowed = Boolean(isGod);
+    return { canEdit: allowed, canDelete: allowed, canAi: allowed };
+  }
+  const isStaff = Boolean(
+    isGod
+    || (athenaUser && ((await isElevatedUser(athenaUser, env)) || await isTgUserCommunityStaff(env, scopeKey, tgUserId, athenaUser)))
+  );
+  const isCreator = Boolean(
+    hit && (
+      (athenaUser && hit.added_by_user_id && String(hit.added_by_user_id) === String(athenaUser.id))
+      || (tgUserId && hit.added_by_user_id && String(hit.added_by_user_id) === String(tgUserId))
+    )
+  );
+  const mutate = isStaff || isCreator;
+  return { canEdit: mutate, canDelete: mutate, canAi: Boolean(isGod) };
+}
+
+function compactWidgetRow(row, perms = {}) {
+  let tags = row.tags;
+  try { tags = typeof tags === 'string' ? JSON.parse(tags || '[]') : (tags || []); } catch (_) { tags = []; }
+  const isDoc = Boolean(row.isDocument || row.type === 'document');
+  const titleRaw = (row.title && !/^link from telegram/i.test(row.title))
+    ? row.title
+    : titleFromUrl(row.url || row.filename || '');
+  let host = '';
+  try { if (row.url) host = new URL(row.url).hostname.replace(/^www\./, ''); } catch (_) {}
+  const url = row.url && /^https?:\/\//i.test(row.url) ? String(row.url).slice(0, 180) : '';
+  const notes = String(row.notes || row.content || '').replace(/\s+/g, ' ').trim().slice(0, 88);
+  return {
+    id: String(row.id || ''),
+    t: String(titleRaw || row.filename || 'Untitled').slice(0, 56),
+    u: url,
+    h: isDoc ? (row.filename || 'doc').slice(0, 26) : host.slice(0, 28),
+    n: notes,
+    g: Array.isArray(tags) ? tags.map((x) => String(x)).filter(Boolean).slice(0, 3) : [],
+    e: row.last_edited_by_name ? String(row.last_edited_by_name).slice(0, 20) : '',
+    ce: perms.canEdit ? 1 : 0,
+    cd: perms.canDelete ? 1 : 0,
+    ca: (perms.canAi && url) ? 1 : 0
+  };
+}
+
+/**
+ * Render a Bot API 10.4 self-contained HTML table widget compliant with QuickJS
+ * widget profile 1 and safely below the 32 KB raw / 4 KB zlib-level-9 cap.
+ */
+export function buildSearchWidgetHtml({
+  sessionId,
+  mode = 'search',
+  scope = 'personal',
+  query = '',
+  page = 0,
+  total = 0,
+  totalPages = 1,
+  items = [],
+  aiAnswer = '',
+  webUrl = ''
+}) {
+  const initState = {
+    s: String(sessionId || ''),
+    m: mode === 'ai' ? 'ai' : 'search',
+    sc: scope === 'personal' ? 'Personal' : 'Community',
+    q: String(query || '').slice(0, 80),
+    p: Number(page || 0),
+    tp: Math.max(1, Number(totalPages || 1)),
+    t: Number(total || 0),
+    ai: String(aiAnswer || '').slice(0, 460),
+    w: /^https:\/\//i.test(String(webUrl || '')) ? String(webUrl).slice(0, 240) : '',
+    r: items
+  };
+  const safeJson = JSON.stringify(initState).replace(/</g, '\\u003c');
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+*{box-sizing:border-box}
+body{margin:0;padding:10px 10px max(10px,env(safe-area-inset-bottom));font-family:system-ui,sans-serif;font-size:13px;line-height:1.35;color:var(--tg-theme-text-color);background:var(--tg-theme-bg-color)}
+.hd{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:6px;flex-wrap:wrap}
+.ttl{font-weight:700;font-size:13px;display:flex;align-items:center;gap:5px}
+.bg{font-size:10px;font-weight:600;padding:1px 6px;border-radius:999px;background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-accent-text-color)}
+.qry{font-size:11px;color:var(--tg-theme-hint-color);margin-bottom:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.aib{background:var(--tg-theme-secondary-bg-color);border-left:3px solid var(--tg-theme-button-color);padding:6px 8px;border-radius:6px;margin-bottom:8px;font-size:12px}
+table.wt{width:100%;border-collapse:collapse}
+table.wt td{padding:7px 2px;border-top:1px solid var(--tg-theme-section-separator-color);vertical-align:top}
+.rw{display:flex;justify-content:space-between;align-items:flex-start;gap:6px}
+.rl{min-width:0;flex:1}
+.lk{background:none;border:none;padding:0;margin:0;text-align:left;font:600 13px/1.28 system-ui,sans-serif;color:var(--tg-theme-link-color);cursor:pointer;word-break:break-word}
+.dm{font-size:10px;color:var(--tg-theme-hint-color);margin-top:2px;word-break:break-word}
+.ac{display:flex;gap:3px;flex-shrink:0}
+.ab{border:1px solid var(--tg-theme-section-separator-color);background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-text-color);border-radius:6px;padding:3px 6px;font:600 11px/1.1 system-ui,sans-serif;cursor:pointer}
+.ab.ai{color:var(--tg-theme-accent-text-color)}
+.ab.del{color:var(--tg-theme-destructive-text-color)}
+.ab.ok{background:var(--tg-theme-destructive-text-color);color:#fff;border-color:transparent}
+.sn{font-size:11px;color:var(--tg-theme-subtitle-text-color);margin-top:3px;word-break:break-word}
+.tg{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+.tp{font-size:10px;padding:1px 5px;border-radius:999px;background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-accent-text-color)}
+.ft{display:flex;justify-content:space-between;align-items:center;gap:6px;padding-top:8px;margin-top:4px;border-top:1px solid var(--tg-theme-section-separator-color);padding-right:var(--tg-content-safe-area-corner-right,0px)}
+.pg{display:flex;gap:4px;align-items:center}
+.st{font-size:11px;color:var(--tg-theme-hint-color)}
+</style></head><body>
+<div id="app"></div>
+<script>
+var TW=window.TelegramWidget,S=${safeJson},CF=-1,MSG='',BUSY=0,REV=0;
+function E(s){return String(s||'').replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]});}
+function draw(){
+  var r=S.r||[],h='<div class="hd"><span class="ttl">'+(S.m==='ai'?'🧠 AI':'🔍 Search')+' <span class="bg">'+E(S.sc)+'</span></span><span class="bg">'+(S.t?(S.p*3+1)+'-'+Math.min(S.t,S.p*3+r.length)+' of '+S.t:'0 results')+'</span>'+(S.w?'<button class="ab" data-op="w">🌐 Web</button>':'')+'</div>';
+  if(S.q)h+='<div class="qry">'+E(S.q)+'</div>';
+  if(S.ai)h+='<div class="aib">'+E(S.ai)+'</div>';
+  if(!r.length){h+='<div class="sn">No matching saved items.</div>';}
+  else{
+    h+='<table class="wt"><tbody>';
+    for(var i=0;i<r.length;i++){
+      var x=r[i],ac='';
+      if(x.ce)ac+='<button class="ab" data-op="e" data-i="'+i+'" title="Edit">✏️</button>';
+      if(x.ca)ac+='<button class="ab ai" data-op="a" data-i="'+i+'" title="AI rewrite">✦AI</button>';
+      if(x.cd)ac+=CF===i?'<button class="ab ok" data-op="dc" data-i="'+i+'">Del?</button><button class="ab" data-op="dx">✕</button>':'<button class="ab del" data-op="d" data-i="'+i+'" title="Delete">🗑</button>';
+      h+='<tr><td><div class="rw"><div class="rl">'+(x.u?'<button class="lk" data-op="o" data-i="'+i+'">'+E(x.t)+'</button>':'<b>'+E(x.t)+'</b>')+'<div class="dm">'+E(x.h)+(x.e?' · Edited by '+E(x.e):'')+'</div></div>'+(ac?'<div class="ac">'+ac+'</div>':'')+'</div>';
+      if(x.n)h+='<div class="sn">'+E(x.n)+'</div>';
+      if(x.g&&x.g.length){h+='<div class="tg">';for(var j=0;j<x.g.length;j++)h+='<span class="tp">#'+E(x.g[j])+'</span>';h+='</div>';}
+      h+='</td></tr>';
+    }
+    h+='</tbody></table>';
+  }
+  h+='<div class="ft"><div class="pg">'+(S.p>0?'<button class="ab" data-op="p">◀</button>':'')+'<span class="bg">'+(S.p+1)+'/'+(S.tp||1)+'</span>'+(S.p<S.tp-1?'<button class="ab" data-op="n">▶</button>':'')+'</div><span class="st">'+E(MSG)+'</span></div>';
+  document.getElementById('app').innerHTML=h;
+}
+function applyData(raw){
+  if(!raw)return;
+  try{
+    var d=JSON.parse(raw);
+    if(d.rev&&d.rev<REV)return;
+    if(d.rev)REV=d.rev;
+    if(d.p!=null)S.p=d.p;
+    if(d.tp!=null)S.tp=d.tp;
+    if(d.t!=null)S.t=d.t;
+    if(d.r)S.r=d.r;
+    if(d.i!=null&&d.row&&S.r[d.i])S.r[d.i]=d.row;
+    if(d.m!=null)MSG=d.m;
+    CF=-1;
+    draw();
+  }catch(_){}
+}
+document.getElementById('app').addEventListener('click',function(ev){
+  var b=ev.target;
+  while(b&&b.tagName!=='BUTTON')b=b.parentNode;
+  if(!b)return;
+  var op=b.getAttribute('data-op'),idx=Number(b.getAttribute('data-i'));
+  if(op==='o'){var u=S.r[idx]&&S.r[idx].u;if(u&&TW){try{TW.openLink(u);}catch(_){MSG='HTTPS links only';draw();}}return;}
+  if(op==='w'){if(S.w&&TW){try{TW.openLink(S.w);}catch(_){}}return;}
+  if(op==='d'){CF=idx;MSG='Tap Del? to confirm';draw();return;}
+  if(op==='dx'){CF=-1;MSG='';draw();return;}
+  if(!TW||BUSY)return;
+  var cmd='';
+  if(op==='n')cmd='w:'+S.s+':n:'+S.p+':0';
+  else if(op==='p')cmd='w:'+S.s+':p:'+S.p+':0';
+  else if(op==='e')cmd='w:'+S.s+':e:'+S.p+':'+idx;
+  else if(op==='dc')cmd='w:'+S.s+':d:'+S.p+':'+idx;
+  else if(op==='a')cmd='w:'+S.s+':a:'+S.p+':'+idx;
+  if(!cmd)return;
+  BUSY=1;MSG=op==='a'?'AI rewriting...':(op==='dc'?'Deleting...':'Loading...');draw();
+  TW.request(cmd).then(function(ans){BUSY=0;MSG='';applyData(ans&&ans.result);},function(err){BUSY=0;MSG=(err&&err.code)||'Error';draw();});
+});
+if(TW&&TW.onEvent){TW.onEvent('chatDataChanged',function(){applyData(TW.chatData);});TW.ready();}
+draw();
+</script></body></html>`;
+}
+
+async function sendTelegramWidget(token, chatId, { html, caption = '', chatData = '', threadId = null, allowQueries = true } = {}) {
+  if (!token || !chatId || !html) return { ok: false, description: 'Missing widget payload' };
+  const payload = {
+    chat_id: chatId,
+    html,
+    width: 0,
+    height: 0,
+    allow_queries: Boolean(allowQueries),
+    ...(caption ? { caption: String(caption).slice(0, 1024), parse_mode: 'HTML' } : {}),
+    ...(chatData ? { chat_data: String(chatData).slice(0, 1024) } : {}),
+    ...(threadId != null && threadId !== '' && !Number.isNaN(Number(threadId)) ? { message_thread_id: Number(threadId) } : {})
+  };
+  return await telegramApi(token, 'sendWidget', payload);
+}
+
+async function editTelegramWidgetData(token, chatId, messageId, chatData) {
+  if (!token || !chatId || !messageId) return { ok: false };
+  return await telegramApi(token, 'editMessageWidgetData', {
+    chat_id: chatId,
+    message_id: Number(messageId),
+    chat_data: String(chatData || '').slice(0, 1024)
+  }).catch(() => ({ ok: false }));
+}
+
+async function answerTelegramWidgetQuery(token, widgetQueryId, dataText = '') {
+  if (!token || !widgetQueryId) return { ok: false };
+  return await telegramApi(token, 'answerWidgetQuery', {
+    widget_query_id: String(widgetQueryId),
+    ...(dataText ? { data: String(dataText).slice(0, 1024) } : {})
+  }).catch(() => ({ ok: false }));
+}
+
+async function aiEnrichSearchHitRow(env, session, hit, actorUser, tgFrom) {
+  const cleanUrl = normalizeCleanUrl(hit.url) || hit.url;
+  let scrapedMeta = null;
+  if (/^https?:\/\//i.test(cleanUrl)) {
+    try { scrapedMeta = await scrapeLinkMetadata(cleanUrl, env); } catch (_) { scrapedMeta = null; }
+  }
+  let existingTags;
+  try { existingTags = typeof hit.tags === 'string' ? JSON.parse(hit.tags || '[]') : (hit.tags || []); } catch (_) { existingTags = []; }
+  const seedMeta = {
+    title: cleanCleanerTitle(scrapedMeta?.title || hit.title, cleanUrl) || hit.title || '',
+    notes: cleanBoilerplateText(scrapedMeta?.description || hit.notes || '', cleanUrl) || hit.notes || '',
+    content: scrapedMeta?.content || [hit.notes, hit.title, existingTags.join(' ')].filter(Boolean).join('\n'),
+  };
+  const generated = await describeAndTagLink(env, cleanUrl, seedMeta, { maxTags: 8, scrape: false, reviewTags: existingTags });
+  const blRules = await getBlacklistRules(env, session.scope, session.scope_key);
+  const safeTags = filterBlacklistedTags(generated.tags || [], blRules).slice(0, 8);
+  const updTitle = cleanCleanerTitle(generated.title || seedMeta.title, cleanUrl) || seedMeta.title;
+  const updNotes = cleanBoilerplateText(generated.description || seedMeta.notes || '', cleanUrl) || seedMeta.notes || '';
+  const editedAt = Date.now();
+  const tbl = session.scope === 'personal' ? 'personal_links' : 'links';
+  await ensureLinkMetaColumns(env);
+  await ensureSearchColumns(env);
+  await env.DB.prepare(
+    `UPDATE ${tbl} SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, last_edited_by = ?, last_edited_by_name = ?, manual_edited_at = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
+  ).bind(cleanUrl, generateUrlHash(cleanUrl), updTitle, updNotes, JSON.stringify(safeTags), 'ai', 'AI', editedAt, hit.id).run();
+  markMeiliScopeDirty(env, session.scope, session.scope_key);
+  await logActivityEvent(env, {
+    action: '✦ Card AI-enriched (TG)',
+    actorUser,
+    tgUser: tgFrom,
+    title: updTitle,
+    url: cleanUrl,
+    scope: session.scope,
+    scopeKey: session.scope_key
+  });
+  return {
+    ...hit,
+    url: cleanUrl,
+    title: updTitle,
+    notes: updNotes,
+    tags: safeTags,
+    manual_edited_at: editedAt,
+    last_edited_by: 'ai',
+    last_edited_by_name: 'AI'
+  };
+}
+
+async function deleteSearchHitRow(env, session, hit, actorUser, tgFrom) {
+  if (session.scope === 'personal') {
+    await env.DB.prepare('DELETE FROM personal_links WHERE id = ?').bind(hit.id).run();
+  } else {
+    await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(hit.id).run().catch(() => {});
+    await env.DB.prepare('DELETE FROM link_votes WHERE link_id = ?').bind(hit.id).run().catch(() => {});
+  }
+  markMeiliScopeDirty(env, session.scope, session.scope_key);
+  await logActivityEvent(env, {
+    action: '🗑 Link deleted (TG search)',
+    actorUser,
+    tgUser: tgFrom,
+    title: hit.title,
+    url: hit.url,
+    scope: session.scope,
+    scopeKey: session.scope_key,
+  });
+}
+
+async function fetchSearchSessionWidgetPage(env, session, tgUserId, athenaUser, { pageSize = TG_WIDGET_PAGE_SIZE } = {}) {
+  let docIds = null;
+  if (session.doc_ids) {
+    try { docIds = JSON.parse(session.doc_ids); } catch (_) { docIds = null; }
+  }
+  let rankedHits;
+  let total;
+  const pageReq = Math.max(0, Number(session.page || 0));
+
+  if (Array.isArray(docIds) && docIds.length) {
+    const tbl = session.scope === 'personal' ? 'personal_links' : 'links';
+    const col = session.scope === 'personal' ? 'user_id' : 'community_id';
+    const placeholders = docIds.map(() => '?').join(',');
+    const { results } = await env.DB.prepare(
+      `SELECT * FROM ${tbl} WHERE ${col} = ? AND id IN (${placeholders})`
+    ).bind(session.scope_key, ...docIds).all().catch(() => ({ results: [] }));
+    const byId = new Map((results || []).map((r) => [String(r.id), r]));
+    const ordered = docIds.map((id) => byId.get(String(id))).filter(Boolean);
+    total = ordered.length;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const page = Math.min(pageReq, totalPages - 1);
+    rankedHits = ordered.slice(page * pageSize, page * pageSize + pageSize);
+    session.page = page;
+  } else {
+    const accelerated = await meiliSearchScope(env, session.scope, session.scope_key, session.query, {
+      limit: pageSize,
+      offset: pageReq * pageSize
+    });
+    if (accelerated) {
+      rankedHits = accelerated.rows;
+      total = accelerated.total;
+    } else {
+      const rows = await searchAllLinks(env, session.scope, session.scope_key, session.query, null);
+      const ranked = rankLinks(dedupeLinkRows(rows), session.query, null);
+      total = ranked.length;
+      const totalPages = Math.max(1, Math.ceil(total / pageSize));
+      const page = Math.min(pageReq, totalPages - 1);
+      rankedHits = ranked.slice(page * pageSize, page * pageSize + pageSize);
+      session.page = page;
+    }
+    if (!rankedHits.length && !total) {
+      try {
+        const one = await resolveSavedLink(env, session.scope, session.scope_key, session.query);
+        if (one) { rankedHits = [one]; total = 1; }
+      } catch (_) {}
+    }
+  }
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(Math.max(0, Number(session.page || 0)), totalPages - 1);
+  session.page = page;
+  const hitIds = (rankedHits || []).map((h) => ({ id: h.id || null, url: h.url || null }));
+  await env.DB.prepare('UPDATE telegram_search_sessions SET page = ?, hit_ids = ? WHERE id = ?')
+    .bind(page, JSON.stringify(hitIds), session.id).run().catch(() => {});
+  session.hit_ids = JSON.stringify(hitIds);
+
+  const widgetRows = [];
+  for (const h of rankedHits) {
+    const perms = await canMutateSearchHit(env, session.scope, session.scope_key, tgUserId, athenaUser, h);
+    widgetRows.push(compactWidgetRow(h, perms));
+  }
+  return { page, total, totalPages, rows: widgetRows, rawHits: rankedHits };
+}
+
+async function handleTelegramWidgetQuery(wq, env, corsHeaders) {
+  const widgetQueryId = String(wq?.id || '');
+  const tgUserId = wq?.from?.id ? String(wq.from.id) : null;
+  const chatId = wq?.chat?.id != null ? String(wq.chat.id) : null;
+  const msgId = wq?.message_id != null ? Number(wq.message_id) : null;
+  const data = String(wq?.data || '');
+  const binding = chatId ? await findTelegramBinding(env, chatId, tgUserId) : null;
+  let token = (await tokenForBindingAsync(binding, env)) || env.TELEGRAM_BOT_TOKEN;
+  if (!token && tgUserId) {
+    const u = await resolveAthenaUserFromTg(env, tgUserId);
+    const personal = u ? await findPersonalBotForOwner(env, u.id) : null;
+    if (personal?.bot_token) token = await decryptBotToken(env, personal.bot_token);
+  }
+  const replyJson = async (obj) => {
+    await answerTelegramWidgetQuery(token, widgetQueryId, encodeWidgetPayloadWithinLimit(obj));
+    return new Response('OK', { status: 200, headers: corsHeaders });
+  };
+
+  if (!data.startsWith('w:')) return await replyJson({ ok: 0, m: 'Unknown action' });
+  const [, sessionId, op, rawPage, rawIdx] = data.split(':');
+  await ensureTelegramSearchTable(env);
+  const session = sessionId
+    ? await env.DB.prepare('SELECT * FROM telegram_search_sessions WHERE id = ? AND expires_at > ?').bind(sessionId, Date.now()).first()
+    : null;
+  if (!session || String(session.tg_user_id) !== String(tgUserId || '')) {
+    return await replyJson({ ok: 0, m: 'Search expired — run again' });
+  }
+
+  const tgUser = await resolveAthenaUserFromTg(env, tgUserId);
+  if (session.scope === 'personal') {
+    if (!isGodTgId(tgUserId, env) && !(tgUser && await isInstanceOwnerUserAsync(tgUser, env))) {
+      return await replyJson({ ok: 0, m: 'GOD rank required' });
+    }
+  } else if (tgUser) {
+    if (await isBannedFromCommunity(env, session.scope_key, tgUser)) {
+      return await replyJson({ ok: 0, m: 'Banned from community' });
+    }
+    const elevated = (await isElevatedUser(tgUser, env)) || isInstanceOwnerTgId(tgUserId, env);
+    if (!elevated && !(await ensureMember(session.scope_key, tgUser.id, env))) {
+      return await replyJson({ ok: 0, m: 'Join community first' });
+    }
+  }
+
+  const pageNum = Number(rawPage || session.page || 0);
+  if (op === 'n' || op === 'p') {
+    session.page = op === 'n' ? pageNum + 1 : Math.max(0, pageNum - 1);
+    const view = await fetchSearchSessionWidgetPage(env, session, tgUserId, tgUser);
+    return await replyJson({ ok: 1, rev: Date.now(), p: view.page, tp: view.totalPages, t: view.total, r: view.rows });
+  }
+
+  const idx = Number(rawIdx || 0);
+  const hit = await resolveSearchHit(env, session, idx);
+  if (!hit) {
+    return await replyJson({ ok: 0, m: 'Result removed — refresh' });
+  }
+  const perms = await canMutateSearchHit(env, session.scope, session.scope_key, tgUserId, tgUser, hit);
+
+  if (op === 'd') {
+    if (!perms.canDelete) return await replyJson({ ok: 0, m: 'Not allowed to delete' });
+    await deleteSearchHitRow(env, session, hit, tgUser, wq.from);
+    session.hit_ids = null;
+    const view = await fetchSearchSessionWidgetPage(env, session, tgUserId, tgUser);
+    const out = { ok: 1, rev: Date.now(), m: 'Deleted', p: view.page, tp: view.totalPages, t: view.total, r: view.rows };
+    if (chatId && msgId) {
+      await editTelegramWidgetData(token, chatId, msgId, encodeWidgetPayloadWithinLimit(out));
+    }
+    return await replyJson(out);
+  }
+
+  if (op === 'a') {
+    if (!perms.canAi || !hit.url) return await replyJson({ ok: 0, m: 'AI rewrite: GOD only' });
+    try {
+      const updatedHit = await aiEnrichSearchHitRow(env, session, hit, tgUser, wq.from);
+      const updatedRow = compactWidgetRow(updatedHit, perms);
+      const out = { ok: 1, rev: Date.now(), m: 'AI updated', i: idx, row: updatedRow };
+      return await replyJson(out);
+    } catch (_) {
+      return await replyJson({ ok: 0, m: 'AI enrich failed' });
+    }
+  }
+
+  if (op === 'e') {
+    if (!perms.canEdit) return await replyJson({ ok: 0, m: 'Not allowed to edit' });
+    let tags = hit.tags;
+    try { tags = typeof tags === 'string' ? JSON.parse(tags || '[]') : (tags || []); } catch (_) { tags = []; }
+    const draft = { title: hit.title || '', url: hit.url || '', notes: hit.notes || '', tags: Array.isArray(tags) ? tags.map((t) => String(t)) : [] };
+    const webUrl = resolvePublicWebsiteUrl(env);
+    let buttons = searchEditButtons(session.id);
+    if (webUrl) {
+      buttons += '\n' + richButtonRow([{ type: 'url', url: webUrl, label: '🌐 Edit on Website' }]);
+    }
+    const sentEdit = await sendTelegramRichMessage(token, chatId, searchEditFormHtml(draft), null, buttons);
+    await env.DB.prepare(
+      'UPDATE telegram_search_sessions SET edit_hit_id = ?, edit_idx = ?, edit_field = NULL, edit_draft = ?, edit_msg_id = ?, widget_msg_id = COALESCE(widget_msg_id, ?) WHERE id = ?'
+    ).bind(String(hit.id || ''), idx, JSON.stringify(draft), sentEdit?.message_id || null, msgId, session.id).run().catch(() => {});
+    return await replyJson({ ok: 1, m: 'Editor opened below' });
+  }
+
+  return await replyJson({ ok: 0, m: 'Unsupported op' });
 }
 
 /** Resolve one search page hit for Edit/Delete callbacks (by stored id,
@@ -9351,6 +9813,37 @@ async function startTelegramSearch(env, token, chatId, tgUserId, scope, scopeKey
   } catch (_) {}
   try {
     const tSearch = Date.now();
+    const isPrivate = !String(chatId).startsWith('-');
+    if (isPrivate) {
+      const tgUser = tgUserId ? await resolveAthenaUserFromTg(env, tgUserId) : null;
+      const wView = await fetchSearchSessionWidgetPage(env, session, tgUserId, tgUser);
+      const webUrl = resolvePublicWebsiteUrl(env);
+      const scopeTitle = scope === 'personal' ? 'Personal' : 'Community';
+      const widgetHtml = buildSearchWidgetHtml({
+        sessionId: session.id,
+        mode: 'search',
+        scope,
+        query: session.query,
+        page: wView.page,
+        total: wView.total,
+        totalPages: wView.totalPages,
+        items: wView.rows,
+        webUrl
+      });
+      const chatData = encodeWidgetPayloadWithinLimit({
+        ok: 1, rev: Date.now(), p: wView.page, tp: wView.totalPages, t: wView.total, r: wView.rows
+      });
+      const caption = `🔍 ${scopeTitle} Search · ${wView.total} result${wView.total === 1 ? '' : 's'}${session.query ? ` for "${session.query}"` : ''}`;
+      const sentWidget = await sendTelegramWidget(token, chatId, { html: widgetHtml, caption, chatData, threadId, allowQueries: true });
+      if (sentWidget?.ok && sentWidget.result?.message_id) {
+        await env.DB.prepare('UPDATE telegram_search_sessions SET widget_msg_id = ? WHERE id = ?')
+          .bind(Number(sentWidget.result.message_id), session.id).run().catch(() => {});
+        if (ackId) await telegramApi(token, 'deleteMessage', { chat_id: chatId, message_id: ackId }).catch(() => {});
+        try { queueMissingLinkEnrichment(env, session.scope, session.scope_key, wView.rawHits); } catch (_) {}
+        try { console.log(`[search] widget sent in ${Date.now() - tSearch}ms scope=${scope} total=${wView.total}`); } catch (_) {}
+        return;
+      }
+    }
     const view = await getTelegramSearchPage(env, session);
     try { console.log(`[search] page built in ${Date.now() - tSearch}ms scope=${scope} total=${view.total}`); } catch (_) {}
     const buttons = searchRichButtonRow(session.id, view.page, view.total);
@@ -12019,32 +12512,7 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
       }
       await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: '✦ Scraping & rewriting card with AI…' }).catch(() => {});
       try {
-        const cleanUrl = normalizeCleanUrl(hit.url) || hit.url;
-        let scrapedMeta = null;
-        if (/^https?:\/\//i.test(cleanUrl)) {
-          try { scrapedMeta = await scrapeLinkMetadata(cleanUrl, env); } catch (_) { scrapedMeta = null; }
-        }
-        let existingTags = [];
-        try { existingTags = typeof hit.tags === 'string' ? JSON.parse(hit.tags || '[]') : (hit.tags || []); } catch (_) { existingTags = []; }
-        const seedMeta = {
-          title: cleanCleanerTitle(scrapedMeta?.title || hit.title, cleanUrl) || hit.title || '',
-          notes: cleanBoilerplateText(scrapedMeta?.description || hit.notes || '', cleanUrl) || hit.notes || '',
-          content: scrapedMeta?.content || [hit.notes, hit.title, existingTags.join(' ')].filter(Boolean).join('\n'),
-        };
-        const generated = await describeAndTagLink(env, cleanUrl, seedMeta, { maxTags: 8, scrape: false, reviewTags: existingTags });
-        const blRules = await getBlacklistRules(env, session.scope, session.scope_key);
-        const safeTags = filterBlacklistedTags(generated.tags || [], blRules).slice(0, 8);
-        const updTitle = cleanCleanerTitle(generated.title || seedMeta.title, cleanUrl) || seedMeta.title;
-        const updNotes = cleanBoilerplateText(generated.description || seedMeta.notes || '', cleanUrl) || seedMeta.notes || '';
-        const editedAt = Date.now();
-        const tbl = session.scope === 'personal' ? 'personal_links' : 'links';
-        await ensureLinkMetaColumns(env);
-        await ensureSearchColumns(env);
-        await env.DB.prepare(
-          `UPDATE ${tbl} SET url = ?, url_hash = ?, title = ?, notes = ?, tags = ?, last_edited_by = ?, last_edited_by_name = ?, manual_edited_at = ?, metadata_version = ${AI_METADATA_VERSION}, search_blob = NULL WHERE id = ?`
-        ).bind(cleanUrl, generateUrlHash(cleanUrl), updTitle, updNotes, JSON.stringify(safeTags), 'ai', 'AI', editedAt, hit.id).run();
-        markMeiliScopeDirty(env, session.scope, session.scope_key);
-        await logActivityEvent(env, { action: '✦ Card AI-enriched (TG)', tgUser: cq.from, title: updTitle, url: cleanUrl, scope: session.scope, scopeKey: session.scope_key });
+        await aiEnrichSearchHitRow(env, session, hit, callbackUser, cq.from);
         const view = await getTelegramSearchPage(env, session);
         await editTelegramRichMessage(token, chatId, msgId, view.html, threadId, searchRichButtonRow(session.id, view.page, view.total));
       } catch (_) {}
@@ -12052,17 +12520,16 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
     }
     if (action === 'edit' || action === 'del' || action === 'ef' || action === 'esv' || action === 'ecx') {
       const parts = data.split(':');
-      if (session.scope === 'personal') {
-        if (!isGodTgId(tgUserId, env)) {
-          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Personal edit is GOD-only', show_alert: true }).catch(() => {});
-          return new Response('OK', { status: 200, headers: corsHeaders });
-        }
-      } else {
-        const staff = callbackUser && ((await isElevatedUser(callbackUser, env)) || isInstanceOwnerTgId(tgUserId, env) || await isTgUserCommunityStaff(env, session.scope_key, tgUserId, callbackUser));
-        if (!staff) {
-          await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Only owner/admins can edit or delete', show_alert: true }).catch(() => {});
-          return new Response('OK', { status: 200, headers: corsHeaders });
-        }
+      const idxHit = Number(parts[3]);
+      const targetHit = action === 'del' || action === 'edit' ? await resolveSearchHit(env, session, idxHit) : null;
+      const perms = await canMutateSearchHit(env, session.scope, session.scope_key, tgUserId, callbackUser, targetHit);
+      if (!perms.canEdit) {
+        await telegramApi(token, 'answerCallbackQuery', {
+          callback_query_id: cq.id,
+          text: session.scope === 'personal' ? 'Personal edit is GOD-only' : 'Only creator/owner/admins can edit or delete',
+          show_alert: true
+        }).catch(() => {});
+        return new Response('OK', { status: 200, headers: corsHeaders });
       }
       const clearEditState = async () => {
         await env.DB.prepare(
@@ -12070,51 +12537,39 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
         ).bind(session.id).run().catch(() => {});
       };
       const renderSearchPage = async (toast = '') => {
-        const view = await getTelegramSearchPage(env, session);
-        await editTelegramRichMessage(token, chatId, msgId, view.html, threadId, searchRichButtonRow(session.id, view.page, view.total));
-        await env.DB.prepare('UPDATE telegram_search_sessions SET page = ? WHERE id = ?').bind(view.page, session.id).run().catch(() => {});
+        if (session.widget_msg_id && Number(session.widget_msg_id) !== Number(msgId)) {
+          const wView = await fetchSearchSessionWidgetPage(env, session, tgUserId, callbackUser);
+          const widgetData = encodeWidgetPayloadWithinLimit({ ok: 1, rev: Date.now(), m: toast || 'Updated', p: wView.page, tp: wView.totalPages, t: wView.total, r: wView.rows });
+          await editTelegramWidgetData(token, chatId, session.widget_msg_id, widgetData);
+          await editTelegramRichMessage(token, chatId, msgId, richParagraph(escHtml(toast || 'Updated.')), threadId).catch(() => {});
+        } else {
+          const view = await getTelegramSearchPage(env, session);
+          await editTelegramRichMessage(token, chatId, msgId, view.html, threadId, searchRichButtonRow(session.id, view.page, view.total));
+          await env.DB.prepare('UPDATE telegram_search_sessions SET page = ? WHERE id = ?').bind(view.page, session.id).run().catch(() => {});
+        }
         if (toast) await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: toast }).catch(() => {});
         else await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
       };
       if (action === 'del') {
-        const idx = Number(parts[3]);
-        const hit = await resolveSearchHit(env, session, idx);
+        const hit = targetHit;
         if (!hit) {
           await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'That result is gone — refresh the search', show_alert: true }).catch(() => {});
           return new Response('OK', { status: 200, headers: corsHeaders });
         }
         try {
-          if (session.scope === 'personal') {
-            await env.DB.prepare('DELETE FROM personal_links WHERE id = ?').bind(hit.id).run();
-          } else {
-            await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(hit.id).run().catch(() => {});
-            await env.DB.prepare('DELETE FROM link_votes WHERE link_id = ?').bind(hit.id).run().catch(() => {});
-          }
-          markMeiliScopeDirty(env, session.scope, session.scope_key);
-          await logActivityEvent(env, {
-            action: '🗑 Link deleted (TG search)',
-            actorUser: callbackUser,
-            tgUser: cq.from,
-            title: hit.title,
-            url: hit.url,
-            scope: session.scope,
-            scopeKey: session.scope_key,
-          });
+          await deleteSearchHitRow(env, session, hit, callbackUser, cq.from);
         } catch (_) {
           await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Delete failed', show_alert: true }).catch(() => {});
           return new Response('OK', { status: 200, headers: corsHeaders });
         }
         await clearEditState();
         try { session.hit_ids = null; } catch (_) {}
-        const view = await getTelegramSearchPage(env, session);
-        await editTelegramRichMessage(token, chatId, msgId, view.html, threadId, searchRichButtonRow(session.id, view.page, view.total));
-        await env.DB.prepare('UPDATE telegram_search_sessions SET page = ? WHERE id = ?').bind(view.page, session.id).run().catch(() => {});
-        await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Deleted from the database' }).catch(() => {});
+        await renderSearchPage('Deleted from the database');
         return new Response('OK', { status: 200, headers: corsHeaders });
       }
       if (action === 'edit') {
-        const idx = Number(parts[3]);
-        const hit = await resolveSearchHit(env, session, idx);
+        const idx = idxHit;
+        const hit = targetHit;
         if (!hit) {
           await telegramApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'That result is gone — refresh the search', show_alert: true }).catch(() => {});
           return new Response('OK', { status: 200, headers: corsHeaders });
@@ -16581,9 +17036,12 @@ async function handleTelegramWebhook(update, env, corsHeaders) {
     return new Response('OK', { status: 200, headers: corsHeaders });
   }
 
-  // Inline button callbacks (approve / reject)
+  // Inline button callbacks (approve / reject) and Bot API 10.4 widget queries
   if (update.callback_query) {
     return await handleTelegramCallbackQuery(update.callback_query, env, corsHeaders);
+  }
+  if (update.widget_query || update.shared_widget_query) {
+    return await handleTelegramWidgetQuery(update.widget_query || update.shared_widget_query, env, corsHeaders);
   }
 
   const msg = update.message || update.channel_post;
@@ -19025,25 +19483,66 @@ Rules:
            await ensureTelegramSearchTable(env);
            const now = Date.now();
            const sid = `ts_${randomToken().slice(0, 12)}`;
+           const docIdList = docs.map((d) => String(d.id || '')).filter(Boolean);
            await env.DB.prepare(
              `INSERT INTO telegram_search_sessions
-               (id, tg_user_id, chat_id, scope, scope_key, query, page, created_at, expires_at)
-              VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`
+               (id, tg_user_id, chat_id, scope, scope_key, query, page, created_at, expires_at, doc_ids)
+              VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`
            ).bind(sid, String(tgUserId || ''), String(chatId), scope, String(scopeKey),
-             String(q || '').trim().slice(0, 240), now, now + TG_SEARCH_SESSION_TTL_MS).run();
+             String(q || '').trim().slice(0, 240), now, now + TG_SEARCH_SESSION_TTL_MS, JSON.stringify(docIdList)).run();
            aiSessionId = sid;
          }
        } catch (_) {}
-       const aiButtonsHtml = aiSessionId ? searchRichButtonRow(aiSessionId, 0, Number(retrieval.total ?? docs.length)) : null;
 
-        // Rich message editing is single-message — long answers continue in
-        // follow-up messages instead of being silently truncated. The
-        // pagination buttons ("Next ▶") ride inside the main answer message.
-        const richAnswer = richTextToRich(msg);
-        const parts = chunkRichHtml(richAnswer);
-        await editTelegramRichMessage(token, chatId, thinkMsgId, parts[0] || richAnswer, forumThreadId, aiButtonsHtml);
-        for (let pi = 1; pi < parts.length; pi++) {
-          await sendTelegramRichMessage(token, chatId, parts[pi], forumThreadId);
+       let widgetSent = false;
+       const isPrivateAi = !String(chatId).startsWith('-');
+       if (isPrivateAi && aiSessionId && docs.length) {
+         try {
+           const sessionRow = await env.DB.prepare('SELECT * FROM telegram_search_sessions WHERE id = ?').bind(aiSessionId).first();
+           if (sessionRow) {
+             const wView = await fetchSearchSessionWidgetPage(env, sessionRow, tgUserId, athenaUser);
+             const conciseSummary = String(content || '').replace(/\s+/g, ' ').trim();
+             const widgetHtml = buildSearchWidgetHtml({
+               sessionId: aiSessionId,
+               mode: 'ai',
+               scope,
+               query: q,
+               page: wView.page,
+               total: wView.total,
+               totalPages: wView.totalPages,
+               items: wView.rows,
+               aiAnswer: conciseSummary.slice(0, 440),
+               webUrl: resolvePublicWebsiteUrl(env)
+             });
+             const chatData = encodeWidgetPayloadWithinLimit({
+               ok: 1, rev: Date.now(), p: wView.page, tp: wView.totalPages, t: wView.total, r: wView.rows
+             });
+             const caption = `🧠 AI Answer · ${wView.total} matched item${wView.total === 1 ? '' : 's'}`;
+             const sentW = await sendTelegramWidget(token, chatId, { html: widgetHtml, caption, chatData, threadId: forumThreadId, allowQueries: true });
+             if (sentW?.ok && sentW.result?.message_id) {
+               widgetSent = true;
+               await env.DB.prepare('UPDATE telegram_search_sessions SET widget_msg_id = ? WHERE id = ?')
+                 .bind(Number(sentW.result.message_id), aiSessionId).run().catch(() => {});
+             }
+           }
+         } catch (_) {
+           widgetSent = false;
+         }
+       }
+
+       const aiButtonsHtml = (!widgetSent && aiSessionId) ? searchRichButtonRow(aiSessionId, 0, Number(retrieval.total ?? docs.length)) : null;
+
+        // Keep full AI prose in thinkMsgId when longer than the compact widget summary,
+        // or replace thinkMsgId cleanly with the widget alone when concise.
+        if (widgetSent && String(content || '').trim().length <= 420) {
+          await telegramApi(token, 'deleteMessage', { chat_id: chatId, message_id: thinkMsgId }).catch(() => {});
+        } else {
+          const richAnswer = richTextToRich(msg);
+          const parts = chunkRichHtml(richAnswer);
+          await editTelegramRichMessage(token, chatId, thinkMsgId, parts[0] || richAnswer, forumThreadId, aiButtonsHtml);
+          for (let pi = 1; pi < parts.length; pi++) {
+            await sendTelegramRichMessage(token, chatId, parts[pi], forumThreadId);
+          }
         }
         // Remember the thread so replying to this message is a follow-up.
         try {

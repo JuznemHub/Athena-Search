@@ -1096,7 +1096,8 @@ document.addEventListener('DOMContentLoaded', () => {
   function isInlineEditingActive() {
     return Boolean(
       resultsList?.querySelector('.edit-panel:not(.hidden)') ||
-      $('adminDbList')?.querySelector('.edit-panel:not(.hidden)')
+      $('adminDbList')?.querySelector('.edit-panel:not(.hidden)') ||
+      $('wikiBlocks')?.querySelector('.edit-panel:not(.hidden)')
     );
   }
 
@@ -3413,6 +3414,29 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  function initDisplayScale() {
+    const input = $('displayScaleInput');
+    const output = $('displayScaleValue');
+    if (!input || !output) return;
+    let saved = null;
+    try { saved = localStorage.getItem('athena_display_scale'); } catch (_) {}
+    const initial = saved !== null && /^-?\d+$/.test(saved)
+      ? Math.max(85, Math.min(115, Number(saved)))
+      : 100;
+    function applyScale(pct, persist) {
+      const clamped = Math.max(85, Math.min(115, Math.round(Number(pct))));
+      input.value = String(clamped);
+      output.textContent = `${clamped}%`;
+      input.setAttribute('aria-valuetext', `${clamped} percent`);
+      document.documentElement.style.setProperty('--ui-scale', String(clamped / 100));
+      if (persist) {
+        try { localStorage.setItem('athena_display_scale', String(clamped)); } catch (_) {}
+      }
+    }
+    applyScale(initial, false);
+    input.addEventListener('input', () => applyScale(input.value, true));
+  }
+
   // ---- Glass appearance ----
   function initGlassBlur() {
     const input = $('glassBlurInput');
@@ -4963,6 +4987,24 @@ document.addEventListener('DOMContentLoaded', () => {
                 ? `<span class="wiki-cat-chip" title="Category: ${escapeHtml(linkCat.title)}">${escapeHtml(linkCat.icon || '📁')} ${escapeHtml(linkCat.title)}</span>`
                 : '';
 
+              const isPublicWiki = !!state.publicWikiMode;
+              const isAuthedUser = !isPublicWiki && !!state.currentUser;
+              const canAiWiki = isAuthedUser && typeof isGod === 'function' && isGod() && !!l.url;
+              const canEditWiki = isAuthedUser;
+              const canDeleteWiki = isAuthedUser && (
+                wikiState.scope === 'personal'
+                || (typeof isStaffRank === 'function' && isStaffRank())
+                || (typeof isCommunityStaff === 'function' && isCommunityStaff())
+                || (l.added_by_user_id && String(l.added_by_user_id) === String(state.currentUser.id))
+              );
+              const wikiActionsHtml = `
+                <div class="wiki-card-actions">
+                  ${canAiWiki ? `<button type="button" class="btn btn-secondary btn-sm wiki-action-btn wiki-ai-btn ai-enrich-btn" data-id="${escapeHtml(l.id)}" title="Re-scrape URL and enrich with AI (GOD only)" aria-label="AI enrich link"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/></svg><span>AI</span></button>` : ''}
+                  ${canEditWiki ? `<button type="button" class="btn btn-secondary btn-sm wiki-action-btn wiki-edit-btn" data-id="${escapeHtml(l.id)}" title="Edit link and tags" aria-label="Edit link"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg><span>Edit</span></button>` : ''}
+                  ${canDeleteWiki ? `<button type="button" class="btn btn-sm wiki-action-btn g-card-del-btn wiki-del-btn" data-id="${escapeHtml(l.id)}" data-title="${escapeHtml(l.title || l.url || 'this link')}" title="Delete link from database" aria-label="Delete link"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg><span>Del</span></button>` : ''}
+                  ${l.url ? `<button type="button" class="wiki-copy-url-btn" data-url="${escapeHtml(l.url)}" title="Copy URL" aria-label="Copy URL"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>` : ''}
+                </div>`;
+
               return `
                 <article class="wiki-link-card" data-id="${escapeHtml(l.id)}">
                   <div class="wiki-card-head">
@@ -4974,7 +5016,7 @@ document.addEventListener('DOMContentLoaded', () => {
                       ${host ? `<span class="wiki-domain-chip">${escapeHtml(host)}</span>` : ''}
                       ${catBadge}
                     </div>
-                    ${l.url ? `<button type="button" class="wiki-copy-url-btn" data-url="${escapeHtml(l.url)}" title="Copy URL" aria-label="Copy URL"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>` : ''}
+                    ${wikiActionsHtml}
                   </div>
                   ${renderLinkPreview(l)}
                   ${l.notes ? `<p class="wiki-card-desc">${escapeHtml(l.notes)}</p>` : ''}
@@ -4997,37 +5039,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     blocksEl.innerHTML = blocksHtml;
     removeFailedLinkPreviews(blocksEl);
-
-    // Wire copy buttons on link cards
-    blocksEl.querySelectorAll('.wiki-copy-url-btn').forEach(btn => {
-      btn.addEventListener('click', async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const u = btn.dataset.url;
-        if (!u) return;
-        try {
-          await navigator.clipboard.writeText(u);
-          showToast('Link copied to clipboard');
-        } catch (_) {
-          showToast('Failed to copy', true);
-        }
-      });
-    });
-
-    // Wire tag clicks inside wiki link cards
-    blocksEl.querySelectorAll('.wiki-tag-pill').forEach(pill => {
-      pill.addEventListener('click', (e) => {
-        e.preventDefault();
-        const tag = pill.dataset.tag;
-        if (!tag) return;
-        const sInput = $('wikiSearchInput');
-        if (sInput) sInput.value = tag;
-        $('wikiClearSearch')?.classList.remove('hidden');
-        wikiState.q = tag;
-        wikiState.page = 1;
-        loadWikiLinks();
-      });
-    });
+    initWikiBlocksDelegation(blocksEl);
 
     // 4. Pagination
     const pager = $('wikiPagination');
@@ -5044,6 +5056,234 @@ document.addEventListener('DOMContentLoaded', () => {
         nextBtn.disabled = wikiState.page >= wikiState.totalPages;
       }
     }
+  }
+
+  function buildWikiEditPanel(item, canDelete) {
+    const panel = document.createElement('div');
+    panel.className = 'edit-panel';
+    panel.dataset.editFor = item.id || '';
+    panel.innerHTML = `
+      <label>Title</label>
+      <input type="text" class="edit-title" value="${escapeHtml(item.title || '')}" />
+      <label>URL</label>
+      <input type="url" class="edit-url" value="${escapeHtml(item.url || '')}" />
+      <label>Description</label>
+      <textarea class="edit-notes" rows="3">${escapeHtml(item.notes || '')}</textarea>
+      <label>Tags (space or comma-separated)</label>
+      <input type="text" class="edit-tags" value="${escapeHtml((item.tags || []).map(t => '#' + t).join(' '))}" placeholder="e.g. #ai #tools #docs" />
+      <div class="edit-panel-actions">
+        <button type="button" class="btn btn-primary btn-sm edit-save">Save</button>
+        <button type="button" class="btn btn-secondary btn-sm edit-cancel">Cancel</button>
+        ${canDelete ? '<button type="button" class="btn btn-sm g-card-del-btn edit-delete">Delete</button>' : ''}
+      </div>
+    `;
+    return panel;
+  }
+
+  async function deleteWikiLinkById(id, btn) {
+    if (state.publicWikiMode || !state.currentUser || !id) return;
+    const isComm = wikiState.scope === 'community';
+    const item = (wikiState.links || []).find(l => l.id === id);
+    const label = item?.title || item?.url || 'this link';
+    if (!(await showModal({
+      title: 'Delete link',
+      message: `Delete "${String(label).slice(0, 80)}" from the database? This cannot be undone.`,
+      confirmText: 'Delete',
+      danger: true
+    }))) return;
+    if (btn) btn.disabled = true;
+    try {
+      const path = isComm ? '/api/links' : '/api/personal-links';
+      const body = isComm
+        ? JSON.stringify({ id, community_id: wikiState.communityId })
+        : JSON.stringify({ id });
+      const { res, data } = await api(path, { method: 'DELETE', body });
+      if (!res.ok || !data.success) {
+        showToast(data.error || 'Delete failed', true);
+        if (btn) btn.disabled = false;
+        return;
+      }
+      wikiState.links = (wikiState.links || []).filter(l => l.id !== id);
+      const list = isComm ? state.communityLinks : state.personalLinks;
+      const mainIdx = list.findIndex(l => l.id === id);
+      if (mainIdx >= 0) list.splice(mainIdx, 1);
+      lastSyncFingerprint = corpusFingerprint();
+      showToast('Link deleted from database');
+      if (typeof wikiState.totalCategoryLinks === 'number' && wikiState.totalCategoryLinks > 0) {
+        wikiState.totalCategoryLinks--;
+      }
+      renderWikiContent();
+      loadMainTags().catch(() => {});
+    } catch (err) {
+      showToast(err.message || 'Delete failed', true);
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function initWikiBlocksDelegation(blocksEl) {
+    if (!blocksEl || typeof blocksEl.addEventListener !== 'function' || blocksEl.dataset?.delegated) return;
+    if (blocksEl.dataset) blocksEl.dataset.delegated = '1';
+
+    blocksEl.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      const inp = e.target.closest?.('.edit-panel input');
+      if (!inp) return;
+      e.preventDefault();
+      inp.closest('.edit-panel')?.querySelector('.edit-save')?.click();
+    });
+
+    blocksEl.addEventListener('click', async (e) => {
+      const copyBtn = e.target.closest('.wiki-copy-url-btn');
+      if (copyBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        const u = copyBtn.dataset.url;
+        if (!u) return;
+        try {
+          await navigator.clipboard.writeText(u);
+          showToast('Link copied to clipboard');
+        } catch (_) {
+          showToast('Failed to copy', true);
+        }
+        return;
+      }
+
+      const tagPill = e.target.closest('.wiki-tag-pill');
+      if (tagPill) {
+        e.preventDefault();
+        const tag = tagPill.dataset.tag;
+        if (!tag) return;
+        const sInput = $('wikiSearchInput');
+        if (sInput) sInput.value = tag;
+        $('wikiClearSearch')?.classList.remove('hidden');
+        wikiState.q = tag;
+        wikiState.page = 1;
+        loadWikiLinks();
+        return;
+      }
+
+      if (state.publicWikiMode || !state.currentUser) return;
+
+      const aiBtn = e.target.closest('.wiki-ai-btn');
+      if (aiBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        await enrichLinkWithAi(aiBtn.dataset.id, wikiState.scope, aiBtn, 'wiki');
+        return;
+      }
+
+      const editBtn = e.target.closest('.wiki-edit-btn');
+      if (editBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        const id = editBtn.dataset.id;
+        const card = editBtn.closest('.wiki-link-card');
+        const item = (wikiState.links || []).find(l => l.id === id);
+        if (!card || !item) return;
+        const existing = card.querySelector('.edit-panel');
+        blocksEl.querySelectorAll('.edit-panel').forEach(p => { if (p.closest('.wiki-link-card') !== card) p.remove(); });
+        blocksEl.querySelectorAll('.wiki-link-card.editing').forEach(c => { if (c !== card) c.classList.remove('editing'); });
+        if (existing) {
+          existing.remove();
+          card.classList.remove('editing');
+          return;
+        }
+        const canDel = Boolean(card.querySelector('.wiki-del-btn'));
+        const panel = buildWikiEditPanel(item, canDel);
+        card.appendChild(panel);
+        card.classList.add('editing');
+        panel.querySelector('.edit-title')?.focus();
+        return;
+      }
+
+      const cancelBtn = e.target.closest('.edit-cancel');
+      if (cancelBtn) {
+        const card = cancelBtn.closest('.wiki-link-card');
+        cancelBtn.closest('.edit-panel')?.remove();
+        card?.classList.remove('editing');
+        return;
+      }
+
+      const saveBtn = e.target.closest('.edit-save');
+      if (saveBtn) {
+        const panel = saveBtn.closest('.edit-panel');
+        const card = saveBtn.closest('.wiki-link-card');
+        const id = panel?.dataset.editFor;
+        if (!id || !panel || !card) return;
+        const title = panel.querySelector('.edit-title')?.value?.trim() || '';
+        const url = panel.querySelector('.edit-url')?.value?.trim() || '';
+        const notes = panel.querySelector('.edit-notes')?.value?.trim() || '';
+        const tagsVal = panel.querySelector('.edit-tags')?.value?.trim() || '';
+        const tags = tagsVal.split(/[\s,]+/).map(t => t.replace(/^#+/, '').trim()).filter(Boolean);
+        if (!url && !title && !notes) {
+          showToast('Nothing to save', true);
+          return;
+        }
+        saveBtn.disabled = true;
+        try {
+          const isComm = wikiState.scope === 'community';
+          const path = isComm ? '/api/links' : '/api/personal-links';
+          const { res, data } = await api(path, {
+            method: 'PATCH',
+            body: JSON.stringify({ id, title, url, notes, tags })
+          });
+          if (!res.ok || !data.success) {
+            showToast(data.error || 'Edit failed', true);
+            return;
+          }
+          const wIdx = (wikiState.links || []).findIndex(l => l.id === id);
+          if (wIdx >= 0) {
+            wikiState.links[wIdx] = {
+              ...wikiState.links[wIdx],
+              title: data.title != null ? data.title : title,
+              url: data.url || url,
+              notes: data.notes != null ? data.notes : notes,
+              tags: Array.isArray(data.tags) ? data.tags : tags,
+              manual_edited_at: data.manual_edited_at || Date.now(),
+              last_edited_by: data.last_edited_by || state.currentUser?.id,
+              last_edited_by_name: data.last_edited_by_name || state.currentUser?.displayName || state.currentUser?.username || 'Admin'
+            };
+          }
+          const list = isComm ? state.communityLinks : state.personalLinks;
+          const mainIdx = list.findIndex(l => l.id === id);
+          if (mainIdx >= 0) {
+            list[mainIdx] = {
+              ...list[mainIdx],
+              __sd: undefined,
+              title: data.title != null ? data.title : title,
+              url: data.url || url,
+              notes: data.notes != null ? data.notes : notes,
+              tags: Array.isArray(data.tags) ? data.tags : tags,
+              manualEditedAt: data.manual_edited_at || Date.now(),
+              lastEditedByName: data.last_edited_by_name || state.currentUser?.displayName || state.currentUser?.username || 'Admin'
+            };
+          }
+          lastSyncFingerprint = corpusFingerprint();
+          showToast('Link updated in database');
+          renderWikiContent();
+          loadMainTags().catch(() => {});
+        } catch (err) {
+          showToast(err.message || 'Edit failed', true);
+        } finally {
+          saveBtn.disabled = false;
+        }
+        return;
+      }
+
+      const delBtn = e.target.closest('.wiki-del-btn');
+      if (delBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        deleteWikiLinkById(delBtn.dataset.id, delBtn);
+        return;
+      }
+
+      const editDelBtn = e.target.closest('.edit-delete');
+      if (editDelBtn) {
+        const panel = editDelBtn.closest('.edit-panel');
+        deleteWikiLinkById(panel?.dataset.editFor, editDelBtn);
+      }
+    });
   }
 
   function setupWikiShareModal() {
@@ -7508,6 +7748,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function setupEventListeners() {
     initThemeUI();
+    initDisplayScale();
     initGlassBlur();
     initAccentColor();
     setupFloatingHeader();
@@ -8162,7 +8403,22 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       showToast('Enriched metadata · Last edited by AI');
       wikiState.dirty = true;
-      if (viewKind === 'admin') {
+      if (viewKind === 'wiki') {
+        const wIdx = (wikiState.links || []).findIndex((l) => l.id === id);
+        if (wIdx >= 0) {
+          wikiState.links[wIdx] = {
+            ...wikiState.links[wIdx],
+            url: updated.url || wikiState.links[wIdx].url,
+            title: updated.title ?? wikiState.links[wIdx].title,
+            notes: updated.notes ?? wikiState.links[wIdx].notes,
+            tags: Array.isArray(updated.tags) ? updated.tags : wikiState.links[wIdx].tags,
+            manual_edited_at: updated.manual_edited_at || Date.now(),
+            last_edited_by: updated.last_edited_by || 'ai',
+            last_edited_by_name: updated.last_edited_by_name || 'AI'
+          };
+          renderWikiContent();
+        }
+      } else if (viewKind === 'admin') {
         await loadAdminDbLinks();
       } else {
         await loadMainTags();

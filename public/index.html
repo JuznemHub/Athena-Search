@@ -34,6 +34,11 @@
         if (accent && /^#[0-9a-fA-F]{6}$/.test(accent)) {
           document.documentElement.style.setProperty('--accent', accent);
         }
+        var dScale = localStorage.getItem('athena_display_scale');
+        if (dScale !== null && /^\d+$/.test(dScale)) {
+          var clampedScale = Math.max(85, Math.min(115, Number(dScale)));
+          document.documentElement.style.setProperty('--ui-scale', String(clampedScale / 100));
+        }
       } catch (e) {
         document.documentElement.setAttribute('data-theme', 'dark');
       }
@@ -991,6 +996,14 @@
           </div>
           <input type="range" id="glassBlurInput" min="0" max="40" step="1" value="24" aria-describedby="glassBlurHint">
           <p class="section-desc" id="glassBlurHint">Applies to the Glass theme. Reduced transparency takes precedence where supported.</p>
+        </div>
+        <div class="glass-blur-control display-scale-control">
+          <div class="glass-blur-heading">
+            <label for="displayScaleInput">Display density</label>
+            <output id="displayScaleValue" for="displayScaleInput">100%</output>
+          </div>
+          <input type="range" id="displayScaleInput" min="85" max="115" step="5" value="100" aria-describedby="displayScaleHint">
+          <p class="section-desc" id="displayScaleHint">Scales controls, buttons, and cards across phone and tablet screens.</p>
         </div>
       </div>
 
