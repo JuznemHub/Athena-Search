@@ -8159,14 +8159,16 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function loadBookmarks() {
-    if (!state.currentUser) return;
+    if (!state.currentUser) return false;
     try {
       const { res, data } = await api('/api/bookmarks');
       if (res?.ok && data?.success && Array.isArray(data.bookmarks)) {
         state.bookmarks = data.bookmarks;
         state.bookmarkedUrls = new Set(data.bookmarks.map((b) => String(b.url || '').trim().toLowerCase()).filter(Boolean));
+        return true;
       }
     } catch (_) {}
+    return false;
   }
 
   async function toggleBookmark({ link_id, scope, scope_key, url, title }, btn) {
@@ -8250,7 +8252,16 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!modal) return;
     modal.classList.remove('hidden');
     syncMobileBottomNav('bookmarks');
-    await loadBookmarks();
+    const listEl = $('bookmarksModalList');
+    const hadCache = (state.bookmarks || []).length > 0;
+    if (hadCache) renderBookmarksModal();
+    else if (listEl) listEl.innerHTML = '<div class="empty-state" role="status"><p>Loading your saved links…</p></div>';
+    const ok = await loadBookmarks();
+    if (!ok && !hadCache && listEl) {
+      listEl.innerHTML = '<div class="empty-state" role="alert"><p>Could not load your saved links. Check your connection and try again.</p><div class="empty-state-action"><button type="button" class="btn btn-secondary btn-sm" id="bookmarksRetryBtn">Try again</button></div></div>';
+      $('bookmarksRetryBtn')?.addEventListener('click', openBookmarksModal);
+      return;
+    }
     renderBookmarksModal();
   }
 
