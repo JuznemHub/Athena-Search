@@ -666,15 +666,15 @@ body.results-active .search-wrapper { align-items: stretch; }
 .accent-color-input::-webkit-color-swatch { border: none; border-radius: 8px; }
 .accent-color-input::-moz-color-swatch { border: none; border-radius: 8px; }
 .accent-current-label { font-family: ui-monospace, monospace; font-size: 0.82rem; color: var(--text-muted, #8e95b0); flex: 1; }
-.accent-swatches { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+.accent-swatches { display: flex; flex-wrap: wrap; gap: 2px; margin: 0 -6px; }
+/* 44px tap area, 30px visible dot: padding + content-box clip keep the dot small */
 .accent-swatch {
-  width: 100%; aspect-ratio: 1; border-radius: 10px; border: 2px solid transparent;
-  background: var(--sw); cursor: pointer; transition: transform var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease); position: relative;
+  width: 44px; height: 44px; padding: 7px; border-radius: 50%; border: 2px solid transparent;
+  background: var(--sw); background-clip: content-box; cursor: pointer;
+  transition: border-color var(--dur-1) var(--ease);
 }
-.accent-swatch:hover { transform: scale(1.08); }
-.accent-swatch:active { transform: scale(0.95); }
-.accent-swatch.active { border-color: #fff; box-shadow: 0 0 0 2px var(--sw); }
-.accent-swatch.active::after { content: ''; position: absolute; inset: 3px; border-radius: 7px; border: 2px solid rgba(255,255,255,0.7); }
+.accent-swatch:hover { border-color: var(--border-color, rgba(255,255,255,0.18)); }
+.accent-swatch.active { border-color: var(--text-main, #eef0f6); }
 
 .search-bar-box.mode-delete { border-color: rgba(255,92,124,0.65); background: rgba(80,12,28,0.45); }
 .search-bar-box.mode-delete .bar-action-btn { color: var(--danger-color, #ff5c7c); }
@@ -684,7 +684,6 @@ body.results-active .search-wrapper { align-items: stretch; }
   .upload-actions { padding: 0 4px; flex-wrap: wrap; }
   .upload-file-btn { min-height: 44px; }
   .upload-status { flex-basis: 100%; }
-  .accent-swatches { grid-template-columns: repeat(3, 1fr); gap: 8px; }
 }
 
 /* AI settings: model picker + error log */
