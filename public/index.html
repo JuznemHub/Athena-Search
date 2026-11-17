@@ -727,12 +727,12 @@
                 <span id="freshrssActiveFilterPill" class="freshrss-filter-pill hidden"></span>
               </div>
               <div class="banner-right">
-                <span id="freshrssActiveDbPill" class="freshrss-db-pill" title="Target database table where feed articles are indexed">
-                  Personal DB (personal_links)
+                <span id="freshrssActiveDbPill" class="freshrss-db-pill" title="Where new feed articles are saved">
+                  Saving to Personal
                 </span>
-                <span class="pzp-sync-tag" title="Articles are automatically indexed into your Athena knowledge base with taxonomy tags">
+                <span class="pzp-sync-tag" title="New articles are tagged and saved automatically">
                   <span class="live-dot"></span>
-                  <span>Auto-Ingest Active</span>
+                  <span>Auto-saving</span>
                 </span>
               </div>
             </div>
@@ -774,7 +774,7 @@
               <div class="form-group">
                 <label for="freshrssScopeInput">Destination Database</label>
                 <select id="freshrssScopeInput" class="input"></select>
-                <span class="form-hint" id="freshrssScopeHint">Personal feeds store articles in your private Personal DB (personal_links).</span>
+                <span class="form-hint" id="freshrssScopeHint">Articles from personal feeds go to your private Personal collection.</span>
               </div>
               <div class="form-group">
                 <label for="freshrssFeedUrlInput">Feed URL (RSS, Atom, or JSON Feed) *</label>
@@ -1048,7 +1048,7 @@
       </div>
 
       <div class="drawer-section auth-only" id="aiSettingsSection" data-collapsible>
-        <h3>AI assistant <span id="aiLockBadge" class="lock-badge hidden" title="GOD only credentials">GOD only</span></h3>
+        <h3>AI assistant <span id="aiLockBadge" class="lock-badge hidden" title="Only the instance owner can change these">Owner only</span></h3>
         <p class="section-desc" id="aiSettingsDesc">Chat available to all ranks. API credentials are set by GOD rank (instance host) only.</p>
         <div id="aiSettingsBody">
         <div class="form-group">
@@ -1077,8 +1077,8 @@
           <label for="aiModel">Model</label>
           <div style="display:flex;flex-wrap:wrap;gap:8px;">
             <input type="text" id="aiModel" placeholder="deepseek-v4-flash" style="flex:1 1 100%;">
-             <button type="button" id="aiLoadModelsBtn" class="btn btn-secondary" title="Fetch the model list from the provider (GOD)">Models…</button>
-             <button type="button" id="aiRefreshModelsBtn" class="btn btn-secondary" title="Refresh the live model list (GOD)" aria-label="Refresh model list">↻</button>
+             <button type="button" id="aiLoadModelsBtn" class="btn btn-secondary" title="Fetch the model list from the provider">Models…</button>
+             <button type="button" id="aiRefreshModelsBtn" class="btn btn-secondary" title="Refresh the live model list" aria-label="Refresh model list">↻</button>
              <button type="button" id="aiPingProviderBtn" class="btn btn-secondary" title="Measure provider endpoint latency">Ping</button>
           </div>
           <div id="aiModelPicker" class="hidden" style="margin-top:8px;">
@@ -1129,7 +1129,7 @@
       </div>
 
       <div class="drawer-section auth-only" id="botSettingsSection" data-collapsible>
-        <h3>Bot (personal) <span id="botGodBadge" class="lock-badge hidden" title="GOD only edit">GOD only</span></h3>
+        <h3>Bot (personal) <span id="botGodBadge" class="lock-badge hidden" title="Only the instance owner can edit these">Owner only</span></h3>
         <p class="section-desc" id="botSettingsDesc">Visible to all ranks. Only GOD rank can add/change the bot. Communities: <code>/community_verify</code> in group.</p>
         <div id="botSettingsBody">
         <div class="form-group">

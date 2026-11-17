@@ -803,7 +803,7 @@ document.addEventListener('DOMContentLoaded', () => {
         telegram_missing: 'Telegram did not return a full login response. Try again.',
         discord_state: 'Login session expired or was started in another browser. Click Continue with Discord once, in this tab.',
         discord_state_store: 'Could not start login (server). Try again in a moment.',
-        banned: 'You are banned from all communities (no remaining memberships). If you still belong to another community, contact support — otherwise rejoin a group then /community_join <id>.'
+        banned: 'You are banned from all communities (no remaining memberships). If you still belong to another community, contact support. Otherwise rejoin a group then /community_join <id>.'
       };
       showAuthError(hints[authErr] || `Login failed (${authErr})`);
       history.replaceState({}, '', window.location.pathname);
@@ -817,11 +817,11 @@ document.addEventListener('DOMContentLoaded', () => {
       // (athena-tui) log in via this URL and must be able to copy the token.
       if (navigator.clipboard?.writeText) {
         navigator.clipboard.writeText(fromOAuth).then(
-          () => showToast('Session ready — token copied. Paste it into athena-tui.'),
-          () => showToast('Session ready — copy the session= token from the address bar.')
+          () => showToast('Session ready. Token copied, paste it into athena-tui.'),
+          () => showToast('Session ready. Copy the session= token from the address bar.')
         );
       } else {
-        showToast('Session ready — copy the session= token from the address bar.');
+        showToast('Session ready. Copy the session= token from the address bar.');
       }
     }
     // Cookie fallback. Only useful same-origin: a SameSite=Lax cookie is not
@@ -877,7 +877,7 @@ document.addEventListener('DOMContentLoaded', () => {
           return false;
         }
         showLoggedOut();
-        showAuthError(`Backend returned ${res.status}. Your login is still saved — retry, or check Settings → Backend.`);
+        showAuthError(`Backend returned ${res.status}. Your login is still saved. Retry, or check Settings → Backend.`);
         return false;
       }
       state.currentUser = data.user;
@@ -893,7 +893,7 @@ document.addEventListener('DOMContentLoaded', () => {
       // self-hosted backend than it ever was same-origin.
       console.warn('[athena] /api/auth/me unreachable:', err);
       showLoggedOut();
-      showAuthError('Could not reach the backend. Your login is saved — reload to retry, or switch backend in Settings.');
+      showAuthError('Could not reach the backend. Your login is saved. Reload to retry, or switch backend in Settings.');
       return false;
     }
   }
@@ -979,7 +979,7 @@ document.addEventListener('DOMContentLoaded', () => {
       wipeBtn.disabled = !god;
       wipeBtn.style.display = god ? 'block' : 'none';
       wipeBtn.style.opacity = god ? '1' : '0.45';
-      wipeBtn.title = god ? 'Wipe your personal links (GOD)' : 'GOD rank only';
+      wipeBtn.title = god ? 'Wipe your personal links' : 'Instance owner only';
     }
     const aiBody = $('aiSettingsBody');
     const aiLock = $('aiLockBadge');
@@ -1022,7 +1022,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.querySelector('.scope-switch-container')?.classList.toggle('is-member', !god);
     if (personalScopeBtn) {
       personalScopeBtn.classList.toggle('scope-locked', !god);
-      personalScopeBtn.title = god ? 'Personal' : 'Personal locked — GOD rank only';
+      personalScopeBtn.title = god ? 'Personal' : 'Personal is for the instance owner only';
       if (!god && state.scope === 'personal') {
         state.scope = 'community';
         updateScopeUI();
@@ -1033,7 +1033,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const personalOpt = mainScopeSelect.querySelector('option[value="personal"]');
       if (personalOpt) {
         personalOpt.disabled = !god;
-        personalOpt.textContent = god ? 'Personal (GOD)' : 'Personal (GOD locked)';
+        personalOpt.textContent = god ? 'Personal' : 'Personal (owner only)';
       }
     }
     const backendInput = $('backendUrl');
@@ -1566,7 +1566,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function uploadDocuments(files) {
     if (!files.length) return;
-    if (state.scope === 'personal' && !isGod()) return showToast('Personal uploads are GOD only', true);
+    if (state.scope === 'personal' && !isGod()) return showToast('Personal uploads are for the instance owner only', true);
     if (state.scope === 'community' && !state.activeCommunity) return showToast('Select a community first', true);
     uploadFileBtn.disabled = true;
     let uploaded = 0;
@@ -1651,7 +1651,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function saveDump(raw) {
     if (state.scope === 'personal' && !isGod()) {
-      showToast('Personal dump is GOD only. Join a community first.', true);
+      showToast('Personal is for the instance owner only. Join a community first.', true);
       return;
     }
     if (state.scope === 'community' && !state.activeCommunity) {
@@ -1810,7 +1810,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
     } else {
-      showToast('Was not in DB — adding now');
+      showToast('Not saved yet, adding it now');
       await saveDump(parsed.url);
       return;
     }
@@ -1824,7 +1824,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function setMode(mode) {
     if (state.publicWikiMode) return;
     if (mode === 'ai' && !state.authReady) {
-      showToast('Auth is still loading — wait a second and click AI again', true);
+      showToast('Still signing you in. Wait a second and click AI again', true);
       return;
     }
     if (mode === 'delete' && state.scope === 'community' && !isCommunityStaff()) {
@@ -1880,7 +1880,7 @@ document.addEventListener('DOMContentLoaded', () => {
       modePulse.style.background = 'var(--danger-color)';
       searchInput.placeholder = 'Paste a link to delete (or it will be added if missing)…';
       searchInput.enterKeyHint = 'go';
-      scopeSubtitle.textContent = 'Prohibited mode — deletes matching URLs from DB';
+      scopeSubtitle.textContent = 'Delete mode: removes matching links';
       aiAnswerCard.classList.add('hidden');
       resultsList.innerHTML = '';
       resultsMeta.classList.add('hidden');
@@ -2269,7 +2269,7 @@ document.addEventListener('DOMContentLoaded', () => {
           ${tagsList.map(t => `<button type="button" class="g-tag-chip" data-tag="${escapeHtml(t)}">#${escapeHtml(t)}</button>`).join('')}
          </div>`
       : `<div class="g-card-tags">
-          <button type="button" class="g-tag-chip g-tag-empty" data-tag="notags" title="Untagged link — click to filter">#notags</button>
+          <button type="button" class="g-tag-chip g-tag-empty" data-tag="notags" title="Untagged link. Click to filter">#notags</button>
          </div>`;
 
     const bmActive = typeof isUrlBookmarked === 'function' && isUrlBookmarked(item.url);
@@ -2280,7 +2280,7 @@ document.addEventListener('DOMContentLoaded', () => {
       </button>` : '';
 
     const aiStarBtnHtml = (typeof isGod === 'function' && isGod()) ? `
-      <button type="button" class="btn btn-secondary btn-sm ai-enrich-btn" data-id="${escapeHtml(item.id)}" title="Re-scrape URL and enrich metadata with AI (GOD only)">
+      <button type="button" class="btn btn-secondary btn-sm ai-enrich-btn" data-id="${escapeHtml(item.id)}" title="Re-scrape URL and enrich metadata with AI (instance owner only)">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/></svg>
         <span>AI</span>
       </button>` : '';
@@ -2685,7 +2685,7 @@ document.addEventListener('DOMContentLoaded', () => {
             body: JSON.stringify({ link_id: reportBtn.dataset.id, reason })
           });
           if (data.success) {
-            showToast('Reported — owners/admins notified');
+            showToast('Reported. Admins have been notified');
             await loadNotifications();
           } else {
             showToast(data.error || 'Report failed', true);
@@ -2985,7 +2985,7 @@ document.addEventListener('DOMContentLoaded', () => {
               : 'PostgreSQL';
           label.textContent = `AI · grounded in ${engine}`;
         } else {
-          const errHint = result.error ? ` — ${result.error}` : '';
+          const errHint = result.error ? `: ${result.error}` : '';
           label.textContent = `AI · ${errHint ? 'local fallback' : 'local brain'}${errHint ? '' : ' (add API key in Settings for full assistant)'}`;
           if (result.error) {
             showToast(result.error, true);
@@ -3109,15 +3109,15 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!res.ok) return;
       const _provider = data.provider || 'postgres';
       if (storageProvider) {
-        storageProvider.innerHTML = `<option value="postgres" selected>PostgreSQL — ${escapeHtml(data.db_engine || 'PostgreSQL')}</option>`;
+        storageProvider.innerHTML = `<option value="postgres" selected>${escapeHtml(data.db_engine || 'PostgreSQL')}</option>`;
         storageProvider.value = 'postgres';
         storageProvider.disabled = true;
       }
       if (storageStatus) {
-        storageStatus.innerHTML = `<span style="color:var(--success-color)">${escapeHtml(data.db_engine || 'PostgreSQL')} — PostgreSQL only (D1/GitHub removed)</span>`;
+        storageStatus.innerHTML = `<span style="color:var(--success-color)">Stored in ${escapeHtml(data.db_engine || 'PostgreSQL')}</span>`;
       }
       if (storageDesc) {
-        storageDesc.textContent = `PostgreSQL — the only store. MCP memory uses the same DB via postgres-mcp (DATABASE_URL).`;
+        storageDesc.textContent = 'Everything is stored in PostgreSQL. To move it, change DATABASE_URL on the server.';
       }
     } catch (_) { /* offline / not logged in */ }
   }
@@ -3170,15 +3170,15 @@ document.addEventListener('DOMContentLoaded', () => {
       if (serverOk) {
         html = `<span style="color:var(--success-color)">API ready · ${escapeHtml(cfg.model || model?.value || 'model')} · synced for bot /ai</span>`;
       } else if (hasLocal && isGodUser) {
-        html = `<span style="color:var(--warning-color)">Local key present (${escapeHtml(cfg.model || model?.value || 'model')}) — not synced to server. Click Save to sync bot & enable AI for all users. If Save fails, check GOD rank and STORAGE_KEY.</span>`;
+        html = `<span style="color:var(--warning-color)">Local key present (${escapeHtml(cfg.model || model?.value || 'model')}) is only in this browser. Click Save to use it for the bot and for everyone. If Save fails, check that STORAGE_KEY is set on the server.</span>`;
       } else if (hasLocal && !isGodUser) {
-        html = `<span style="color:var(--warning-color)">Local key saved in browser but you are not GOD — instance has no key. GOD must configure in Settings → AI.</span>`;
+        html = `<span style="color:var(--warning-color)">A key is saved in this browser, but only the instance owner can set the shared key in Settings, AI.</span>`;
       } else {
-        html = '<span style="color:var(--text-muted)">No API key — GOD: Settings → AI → Save</span>';
+        html = '<span style="color:var(--text-muted)">No API key yet. Add one above and click Save.</span>';
       }
       const lastCfg = window.AthenaAI?.getLastServerAiConfig?.();
       if (lastCfg && lastCfg.configured && !lastCfg.hasKey) {
-        html += `<br><span style="color:var(--danger-color)">Server row exists but key unreadable — STORAGE_KEY missing/rotated? Re-save credentials.</span>`;
+        html += `<br><span style="color:var(--danger-color)">The saved key can't be read, likely because STORAGE_KEY changed. Save the key again.</span>`;
       }
       status.innerHTML = html;
     }
@@ -3294,7 +3294,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const AI_MODEL_PAGE_SIZE = 100;
 
   async function loadAiModels(force = false) {
-    if (!canEditAiConfig()) return showToast('Model picker is GOD only', true);
+    if (!canEditAiConfig()) return showToast('Only the instance owner can pick the model', true);
     const list = $('aiModelList');
     const picker = $('aiModelPicker');
     if (!picker) return;
@@ -3392,7 +3392,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const count = $('aiErrorCount');
       if (count) count.textContent = errors.length ? `(${errors.length})` : '';
       if (!errors.length) {
-        if (list) list.innerHTML = '<div class="model-item status-msg">No recent errors — in-memory log clears on restart.</div>';
+        if (list) list.innerHTML = '<div class="model-item status-msg">No recent errors. This list clears when the server restarts.</div>';
         return;
       }
       if (list) {
@@ -3935,7 +3935,7 @@ document.addEventListener('DOMContentLoaded', () => {
           ${item.tags.map(t => `<span class="admin-card-tag" data-tag="${escapeHtml(t)}">#${escapeHtml(t)}</span>`).join('')}
          </div>`
       : `<div class="admin-card-tags">
-          <span class="admin-card-tag admin-card-notag" data-tag="notags" title="Untagged link — click to view untagged" style="opacity:0.65;font-style:italic;">#notags</span>
+          <span class="admin-card-tag admin-card-notag" data-tag="notags" title="Untagged link. Click to see all untagged links" style="opacity:0.65;font-style:italic;">#notags</span>
          </div>`;
 
     card.innerHTML = `
@@ -3949,7 +3949,7 @@ document.addEventListener('DOMContentLoaded', () => {
           ${item.url ? `<button type="button" class="btn btn-secondary btn-sm admin-card-bm-btn ${isUrlBookmarked(item.url) ? 'is-bookmarked' : ''}" data-id="${escapeHtml(item.id)}" data-url="${escapeHtml(item.url)}" data-title="${escapeHtml(item.title || '')}" title="Bookmark link">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="${isUrlBookmarked(item.url) ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" style="vertical-align:middle;"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
           </button>` : ''}
-          ${isGod() ? `<button type="button" class="btn btn-secondary btn-sm admin-card-ai-btn ai-enrich-btn" data-id="${escapeHtml(item.id)}" title="Re-scrape URL and enrich metadata with AI (GOD only)">
+          ${isGod() ? `<button type="button" class="btn btn-secondary btn-sm admin-card-ai-btn ai-enrich-btn" data-id="${escapeHtml(item.id)}" title="Re-scrape URL and enrich metadata with AI (instance owner only)">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px;"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/></svg>
             AI
           </button>` : ''}
@@ -4403,7 +4403,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const val = e.target.value;
         if (val === 'personal') {
           if (!isGod()) {
-            showToast('Personal mode is GOD only', true);
+            showToast('Personal is for the instance owner only', true);
             scopeSel.value = state.scope;
             return;
           }
@@ -5577,7 +5577,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!selectElem) return;
     const opts = [];
     opts.push(
-      `<option value="personal" ${currentScope === 'personal' ? 'selected' : ''}>Personal Second Brain (personal_links)</option>`
+      `<option value="personal" ${currentScope === 'personal' ? 'selected' : ''}>Personal</option>`
     );
     if (Array.isArray(state.communities) && state.communities.length > 0) {
       for (const c of state.communities) {
@@ -5604,15 +5604,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const dbPill = $('freshrssActiveDbPill');
     if (dbPill) {
       if (isPersonal) {
-        dbPill.textContent = 'Personal DB (personal_links)';
+        dbPill.textContent = 'Saving to Personal';
         dbPill.classList.remove('is-community');
-        dbPill.title = 'Subscriptions and articles in this view are stored in your private Personal DB (personal_links)';
+        dbPill.title = 'Feeds and articles here are saved to your private Personal collection';
       } else {
         const commObj = (state.communities || []).find((c) => c.id === feedState.communityId);
         const commName = commObj ? (commObj.name || commObj.id) : 'Community';
-        dbPill.textContent = `Community DB (${commName} -> links)`;
+        dbPill.textContent = `Saving to ${commName}`;
         dbPill.classList.add('is-community');
-        dbPill.title = 'Subscriptions and articles in this view are stored in the shared Community DB (links)';
+        dbPill.title = 'Feeds and articles here are saved to this community, where every member can see them';
       }
     }
   }
@@ -5807,12 +5807,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (!feedState.categories.length) {
       const targetDesc = feedState.communityId === 'personal'
-        ? 'your Personal Second Brain (personal_links)'
-        : 'this Community Archive (links)';
+        ? 'your Personal'
+        : 'this community';
       tree.innerHTML = `
         <div class="freshrss-loading-feeds">
           <p style="margin:0 0 8px;">No feeds in ${escapeHtml(targetDesc)} yet.</p>
-          <p style="margin:0;font-size:0.78rem;">Click <strong>+ Add subscription</strong> above to subscribe and auto-ingest articles.</p>
+          <p style="margin:0;font-size:0.78rem;">Click <strong>+ Add subscription</strong> above to start getting articles.</p>
         </div>
       `;
       return;
@@ -6311,11 +6311,11 @@ document.addEventListener('DOMContentLoaded', () => {
               </div>
               <footer>
                 <div class="footer-left">
-                  <span class="pzp-brain-badge" title="${isPersonalFeed ? 'Indexed in your private Personal DB (personal_links)' : 'Indexed in shared Community DB (links)'}">
-                    <span>${isPersonalFeed ? 'In Personal DB (personal_links)' : 'In Community DB (links)'}</span>
+                  <span class="pzp-brain-badge" title="${isPersonalFeed ? 'Saved in your private Personal collection' : 'Saved in this community'}">
+                    <span>${isPersonalFeed ? 'In Personal' : 'In community'}</span>
                   </span>
                   ${!isPersonalFeed ? `
-                    <button type="button" class="pzp-save-personal-btn ${art.saved_to_personal ? 'is-saved' : ''}" data-action="save-personal" title="Save a copy of this article to your private Personal DB (personal_links)">
+                    <button type="button" class="pzp-save-personal-btn ${art.saved_to_personal ? 'is-saved' : ''}" data-action="save-personal" title="Save a copy of this article to your private Personal collection">
                       <span>${art.saved_to_personal ? 'Saved to Personal DB' : '+ Save to Personal DB'}</span>
                     </button>
                   ` : ''}
@@ -6436,7 +6436,7 @@ document.addEventListener('DOMContentLoaded', () => {
           });
           if (res?.ok && data?.success) {
             article.saved_to_personal = true;
-            showToast('Saved article to your Personal DB (personal_links)');
+            showToast('Article saved to Personal');
             renderFeedArticles();
             refreshAthenaLinksAfterFeedSync('personal');
           } else {
@@ -6590,8 +6590,8 @@ document.addEventListener('DOMContentLoaded', () => {
       });
       if (res?.ok && data?.success) {
         const count = data.new_articles_count || 0;
-        const targetLabel = feedState.communityId === 'personal' ? 'Personal DB (personal_links)' : 'Community DB (links)';
-        showToast(count > 0 ? `Synced feeds: ${count} new articles indexed into ${targetLabel}` : 'All feeds up to date');
+        const targetLabel = feedState.communityId === 'personal' ? 'Personal' : 'this community';
+        showToast(count > 0 ? `Synced feeds: ${count} new articles saved to ${targetLabel}` : 'All feeds up to date');
         loadFeedSources();
         loadFeedArticles();
         if (count > 0) {
@@ -7118,11 +7118,11 @@ document.addEventListener('DOMContentLoaded', () => {
       const note = $('freshrssIngestNoteText');
       const hint = $('freshrssScopeHint');
       if (scopeVal === 'personal') {
-        if (hint) hint.textContent = 'Personal feeds store articles in your private Personal DB (personal_links).';
-        if (note) note.textContent = 'Articles are automatically parsed, tagged with Athena taxonomy facts, and saved to your private Personal DB (personal_links).';
+        if (hint) hint.textContent = 'Articles from personal feeds go to your private Personal collection.';
+        if (note) note.textContent = 'New articles are tagged and saved to your private Personal collection.';
       } else {
-        if (hint) hint.textContent = 'Community feeds store articles in the shared Community DB (links).';
-        if (note) note.textContent = 'Articles are automatically parsed, tagged with Athena taxonomy facts, and saved to the shared Community DB (links).';
+        if (hint) hint.textContent = 'Articles from community feeds are shared with every member.';
+        if (note) note.textContent = 'New articles are tagged and saved to the community for every member.';
       }
     }
 
@@ -7173,7 +7173,7 @@ document.addEventListener('DOMContentLoaded', () => {
           })
         });
         if (res?.ok && data?.success) {
-          const targetName = targetCommunityId === 'personal' ? 'Personal DB (personal_links)' : 'Community DB (links)';
+          const targetName = targetCommunityId === 'personal' ? 'Personal' : 'this community';
           showToast(`Subscribed to "${data.feed.title}" (${data.feed.articles_count} articles saved to ${targetName})`);
           closeAddModal();
           if (feedState.communityId !== targetCommunityId) {
@@ -7332,7 +7332,7 @@ document.addEventListener('DOMContentLoaded', () => {
           })
         });
         if (res?.ok && data?.success) {
-          const targetName = targetCommunityId === 'personal' ? 'Personal DB (personal_links)' : 'Community DB (links)';
+          const targetName = targetCommunityId === 'personal' ? 'Personal' : 'this community';
           showToast(`Imported ${data.imported_count} feeds to ${targetName}`);
           closeOpmlModal();
           if (feedState.communityId !== targetCommunityId) {
@@ -7462,7 +7462,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return [
         {
           title: 'Switch between Personal & Community feeds',
-          description: 'Choose Personal Feeds to route subscriptions and articles into your private library (personal_links), or choose Community to share feeds in a community library (links).',
+          description: 'Choose Personal Feeds to route subscriptions and articles into your private Personal collection, or Community to share them with every member.',
           label: 'Use Personal Feeds',
           run: () => $('freshrssScopePersonalBtn')?.focus()
         },
@@ -7659,7 +7659,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
           prompt('Session token (for athena-tui):', data.token);
         }
-        showToast('Session token copied — paste it into athena-tui');
+        showToast('Session token copied. Paste it into athena-tui.');
       } catch {
         showToast('Could not reach the server', true);
       }
@@ -7692,7 +7692,7 @@ document.addEventListener('DOMContentLoaded', () => {
           return;
         }
         if (!isGod()) {
-          showToast('Wipe personal is GOD only', true);
+          showToast('Only the instance owner can wipe Personal', true);
           return;
         }
         if (!(await showModal({ title: 'Wipe personal data', message: 'Delete ALL your personal data on this instance? This cannot be undone.', confirmText: 'Continue', danger: true }))) return;
@@ -7806,7 +7806,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     personalScopeBtn.addEventListener('click', async () => {
       if (!isGod()) {
-        showToast('Personal mode is GOD only. Join a community via bot: /community_join <id>', true);
+        showToast('Personal is for the instance owner only. Join a community through the bot: /community_join <id>', true);
         return;
       }
       state.scope = 'personal';
@@ -7867,7 +7867,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Publishing the default is a property of the SITE, so it is stored on the
     // origin serving this page — not on whichever backend is currently selected.
     $('defaultBackendBtn')?.addEventListener('click', async () => {
-      if (!canEditAiConfig()) { showToast('GOD rank only', true); return; }
+      if (!canEditAiConfig()) { showToast('Instance owner only', true); return; }
       const raw = (backendUrl?.value || '').trim().replace(/\/+$/, '');
       if (backendStatus) backendStatus.textContent = 'Publishing…';
       try {
@@ -7893,11 +7893,11 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
-        showToast(raw ? `Backend set for everyone: ${raw}` : 'Backend choice cleared — using this site');
+        showToast(raw ? `Backend set for everyone: ${raw}` : 'Backend cleared. Using this site.');
         setTimeout(() => window.location.reload(), 900);
       } catch (err) {
         const hint = /401|403|Login required|GOD/i.test(err.message)
-          ? 'The site origin did not accept this GOD session.'
+          ? 'This site did not accept your owner session.'
           : err.message;
         if (backendStatus) backendStatus.innerHTML = `<span style="color:var(--danger-color)">${escapeHtml(hint)}</span>`;
         showToast(hint, true);
@@ -7906,10 +7906,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Storage is PostgreSQL-only — sync/save kept as no-ops for compat.
     saveStorageBtn?.addEventListener('click', async () => {
-      showToast('PostgreSQL is the only store — no switch needed. Set DATABASE_URL on server.', true);
+      showToast('Storage is always PostgreSQL. To change the database, set DATABASE_URL on the server.', true);
     });
     syncStorageBtn?.addEventListener('click', async () => {
-      showToast('Sync removed — PostgreSQL only (D1/GitHub deprecated)', true);
+      showToast('Nothing to sync. Everything is already in PostgreSQL.', true);
     });
 
     logoutBtn.addEventListener('click', async () => {
@@ -7938,7 +7938,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const bot_username = botUsernameInput.value.trim();
       const bot_token = $('botTokenInput')?.value.trim() || '';
       const group_id = groupIdInput.value.trim();
-      if (!group_id) return showToast('Chat ID required — open bot DM, send /id', true);
+      if (!group_id) return showToast('Chat ID needed. Send /id to the bot in a DM to get it.', true);
       if (botPlatform.value === 'telegram' && !bot_token) {
         return showToast('Bot token required (from @BotFather)', true);
       }
@@ -8046,7 +8046,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     if (saveAiConfigBtn) {
       saveAiConfigBtn.addEventListener('click', async () => {
-        if (!canEditAiConfig()) { showToast('AI credentials: GOD rank only', true); return; }
+        if (!canEditAiConfig()) { showToast('Only the instance owner can change AI keys', true); return; }
         let baseUrl = $('aiBaseUrl')?.value.trim() || '';
         let model = $('aiModel')?.value.trim() || '';
         // normalize OpenCode URLs / model ids (strip trailing dots/slashes)
@@ -8088,7 +8088,7 @@ document.addEventListener('DOMContentLoaded', () => {
             showToast('Saved locally; bot sync failed: ' + err.message, true);
           }
         } else {
-          showToast('Saved — add a key to enable LLM');
+          showToast('Saved. Add an API key to turn on AI.');
         }
         await loadAiForm();
       });
@@ -8109,14 +8109,14 @@ document.addEventListener('DOMContentLoaded', () => {
     if (steroidToggle) {
       steroidToggle.addEventListener('change', async () => {
         if (!canEditAiConfig()) {
-          showToast('GOD only', true);
+          showToast('Instance owner only', true);
           steroidToggle.checked = !steroidToggle.checked;
           return;
         }
         try {
           await api('/api/ai/steroid', { method: 'POST', body: JSON.stringify({ steroid: steroidToggle.checked }) });
           window.__athenaSteroid = !!steroidToggle.checked;
-          showToast(steroidToggle.checked ? 'Steroid mode ON — unlimited' : 'Steroid mode OFF — throttled');
+          showToast(steroidToggle.checked ? 'Steroid mode on: no rate limit' : 'Steroid mode off: rate limited');
         } catch (err) {
           showToast(err.message || 'Failed', true);
           steroidToggle.checked = !steroidToggle.checked;
@@ -8229,7 +8229,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function enrichLinkWithAi(id, scope, btn, viewKind) {
     if (!isGod()) {
-      showToast('GOD rank required for single-card AI enrich', true);
+      showToast('Only the instance owner can enrich a link with AI', true);
       return;
     }
     if (btn) {
@@ -8397,7 +8397,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function scanCleanerCandidates() {
-    if (!isGod()) return showToast('GOD rank only', true);
+    if (!isGod()) return showToast('Instance owner only', true);
     const scope = $('cleanerScopeSelect')?.value || 'community';
     const communityId = $('cleanerCommunitySelect')?.value || '';
     const filter = $('cleanerFilterSelect')?.value || 'unedited';
@@ -8484,7 +8484,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function runCleanerBatches(resume = false) {
-    if (!isGod()) return showToast('GOD rank only', true);
+    if (!isGod()) return showToast('Instance owner only', true);
     if (cleanerState.running) return;
     if (resume) {
       const saved = loadCleanerCheckpoint();
@@ -8522,7 +8522,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const onOffline = () => {
       if (cleanerState.running && !cleanerState.paused) {
         cleanerState.paused = true;
-        updateCleanerProgressUI('Offline — paused safely with checkpoint');
+        updateCleanerProgressUI('Offline. Paused, progress is saved.');
       }
     };
     window.addEventListener('offline', onOffline);
@@ -8542,7 +8542,7 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             if (res?.status === 429 || (res?.status >= 500 && res.status < 600)) {
               const waitSec = Math.min(15, Math.max(1, parseInt(res.headers?.get('Retry-After') || String(2 ** attempt), 10) || (2 ** attempt)));
-              updateCleanerProgressUI(`Rate limit / server busy (${res.status}) — retrying in ${waitSec}s…`);
+              updateCleanerProgressUI(`Rate limit / server busy (${res.status}). Retrying in ${waitSec}s…`);
               await new Promise((r) => setTimeout(r, waitSec * 1000));
               continue;
             }
@@ -8609,7 +8609,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function openDbCleanerModal() {
-    if (!isGod()) return showToast('DB Cleaner is GOD rank only', true);
+    if (!isGod()) return showToast('Only the instance owner can run the cleaner', true);
     const modal = $('dbCleanerModal');
     if (!modal) return;
     populateCleanerCommunities();
@@ -8671,7 +8671,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function openBlacklistModal() {
-    if (!isGod() && !isStaffRank()) return showToast('Admin or GOD required', true);
+    if (!isGod() && !isStaffRank()) return showToast('Admins only', true);
     const modal = $('blacklistModal');
     const scopeSel = $('blacklistScopeSelect');
     if (scopeSel) {
@@ -8712,7 +8712,7 @@ document.addEventListener('DOMContentLoaded', () => {
       clearSearchBtn?.classList.remove('hidden');
       searchInput.focus();
     }
-    showToast('Shared item ready in Dump bar — press Enter to save');
+    showToast('Shared item is in the Dump bar. Press Enter to save.');
     params.delete('share_url');
     params.delete('share_text');
     params.delete('share_title');
