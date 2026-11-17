@@ -106,8 +106,8 @@
   --text-main: var(--text);
   --text-muted: var(--text-dim);
   --danger-color: #c6284e;
-  --success-color: #0d9f5f;
-  --warning-color: #b86e00;
+  --success-color: #0a7a4a;
+  --warning-color: #8f5600;
   --radius-lg: 18px;
   --radius-md: 12px;
   --radius-sm: 10px;
@@ -428,6 +428,35 @@ body::before {
 [data-theme="light"] .drawer-section {
   background: var(--surface-2);
   border-color: var(--hairline);
+}
+
+/* Light mode: controls need an edge you can see (3:1 against the page). */
+:root[data-theme="light"] {
+  --control-border: #868c9e;
+  --accent-text: color-mix(in srgb, var(--accent) 55%, var(--text));
+}
+[data-theme="light"] .main-ctrl-group select,
+[data-theme="light"] .main-tag-toggle-btn {
+  background-color: var(--surface);
+  border-color: var(--control-border);
+}
+[data-theme="light"] .main-tag-toggle-btn:hover,
+[data-theme="light"] .main-tag-toggle-btn[aria-expanded="true"] {
+  color: var(--accent-text);
+}
+[data-theme="light"] .mobile-bottom-nav {
+  background: var(--surface);
+}
+[data-theme="light"] .mobile-nav-item.active {
+  color: var(--accent-text);
+}
+[data-theme="light"] .btn-secondary,
+[data-theme="light"] .vote-btn,
+[data-theme="light"] .report-btn {
+  border-color: var(--hairline-strong);
+}
+[data-theme="light"] .plat-telegram {
+  color: #195d84;
 }
 
 /* ========== Glass surfaces (blur restricted to .top-bar and .side-drawer for 60Hz) ========== */
