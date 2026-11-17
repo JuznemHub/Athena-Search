@@ -981,6 +981,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const blacklistOpenBtn = $('adminBlacklistOpenBtn');
     if (blacklistOpenBtn) blacklistOpenBtn.classList.toggle('hidden', !(god || isStaff));
     updateAiProviderInfoCard();
+    syncProfileMcpUI(god, isStaff);
 
     const wipeWrap = $('wipePersonalWrap');
     const wipeBtn = $('wipePersonalBtn');
@@ -9043,12 +9044,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  let activeAgentJobId = null;
+
   async function runCustomCleaner(dryRun) {
     if (!isGod()) return showToast('Instance owner only', true);
     if (cleanerState.running) return;
     const scope = $('cleanerScopeSelect')?.value || 'community';
     const communityId = $('cleanerCommunitySelect')?.value || '';
-    const filter = $('cleanerFilterSelect')?.value || 'unedited';
     const prompt = String($('cleanerCustomPromptInput')?.value || '').trim();
     const includeLinks = $('cleanerCustomIncludeLinks')?.checked !== false;
     const includeDocs = $('cleanerCustomIncludeDocs')?.checked !== false;
@@ -9057,13 +9059,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const previewBtn = $('cleanerCustomPreviewBtn');
     const runBtn = $('cleanerCustomRunBtn');
+    const stopBtn = $('cleanerCustomStopBtn');
+    const applyBtn = $('cleanerCustomApplyBtn');
     const summaryEl = $('cleanerCustomSummary');
     if (previewBtn) previewBtn.disabled = true;
     if (runBtn) runBtn.disabled = true;
+    if (applyBtn) applyBtn.classList.add('hidden');
+    if (stopBtn) stopBtn.classList.remove('hidden');
     if (summaryEl) {
       summaryEl.classList.remove('hidden');
-      summaryEl.textContent = dryRun ? 'AI agent is analyzing DB and planning…' : 'AI agent is executing on DB…';
+      summaryEl.textContent = 'Starting AI DB Agent…';
     }
+
+    cleanerState.running = true;
+    cleanerState.diffs = [];
+    renderCleanerDiffs([]);
 
     try {
       const { res, data } = await api('/api/admin/cleaner/custom', {
@@ -9071,110 +9081,161 @@ document.addEventListener('DOMContentLoaded', () => {
         body: JSON.stringify({
           scope,
           community_id: communityId,
-          filter,
           prompt,
           include_links: includeLinks,
           include_docs: includeDocs,
           dry_run: Boolean(dryRun)
         })
       });
-      if (!res?.ok || !data?.success) throw new Error(data?.error || 'Custom cleaner failed');
+      if (!res?.ok || !data?.success || !data?.job_id) throw new Error(data?.error || 'Failed to start AI agent');
+      activeAgentJobId = data.job_id;
 
-      const items = Array.isArray(data.items) ? data.items : [];
-      cleanerState.diffs = items;
-      renderCleanerDiffs(items);
-
-      if (data.kind === 'answer') {
+      for (;;) {
+        const { res: gRes, data: gData } = await api(`/api/admin/cleaner/agent/${encodeURIComponent(activeAgentJobId)}`);
+        if (!gRes?.ok || !gData?.success || !gData?.job) throw new Error(gData?.error || 'Agent status failed');
+        const job = gData.job;
+        if (Array.isArray(job.diffs) && job.diffs.length) {
+          cleanerState.diffs = job.diffs;
+          renderCleanerDiffs(job.diffs);
+        }
         if (summaryEl) {
-          summaryEl.textContent = data.answer || data.explanation || 'Done.';
+          const logText = (job.logs || []).slice(-10).join('\n');
+          const head = job.status === 'running' || job.status === 'stopping'
+            ? `Agent running (step ${job.step_count})… ${job.staged_count} staged`
+            : (job.summary || job.error || job.status);
+          summaryEl.textContent = logText ? `${head}\n\n${logText}` : head;
         }
-        showToast('AI analysis complete');
-        return;
-      }
-
-      if (data.kind === 'bulk_rule') {
-        const matchedTotal = Number(data.matched_links || 0) + Number(data.matched_docs || 0);
-        const appliedTotal = Number(data.fixed || 0) + Number(data.deleted || 0);
-        if (summaryEl) {
-          summaryEl.textContent = dryRun
-            ? `Plan: ${data.explanation || 'Bulk rule'}\nMatched: ${data.matched_links || 0} link(s), ${data.matched_docs || 0} document(s). Review below and click Execute on DB.`
-            : `Executed: ${data.explanation || 'Bulk rule'}\nUpdated: ${data.fixed || 0} · Deleted: ${data.deleted || 0} · Failed: ${data.failed || 0}`;
-        }
-        if (!dryRun && appliedTotal > 0) {
-          loadAdminDbLinks();
-          loadMainTags();
-        }
-        showToast(dryRun ? `Preview ready (${matchedTotal} matched)` : `Custom clean done: ${appliedTotal} affected`);
-        return;
-      }
-
-      if (data.kind === 'ai_transform_rows') {
-        const ids = Array.isArray(data.ids) ? data.ids : [];
-        if (dryRun || !ids.length) {
-          if (summaryEl) {
-            summaryEl.textContent = `Plan: ${data.explanation || 'Per-row AI transform'}\nTarget rows: ${ids.length}${ids.length ? ' (previewing first 10 below)' : ''}.`;
-          }
-          showToast(`Preview ready (${ids.length} target rows)`);
-          return;
-        }
-
-        cleanerState.ids = ids;
-        cleanerState.scopeKey = data.scope_key || communityId;
-        cleanerState.offset = 0;
-        cleanerState.processed = 0;
-        cleanerState.updated = 0;
-        cleanerState.failed = 0;
-        cleanerState.diffs = [];
-        cleanerState.running = true;
-        cleanerState.paused = false;
-        updateCleanerProgressUI();
-
-        try {
-          while (cleanerState.offset < ids.length) {
-            if (cleanerState.paused) break;
-            const chunk = ids.slice(cleanerState.offset, cleanerState.offset + 10);
-            const { res: bRes, data: bData } = await api('/api/admin/cleaner/custom-batch', {
-              method: 'POST',
-              body: JSON.stringify({
-                scope,
-                community_id: cleanerState.scopeKey,
-                prompt,
-                dry_run: false,
-                ids: chunk
-              })
-            });
-            if (!bRes?.ok || !bData?.success) throw new Error(bData?.error || 'Custom batch failed');
-            const batchItems = Array.isArray(bData.items) ? bData.items : [];
-            cleanerState.offset += chunk.length;
-            cleanerState.processed += Number(bData.processed ?? chunk.length);
-            cleanerState.updated += Number(bData.fixed || 0) + Number(bData.deleted || 0);
-            cleanerState.failed += Number(bData.failed || 0);
-            const changedItems = batchItems.filter((it) => it.changed || it.error);
-            if (changedItems.length) {
-              cleanerState.diffs = [...cleanerState.diffs, ...changedItems].slice(-60);
-              renderCleanerDiffs(cleanerState.diffs);
+        if (['done', 'stopped', 'error'].includes(job.status)) {
+          if (job.status === 'error') {
+            showToast(job.error || 'Agent failed', true);
+          } else if (dryRun && job.staged_count > 0 && applyBtn) {
+            applyBtn.textContent = `Apply Staged Changes (${job.staged_count})`;
+            applyBtn.classList.remove('hidden');
+            showToast(`Agent staged ${job.staged_count} change(s) — review and click Apply`);
+          } else {
+            if (!dryRun && job.applied_count > 0) {
+              loadAdminDbLinks();
+              loadMainTags();
             }
-            updateCleanerProgressUI();
+            showToast(dryRun ? 'Agent finished' : `Agent applied ${job.applied_count} change(s)`);
           }
-        } finally {
-          cleanerState.running = false;
-          updateCleanerProgressUI();
+          break;
         }
-        if (summaryEl) {
-          summaryEl.textContent = `Executed: ${data.explanation || 'Per-row AI transform'}\nProcessed: ${cleanerState.offset}/${ids.length} · Updated/Deleted: ${cleanerState.updated} · Failed: ${cleanerState.failed}`;
-        }
-        if (cleanerState.updated > 0) {
-          loadAdminDbLinks();
-          loadMainTags();
-        }
-        showToast(`Custom clean finished: ${cleanerState.updated} rows affected`);
+        await new Promise((r) => setTimeout(r, 1400));
       }
     } catch (err) {
-      if (summaryEl) summaryEl.textContent = `Error: ${err.message || 'Custom cleaner failed'}`;
-      showToast(err.message || 'Custom cleaner failed', true);
+      if (summaryEl) summaryEl.textContent = `Error: ${err.message || 'Agent failed'}`;
+      showToast(err.message || 'Agent failed', true);
     } finally {
+      cleanerState.running = false;
       if (previewBtn) previewBtn.disabled = false;
       if (runBtn) runBtn.disabled = false;
+      if (stopBtn) stopBtn.classList.add('hidden');
+    }
+  }
+
+  async function stopCleanerAgent() {
+    if (!activeAgentJobId) return;
+    await api(`/api/admin/cleaner/agent/${encodeURIComponent(activeAgentJobId)}/stop`, { method: 'POST' }).catch(() => {});
+    showToast('Stopping AI agent…');
+  }
+
+  function syncProfileMcpUI(god, isStaff) {
+    const wrap = $('mcpProfileWrap');
+    const ownerWrap = $('mcpOwnerWrap');
+    const adminWrap = $('mcpAdminWrap');
+    if (wrap) wrap.classList.toggle('hidden', !(god || isStaff));
+    if (ownerWrap) ownerWrap.classList.toggle('hidden', !god);
+    if (adminWrap) adminWrap.classList.toggle('hidden', !(god || isStaff));
+    if (god || isStaff) loadMcpTokenStatus();
+  }
+
+  async function loadMcpTokenStatus() {
+    try {
+      const { res, data } = await api('/api/profile/mcp-token');
+      if (!res?.ok || !data?.success) return;
+      for (const role of ['owner', 'admin']) {
+        const cap = role === 'owner' ? 'Owner' : 'Admin';
+        const info = data.tokens?.[role];
+        const statusEl = $(`mcp${cap}Status`);
+        const revokeBtn = $(`mcpRevoke${cap}Btn`);
+        if (statusEl) {
+          statusEl.textContent = info?.exists
+            ? `Active (${new Date(info.created_at).toLocaleDateString()})`
+            : 'Not generated';
+        }
+        if (revokeBtn) revokeBtn.classList.toggle('hidden', !info?.exists);
+      }
+    } catch (_) {}
+  }
+
+  async function generateMcpUrl(role) {
+    const cap = role === 'owner' ? 'Owner' : 'Admin';
+    const btn = $(`mcpGen${cap}Btn`);
+    if (btn) btn.disabled = true;
+    try {
+      const { res, data } = await api('/api/profile/mcp-token', {
+        method: 'POST',
+        body: JSON.stringify({ role, community_id: state.activeCommunity || null })
+      });
+      if (!res?.ok || !data?.success || !data?.url) throw new Error(data?.error || 'Failed to generate MCP URL');
+      const row = $(`mcp${cap}UrlRow`);
+      const input = $(`mcp${cap}UrlInput`);
+      if (input) input.value = data.url;
+      if (row) row.classList.remove('hidden');
+      await loadMcpTokenStatus();
+      showToast(`${cap} MCP URL generated — copy and save it now`);
+    } catch (err) {
+      showToast(err.message || 'MCP generation failed', true);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function revokeMcpUrl(role) {
+    const cap = role === 'owner' ? 'Owner' : 'Admin';
+    try {
+      const { res, data } = await api('/api/profile/mcp-token', {
+        method: 'DELETE',
+        body: JSON.stringify({ role })
+      });
+      if (!res?.ok || !data?.success) throw new Error(data?.error || 'Revoke failed');
+      $(`mcp${cap}UrlRow`)?.classList.add('hidden');
+      if ($(`mcp${cap}UrlInput`)) $(`mcp${cap}UrlInput`).value = '';
+      await loadMcpTokenStatus();
+      showToast(`${cap} MCP URL revoked`);
+    } catch (err) {
+      showToast(err.message || 'Revoke failed', true);
+    }
+  }
+
+  async function copyMcpUrl(role) {
+    const cap = role === 'owner' ? 'Owner' : 'Admin';
+    const val = $(`mcp${cap}UrlInput`)?.value || '';
+    if (!val) return;
+    try {
+      await navigator.clipboard.writeText(val);
+      showToast(`${cap} MCP URL copied`);
+    } catch (_) {
+      showToast('Copy failed — select and copy manually', true);
+    }
+  }
+
+  async function applyCleanerAgent() {
+    if (!activeAgentJobId) return;
+    const applyBtn = $('cleanerCustomApplyBtn');
+    if (applyBtn) applyBtn.disabled = true;
+    try {
+      const { res, data } = await api(`/api/admin/cleaner/agent/${encodeURIComponent(activeAgentJobId)}/apply`, { method: 'POST' });
+      if (!res?.ok || !data?.success) throw new Error(data?.error || 'Apply failed');
+      if (applyBtn) applyBtn.classList.add('hidden');
+      loadAdminDbLinks();
+      loadMainTags();
+      showToast(`Applied ${data.applied || 0} change(s)`);
+    } catch (err) {
+      showToast(err.message || 'Apply failed', true);
+    } finally {
+      if (applyBtn) applyBtn.disabled = false;
     }
   }
 
@@ -9326,6 +9387,14 @@ document.addEventListener('DOMContentLoaded', () => {
     $('cleanerModeSelect')?.addEventListener('change', syncCleanerModeUI);
     $('cleanerCustomPreviewBtn')?.addEventListener('click', () => runCustomCleaner(true));
     $('cleanerCustomRunBtn')?.addEventListener('click', () => runCustomCleaner(false));
+    $('cleanerCustomStopBtn')?.addEventListener('click', stopCleanerAgent);
+    $('cleanerCustomApplyBtn')?.addEventListener('click', applyCleanerAgent);
+    $('mcpGenOwnerBtn')?.addEventListener('click', () => generateMcpUrl('owner'));
+    $('mcpRevokeOwnerBtn')?.addEventListener('click', () => revokeMcpUrl('owner'));
+    $('mcpCopyOwnerBtn')?.addEventListener('click', () => copyMcpUrl('owner'));
+    $('mcpGenAdminBtn')?.addEventListener('click', () => generateMcpUrl('admin'));
+    $('mcpRevokeAdminBtn')?.addEventListener('click', () => revokeMcpUrl('admin'));
+    $('mcpCopyAdminBtn')?.addEventListener('click', () => copyMcpUrl('admin'));
     $('cleanerScanBtn')?.addEventListener('click', scanCleanerCandidates);
     $('cleanerBackupBtn')?.addEventListener('click', exportCleanerBackup);
     $('cleanerStartBtn')?.addEventListener('click', () => runCleanerBatches(false));

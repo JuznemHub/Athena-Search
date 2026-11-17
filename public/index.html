@@ -975,6 +975,40 @@
         </div>
         <button type="button" id="drawerSessionTokenBtn" class="btn btn-secondary btn-sm">Copy CLI session token</button>
         <p class="section-desc">For signing in to athena-tui from a terminal.</p>
+        <div id="mcpProfileWrap" class="mcp-profile-wrap hidden">
+          <div class="mcp-profile-title">Remote MCP URLs</div>
+          <p class="section-desc">Connect Hermes, Claude, Cursor, or Codex directly to Athena.</p>
+          <div id="mcpOwnerWrap" class="mcp-role-box hidden">
+            <div class="mcp-role-head">
+              <strong>Owner MCP</strong>
+              <span id="mcpOwnerStatus" class="mcp-role-status">Not generated</span>
+            </div>
+            <p class="section-desc">Full instance control (DB SQL, cleaner agent, users, clones, blacklists).</p>
+            <div class="mcp-role-actions">
+              <button type="button" id="mcpGenOwnerBtn" class="btn btn-primary btn-sm">Generate Owner MCP URL</button>
+              <button type="button" id="mcpRevokeOwnerBtn" class="btn btn-danger btn-sm hidden">Revoke</button>
+            </div>
+            <div id="mcpOwnerUrlRow" class="mcp-url-row hidden">
+              <input type="text" id="mcpOwnerUrlInput" class="input input-sm" readonly aria-label="Owner MCP URL">
+              <button type="button" id="mcpCopyOwnerBtn" class="btn btn-secondary btn-sm">Copy</button>
+            </div>
+          </div>
+          <div id="mcpAdminWrap" class="mcp-role-box hidden">
+            <div class="mcp-role-head">
+              <strong>Admin MCP</strong>
+              <span id="mcpAdminStatus" class="mcp-role-status">Not generated</span>
+            </div>
+            <p class="section-desc">Community moderation only (search, add, edit, delete links/docs, reports, community blacklist).</p>
+            <div class="mcp-role-actions">
+              <button type="button" id="mcpGenAdminBtn" class="btn btn-secondary btn-sm">Generate Admin MCP URL</button>
+              <button type="button" id="mcpRevokeAdminBtn" class="btn btn-danger btn-sm hidden">Revoke</button>
+            </div>
+            <div id="mcpAdminUrlRow" class="mcp-url-row hidden">
+              <input type="text" id="mcpAdminUrlInput" class="input input-sm" readonly aria-label="Admin MCP URL">
+              <button type="button" id="mcpCopyAdminBtn" class="btn btn-secondary btn-sm">Copy</button>
+            </div>
+          </div>
+        </div>
         <button id="logoutBtn" class="btn btn-danger btn-sm">Logout</button>
         <div id="wipePersonalWrap" class="mt-2" style="display:block">
           <button type="button" id="wipePersonalBtn" class="btn btn-danger btn-block">Wipe all personal data</button>
@@ -1331,6 +1365,8 @@
           <div class="cleaner-action-bar">
             <button type="button" id="cleanerCustomPreviewBtn" class="btn btn-secondary btn-sm">Preview Plan (Dry Run)</button>
             <button type="button" id="cleanerCustomRunBtn" class="btn btn-primary btn-sm">Execute on DB</button>
+            <button type="button" id="cleanerCustomStopBtn" class="btn btn-secondary btn-sm hidden">Stop Agent</button>
+            <button type="button" id="cleanerCustomApplyBtn" class="btn btn-primary btn-sm hidden">Apply Staged Changes</button>
           </div>
           <div id="cleanerCustomSummary" class="cleaner-custom-summary hidden"></div>
         </div>

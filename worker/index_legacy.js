@@ -1,4 +1,6 @@
 import { createUcloneManager, cloneFailure, withCloneAccount, ensureUcloneTables } from './uclone-manager.js';
+import { ensureCleanerAgentTable, runCleanerAgentJob, applyStagedMutations } from './db-agent.js';
+import { handleProfileMcpToken, handleMcpHttpRequest } from './mcp-server.js';
 import { classifyCloneMessage, countCloneMessage, emptyCloneCounters, sourceClonePost, documentCounter, isDirectImageUrl, topicOf } from './clone-content.js';
 import { renderCloneProgress } from './clone-ui.js';
 import { dokployConfigured, dokployApps, dokployStatus, dokployLogSnapshot, dokployDeploy, dokploySimple } from './dokploy.js';
@@ -422,6 +424,22 @@ export default {
         return await handleResetWikiTaxonomy(request, user, env, corsHeaders);
       }
 
+      if (pathname === '/mcp' || pathname.startsWith('/mcp/')) {
+        return await handleMcpHttpRequest(request, url, env, corsHeaders, {
+          isInstanceOwnerUserAsync,
+          generateUrlHash,
+          markMeiliScopeDirty,
+          fetchWithTimeout,
+          getInstanceAiConfig,
+          runInBackground,
+          cleanerAgentDeps,
+        });
+      }
+
+      if (pathname === '/api/profile/mcp-token') {
+        return await handleProfileMcpToken(request, user, env, corsHeaders, { isInstanceOwnerUserAsync });
+      }
+
       if (pathname === '/api/wiki/share-links/verify' && request.method === 'GET') {
         return await handleVerifyWikiShare(url, env, corsHeaders);
       }
@@ -503,8 +521,19 @@ export default {
       if (pathname === '/api/admin/cleaner/custom' && request.method === 'POST') {
         return await handleCustomCleaner(request, user, env, corsHeaders);
       }
-      if (pathname === '/api/admin/cleaner/custom-batch' && request.method === 'POST') {
-        return await handleCustomCleanerBatch(request, user, env, corsHeaders);
+      if (pathname.startsWith('/api/admin/cleaner/agent/')) {
+        const parts = pathname.slice('/api/admin/cleaner/agent/'.length).split('/');
+        const jobId = parts[0];
+        const sub = parts[1] || '';
+        if (request.method === 'GET' && !sub) {
+          return await handleGetCleanerAgentJob(jobId, user, env, corsHeaders);
+        }
+        if (request.method === 'POST' && sub === 'stop') {
+          return await handleStopCleanerAgentJob(jobId, user, env, corsHeaders);
+        }
+        if (request.method === 'POST' && sub === 'apply') {
+          return await handleApplyCleanerAgentJob(jobId, user, env, corsHeaders);
+        }
       }
 
       // Community links — members only (join required before dump)
@@ -5902,162 +5931,18 @@ async function handleRunCleanerBatch(request, user, env, corsHeaders) {
   }, { headers: corsHeaders });
 }
 
-function parseCleanerJson(text) {
-  const raw = String(text || '').trim();
-  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidate = (fenced ? fenced[1] : raw).trim();
-  try {
-    return JSON.parse(candidate);
-  } catch (err) {
-    const start = candidate.indexOf('{');
-    const end = candidate.lastIndexOf('}');
-    if (start >= 0 && end > start) {
-      return JSON.parse(candidate.slice(start, end + 1));
-    }
-    throw new Error('AI did not return valid JSON', { cause: err });
-  }
-}
-
-function safeCleanerRegex(pattern) {
-  const s = String(pattern || '').trim();
-  if (!s || s.length > 120) return null;
-  try { return new RegExp(s, 'i'); } catch (_) { return null; }
-}
-
-function cleanerFilterSql(filter) {
-  if (filter === 'untagged') {
-    return ` AND (COALESCE(tags,'') IN ('', '[]', 'null', '["untagged"]', '["notags"]') OR manual_edited_at IS NULL)`;
-  }
-  if (filter === 'unedited') return ' AND manual_edited_at IS NULL';
-  return '';
-}
-
-function matchesCleanerRule(row, kind, match = {}) {
-  const m = match || {};
-  if (kind === 'doc') {
-    const fn = String(row.filename || '');
-    const lowerFn = fn.toLowerCase();
-    if (m.filename_ext) {
-      const ext = String(m.filename_ext).toLowerCase();
-      const dotted = ext.startsWith('.') ? ext : `.${ext}`;
-      if (!lowerFn.endsWith(dotted)) return false;
-    }
-    if (m.filename_contains && !lowerFn.includes(String(m.filename_contains).toLowerCase())) return false;
-    if (m.filename_regex) {
-      const re = safeCleanerRegex(m.filename_regex);
-      if (re && !re.test(fn)) return false;
-    }
-    if (m.content_contains && !String(row.content || '').toLowerCase().includes(String(m.content_contains).toLowerCase())) return false;
-    return true;
-  }
-  const url = String(row.url || '');
-  const title = String(row.title || '');
-  const notes = String(row.notes || '');
-  let tags = [];
-  try { tags = JSON.parse(row.tags || '[]'); } catch (_) {}
-  if (m.url_contains && !url.toLowerCase().includes(String(m.url_contains).toLowerCase())) return false;
-  if (m.url_regex) {
-    const re = safeCleanerRegex(m.url_regex);
-    if (re && !re.test(url)) return false;
-  }
-  if (m.title_contains && !title.toLowerCase().includes(String(m.title_contains).toLowerCase())) return false;
-  if (m.title_regex) {
-    const re = safeCleanerRegex(m.title_regex);
-    if (re && !re.test(title)) return false;
-  }
-  if (m.notes_contains && !notes.toLowerCase().includes(String(m.notes_contains).toLowerCase())) return false;
-  if (m.has_tag && !tags.some((t) => String(t).toLowerCase() === String(m.has_tag).toLowerCase().replace(/^#+/, ''))) return false;
-  if (m.empty_tags && tags.length > 0) return false;
-  return true;
-}
-
-async function runCustomBatchOnRows(env, { scope, scopeKey, prompt, ids, dryRun, user, cfg, actorLabel }) {
-  const table = scope === 'personal' ? 'personal_links' : 'links';
-  const scopeCol = scope === 'personal' ? 'user_id' : 'community_id';
-  const placeholders = ids.map(() => '?').join(',');
-  const { results } = await env.DB.prepare(
-    `SELECT id, url, url_hash, title, notes, tags FROM ${table} WHERE ${scopeCol} = ? AND id IN (${placeholders})`
-  ).bind(scopeKey, ...ids).all();
-  const rows = results || [];
-  if (!rows.length) return { processed: 0, fixed: 0, deleted: 0, unchanged: 0, failed: 0, items: [] };
-
-  const compact = rows.map((r) => {
-    let tags = [];
-    try { tags = JSON.parse(r.tags || '[]'); } catch (_) {}
-    return { id: r.id, url: r.url, title: r.title || '', notes: (r.notes || '').slice(0, 300), tags };
-  });
-
-  const system = 'You are an expert database maintenance AI agent. Execute the user instruction on each provided link row. Return ONLY valid JSON: {"results":[{"id":"...","action":"keep"|"update"|"delete","title":"...","notes":"...","tags":["..."]}]}. Only include changed fields when action is "update".';
-  const aiOut = await callAiChatShared(env, {
-    baseUrl: cfg.base_url, apiKey: cfg.api_key, mode: cfg.mode, model: cfg.model,
-    system,
-    user: `Instruction:\n${prompt}\n\nRows:\n${JSON.stringify(compact)}`,
-    maxTokens: 3500, temperature: 0.1, source: 'cleaner_custom',
-  });
-  const parsed = parseCleanerJson(aiOut.content);
-  const actions = new Map((Array.isArray(parsed?.results) ? parsed.results : []).map((x) => [String(x.id), x]));
-
-  let fixed = 0, deleted = 0, unchanged = 0, failed = 0;
-  const items = [];
-  for (const row of rows) {
-    try {
-      let existingTags = [];
-      try { existingTags = JSON.parse(row.tags || '[]'); } catch (_) {}
-      const act = actions.get(String(row.id));
-      if (!act || act.action === 'keep') {
-        unchanged++;
-        items.push({
-          id: row.id, changed: false, changedFields: [], usedAi: true,
-          before: { url: row.url, title: row.title || '', notes: row.notes || '', tags: existingTags },
-          after: { url: row.url, title: row.title || '', notes: row.notes || '', tags: existingTags },
-        });
-        continue;
-      }
-      if (act.action === 'delete') {
-        if (!dryRun) {
-          await env.DB.prepare(`DELETE FROM ${table} WHERE id = ? AND ${scopeCol} = ?`).bind(row.id, scopeKey).run();
-        }
-        deleted++;
-        items.push({
-          id: row.id, changed: true, deleted: true, changedFields: ['deleted'], usedAi: true,
-          before: { url: row.url, title: row.title || '', notes: row.notes || '', tags: existingTags },
-          after: { url: '', title: '(deleted)', notes: '', tags: [] },
-        });
-        continue;
-      }
-      const nextTitle = typeof act.title === 'string' ? act.title.trim().slice(0, 300) : (row.title || '');
-      const nextNotes = typeof act.notes === 'string' ? act.notes.trim().slice(0, 2000) : (row.notes || '');
-      const nextTags = Array.isArray(act.tags) ? [...new Set(act.tags.map((t) => String(t).trim().replace(/^#+/, '').toLowerCase()).filter(Boolean))].slice(0, 12) : existingTags;
-      const changedFields = [];
-      if (nextTitle !== (row.title || '')) changedFields.push('title');
-      if (nextNotes !== (row.notes || '')) changedFields.push('notes');
-      if (JSON.stringify(nextTags) !== JSON.stringify(existingTags)) changedFields.push('tags');
-      if (!changedFields.length) {
-        unchanged++;
-        items.push({
-          id: row.id, changed: false, changedFields: [], usedAi: true,
-          before: { url: row.url, title: row.title || '', notes: row.notes || '', tags: existingTags },
-          after: { url: row.url, title: nextTitle, notes: nextNotes, tags: nextTags },
-        });
-        continue;
-      }
-      if (!dryRun) {
-        await env.DB.prepare(
-          `UPDATE ${table} SET title = ?, notes = ?, tags = ?, manual_edited_at = ?, last_edited_by = ?, last_edited_by_name = ?, search_blob = NULL WHERE id = ?`
-        ).bind(nextTitle, nextNotes, JSON.stringify(nextTags), Date.now(), user.id, `AI Custom (${actorLabel})`, row.id).run();
-      }
-      fixed++;
-      items.push({
-        id: row.id, changed: true, changedFields, usedAi: true,
-        before: { url: row.url, title: row.title || '', notes: row.notes || '', tags: existingTags },
-        after: { url: row.url, title: nextTitle, notes: nextNotes, tags: nextTags },
-      });
-    } catch (err) {
-      failed++;
-      items.push({ id: row.id, error: err?.message || 'Error' });
-    }
-  }
-  return { processed: rows.length, fixed, deleted, unchanged, failed, items };
+function cleanerAgentDeps() {
+  return {
+    cleanApiBase,
+    normalizeModelId,
+    resolveChatEndpoint,
+    aiUpstreamHeaders,
+    isAllowedAiEndpoint,
+    fetchWithTimeout,
+    generateUrlHash,
+    markMeiliScopeDirty,
+    logActivityEvent,
+  };
 }
 
 async function handleCustomCleaner(request, user, env, corsHeaders) {
@@ -6072,7 +5957,6 @@ async function handleCustomCleaner(request, user, env, corsHeaders) {
     const first = await env.DB.prepare('SELECT id FROM communities ORDER BY created_at DESC LIMIT 1').first();
     scopeKey = first?.id || '';
   }
-  const filter = String(body.filter || 'unedited').toLowerCase();
   const prompt = String(body.prompt || '').trim();
   const includeLinks = body.include_links !== false;
   const includeDocs = body.include_docs !== false;
@@ -6085,184 +5969,90 @@ async function handleCustomCleaner(request, user, env, corsHeaders) {
     return Response.json({ success: false, error: 'Configure an AI provider key in AI settings first' }, { status: 400, headers: corsHeaders });
   }
 
+  await ensureCleanerAgentTable(env);
   await ensureDocumentsTable(env);
-  const table = scope === 'personal' ? 'personal_links' : 'links';
-  const scopeCol = scope === 'personal' ? 'user_id' : 'community_id';
-  const linkCountRow = await env.DB.prepare(`SELECT COUNT(*) AS c FROM ${table} WHERE ${scopeCol} = ?`).bind(scopeKey).first();
-  const docCountRow = await env.DB.prepare(`SELECT COUNT(*) AS c FROM uploaded_documents WHERE scope = ? AND ${scopeCol} = ?`).bind(scope, scopeKey).first();
-  const sampleLinks = (await env.DB.prepare(`SELECT id, url, title, tags FROM ${table} WHERE ${scopeCol} = ? ORDER BY created_at DESC LIMIT 10`).bind(scopeKey).all()).results || [];
-  const sampleDocs = (await env.DB.prepare(`SELECT id, filename FROM uploaded_documents WHERE scope = ? AND ${scopeCol} = ? ORDER BY created_at DESC LIMIT 15`).bind(scope, scopeKey).all()).results || [];
+  const jobId = 'cag_' + Date.now().toString(36) + '_' + randomToken().slice(0, 8);
+  const now = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO cleaner_agent_jobs (id, user_id, scope, scope_key, prompt, dry_run, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)`
+  ).bind(jobId, user.id, scope, scopeKey, prompt, dryRun ? 1 : 0, now, now).run();
 
-  const plannerSystem = `You are Athena's DB Maintenance AI Planner. Given a user instruction and DB summary, output ONLY valid JSON:
-{
-  "kind": "bulk_rule" | "ai_transform_rows" | "answer",
-  "explanation": "1 short sentence describing the plan",
-  "answer": "if kind=answer, concise answer here",
-  "rule": {
-    "target": "links" | "documents" | "both",
-    "operation": "delete" | "add_tags" | "remove_tags",
-    "match": {
-      "filename_ext": ".md",
-      "filename_contains": "",
-      "filename_regex": "",
-      "content_contains": "",
-      "url_contains": "",
-      "url_regex": "",
-      "title_contains": "",
-      "title_regex": "",
-      "notes_contains": "",
-      "has_tag": "",
-      "empty_tags": false
-    },
-    "tags": ["tag1"]
-  }
-}
-Use "bulk_rule" for deterministic pattern/extension/tag deletes or tag additions/removals across many rows (e.g. delete all .md files, delete domain X, add tag #foo to github links).
-Use "ai_transform_rows" when each link needs AI judgment (e.g. rewrite notes, categorize, fix titles, judge spam).
-Use "answer" for read-only questions.`;
-
-  const aiPlanRes = await callAiChatShared(env, {
-    baseUrl: cfg.base_url, apiKey: cfg.api_key, mode: cfg.mode, model: cfg.model,
-    system: plannerSystem,
-    user: JSON.stringify({
-      prompt, scope, includeLinks, includeDocs,
-      totalLinks: Number(linkCountRow?.c || 0),
-      totalDocuments: Number(docCountRow?.c || 0),
-      sampleLinks, sampleDocs,
-    }),
-    maxTokens: 1200, temperature: 0.1, source: 'cleaner_custom_plan',
-  });
-  const plan = parseCleanerJson(aiPlanRes.content);
-  const kind = ['bulk_rule', 'ai_transform_rows', 'answer'].includes(plan?.kind) ? plan.kind : 'answer';
-  const explanation = String(plan?.explanation || '');
-
-  if (kind === 'answer') {
-    return Response.json({
-      success: true, kind: 'answer', explanation, answer: String(plan?.answer || explanation || 'Done.'), items: [],
-    }, { headers: corsHeaders });
-  }
-
-  if (kind === 'bulk_rule') {
-    const rule = plan.rule || {};
-    const target = ['links', 'documents', 'both'].includes(rule.target) ? rule.target : 'both';
-    const op = ['delete', 'add_tags', 'remove_tags'].includes(rule.operation) ? rule.operation : 'delete';
-    const match = rule.match || {};
-    const ruleTags = Array.isArray(rule.tags) ? rule.tags.map((t) => String(t).trim().replace(/^#+/, '').toLowerCase()).filter(Boolean) : [];
-    const items = [];
-    let matchedLinks = 0, matchedDocs = 0, fixed = 0, deleted = 0, failed = 0;
-
-    if (includeLinks && target !== 'documents') {
-      const { results: linkRows } = await env.DB.prepare(
-        `SELECT id, url, title, notes, tags FROM ${table} WHERE ${scopeCol} = ? ${cleanerFilterSql(filter)}`
-      ).bind(scopeKey).all();
-      for (const r of (linkRows || [])) {
-        if (!matchesCleanerRule(r, 'link', match)) continue;
-        matchedLinks++;
-        let existingTags = [];
-        try { existingTags = JSON.parse(r.tags || '[]'); } catch (_) {}
-        if (op === 'delete') {
-          if (!dryRun) {
-            try { await env.DB.prepare(`DELETE FROM ${table} WHERE id = ? AND ${scopeCol} = ?`).bind(r.id, scopeKey).run(); deleted++; }
-            catch (_) { failed++; }
-          }
-          if (items.length < 25) {
-            items.push({ id: r.id, changed: true, deleted: true, changedFields: ['deleted'], usedAi: true,
-              before: { url: r.url, title: r.title || '', notes: r.notes || '', tags: existingTags },
-              after: { url: '', title: '(deleted)', notes: '', tags: [] } });
-          }
-        } else {
-          const nextTags = op === 'add_tags'
-            ? [...new Set([...existingTags, ...ruleTags])].slice(0, 12)
-            : existingTags.filter((t) => !ruleTags.includes(String(t).toLowerCase()));
-          if (JSON.stringify(nextTags) === JSON.stringify(existingTags)) continue;
-          if (!dryRun) {
-            try {
-              await env.DB.prepare(`UPDATE ${table} SET tags = ?, search_blob = NULL WHERE id = ?`).bind(JSON.stringify(nextTags), r.id).run();
-              fixed++;
-            } catch (_) { failed++; }
-          }
-          if (items.length < 25) {
-            items.push({ id: r.id, changed: true, changedFields: ['tags'], usedAi: true,
-              before: { url: r.url, title: r.title || '', notes: r.notes || '', tags: existingTags },
-              after: { url: r.url, title: r.title || '', notes: r.notes || '', tags: nextTags } });
-          }
-        }
-      }
-    }
-
-    if (includeDocs && target !== 'links' && op === 'delete') {
-      const { results: docRows } = await env.DB.prepare(
-        `SELECT id, filename, content FROM uploaded_documents WHERE scope = ? AND ${scopeCol} = ?`
-      ).bind(scope, scopeKey).all();
-      for (const d of (docRows || [])) {
-        if (!matchesCleanerRule(d, 'doc', match)) continue;
-        matchedDocs++;
-        if (!dryRun) {
-          try { await env.DB.prepare('DELETE FROM uploaded_documents WHERE id = ?').bind(d.id).run(); deleted++; }
-          catch (_) { failed++; }
-        }
-        if (items.length < 25) {
-          items.push({ id: d.id, changed: true, deleted: true, changedFields: ['deleted'], usedAi: true,
-            before: { url: `doc://${d.filename}`, title: d.filename, notes: String(d.content || '').slice(0, 100), tags: [] },
-            after: { url: '', title: '(deleted)', notes: '', tags: [] } });
-        }
-      }
-    }
-
-    if (!dryRun && (fixed > 0 || deleted > 0)) {
-      markMeiliScopeDirty(env, scope, scopeKey);
-      await logActivityEvent(env, {
-        action: '🤖 AI Custom DB Cleaner',
-        actorUser: user,
-        details: `${explanation} · Updated: ${fixed} · Deleted: ${deleted} (${scope})`,
-        scope, scopeKey,
-      });
-    }
-    return Response.json({
-      success: true, kind: 'bulk_rule', explanation, dry_run: dryRun,
-      matched_links: matchedLinks, matched_docs: matchedDocs, fixed, deleted, failed, items,
-    }, { headers: corsHeaders });
-  }
-
-  // ai_transform_rows
-  const { results: candidateRows } = await env.DB.prepare(
-    `SELECT id FROM ${table} WHERE ${scopeCol} = ? ${cleanerFilterSql(filter)} ORDER BY created_at DESC`
-  ).bind(scopeKey).all();
-  const allIds = (candidateRows || []).map((r) => String(r.id));
   const actorLabel = await resolveActorTgLabel(env, user);
-  const preview = allIds.length
-    ? await runCustomBatchOnRows(env, { scope, scopeKey, prompt, ids: allIds.slice(0, 10), dryRun: true, user, cfg, actorLabel })
-    : { items: [] };
-  return Response.json({
-    success: true, kind: 'ai_transform_rows', scope_key: scopeKey, explanation,
-    total: allIds.length, ids: allIds, items: preview.items,
-  }, { headers: corsHeaders });
+  runInBackground(env, runCleanerAgentJob(env, jobId, {
+    user, cfg, includeLinks, includeDocs, actorLabel, deps: cleanerAgentDeps(),
+  }));
+
+  return Response.json({ success: true, job_id: jobId, scope_key: scopeKey }, { headers: corsHeaders });
 }
 
-async function handleCustomCleanerBatch(request, user, env, corsHeaders) {
+async function handleGetCleanerAgentJob(jobId, user, env, corsHeaders) {
   if (!user) return deny(corsHeaders, 'Authentication required');
   if (!(await isInstanceOwnerUserAsync(user, env))) {
     return deny(corsHeaders, 'DB Cleaner is GOD rank only', 'GOD_ONLY');
   }
-  const body = await request.json().catch(() => ({}));
-  const scope = String(body.scope || 'community').toLowerCase();
-  const scopeKey = scope === 'personal' ? user.id : String(body.community_id || '').trim();
-  const prompt = String(body.prompt || '').trim();
-  const dryRun = Boolean(body.dry_run);
-  const ids = Array.isArray(body.ids) ? body.ids.map(String).slice(0, 20) : [];
-  if (!scopeKey || !prompt || !ids.length) {
-    return Response.json({ success: false, error: 'scope_key, prompt, and ids required' }, { status: 400, headers: corsHeaders });
+  await ensureCleanerAgentTable(env);
+  const row = await env.DB.prepare('SELECT * FROM cleaner_agent_jobs WHERE id = ?').bind(String(jobId || '')).first();
+  if (!row) return Response.json({ success: false, error: 'Agent job not found' }, { status: 404, headers: corsHeaders });
+  let logs = [], stagedOps = [], diffs = [];
+  try { logs = JSON.parse(row.logs_json || '[]'); } catch (_) {}
+  try { stagedOps = JSON.parse(row.staged_ops_json || '[]'); } catch (_) {}
+  try { diffs = JSON.parse(row.diffs_json || '[]'); } catch (_) {}
+  return Response.json({
+    success: true,
+    job: {
+      id: row.id,
+      scope: row.scope,
+      scope_key: row.scope_key,
+      dry_run: Number(row.dry_run) !== 0,
+      status: row.status,
+      step_count: Number(row.step_count || 0),
+      logs,
+      staged_count: stagedOps.length,
+      diffs,
+      summary: row.summary || '',
+      error: row.error || '',
+      applied_count: Number(row.applied_count || 0),
+    },
+  }, { headers: corsHeaders });
+}
+
+async function handleStopCleanerAgentJob(jobId, user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  if (!(await isInstanceOwnerUserAsync(user, env))) {
+    return deny(corsHeaders, 'DB Cleaner is GOD rank only', 'GOD_ONLY');
   }
-  const cfg = await getInstanceAiConfig(env).catch(() => null);
-  if (!cfg?.api_key) {
-    return Response.json({ success: false, error: 'AI key not configured' }, { status: 400, headers: corsHeaders });
+  await ensureCleanerAgentTable(env);
+  await env.DB.prepare("UPDATE cleaner_agent_jobs SET status = 'stopping', updated_at = ? WHERE id = ? AND status = 'running'")
+    .bind(Date.now(), String(jobId || '')).run();
+  return Response.json({ success: true }, { headers: corsHeaders });
+}
+
+async function handleApplyCleanerAgentJob(jobId, user, env, corsHeaders) {
+  if (!user) return deny(corsHeaders, 'Authentication required');
+  if (!(await isInstanceOwnerUserAsync(user, env))) {
+    return deny(corsHeaders, 'DB Cleaner is GOD rank only', 'GOD_ONLY');
+  }
+  await ensureCleanerAgentTable(env);
+  const row = await env.DB.prepare('SELECT * FROM cleaner_agent_jobs WHERE id = ?').bind(String(jobId || '')).first();
+  if (!row) return Response.json({ success: false, error: 'Agent job not found' }, { status: 404, headers: corsHeaders });
+  let stagedOps = [];
+  try { stagedOps = JSON.parse(row.staged_ops_json || '[]'); } catch (_) {}
+  if (!stagedOps.length) {
+    return Response.json({ success: true, applied: 0, failed: 0 }, { headers: corsHeaders });
   }
   const actorLabel = await resolveActorTgLabel(env, user);
-  const out = await runCustomBatchOnRows(env, { scope, scopeKey, prompt, ids, dryRun, user, cfg, actorLabel });
-  if (!dryRun && (out.fixed > 0 || out.deleted > 0)) {
-    markMeiliScopeDirty(env, scope, scopeKey);
-  }
-  return Response.json({ success: true, ...out }, { headers: corsHeaders });
+  const res = await applyStagedMutations(env, {
+    scope: row.scope,
+    scopeKey: row.scope_key,
+    ops: stagedOps,
+    user,
+    actorLabel,
+    deps: cleanerAgentDeps(),
+  });
+  await env.DB.prepare('UPDATE cleaner_agent_jobs SET applied_count = ?, dry_run = 0, updated_at = ? WHERE id = ?')
+    .bind(res.applied, Date.now(), row.id).run();
+  return Response.json({ success: true, ...res }, { headers: corsHeaders });
 }
 
 async function handleAdminGetLinks(url, user, env, corsHeaders) {

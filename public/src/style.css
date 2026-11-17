@@ -5004,6 +5004,50 @@ body.feed-active .scope-switch-container,
   color: var(--text-main);
   white-space: pre-wrap;
 }
+.mcp-profile-wrap {
+  margin: 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mcp-profile-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text-main);
+}
+.mcp-role-box {
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: var(--surface-2, rgba(255, 255, 255, 0.03));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mcp-role-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.82rem;
+}
+.mcp-role-status {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+.mcp-role-actions,
+.mcp-url-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.mcp-url-row .input {
+  flex: 1;
+  min-width: 0;
+  font-family: monospace;
+  font-size: 0.74rem;
+}
 
 .mobile-bottom-nav {
   display: none;
