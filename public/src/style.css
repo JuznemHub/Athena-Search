@@ -2641,11 +2641,11 @@ body.feed-active .scope-switch-container,
   --frss-text: #0f172a;
   --frss-text-secondary: #334155;
   --frss-text-muted: #475569;
-  --frss-accent: #0369a1;
-  --frss-accent-strong: #0284c7;
-  --frss-accent-fg: #000;
-  --frss-accent-soft: rgba(2, 132, 199, 0.12);
-  --frss-accent-border: rgba(2, 132, 199, 0.38);
+  --frss-accent: var(--accent-text, #0369a1);
+  --frss-accent-strong: var(--accent, #0284c7);
+  --frss-accent-fg: var(--accent-fg, #000);
+  --frss-accent-soft: var(--accent-soft, rgba(2, 132, 199, 0.12));
+  --frss-accent-border: var(--accent-border, rgba(2, 132, 199, 0.38));
   --frss-personal-bg: rgba(126, 34, 206, 0.1);
   --frss-personal-text: #6b21a8;
   --frss-personal-border: rgba(126, 34, 206, 0.32);
@@ -2688,8 +2688,8 @@ body.feed-active .scope-switch-container,
   --frss-text-secondary: #eef1f5;
   --frss-text-muted: #d0d6e1;
   --frss-accent: #9cc5ff;
-  --frss-accent-strong: #0a84ff;
-  --frss-accent-fg: #000;
+  --frss-accent-strong: var(--accent, #0a84ff);
+  --frss-accent-fg: var(--accent-fg, #000);
 }
 
 .freshrss-view.hidden {
