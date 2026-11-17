@@ -5037,6 +5037,62 @@ body.feed-active .scope-switch-container,
   #sessionTokenBtn {
     display: none !important;
   }
+  /* Feed: the bottom nav already goes back to Search, so the header button
+     goes. Tools become three rows: state tabs, icon actions, sort. The
+     floating article arrows covered content, and scrolling does the same job. */
+  #freshrssCloseBtn,
+  .nav_entries {
+    display: none !important;
+  }
+  .freshrss-scope-btn,
+  .freshrss-header-select {
+    min-height: 44px;
+  }
+  .freshrss-header-select {
+    flex: 1 1 100%;
+    width: 100% !important;
+    max-width: none !important;
+  }
+  .freshrss-nav-menu {
+    gap: 6px 3px;
+    padding: 6px 8px;
+    justify-content: flex-start;
+  }
+  .freshrss-toolbar-left,
+  .freshrss-toolbar-right {
+    display: contents;
+  }
+  .freshrss-nav-menu .group {
+    gap: 3px;
+  }
+  .freshrss-state-tabs {
+    order: -1;
+    flex: 1 1 100%;
+    flex-wrap: nowrap !important;
+  }
+  .freshrss-state-tab {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 0 4px !important;
+    font-size: 0.8rem !important;
+  }
+  .freshrss-state-tab .icon {
+    display: none;
+  }
+  .freshrss-nav-menu .btn:not(.freshrss-state-tab) {
+    width: 42px;
+    min-width: 42px;
+    padding: 0 !important;
+  }
+  .freshrss-sort-group,
+  .freshrss-sort-dropdown {
+    flex: 1 1 100%;
+  }
+  .freshrss-nav-menu #freshrssSortToggleBtn {
+    width: 100%;
+    justify-content: flex-start;
+    padding: 0 12px !important;
+  }
   /* Saved opens as a full-screen sheet above the bottom nav, like the other tabs. */
   #bookmarksModal {
     padding: 0;
