@@ -206,5 +206,11 @@ assert(htmlContent.includes('value="1d"'), 'index.html must offer 24 Hours share
 assert(htmlContent.includes('data-public-wiki'), 'index.html must apply synchronous data-public-wiki attribute');
 assert(jsContent.includes('formatShareExpiry'), 'main.js must format share link expirations with time precision');
 assert(jsContent.includes('telegramAppChooserBtn'), 'main.js must wire Telegram client chooser button');
+assert(jsContent.includes('wiki-edit-btn'), 'main.js must render Edit button on authenticated wiki cards');
+assert(jsContent.includes('wiki-del-btn'), 'main.js must render Delete button on authenticated wiki cards');
+assert(jsContent.includes('wiki-ai-btn'), 'main.js must render AI enrich button on authenticated wiki cards');
+assert(cssContent.includes('body.public-wiki-only .wiki-edit-btn'), 'style.css must hide edit button on public wiki share links');
+assert(cssContent.includes('body.public-wiki-only .wiki-del-btn'), 'style.css must hide delete button on public wiki share links');
+assert(cssContent.includes('body.public-wiki-only .wiki-ai-btn'), 'style.css must hide AI button on public wiki share links');
 
 console.log('FMHY wiki taxonomy and classification tests passed.');

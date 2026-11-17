@@ -298,7 +298,7 @@ body::before {
 .drawer-overlay {
   position: fixed !important;
   inset: 0 !important;
-  z-index: 200 !important;
+  z-index: 960 !important;
   background: rgba(0, 0, 0, 0.62) !important;
   opacity: 0;
   visibility: hidden;
@@ -318,7 +318,7 @@ body::before {
   width: min(400px, 100vw) !important;
   height: 100% !important;
   max-height: 100dvh !important;
-  z-index: 210 !important;
+  z-index: 970 !important;
   background: var(--drawer-bg) !important;
   border-right: 1px solid var(--hairline) !important;
   backdrop-filter: blur(var(--blur)) saturate(180%);
@@ -354,22 +354,22 @@ body::before {
 .logo-text .highlight { color: var(--accent) !important; }
 
 .theme-switcher {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(92px, 100%), 1fr));
+  gap: clamp(6px, 1.8cqi, 8px);
 }
 .theme-switcher .theme-chip {
-  flex: 1 1 calc(50% - 8px);
-  padding: 10px 12px;
-  border-radius: 12px;
+  padding: calc(clamp(6px, 1.8cqi, 9px) * var(--ui-scale, 1)) clamp(8px, 2cqi, 11px);
+  border-radius: 10px;
   border: 1px solid var(--hairline);
   background: var(--surface);
   color: var(--text-dim);
-  font-size: 0.8rem;
+  font-size: calc(clamp(0.74rem, 2.1cqi, 0.82rem) * var(--ui-scale, 1));
   font-weight: 600;
   font-family: var(--font-sans);
   cursor: pointer;
   white-space: nowrap;
+  min-height: calc(34px * var(--ui-scale, 1));
   transition: color var(--dur-1) var(--ease), background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
 }
 .theme-switcher .theme-chip:hover {
@@ -815,12 +815,10 @@ body::before {
 /* Phones: roomier search bar, taller tap targets, and result rows that
    don't crush the favicon + action row against 320px screens. */
 @media (max-width: 720px) {
-  .search-bar-box { padding: var(--s-2) var(--s-2); border-radius: var(--radius-md, 14px); }
-  .search-bar-box #searchInput { min-height: 44px; }
-  .g-result { padding: var(--s-2) var(--s-2); }
-  .g-title { font-size: 1rem; }
+  .search-bar-box { padding: calc(var(--s-2) * var(--ui-scale, 1)); border-radius: var(--radius-md, 14px); }
+  .search-bar-box #searchInput { min-height: 40px; }
   .g-cite { white-space: normal; overflow-wrap: anywhere; }
-  .hero-sub { font-size: 0.95rem !important; }
+  .hero-sub { font-size: calc(0.88rem * var(--ui-scale, 1)) !important; }
   /* Bottom scope bar must never overlap the last result on short phones. */
   .main-content { padding-bottom: max(140px, env(safe-area-inset-bottom) + 110px) !important; }
   .chat-answer-content table { display: block; overflow-x: auto; }
@@ -862,7 +860,7 @@ body::before {
   -webkit-backdrop-filter: none;
 }
 .glass-blur-control { margin-top: 16px; }
-:root:not([data-theme="glass"]) .glass-blur-control { display: none; }
+:root:not([data-theme="glass"]) .glass-blur-control:not(.display-scale-control) { display: none; }
 .glass-blur-heading { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; color: var(--text); font-size: 0.875rem; }
 .glass-blur-heading output { color: var(--text-dim); font-variant-numeric: tabular-nums; }
 .glass-blur-control input[type="range"] { display: block; width: 100%; min-height: 44px; accent-color: var(--accent); cursor: pointer; }
