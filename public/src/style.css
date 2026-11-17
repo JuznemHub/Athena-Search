@@ -1156,6 +1156,20 @@ body, .g-result, .side-drawer, .search-bar-box, .modal, #toast { transition: bac
   border-color: var(--accent-border);
   color: var(--accent);
 }
+.main-filter-fields { display: contents; }
+.main-filters-toggle-btn { display: none; }
+.main-filters-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--accent-fg, #08080f);
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
 
 /* Tag Cloud Card */
 .main-tags-card {
@@ -4862,24 +4876,33 @@ body.feed-active .scope-switch-container {
     gap: 6px;
     padding: 0;
   }
+  .main-filters-toggle-btn { display: inline-flex; }
+  .main-filter-fields {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-row: 2;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .main-filter-fields.is-collapsed { display: none; }
   .main-ctrl-group {
     min-width: 0;
-    justify-content: space-between;
+    flex-direction: column;
+    align-items: stretch;
     gap: 4px;
   }
   .main-ctrl-group label {
-    font-size: 0.68rem;
-    flex-shrink: 0;
+    font-size: 0.72rem;
+    padding-left: 4px;
   }
   .main-ctrl-group select {
-    flex: 1;
+    width: 100%;
     min-width: 0;
-    height: 36px;
-    padding: 0 22px 0 8px;
-    font-size: 0.8rem;
+    height: 44px;
+    padding: 0 26px 0 12px;
   }
   .main-tag-toggle-btn {
-    height: 36px;
+    height: 44px;
     justify-content: center;
   }
   .main-tags-card {

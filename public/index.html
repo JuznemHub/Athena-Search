@@ -180,6 +180,12 @@
         <!-- Main Database & Filter Controls Panel -->
         <div class="main-db-panel" id="mainDbPanel">
           <div class="main-db-controls">
+            <button type="button" id="mainFiltersToggleBtn" class="btn btn-secondary btn-sm main-tag-toggle-btn main-filters-toggle-btn" aria-expanded="false" aria-controls="mainFilterFields">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"></line><line x1="7" y1="12" x2="17" y2="12"></line><line x1="10" y1="18" x2="14" y2="18"></line></svg>
+              <span>Filters</span>
+              <span class="main-filters-count hidden" id="mainFiltersCount"></span>
+            </button>
+            <div class="main-filter-fields" id="mainFilterFields">
             <div class="main-ctrl-group">
               <label for="mainScopeSelect">Scope</label>
               <select id="mainScopeSelect" class="input input-sm">
@@ -207,6 +213,7 @@
                 <option value="created_asc">Oldest added</option>
                 <option value="title_asc">Title (A–Z)</option>
               </select>
+            </div>
             </div>
             <button type="button" id="mainTagsToggleBtn" class="btn btn-secondary btn-sm main-tag-toggle-btn" aria-expanded="true" aria-controls="mainTagsCard" title="Toggle tag cloud">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg>

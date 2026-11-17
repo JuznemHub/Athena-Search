@@ -2114,6 +2114,7 @@ document.addEventListener('DOMContentLoaded', () => {
           state.filterTag = '';
           state.filterStatus = 'all';
           if ($('mainStatusSelect')) $('mainStatusSelect').value = 'all';
+          updateFiltersCount();
           renderMainTags();
           renderHome();
         });
@@ -4354,6 +4355,19 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // Mobile hides the filter dropdowns; the count keeps a narrowed search visible.
+  function updateFiltersCount() {
+    const badge = $('mainFiltersCount');
+    if (!badge) return;
+    const changed = [
+      ($('mainStatusSelect')?.value || 'all') !== 'all',
+      ($('mainSortSelect')?.value || 'created_desc') !== 'created_desc'
+    ].filter(Boolean).length;
+    badge.textContent = changed ? String(changed) : '';
+    badge.classList.toggle('hidden', !changed);
+    $('mainFiltersToggleBtn')?.setAttribute('aria-label', changed ? `Filters, ${changed} active` : 'Filters');
+  }
+
   function setupMainDbEvents() {
     const scopeSel = $('mainScopeSelect');
     if (scopeSel) {
@@ -4414,6 +4428,18 @@ document.addEventListener('DOMContentLoaded', () => {
         state.filterSort = e.target.value;
         runSearch();
       });
+    }
+
+    const filtersBtn = $('mainFiltersToggleBtn');
+    const filterFields = $('mainFilterFields');
+    if (filtersBtn && filterFields) {
+      filterFields.classList.add('is-collapsed');
+      filtersBtn.addEventListener('click', () => {
+        const collapsed = filterFields.classList.toggle('is-collapsed');
+        filtersBtn.setAttribute('aria-expanded', String(!collapsed));
+      });
+      filterFields.addEventListener('change', updateFiltersCount);
+      updateFiltersCount();
     }
 
     const tagsToggleBtn = $('mainTagsToggleBtn');
