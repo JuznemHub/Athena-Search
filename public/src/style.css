@@ -1693,10 +1693,20 @@ body.public-wiki-only .brand-logo {
   flex-shrink: 0;
 }
 .wiki-cat-arrow {
-  font-size: 0.72rem;
+  /* The ▸/▾ glyphs render as specks at this size; draw a chevron instead. */
+  font-size: 0;
+  width: 6px;
+  height: 6px;
+  margin: 0 4px 2px 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
   color: var(--text-muted);
-  line-height: 1;
   transition: transform var(--dur-1) var(--ease);
+}
+.wiki-cat-item.active .wiki-cat-arrow {
+  transform: rotate(45deg);
+  margin-bottom: 4px;
 }
 .wiki-cat-item.active .wiki-cat-arrow {
   color: var(--accent-bright, #a78bfa);
