@@ -449,7 +449,7 @@ body {
   background: rgba(255, 255, 255, 0.05);
 }
 .mode-pill.active {
-  color: #fff !important;
+  color: var(--accent-fg, #000) !important;
   background: var(--accent) !important;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
   font-weight: 600;
@@ -468,7 +468,7 @@ body {
   cursor: pointer; display: flex; align-items: center; gap: 6px;
   transition: color var(--dur-1) var(--ease), background-color var(--dur-1) var(--ease);
 }
-.scope-btn.active { background: var(--accent-gradient); color: #fff; }
+.scope-btn.active { background: var(--accent-gradient); color: var(--accent-fg, #000); }
 
 /* Drawer: keep overlay blur-free so opening drawer does not force a full-screen GPU pass over long lists */
 .drawer-overlay {
@@ -642,7 +642,7 @@ body {
 .notif-bell { position: relative; }
 .notif-badge {
   position: absolute; top: 2px; right: 2px; min-width: 16px; height: 16px; padding: 0 4px;
-  border-radius: 999px; background: var(--danger-color, #e02444); color: #fff;
+  border-radius: 999px; background: #c4183c; color: #fff;
   font-size: 0.72rem; font-weight: 700; display: flex; align-items: center; justify-content: center;
 }
 .notif-panel {
@@ -2602,6 +2602,7 @@ body.feed-active .scope-switch-container,
   --frss-text-muted: #a1a1a1;
   --frss-accent: var(--serp-link, #70b2ff);
   --frss-accent-strong: var(--accent, #0072f5);
+  --frss-accent-fg: var(--accent-fg, #000);
   --frss-accent-soft: var(--accent-soft, rgba(0, 114, 245, 0.18));
   --frss-accent-border: var(--accent-border, rgba(0, 114, 245, 0.4));
   --frss-personal-bg: rgba(168, 85, 247, 0.16);
@@ -2635,6 +2636,7 @@ body.feed-active .scope-switch-container,
   --frss-text-muted: #475569;
   --frss-accent: #0369a1;
   --frss-accent-strong: #0284c7;
+  --frss-accent-fg: #000;
   --frss-accent-soft: rgba(2, 132, 199, 0.12);
   --frss-accent-border: rgba(2, 132, 199, 0.38);
   --frss-personal-bg: rgba(126, 34, 206, 0.1);
@@ -2680,6 +2682,7 @@ body.feed-active .scope-switch-container,
   --frss-text-muted: #d0d6e1;
   --frss-accent: #9cc5ff;
   --frss-accent-strong: #0a84ff;
+  --frss-accent-fg: #000;
 }
 
 .freshrss-view.hidden {
@@ -3400,7 +3403,7 @@ body.feed-active .scope-switch-container,
 .aside_feed .tree-folder.active > .tree-folder-title .badge,
 .aside_feed .badge.has-unread {
   background: var(--frss-accent-strong);
-  color: #ffffff;
+  color: var(--frss-accent-fg);
 }
 
 .aside_feed .dropdown-toggle {

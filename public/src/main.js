@@ -3503,7 +3503,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     root.style.setProperty('--accent', hex);
     const rgb = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255);
-    const luminance = rgb.map(c => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2)
+    const luminance = rgb.map(c => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)
       .reduce((sum, c, i) => sum + c * [0.2126, 0.7152, 0.0722][i], 0);
     const fg = (luminance + 0.05) / 0.05 >= 1.05 / (luminance + 0.05) ? '#000000' : '#ffffff';
     root.style.setProperty('--accent-fg', fg);
