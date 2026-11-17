@@ -5749,6 +5749,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!data?.success) return;
 
       feedState.categories = data.categories || [];
+      feedState.sourcesLoaded = true;
       feedState.totalUnread = data.total_unread || 0;
       feedState.totalImportantUnread = data.total_important_unread ?? 0;
       feedState.totalStarred = data.total_starred || 0;
@@ -5758,6 +5759,8 @@ document.addEventListener('DOMContentLoaded', () => {
       renderFeedSidebar();
       if (feedState.viewMode === 'global') {
         renderFeedGlobalView();
+      } else if (!feedState.articles.length) {
+        renderFeedArticles();
       }
     } catch (err) {
       console.warn('[feed] loadFeedSources failed:', err);
@@ -6223,6 +6226,19 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderFeedArticles() {
     const listEl = $('freshrssArticlesList');
     if (!listEl) return;
+
+    if (!feedState.articles.length && feedState.sourcesLoaded && !feedState.categories.length && !feedState.search) {
+      const where = feedState.communityId === 'personal' ? 'your Personal feeds' : 'this community';
+      listEl.innerHTML = `
+        <div class="freshrss-empty-state">
+          <h3>No feeds yet</h3>
+          <p>Nothing is subscribed in ${escapeHtml(where)}. Add a site's RSS feed and new articles will show up here.</p>
+          <button type="button" class="btn btn-secondary btn-sm" id="freshrssEmptyAddBtn">+ Add subscription</button>
+        </div>
+      `;
+      $('freshrssEmptyAddBtn')?.addEventListener('click', () => $('freshrssSidebarAddBtn')?.click());
+      return;
+    }
 
     if (!feedState.articles.length) {
       const isUnreadOnly = feedState.stateFilter === 'unread';
