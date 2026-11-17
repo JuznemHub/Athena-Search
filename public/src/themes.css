@@ -574,15 +574,6 @@ body::before {
     transform: none !important;
   }
 }
-@media (max-width: 768px) {
-  .scope-switch-container {
-    left: 50% !important;
-    right: auto !important;
-    transform: translateX(-50%) !important;
-    bottom: calc(76px + env(safe-area-inset-bottom, 0px)) !important;
-    z-index: 940 !important;
-  }
-}
 .scope-btn.active {
   background: var(--accent-gradient) !important;
   color: var(--accent-fg, #08080f) !important;

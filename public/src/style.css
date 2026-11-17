@@ -2582,7 +2582,8 @@ body.feed-active .main-content {
   align-items: stretch !important;
 }
 
-body.feed-active .scope-switch-container {
+body.feed-active .scope-switch-container,
+.scope-switch-container.is-member {
   display: none !important;
 }
 
@@ -4852,23 +4853,9 @@ body.feed-active .scope-switch-container {
   .top-bar .bookmarks-nav-btn {
     display: none !important;
   }
+  /* Scope is in the Filters panel on phones; the floating pill covered results. */
   .scope-switch-container {
-    left: 50% !important;
-    right: auto !important;
-    transform: translateX(-50%);
-    bottom: calc(76px + env(safe-area-inset-bottom, 0px)) !important;
-    z-index: 940 !important;
-    width: auto !important;
-    max-width: calc(100vw - 24px);
-  }
-  .scope-switch {
-    padding: 3px;
-    width: auto;
-  }
-  .scope-btn {
-    min-height: 36px;
-    padding: 5px 14px;
-    font-size: 0.78rem;
+    display: none !important;
   }
   .main-db-controls {
     display: grid;

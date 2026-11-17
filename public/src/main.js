@@ -1010,6 +1010,8 @@ document.addEventListener('DOMContentLoaded', () => {
         ? 'Register a Telegram bot with its token and your DM chat ID. In a group, run /community_verify.'
         : 'The instance owner adds and changes bots.';
     }
+    // Members can only use Community scope, so the switch has nothing to switch.
+    document.querySelector('.scope-switch-container')?.classList.toggle('is-member', !god);
     if (personalScopeBtn) {
       personalScopeBtn.classList.toggle('scope-locked', !god);
       personalScopeBtn.title = god ? 'Personal' : 'Personal locked — GOD rank only';
