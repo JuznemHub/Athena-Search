@@ -1407,7 +1407,7 @@ document.addEventListener('DOMContentLoaded', () => {
         state.communities.forEach(c => {
           const opt = document.createElement('option');
           opt.value = c.id;
-          opt.textContent = `${c.name}${c.link_count != null ? ` (${c.link_count})` : ''}`;
+          opt.textContent = `${c.name}${c.link_count != null ? ` (${Number(c.link_count).toLocaleString()})` : ''}`;
           if (c.id === state.activeCommunity) opt.selected = true;
           mainCommSel.appendChild(opt);
         });
@@ -2335,7 +2335,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const q = resultsRenderState.query;
     const filterSummary = state.filterTag ? ` in #${state.filterTag}` : '';
     const total = resultsRenderState.corpusTotal;
-    resultsMeta.textContent = `${count} link${count === 1 ? '' : 's'}${q ? ` for “${q}”` : filterSummary}${total != null && total !== count ? ` · ${total} total in scope` : ''}`;
+    resultsMeta.textContent = `${count.toLocaleString()} link${count === 1 ? '' : 's'}${q ? ` for “${q}”` : filterSummary}${total != null && total !== count ? ` · ${Number(total).toLocaleString()} total in scope` : ''}`;
   }
 
   function appendNextResultBatch() {
@@ -3843,7 +3843,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const active = adminDbState.tag.toLowerCase() === t.name.toLowerCase();
       return `<button type="button" class="admin-tag-chip ${active ? 'active' : ''}" data-tag="${escapeHtml(t.name)}">
         <span>#${escapeHtml(t.name)}</span>
-        <span class="admin-tag-count">(${t.count})</span>
+        <span class="admin-tag-count">(${Number(t.count).toLocaleString()})</span>
       </button>`;
     }).join('');
 
