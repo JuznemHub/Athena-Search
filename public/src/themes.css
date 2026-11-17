@@ -661,8 +661,8 @@ body::before {
   padding: 18px 20px !important;
 }
 .drawer-content {
-  padding: var(--s-4) !important;
-  gap: var(--s-3) !important;
+  padding: var(--s-4);
+  gap: var(--s-3);
   overflow-y: auto;
   flex: 1;
 }
@@ -716,7 +716,8 @@ body::before {
   .brand-logo .logo-text { font-size: 0.95rem !important; }
   .scope-switch { width: auto; max-width: calc(100vw - 24px); }
   .scope-btn { flex: 0 1 auto; justify-content: center; min-height: 36px; padding: 5px 14px; font-size: 0.78rem; }
-  .side-drawer { width: 100% !important; }
+  /* Leave a strip of the page visible so the drawer reads as a panel and can be tapped away. */
+  .side-drawer { width: calc(100vw - 48px) !important; }
   /* Under 16px, iOS Safari zooms the page on focus and never zooms back. */
   .search-bar-box input, .search-bar-box #searchInput,
   .form-group input, .form-group textarea, .form-group select,

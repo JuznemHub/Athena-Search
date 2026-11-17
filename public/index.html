@@ -1018,7 +1018,7 @@
         </div>
       </div>
 
-      <div class="drawer-section" id="backendSection">
+      <div class="drawer-section" id="backendSection" data-collapsible>
         <h3>Backend</h3>
         <p class="section-desc">GOD sets one API backend for this instance. Every account uses that backend and its storage.</p>
         <label class="field-label" for="backendUrl">Backend URL</label>
@@ -1027,7 +1027,7 @@
         <div id="backendStatus" class="status-msg mt-2"></div>
       </div>
 
-      <div class="drawer-section auth-only" id="storageSection">
+      <div class="drawer-section auth-only" id="storageSection" data-collapsible>
         <h3>Storage backend <span id="storageGodBadge" class="lock-badge hidden">GOD</span></h3>
         <p class="section-desc" id="storageDesc">PostgreSQL is the only store. Set <code>DATABASE_URL</code> on the server.</p>
         <div id="storageSettingsBody">
@@ -1040,7 +1040,7 @@
         <div id="storageStatus" class="status-msg mt-2"></div>
       </div>
 
-      <div class="drawer-section auth-only" id="aiSettingsSection">
+      <div class="drawer-section auth-only" id="aiSettingsSection" data-collapsible>
         <h3>AI assistant <span id="aiLockBadge" class="lock-badge hidden" title="GOD only credentials">GOD only</span></h3>
         <p class="section-desc" id="aiSettingsDesc">Chat available to all ranks. API credentials are set by GOD rank (instance host) only.</p>
         <div id="aiSettingsBody">
@@ -1121,7 +1121,7 @@
         </div>
       </div>
 
-      <div class="drawer-section auth-only" id="botSettingsSection">
+      <div class="drawer-section auth-only" id="botSettingsSection" data-collapsible>
         <h3>Bot (personal) <span id="botGodBadge" class="lock-badge hidden" title="GOD only edit">GOD only</span></h3>
         <p class="section-desc" id="botSettingsDesc">Visible to all ranks. Only GOD rank can add/change the bot. Communities: <code>/community_verify</code> in group.</p>
         <div id="botSettingsBody">
@@ -1141,7 +1141,7 @@
         <div id="botStatus" class="status-msg mt-2">1) DM the bot → /id  2) Paste token + chat ID  3) Add bot to a group → /community_verify</div>
       </div>
 
-      <div class="drawer-section auth-only">
+      <div class="drawer-section auth-only" data-collapsible>
         <h3>Communities</h3>
         <p class="section-desc">Linked via Telegram: add bot to group, owner sends <code>/community_verify</code>. Select one to browse on the site.</p>
         <div class="form-group">

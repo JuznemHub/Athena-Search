@@ -7506,6 +7506,32 @@ document.addEventListener('DOMContentLoaded', () => {
     update();
   }
 
+  // Long settings groups start collapsed; the heading becomes a real button
+  // so keyboard and screen-reader users can expand them.
+  function setupCollapsibleDrawerSections() {
+    document.querySelectorAll('.drawer-section[data-collapsible]').forEach((section, i) => {
+      const heading = section.querySelector(':scope > h3');
+      if (!heading || heading.querySelector('.drawer-section-toggle')) return;
+      const body = document.createElement('div');
+      body.className = 'drawer-section-body';
+      body.id = section.id ? `${section.id}Body` : `drawerSectionBody${i}`;
+      while (heading.nextSibling) body.appendChild(heading.nextSibling);
+      section.appendChild(body);
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'drawer-section-toggle';
+      toggle.setAttribute('aria-expanded', 'false');
+      toggle.setAttribute('aria-controls', body.id);
+      while (heading.firstChild) toggle.appendChild(heading.firstChild);
+      heading.appendChild(toggle);
+      section.classList.add('is-collapsed');
+      toggle.addEventListener('click', () => {
+        const open = section.classList.toggle('is-collapsed') === false;
+        toggle.setAttribute('aria-expanded', String(open));
+      });
+    });
+  }
+
   function setupEventListeners() {
     initThemeUI();
     initGlassBlur();
@@ -7537,6 +7563,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (closeDrawerBtn) closeDrawerBtn.addEventListener('click', closeDrawer);
     if (drawerOverlay) drawerOverlay.addEventListener('click', closeDrawer);
+    setupCollapsibleDrawerSections();
 
     const sessionTokenBtn = $('sessionTokenBtn');
     if (sessionTokenBtn) {

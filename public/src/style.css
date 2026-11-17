@@ -506,6 +506,22 @@ body {
   font-size: 0.8rem; font-weight: 600; text-transform: uppercase;
   letter-spacing: 0.06em; color: var(--accent); margin: 0;
 }
+.drawer-section-body { display: flex; flex-direction: column; gap: 8px; }
+.drawer-section.is-collapsed { padding-block: 4px; }
+.drawer-section.is-collapsed .drawer-section-body { display: none; }
+.drawer-section-toggle {
+  display: flex; align-items: center; gap: 6px; width: 100%; min-height: 44px; margin: -4px 0;
+  padding: 0; background: none; border: 0; color: inherit; font: inherit; letter-spacing: inherit;
+  text-transform: inherit; text-align: left; cursor: pointer;
+}
+.drawer-section-toggle::after {
+  content: ''; margin-left: auto; width: 8px; height: 8px; flex-shrink: 0;
+  border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
+  transform: rotate(-135deg) translate(-2px, -2px); opacity: 0.7;
+  transition: transform var(--dur-1) var(--ease);
+}
+.drawer-section.is-collapsed .drawer-section-toggle::after { transform: rotate(45deg) translate(-2px, -2px); }
+.drawer-section:not(.is-collapsed) .drawer-section-toggle { margin-bottom: 0; }
 .section-desc { font-size: 0.82rem; color: var(--text-muted, #8e95b0); margin: 0 0 6px; line-height: 1.45; }
 
 /* Profile */
@@ -4807,9 +4823,11 @@ body.feed-active .scope-switch-container {
     padding: 16px 12px calc(92px + env(safe-area-inset-bottom, 0px));
   }
   .drawer-content {
-    padding: 14px;
-    gap: 12px;
+    padding: 12px;
+    gap: 10px;
   }
+  .drawer-section { padding: 12px 14px; }
+  .drawer-section.is-collapsed { padding-block: 4px; }
   .modal {
     padding: 16px;
     width: min(420px, calc(100vw - 24px));
