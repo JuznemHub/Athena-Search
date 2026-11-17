@@ -94,10 +94,6 @@ body {
   }
 }
 
-@media (max-width: 920px) {
-  .theme-bar { display: none !important; }
-}
-
 .icon-btn {
   background: transparent; border: none; color: var(--text-main, #eef0f6);
   cursor: pointer; padding: 7px; border-radius: 10px;
@@ -264,7 +260,8 @@ body {
   display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 auto;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.g-favicon { width: 16px; height: 16px; border-radius: 4px; background: var(--accent); flex-shrink: 0; opacity: 0.85; }
+.g-favicon { width: 16px; height: 16px; border-radius: 4px; background: var(--surface-2, rgba(127,127,127,0.18)); color: var(--text-muted); border: 1px solid var(--hairline, rgba(127,127,127,0.25)); flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; line-height: 1; font-family: inherit; }
+.g-favicon.hidden { display: none; }
 .g-favicon-img { width: 16px; height: 16px; border-radius: 4px; object-fit: cover; flex-shrink: 0; background: rgba(255,255,255,0.06); }
 .g-cite { font-style: normal; font-size: calc(clamp(0.68rem, 0.64rem + 0.25vw, 0.77rem) * var(--ui-scale, 1)); color: var(--text-muted, #8e95b0); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: 0.01em; overflow-wrap: anywhere; }
 .g-title {
@@ -296,9 +293,16 @@ body {
 .g-result.editing { background: var(--accent-surface); box-shadow: inset 0 0 0 1px var(--accent-border); }
 .g-result.edited-flash { background: rgba(255,92,124,0.12); box-shadow: inset 0 0 0 1px rgba(255,92,124,0.45); }
 
+/* Card footer: votes and report on the left, Save/Edit/Delete on the right. */
+.g-card-footer {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px;
+}
+.g-card-footer > .g-actions,
+.g-card-footer > .g-meta { margin-top: 0; }
+
 /* Edit & Delete Action Buttons */
 .g-card-actions {
-  display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+  display: flex; align-items: center; gap: 6px; flex-shrink: 0; margin-left: auto;
 }
 .g-card-actions .edit-link-btn,
 .g-card-actions .del-link-btn {
@@ -331,7 +335,7 @@ body {
   display: flex; flex-direction: column; gap: 8px; text-align: left;
 }
 .edit-panel.hidden { display: none !important; }
-.edit-panel label { font-size: 0.7rem; color: var(--text-muted, #8e95b0); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+.edit-panel label { font-size: 0.7rem; color: var(--text-muted, #8e95b0); font-weight: 600; }
 .edit-panel input, .edit-panel textarea {
   width: 100%; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
   border-radius: 8px; color: var(--text-main, #eef0f6); padding: 7px 10px; font-size: 0.88rem; font-family: inherit; resize: vertical;
@@ -347,7 +351,7 @@ body {
   border: 1px solid var(--accent-border); border-radius: var(--radius-md, 12px);
   text-align: left;
 }
-.ai-answer-label { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent); margin-bottom: var(--s-2); font-weight: 600; }
+.ai-answer-label { font-size: var(--fs-xs); color: var(--accent); margin-bottom: var(--s-2); font-weight: 600; }
 .ai-answer-text { font-size: var(--fs-base); line-height: 1.6; color: var(--text-main, #eef0f6); min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
 .ai-answer-text a { overflow-wrap: anywhere; word-break: break-word; }
 .ai-sources { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
@@ -446,7 +450,7 @@ body {
   background: rgba(255, 255, 255, 0.05);
 }
 .mode-pill.active {
-  color: #fff !important;
+  color: var(--accent-fg, #000) !important;
   background: var(--accent) !important;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
   font-weight: 600;
@@ -465,7 +469,7 @@ body {
   cursor: pointer; display: flex; align-items: center; gap: 6px;
   transition: color var(--dur-1) var(--ease), background-color var(--dur-1) var(--ease);
 }
-.scope-btn.active { background: var(--accent-gradient); color: #fff; }
+.scope-btn.active { background: var(--accent-gradient); color: var(--accent-fg, #000); }
 
 /* Drawer: keep overlay blur-free so opening drawer does not force a full-screen GPU pass over long lists */
 .drawer-overlay {
@@ -508,15 +512,30 @@ body {
 }
 .drawer-section:hover { border-color: rgba(255, 255, 255, 0.1); }
 .drawer-section h3 {
-  font-size: calc(clamp(0.72rem, 2.1cqi, 0.8rem) * var(--ui-scale, 1)); font-weight: 600; text-transform: uppercase;
-  letter-spacing: 0.06em; color: var(--accent); margin: 0;
+  font-size: calc(clamp(0.74rem, 2.1cqi, 0.82rem) * var(--ui-scale, 1)); font-weight: 600;
+  color: var(--accent); margin: 0;
 }
+.drawer-section-body { display: flex; flex-direction: column; gap: 8px; }
+.drawer-section.is-collapsed { padding-block: 4px; }
+.drawer-section.is-collapsed .drawer-section-body { display: none; }
+.drawer-section-toggle {
+  display: flex; align-items: center; gap: 6px; width: 100%; min-height: 44px; margin: -4px 0;
+  padding: 0; background: none; border: 0; color: inherit; font: inherit; letter-spacing: inherit;
+  text-transform: inherit; text-align: left; cursor: pointer;
+}
+.drawer-section-toggle::after {
+  content: ''; margin-left: auto; width: 8px; height: 8px; flex-shrink: 0;
+  border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
+  transform: rotate(-135deg) translate(-2px, -2px); opacity: 0.7;
+  transition: transform var(--dur-1) var(--ease);
+}
+.drawer-section.is-collapsed .drawer-section-toggle::after { transform: rotate(45deg) translate(-2px, -2px); }
+.drawer-section:not(.is-collapsed) .drawer-section-toggle { margin-bottom: 0; }
 .drawer-section .btn {
   font-size: calc(clamp(0.76rem, 2.2cqi, 0.84rem) * var(--ui-scale, 1));
   padding: calc(6px * var(--ui-scale, 1)) clamp(10px, 2.8cqi, 14px);
-  min-height: calc(clamp(34px, 8cqi, 38px) * var(--ui-scale, 1));
 }
-.section-desc { font-size: calc(clamp(0.74rem, 2.2cqi, 0.82rem) * var(--ui-scale, 1)); color: var(--text-muted, #8e95b0); margin: 0 0 4px; line-height: 1.42; }
+.section-desc { font-size: calc(clamp(0.74rem, 2.2cqi, 0.82rem) * var(--ui-scale, 1)); color: var(--text-muted, #8e95b0); margin: 0 0 6px; line-height: 1.45; }
 
 /* Profile */
 .profile-card {
@@ -569,13 +588,18 @@ body {
 .auth-gate-card h1 { font-size: 1.4rem; margin-bottom: 8px; }
 .auth-gate-sub { color: var(--text-muted, #8e95b0); font-size: 0.92rem; margin-bottom: 24px; line-height: 1.45; }
 .oauth-buttons { display: flex; flex-direction: column; gap: 14px; align-items: center; }
-.btn-telegram { background: #2AABEE !important; color: #fff !important; border: none !important; font-weight: 600; }
+.btn-telegram { background: #1c76a8 !important; color: #fff !important; border: none !important; font-weight: 600; }
 .btn-telegram:hover:not(:disabled) { filter: brightness(1.08); }
 .btn-telegram:disabled { opacity: 0.45; }
 .btn-discord { background: #5865F2 !important; color: #fff !important; border: none !important; font-weight: 600; }
 .btn-discord:hover:not(:disabled) { filter: brightness(1.08); }
 .btn-discord:disabled { opacity: 0.45; }
-.telegram-widget-wrap { display: flex; justify-content: center; min-height: 40px; margin: 4px 0; }
+.telegram-widget-wrap { display: flex; justify-content: center; }
+.telegram-widget-wrap:empty { display: none; }
+.auth-more { width: 100%; text-align: center; }
+.auth-more > summary { display: inline-flex; align-items: center; min-height: 44px; padding: 0 8px; cursor: pointer; color: var(--text-dim); font-size: 0.88rem; text-decoration: underline; text-underline-offset: 3px; }
+.auth-more > summary:hover { color: var(--text); }
+.auth-more-body { display: flex; flex-direction: column; gap: 10px; align-items: center; margin-top: 8px; }
 .telegram-chooser {
   width: 100%;
   padding: 12px;
@@ -624,7 +648,7 @@ body {
 .notif-bell { position: relative; }
 .notif-badge {
   position: absolute; top: 2px; right: 2px; min-width: 16px; height: 16px; padding: 0 4px;
-  border-radius: 999px; background: var(--danger-color, #e02444); color: #fff;
+  border-radius: 999px; background: #c4183c; color: #fff;
   font-size: 0.72rem; font-weight: 700; display: flex; align-items: center; justify-content: center;
 }
 .notif-panel {
@@ -647,9 +671,10 @@ body {
 .g-author { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 0.78rem; color: var(--text-muted, #8e95b0); margin-bottom: 6px; }
 .g-author-name { color: var(--text-main, #eef0f6); font-weight: 500; }
 .g-author-time { opacity: 0.8; }
-.plat-tag { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 7px; border-radius: 999px; font-weight: 600; }
+.plat-tag { font-size: 0.75rem; padding: 2px 7px; border-radius: 999px; font-weight: 600; }
 .plat-telegram { background: rgba(42,171,238,0.2); color: #6ec9f5; }
 .g-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.report-btn { display: inline-flex; align-items: center; gap: 4px; }
 .vote-btn, .report-btn { background: rgba(255,255,255,0.04); border: 1px solid var(--border-color, rgba(255,255,255,0.1)); color: var(--text-muted, #8e95b0); border-radius: 8px; padding: 4px 10px; font-size: 0.8rem; cursor: pointer; }
 .vote-btn:hover, .report-btn:hover { color: var(--text-main, #eef0f6); border-color: var(--accent-border); }
 .vote-btn.active.up { color: var(--success-color, #00e676); border-color: rgba(0,230,118,0.4); }
@@ -674,18 +699,18 @@ body.results-active .search-wrapper { align-items: stretch; }
 .accent-color-input:hover { border-color: rgba(255,255,255,0.18); }
 .accent-color-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .accent-color-input::-webkit-color-swatch-wrapper { padding: 3px; }
-.accent-color-input::-webkit-color-swatch { border: none; border-radius: 7px; }
-.accent-color-input::-moz-color-swatch { border: none; border-radius: 7px; }
-.accent-current-label { font-family: ui-monospace, monospace; font-size: clamp(0.72rem, 2.2cqi, 0.82rem); color: var(--text-muted, #8e95b0); flex: 1; }
-.accent-swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(clamp(28px, 8cqi, 36px), 1fr)); gap: clamp(6px, 1.8cqi, 8px); }
+.accent-color-input::-webkit-color-swatch { border: none; border-radius: 8px; }
+.accent-color-input::-moz-color-swatch { border: none; border-radius: 8px; }
+.accent-current-label { font-family: ui-monospace, monospace; font-size: clamp(0.74rem, 2.2cqi, 0.82rem); color: var(--text-muted, #8e95b0); flex: 1; }
+.accent-swatches { display: grid; grid-template-columns: repeat(auto-fit, minmax(44px, 1fr)); justify-items: center; gap: 2px; }
+/* 44px tap area, 30px visible dot: padding + content-box clip keep the dot small */
 .accent-swatch {
-  width: 100%; max-width: 38px; min-height: 28px; aspect-ratio: 1; border-radius: 9px; border: 2px solid transparent;
-  background: var(--sw); cursor: pointer; transition: transform var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease); position: relative;
+  width: 44px; height: 44px; padding: 7px; border-radius: 50%; border: 2px solid transparent;
+  background: var(--sw); background-clip: content-box; cursor: pointer;
+  transition: border-color var(--dur-1) var(--ease);
 }
-.accent-swatch:hover { transform: scale(1.08); }
-.accent-swatch:active { transform: scale(0.95); }
-.accent-swatch.active { border-color: #fff; box-shadow: 0 0 0 2px var(--sw); }
-.accent-swatch.active::after { content: ''; position: absolute; inset: 3px; border-radius: 6px; border: 2px solid rgba(255,255,255,0.7); }
+.accent-swatch:hover { border-color: var(--border-color, rgba(255,255,255,0.18)); }
+.accent-swatch.active { border-color: var(--text-main, #eef0f6); }
 
 .search-bar-box.mode-delete { border-color: rgba(255,92,124,0.65); background: rgba(80,12,28,0.45); }
 .search-bar-box.mode-delete .bar-action-btn { color: var(--danger-color, #ff5c7c); }
@@ -898,7 +923,7 @@ dialog.modal-dialog::backdrop {
 
 .admin-db-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr)); gap: 10px; }
 .admin-ctrl-group { display: flex; flex-direction: column; gap: 4px; }
-.admin-ctrl-group label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; letter-spacing: 0.05em; }
+.admin-ctrl-group label { font-size: 0.75rem; color: var(--text-muted); font-weight: 600; }
 .admin-ctrl-group select {
   height: 34px;
   font-size: 0.8rem;
@@ -938,7 +963,7 @@ dialog.modal-dialog::backdrop {
   display: flex; flex-direction: column; gap: 8px; background: var(--surface);
   border: 1px solid var(--hairline); border-radius: 12px; padding: 10px 14px;
 }
-.admin-tags-label { display: flex; justify-content: space-between; align-items: center; font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; letter-spacing: 0.04em; }
+.admin-tags-label { display: flex; justify-content: space-between; align-items: center; font-size: 0.75rem; color: var(--text-muted); font-weight: 600; }
 .btn-text-sm { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 0.75rem; text-decoration: underline; font-family: inherit; }
 .admin-tags-cloud { display: flex; flex-wrap: wrap; gap: 6px; max-height: 120px; overflow-y: auto; padding: 2px 0; }
 .admin-tag-chip {
@@ -1106,8 +1131,6 @@ body, .g-result, .side-drawer, .search-bar-box, .modal, #toast { transition: bac
 .main-ctrl-group label {
   font-size: calc(clamp(0.6rem, 0.56rem + 0.16vw, 0.68rem) * var(--ui-scale, 1));
   color: var(--text-muted, #8e95b0);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
   font-weight: 600;
   padding-left: 4px;
 }
@@ -1122,7 +1145,7 @@ body, .g-result, .side-drawer, .search-bar-box, .modal, #toast { transition: bac
   padding: 0 22px 0 9px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 999px;
+  border-radius: var(--radius-sm, 8px);
   color: var(--text-main, #eef0f6);
   outline: none;
   cursor: pointer;
@@ -1177,6 +1200,20 @@ body, .g-result, .side-drawer, .search-bar-box, .modal, #toast { transition: bac
   border-color: var(--accent-border);
   color: var(--accent);
 }
+.main-filter-fields { display: contents; }
+.main-filters-toggle-btn { display: none; }
+.main-filters-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--accent-fg, #08080f);
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
 
 /* Tag Cloud Card */
 .main-tags-card {
@@ -1207,8 +1244,6 @@ body, .g-result, .side-drawer, .search-bar-box, .modal, #toast { transition: bac
   font-size: 0.76rem;
   font-weight: 600;
   color: var(--text-dim, #8e95b0);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 .main-tags-summary {
   font-size: 0.72rem;
@@ -1497,8 +1532,6 @@ body.public-wiki-only .wiki-del-btn {
 .wiki-ctrl-group label {
   font-size: 0.75rem;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   font-weight: 600;
 }
 .wiki-ctrl-group select {
@@ -1507,7 +1540,7 @@ body.public-wiki-only .wiki-del-btn {
   padding: 0 26px 0 10px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 999px;
+  border-radius: var(--radius-sm, 8px);
   color: var(--text-main);
   outline: none;
   appearance: auto;
@@ -1543,7 +1576,7 @@ body.public-wiki-only .wiki-del-btn {
   height: 34px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 999px;
+  border-radius: var(--radius-sm, 8px);
   padding: 0 32px 0 34px;
   font-size: 0.82rem;
   color: var(--text-main);
@@ -1633,8 +1666,6 @@ body.public-wiki-only .wiki-del-btn {
 .wiki-sidebar-title {
   font-size: 0.75rem;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
   color: var(--text-muted);
 }
 .wiki-total-badge {
@@ -1706,10 +1737,20 @@ body.public-wiki-only .wiki-del-btn {
   flex-shrink: 0;
 }
 .wiki-cat-arrow {
-  font-size: 0.72rem;
+  /* The ▸/▾ glyphs render as specks at this size; draw a chevron instead. */
+  font-size: 0;
+  width: 6px;
+  height: 6px;
+  margin: 0 4px 2px 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
   color: var(--text-muted);
-  line-height: 1;
   transition: transform var(--dur-1) var(--ease);
+}
+.wiki-cat-item.active .wiki-cat-arrow {
+  transform: rotate(45deg);
+  margin-bottom: 4px;
 }
 .wiki-cat-item.active .wiki-cat-arrow {
   color: var(--accent-bright, #a78bfa);
@@ -1878,7 +1919,7 @@ body.public-wiki-only .wiki-del-btn {
   gap: 8px;
   background: rgba(255, 255, 255, 0.035);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 999px;
+  border-radius: var(--radius-sm, 8px);
   padding: 4px 14px 4px 12px;
   transition: all var(--dur-1) var(--ease);
 }
@@ -1898,8 +1939,6 @@ body.public-wiki-only .wiki-del-btn {
   font-size: 0.76rem;
   font-weight: 600;
   color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   cursor: pointer;
   white-space: nowrap;
 }
@@ -2359,8 +2398,6 @@ body.public-wiki-only .wiki-del-btn {
   font-size: 0.75rem;
   font-weight: 600;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 .wiki-share-field select {
   height: 38px;
@@ -2411,9 +2448,7 @@ body.public-wiki-only .wiki-del-btn {
 .wiki-gen-label {
   font-size: 0.75rem;
   font-weight: 700;
-  text-transform: uppercase;
   color: var(--accent);
-  letter-spacing: 0.05em;
 }
 .wiki-gen-badge {
   font-size: 0.75rem;
@@ -2452,8 +2487,6 @@ body.public-wiki-only .wiki-del-btn {
 .wiki-share-history-title {
   font-size: 0.75rem;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
   color: var(--text-muted);
 }
 .wiki-share-links-list {
@@ -2617,7 +2650,8 @@ body.feed-active .main-content {
   align-items: stretch !important;
 }
 
-body.feed-active .scope-switch-container {
+body.feed-active .scope-switch-container,
+.scope-switch-container.is-member {
   display: none !important;
 }
 
@@ -2639,6 +2673,7 @@ body.feed-active .scope-switch-container {
   --frss-text-muted: #a1a1a1;
   --frss-accent: var(--serp-link, #70b2ff);
   --frss-accent-strong: var(--accent, #0072f5);
+  --frss-accent-fg: var(--accent-fg, #000);
   --frss-accent-soft: var(--accent-soft, rgba(0, 114, 245, 0.18));
   --frss-accent-border: var(--accent-border, rgba(0, 114, 245, 0.4));
   --frss-personal-bg: rgba(168, 85, 247, 0.16);
@@ -2670,10 +2705,11 @@ body.feed-active .scope-switch-container {
   --frss-text: #0f172a;
   --frss-text-secondary: #334155;
   --frss-text-muted: #475569;
-  --frss-accent: #0369a1;
-  --frss-accent-strong: #0284c7;
-  --frss-accent-soft: rgba(2, 132, 199, 0.12);
-  --frss-accent-border: rgba(2, 132, 199, 0.38);
+  --frss-accent: var(--accent-text, #0369a1);
+  --frss-accent-strong: var(--accent, #0284c7);
+  --frss-accent-fg: var(--accent-fg, #000);
+  --frss-accent-soft: var(--accent-soft, rgba(2, 132, 199, 0.12));
+  --frss-accent-border: var(--accent-border, rgba(2, 132, 199, 0.38));
   --frss-personal-bg: rgba(126, 34, 206, 0.1);
   --frss-personal-text: #6b21a8;
   --frss-personal-border: rgba(126, 34, 206, 0.32);
@@ -2716,7 +2752,8 @@ body.feed-active .scope-switch-container {
   --frss-text-secondary: #eef1f5;
   --frss-text-muted: #d0d6e1;
   --frss-accent: #9cc5ff;
-  --frss-accent-strong: #0a84ff;
+  --frss-accent-strong: var(--accent, #0a84ff);
+  --frss-accent-fg: var(--accent-fg, #000);
 }
 
 .freshrss-view.hidden {
@@ -2847,6 +2884,12 @@ body.feed-active .scope-switch-container {
   outline: none;
 }
 
+/* The whole bar shows the focus ring via :focus-within, so a second ring
+   on the input inside it is dropped. */
+.freshrss-view .freshrss-search-stick input:focus-visible {
+  outline: none;
+}
+
 .freshrss-search-stick input::placeholder {
   color: var(--frss-text-muted);
 }
@@ -2885,6 +2928,28 @@ body.feed-active .scope-switch-container {
   align-items: center;
   justify-content: center;
   margin-right: 4px;
+}
+
+/* .btn padding left the glyph 2px of room; keep it a square matching Search. */
+.freshrss-search-stick .freshrss-search-help-btn {
+  flex: none;
+  width: 27px;
+  height: 27px;
+  min-width: 0;
+  padding: 0;
+  border-color: var(--frss-border);
+}
+
+@media (max-width: 768px) {
+  .freshrss-search-stick .freshrss-search-help-btn {
+    width: 44px;
+    height: 44px;
+  }
+  /* The input was 27px tall in a 44px bar, so taps near its edge missed. */
+  .freshrss-search-stick input {
+    align-self: stretch;
+    min-height: 44px;
+  }
 }
 
 .freshrss-search-help-btn:hover {
@@ -2930,8 +2995,6 @@ body.feed-active .scope-switch-container {
 .freshrss-search-help-popover .search-help-title {
   font-size: 0.74rem;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
   color: var(--frss-text-muted);
   margin-bottom: 8px;
 }
@@ -2971,6 +3034,23 @@ body.feed-active .scope-switch-container {
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+}
+/* On narrower desktops the header actions spilled past the panel edge.
+   Let them drop to a second line, right-aligned, instead. */
+@media (min-width: 861px) {
+  .freshrss-header {
+    flex-wrap: wrap;
+    row-gap: 10px;
+  }
+  .freshrss-header-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    margin-left: auto;
+  }
+}
+/* Prev / top / next have nothing to move between in an empty stream. */
+#feedView:has(.freshrss-empty-state) .nav_entries {
+  display: none;
 }
 
 .freshrss-scope-switcher {
@@ -3112,8 +3192,6 @@ body.feed-active .scope-switch-container {
 .settings-menu-heading {
   font-size: 0.7rem;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
   color: var(--frss-text-muted);
 }
 
@@ -3222,6 +3300,35 @@ body.feed-active .scope-switch-container {
   border-color: var(--frss-accent);
   color: var(--frss-accent);
   font-weight: 600;
+}
+
+/* Thirteen separately boxed buttons read as one flat row. Each .group
+   (sidebar, actions, state filter, layout, sort) becomes one outlined
+   segment so the row scans as five controls, not thirteen. */
+@media (min-width: 769px) {
+  .freshrss-nav-menu .group {
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--frss-border);
+    border-radius: 8px;
+    background: var(--frss-bg-input);
+  }
+  .freshrss-nav-menu .group .btn,
+  .freshrss-nav-menu .group .btn:hover {
+    border-color: transparent;
+  }
+  .freshrss-nav-menu .group .btn:not(.active) {
+    background: transparent;
+  }
+  .freshrss-nav-menu .group .btn.active {
+    border-color: transparent;
+  }
+  /* Expand all is an action, not a layout, so it sits behind a divider. */
+  .freshrss-views-group #freshrssExpandAllBtn {
+    margin-left: 4px;
+    border-radius: 0 6px 6px 0;
+    box-shadow: inset 1px 0 0 var(--frss-border);
+  }
 }
 
 /* Sort Dropdown */
@@ -3441,7 +3548,7 @@ body.feed-active .scope-switch-container {
 .aside_feed .tree-folder.active > .tree-folder-title .badge,
 .aside_feed .badge.has-unread {
   background: var(--frss-accent-strong);
-  color: #ffffff;
+  color: var(--frss-accent-fg);
 }
 
 .aside_feed .dropdown-toggle {
@@ -3481,8 +3588,6 @@ body.feed-active .scope-switch-container {
 .aside_feed .freshrss-categories-divider {
   font-size: 0.68rem;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
   color: var(--frss-text-muted);
   padding: 12px 10px 4px;
   list-style: none;
@@ -4203,7 +4308,7 @@ body.feed-active .scope-switch-container {
 .nav_entries {
   position: fixed;
   bottom: 24px;
-  right: 28px;
+  right: 52px;
   z-index: 950;
   display: flex;
   flex-direction: column;
@@ -4842,7 +4947,7 @@ body.feed-active .scope-switch-container {
 }
 .cleaner-diff-col { min-width: 0; overflow-wrap: anywhere; }
 .cleaner-diff-after { border-left: 2px solid var(--accent, #8b5cf6); padding-left: 8px; }
-.cleaner-diff-label { font-size: 0.68rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; }
+.cleaner-diff-label { font-size: 0.68rem; font-weight: 700; color: var(--text-muted); }
 .cleaner-diff-title { font-weight: 600; color: var(--text-main); }
 .cleaner-diff-url { color: var(--text-muted); font-size: 0.72rem; }
 .cleaner-diff-tags { color: var(--accent, #a78bfa); margin-top: 2px; }
@@ -4872,9 +4977,11 @@ body.feed-active .scope-switch-container {
     padding: 16px 12px calc(92px + env(safe-area-inset-bottom, 0px));
   }
   .drawer-content {
-    padding: 14px;
-    gap: 12px;
+    padding: 12px;
+    gap: 10px;
   }
+  .drawer-section { padding: 12px 14px; }
+  .drawer-section.is-collapsed { padding-block: 4px; }
   .modal {
     padding: 16px;
     width: min(420px, calc(100vw - 24px));
@@ -4885,35 +4992,50 @@ body.feed-active .scope-switch-container {
   .top-bar .bookmarks-nav-btn {
     display: none !important;
   }
+  /* Search keeps Scope in Filters so results stay clear; Dump/AI/Delete hide Filters so keep the scope pill above nav. */
+  body:not([data-mode="dump"]):not([data-mode="ai"]):not([data-mode="delete"]) .scope-switch-container {
+    display: none !important;
+  }
   .scope-switch-container {
     left: 50% !important;
     right: auto !important;
     transform: translateX(-50%);
-    bottom: calc(76px + env(safe-area-inset-bottom, 0px)) !important;
+    bottom: calc(70px + env(safe-area-inset-bottom, 0px)) !important;
     z-index: 940 !important;
-    width: auto !important;
-    max-width: calc(100vw - 24px);
-  }
-  .scope-switch {
-    padding: 3px;
-    width: auto;
-  }
-  .scope-btn {
-    min-height: 36px;
-    padding: 5px 14px;
-    font-size: 0.78rem;
   }
   .main-db-controls {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 6px;
     padding: 0;
   }
+  .main-filters-toggle-btn { display: inline-flex; }
+  .main-filter-fields {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-row: 2;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .main-filter-fields.is-collapsed { display: none; }
   .main-ctrl-group {
     min-width: 0;
-    gap: 2px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+  }
+  .main-ctrl-group label {
+    font-size: 0.72rem;
+    padding-left: 4px;
+  }
+  .main-ctrl-group select {
+    width: 100%;
+    min-width: 0;
+    height: 44px;
+    padding: 0 26px 0 12px;
   }
   .main-tag-toggle-btn {
     width: 100%;
+    height: 44px;
     justify-content: center;
   }
   .main-tags-card {
@@ -4945,17 +5067,31 @@ body.feed-active .scope-switch-container {
   }
   /* Compact visual card action pills while keeping extended touch hit-boxes */
   .g-card-actions {
-    width: 100%;
-    flex-wrap: wrap;
-    gap: 5px;
-    margin-top: 2px;
+    gap: 6px;
+  }
+  /* Icon-only on phones so the footer fits one line; the label stays for screen readers. */
+  .g-card-actions .btn-sm > span,
+  .g-card-footer .report-btn > span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
   .g-card-actions .btn-sm,
   .g-card-actions .edit-link-btn,
   .g-card-actions .del-link-btn,
-  .wiki-action-btn,
   .vote-btn,
   .report-btn {
+    position: relative;
+    height: auto;
+    padding: 0 12px;
+    font-size: 0.8rem;
+    gap: 4px;
+    justify-content: center;
+  }
+  .wiki-action-btn {
     position: relative;
     min-height: 28px;
     height: 28px;
@@ -4963,12 +5099,7 @@ body.feed-active .scope-switch-container {
     font-size: 0.7rem;
     gap: 3px;
   }
-  .g-card-actions .btn-sm::before,
-  .g-card-actions .edit-link-btn::before,
-  .g-card-actions .del-link-btn::before,
-  .wiki-action-btn::before,
-  .vote-btn::before,
-  .report-btn::before {
+  .wiki-action-btn::before {
     content: "";
     position: absolute;
     inset: -8px -2px;
@@ -5051,6 +5182,147 @@ body.feed-active .scope-switch-container {
   #blacklistAddBtn {
     width: 100%;
   }
+  /* Phones: the bottom nav already has Settings, and the CLI token copy lives
+     in the Settings drawer, so the header keeps only logo, bell and DB. */
+  #hamburgerBtn,
+  #sessionTokenBtn {
+    display: none !important;
+  }
+  /* Feed: the bottom nav already goes back to Search, so the header button
+     goes. Tools become three rows: state tabs, icon actions, sort. The
+     floating article arrows covered content, and scrolling does the same job. */
+  #freshrssCloseBtn,
+  .nav_entries {
+    display: none !important;
+  }
+  .freshrss-scope-btn,
+  .freshrss-header-select {
+    min-height: 44px;
+  }
+  .freshrss-header-select {
+    flex: 1 1 100%;
+    width: 100% !important;
+    max-width: none !important;
+  }
+  .freshrss-nav-menu {
+    gap: 6px 3px;
+    padding: 6px 8px;
+    justify-content: flex-start;
+  }
+  .freshrss-toolbar-left,
+  .freshrss-toolbar-right {
+    display: contents;
+  }
+  .freshrss-nav-menu .group {
+    gap: 3px;
+  }
+  .freshrss-state-tabs {
+    order: -1;
+    flex: 1 1 100%;
+    flex-wrap: nowrap !important;
+  }
+  .freshrss-state-tab {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 0 4px !important;
+    font-size: 0.8rem !important;
+  }
+  .freshrss-state-tab .icon {
+    display: none;
+  }
+  /* The seven icon buttons share one row edge to edge, so it lines up
+     with the tabs above and the sort bar below. */
+  .freshrss-nav-menu .group:not(.freshrss-state-tabs):not(.freshrss-sort-group) {
+    display: contents;
+  }
+  .freshrss-nav-menu .btn:not(.freshrss-state-tab):not(#freshrssSortToggleBtn) {
+    flex: 1 1 0;
+    width: auto;
+    min-width: 0;
+    padding: 0 !important;
+  }
+  /* Add Feed takes the free width, settings sits beside it, tour link last. */
+  .freshrss-header-actions {
+    justify-content: flex-start !important;
+  }
+  #freshrssAddFeedBtn {
+    flex: 1 1 auto;
+  }
+  #freshrssSettingsDropdown,
+  #freshrssSettingsDropdown > button {
+    min-width: 44px;
+  }
+  #feedTourBtn {
+    margin-left: 4px;
+  }
+  .freshrss-sort-group,
+  .freshrss-sort-dropdown {
+    flex: 1 1 100%;
+  }
+  .freshrss-nav-menu #freshrssSortToggleBtn {
+    width: 100%;
+    justify-content: flex-start;
+    padding: 0 12px !important;
+  }
+  /* Wiki: Scope and Community sit side by side with labels above, and the
+     bottom nav replaces the close button. */
+  #wikiCloseBtn {
+    display: none !important;
+  }
+  .wiki-controls-bar {
+    gap: 10px;
+  }
+  .wiki-ctrl-group {
+    flex: 1 1 140px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    min-width: 0;
+  }
+  .wiki-ctrl-group select {
+    width: 100%;
+    min-height: 44px;
+    border-radius: var(--radius-sm, 8px);
+  }
+  .wiki-search-wrap {
+    flex: 1 1 200px;
+  }
+  .wiki-sub-select-wrap {
+    width: 100%;
+    border-radius: var(--radius-sm, 8px);
+  }
+  .wiki-sub-select {
+    flex: 1;
+    min-width: 0;
+    max-width: none;
+    min-height: 40px;
+    text-overflow: ellipsis;
+  }
+  .wiki-search-wrap input,
+  .wiki-mobile-cat-btn {
+    min-height: 44px;
+  }
+  /* Saved opens as a full-screen sheet above the bottom nav, like the other tabs. */
+  #bookmarksModal {
+    padding: 0;
+    bottom: calc(59px + env(safe-area-inset-bottom, 0px));
+    z-index: 940;
+  }
+  #bookmarksModal .wiki-modal-card {
+    width: 100% !important;
+    max-width: none;
+    height: 100%;
+    max-height: none;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    padding: 16px;
+    background: var(--ink) !important;
+  }
+  #bookmarksModal .athena-modal-scroll-list {
+    max-height: none;
+    flex: 1;
+  }
   .mobile-bottom-nav {
     display: grid;
     grid-template-columns: repeat(5, 1fr);
@@ -5091,13 +5363,32 @@ body.feed-active .scope-switch-container {
   }
 }
 
+/* Touch screens: every control is at least 44px. Tag chips stay at 32px
+   (there can be ten per card) with 8px gaps so neighbours aren't hit by mistake. */
 @media (pointer: coarse) {
   .icon-btn,
-  .theme-bar .theme-chip,
+  .theme-switcher .theme-chip,
   .vote-btn,
   .report-btn,
   .nav_entries button,
-  .btn-sm {
+  .btn,
+  .btn-sm,
+  .download-doc-btn,
+  .bar-action-btn,
+  .bar-submit-btn,
+  .brand-logo {
     min-height: 44px;
+  }
+  .vote-btn,
+  .report-btn,
+  .bar-action-btn,
+  .bar-submit-btn,
+  .g-card-actions .btn-sm {
+    min-width: 44px;
+  }
+  .g-card-tags { gap: 8px; }
+  .g-tag-chip {
+    min-height: 32px;
+    padding: 0 10px;
   }
 }
