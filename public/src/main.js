@@ -7612,34 +7612,33 @@ document.addEventListener('DOMContentLoaded', () => {
     if (drawerOverlay) drawerOverlay.addEventListener('click', closeDrawer);
     setupCollapsibleDrawerSections();
 
-    const sessionTokenBtn = $('sessionTokenBtn');
-    if (sessionTokenBtn) {
-      sessionTokenBtn.addEventListener('click', async () => {
-        if (!state.currentUser) {
+    const copySessionToken = async () => {
+      if (!state.currentUser) {
+        showToast('Login required to copy a session token', true);
+        return;
+      }
+      try {
+        const res = await fetch(`${API_BASE}/api/auth/session-token`, {
+          method: 'GET',
+          headers: authHeaders(),
+        });
+        const data = await res.json();
+        if (!res.ok || !data?.token) {
           showToast('Login required to copy a session token', true);
           return;
         }
-        try {
-          const res = await fetch(`${API_BASE}/api/auth/session-token`, {
-            method: 'GET',
-            headers: authHeaders(),
-          });
-          const data = await res.json();
-          if (!res.ok || !data?.token) {
-            showToast('Login required to copy a session token', true);
-            return;
-          }
-          if (navigator.clipboard?.writeText) {
-            await navigator.clipboard.writeText(data.token);
-          } else {
-            prompt('Session token (for athena-tui):', data.token);
-          }
-          showToast('Session token copied — paste it into athena-tui');
-        } catch {
-          showToast('Could not reach the server', true);
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(data.token);
+        } else {
+          prompt('Session token (for athena-tui):', data.token);
         }
-      });
-    }
+        showToast('Session token copied — paste it into athena-tui');
+      } catch {
+        showToast('Could not reach the server', true);
+      }
+    };
+    $('sessionTokenBtn')?.addEventListener('click', copySessionToken);
+    $('drawerSessionTokenBtn')?.addEventListener('click', copySessionToken);
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') closeDrawer();
     });
@@ -8705,6 +8704,15 @@ document.addEventListener('DOMContentLoaded', () => {
       syncMobileBottomNav();
     });
     $('bookmarksFilterInput')?.addEventListener('input', renderBookmarksModal);
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      const open = ['bookmarksModal', 'dbCleanerModal', 'blacklistModal']
+        .map((id) => $(id))
+        .find((el) => el && !el.classList.contains('hidden'));
+      if (!open) return;
+      open.classList.add('hidden');
+      if (open.id === 'bookmarksModal') syncMobileBottomNav();
+    });
 
     $('adminCleanerOpenBtn')?.addEventListener('click', openDbCleanerModal);
     $('dbCleanerCloseBtn')?.addEventListener('click', () => $('dbCleanerModal')?.classList.add('hidden'));

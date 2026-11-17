@@ -5031,6 +5031,33 @@ body.feed-active .scope-switch-container,
   #blacklistAddBtn {
     width: 100%;
   }
+  /* Phones: the bottom nav already has Settings, and the CLI token copy lives
+     in the Settings drawer, so the header keeps only logo, bell and DB. */
+  #hamburgerBtn,
+  #sessionTokenBtn {
+    display: none !important;
+  }
+  /* Saved opens as a full-screen sheet above the bottom nav, like the other tabs. */
+  #bookmarksModal {
+    padding: 0;
+    bottom: calc(59px + env(safe-area-inset-bottom, 0px));
+    z-index: 940;
+  }
+  #bookmarksModal .wiki-modal-card {
+    width: 100% !important;
+    max-width: none;
+    height: 100%;
+    max-height: none;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    padding: 16px;
+    background: var(--ink) !important;
+  }
+  #bookmarksModal .athena-modal-scroll-list {
+    max-height: none;
+    flex: 1;
+  }
   .mobile-bottom-nav {
     display: grid;
     grid-template-columns: repeat(5, 1fr);
