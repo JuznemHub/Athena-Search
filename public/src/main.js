@@ -1857,8 +1857,8 @@ document.addEventListener('DOMContentLoaded', () => {
       searchInput.placeholder = 'Search your brain…';
       searchInput.enterKeyHint = 'search';
       scopeSubtitle.textContent = state.scope === 'personal'
-        ? 'Search personal notes & links'
-        : 'Search community set';
+        ? 'Search your personal notes and links'
+        : 'Search everything shared in this community';
       aiAnswerCard.classList.add('hidden');
       if (state.authReady) {
         if (hasActiveMainFilters()) runSearch();
@@ -1869,7 +1869,7 @@ document.addEventListener('DOMContentLoaded', () => {
       modePulse.style.background = 'var(--success-color)';
       searchInput.placeholder = 'Paste a link or any text to save…';
       searchInput.enterKeyHint = 'done';
-      scopeSubtitle.textContent = 'Save into markdown brain';
+      scopeSubtitle.textContent = 'Paste a link or a note to save it';
       aiAnswerCard.classList.add('hidden');
       resultsList.innerHTML = '';
       resultsMeta.classList.add('hidden');
@@ -1891,7 +1891,7 @@ document.addEventListener('DOMContentLoaded', () => {
       modePulse.style.background = 'var(--primary-purple)';
       searchInput.placeholder = 'Ask anything about your brain…';
       searchInput.enterKeyHint = 'go';
-      scopeSubtitle.textContent = 'Answers from your .md / links only';
+      scopeSubtitle.textContent = 'Answers come only from your saved notes and links';
       emptyState.classList.add('hidden');
     }
     searchInput.setAttribute('aria-label', searchInput.placeholder.replace(/…$/, ''));
@@ -1910,8 +1910,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (state.mode === 'search') {
       scopeSubtitle.textContent = state.scope === 'personal'
-        ? 'Search personal notes & links'
-        : 'Search community set';
+        ? 'Search your personal notes and links'
+        : 'Search everything shared in this community';
     }
     updateDeleteModeVisibility();
   }
@@ -2829,7 +2829,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (summaryEl && state.tagStats) {
-      summaryEl.textContent = `${state.tagStats.uniqueTags} tags · ${state.tagStats.total} total links`;
+      // The link total is already in the results line, so only the tag count goes here.
+      const tagCount = state.tagStats.uniqueTags;
+      summaryEl.textContent = tagCount > 0 ? `${tagCount.toLocaleString()} tags` : '';
     }
 
     if (!state.tags || !state.tags.length) {
