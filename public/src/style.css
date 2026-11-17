@@ -3182,6 +3182,35 @@ body.feed-active .scope-switch-container,
   font-weight: 600;
 }
 
+/* Thirteen separately boxed buttons read as one flat row. Each .group
+   (sidebar, actions, state filter, layout, sort) becomes one outlined
+   segment so the row scans as five controls, not thirteen. */
+@media (min-width: 769px) {
+  .freshrss-nav-menu .group {
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--frss-border);
+    border-radius: 8px;
+    background: var(--frss-bg-input);
+  }
+  .freshrss-nav-menu .group .btn,
+  .freshrss-nav-menu .group .btn:hover {
+    border-color: transparent;
+  }
+  .freshrss-nav-menu .group .btn:not(.active) {
+    background: transparent;
+  }
+  .freshrss-nav-menu .group .btn.active {
+    border-color: transparent;
+  }
+  /* Expand all is an action, not a layout, so it sits behind a divider. */
+  .freshrss-views-group #freshrssExpandAllBtn {
+    margin-left: 4px;
+    border-radius: 0 6px 6px 0;
+    box-shadow: inset 1px 0 0 var(--frss-border);
+  }
+}
+
 /* Sort Dropdown */
 .freshrss-sort-dropdown {
   position: relative;
