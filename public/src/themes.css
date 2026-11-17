@@ -353,40 +353,6 @@ body::before {
 }
 .logo-text .highlight { color: var(--accent) !important; }
 
-/* ========== Theme bar ========== */
-.theme-bar {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  padding: 3px;
-  border-radius: 12px;
-  background: var(--surface);
-  border: 1px solid var(--hairline);
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-.theme-bar .theme-chip {
-  flex: 0 0 auto;
-  min-width: 0;
-  padding: 6px 10px;
-  border-radius: 10px;
-  border: none;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 0.72rem;
-  font-weight: 600;
-  font-family: var(--font-sans);
-  cursor: pointer;
-  line-height: 1;
-  white-space: nowrap;
-  transition: color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
-}
-.theme-bar .theme-chip:hover { color: var(--text); background: var(--surface-2); }
-.theme-bar .theme-chip.active {
-  color: var(--accent-fg, #08080f);
-  background: var(--accent-gradient);
-}
-
 .theme-switcher {
   display: flex;
   flex-wrap: wrap;
@@ -416,22 +382,7 @@ body::before {
   border-color: transparent;
 }
 
-/* Light theme overrides for theme bar & switcher */
-[data-theme="light"] .theme-bar {
-  background: var(--surface-2);
-  border-color: var(--hairline-strong);
-}
-[data-theme="light"] .theme-bar .theme-chip {
-  color: var(--text);
-}
-[data-theme="light"] .theme-bar .theme-chip:hover {
-  color: var(--text);
-  background: var(--surface);
-}
-[data-theme="light"] .theme-bar .theme-chip.active {
-  color: var(--accent-fg, #08080f);
-  background: var(--accent-gradient);
-}
+/* Light theme overrides for the theme switcher */
 [data-theme="light"] .theme-switcher .theme-chip {
   background: var(--surface);
   color: var(--text);
@@ -741,6 +692,39 @@ body::before {
   color: var(--accent) !important;
 }
 
+/* DB, Wiki, Feed and Saved are one nav group: same shape, no box until
+   hovered, and only the view you're in gets the accent. */
+@media (min-width: 721px) {
+  .top-bar :is(#adminDbNavBtn, #wikiNavBtn, #feedNavBtn, #bookmarksNavBtn) {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    width: auto !important;
+    height: 36px !important;
+    min-height: 36px;
+    padding: 0 12px !important;
+    border: 1px solid transparent !important;
+    border-radius: var(--radius-sm, 8px) !important;
+    background: transparent !important;
+    color: var(--text-main) !important;
+    transform: none !important;
+  }
+  .top-bar :is(#adminDbNavBtn, #wikiNavBtn, #feedNavBtn, #bookmarksNavBtn):hover {
+    background: var(--surface-2) !important;
+  }
+  .top-bar :is(#adminDbNavBtn, #wikiNavBtn, #feedNavBtn)[aria-current="page"] {
+    background: var(--accent-surface) !important;
+    border-color: var(--accent-border) !important;
+    color: var(--accent-text, var(--accent)) !important;
+  }
+  .top-bar :is(.admin-nav-label, .wiki-nav-label, .feed-nav-label, .bookmarks-nav-label) {
+    color: inherit;
+    font-size: 0.82rem;
+    font-weight: 600;
+    letter-spacing: 0;
+  }
+}
+
 .mode-badge {
   background: var(--surface) !important;
   border: 1px solid var(--hairline) !important;
@@ -772,9 +756,6 @@ body::before {
 .g-title, .g-snippet, .g-author { overflow-wrap: anywhere; }
 
 @media (max-width: 720px) {
-  /* Four 44px chips can't share a 360px bar with the brand and two icon
-     buttons. The drawer's Appearance switcher is the same .theme-chip set. */
-  .theme-bar { display: none !important; }
   .mode-badge { display: none !important; }
   .brand-logo .logo-text { font-size: 0.95rem !important; }
   .scope-switch { width: auto; max-width: calc(100vw - 24px); }
@@ -796,7 +777,7 @@ body::before {
 }
 
 @media (pointer: coarse) {
-  .icon-btn, .theme-bar .theme-chip { min-height: 44px; min-width: 44px; }
+  .icon-btn { min-height: 44px; min-width: 44px; }
   .mode-pill { min-height: 44px; }
 }
 
@@ -946,7 +927,6 @@ body::before {
   transform: none;
 }
 [data-theme="glass"] .search-bar-box input::placeholder { opacity: 1; }
-[data-theme="glass"] .theme-bar,
 [data-theme="glass"] .theme-switcher .theme-chip,
 [data-theme="glass"] .btn-secondary,
 [data-theme="glass"] .main-tag-chip {

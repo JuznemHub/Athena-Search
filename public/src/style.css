@@ -93,10 +93,6 @@ body {
   }
 }
 
-@media (max-width: 920px) {
-  .theme-bar { display: none !important; }
-}
-
 .icon-btn {
   background: transparent; border: none; color: var(--text-main, #eef0f6);
   cursor: pointer; padding: 7px; border-radius: 10px;
@@ -5182,7 +5178,6 @@ body.feed-active .scope-switch-container,
    (there can be ten per card) with 8px gaps so neighbours aren't hit by mistake. */
 @media (pointer: coarse) {
   .icon-btn,
-  .theme-bar .theme-chip,
   .theme-switcher .theme-chip,
   .vote-btn,
   .report-btn,

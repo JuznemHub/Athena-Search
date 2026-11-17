@@ -8685,7 +8685,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function syncMobileBottomNav(explicitTab) {
     const nav = $('mobileBottomNav');
-    if (!nav) return;
     let active = explicitTab;
     if (!active) {
       if (!$('bookmarksModal')?.classList.contains('hidden')) active = 'bookmarks';
@@ -8694,8 +8693,16 @@ document.addEventListener('DOMContentLoaded', () => {
       else if ($('wikiView') && !$('wikiView').classList.contains('hidden')) active = 'wiki';
       else active = 'search';
     }
-    nav.querySelectorAll('button[data-mnav]').forEach((btn) => {
+    nav?.querySelectorAll('button[data-mnav]').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.mnav === active);
+    });
+    // Saved is a modal over the current view, so it never takes the desktop highlight.
+    const desktopNav = { db: 'adminDbNavBtn', wiki: 'wikiNavBtn', feed: 'feedNavBtn' };
+    Object.entries(desktopNav).forEach(([view, id]) => {
+      const btn = $(id);
+      if (!btn) return;
+      if (view === active) btn.setAttribute('aria-current', 'page');
+      else if (active !== 'bookmarks' && active !== 'settings') btn.removeAttribute('aria-current');
     });
   }
 
