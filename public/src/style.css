@@ -4930,10 +4930,22 @@ body.feed-active .scope-switch-container,
 }
 .cleaner-diff-list {
   max-height: 36vh;
+  min-height: 90px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+#dbCleanerModal .wiki-modal-card {
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+}
+#dbCleanerModal .wiki-modal-body {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  padding-right: 4px;
 }
 .cleaner-diff-row {
   display: grid;
@@ -5003,6 +5015,9 @@ body.feed-active .scope-switch-container,
   line-height: 1.45;
   color: var(--text-main);
   white-space: pre-wrap;
+  max-height: 220px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
 }
 .mcp-profile-wrap {
   margin: 12px 0;

@@ -6,7 +6,7 @@
 
 const AGENT_MAX_STEPS = 24;
 const AGENT_AI_TIMEOUT_MS = 45_000;
-const SQL_ROW_LIMIT = 200;
+const SQL_ROW_LIMIT = 150;
 
 export async function ensureCleanerAgentTable(env) {
   await env.DB.prepare(
@@ -44,7 +44,7 @@ export function validateReadOnlySql(rawSql) {
 
 function truncateCell(v) {
   if (typeof v !== 'string') return v;
-  return v.length > 260 ? `${v.slice(0, 257)}...` : v;
+  return v.length > 180 ? `${v.slice(0, 177)}...` : v;
 }
 
 const AGENT_TOOLS = [
@@ -284,20 +284,22 @@ export async function runCleanerAgentJob(env, jobId, { user, cfg, includeLinks, 
   };
 
   const system = `You are Athena's autonomous AI DB Agent. Execute the user's instruction accurately using your tools.
+Mode: ${dryRun ? 'DRY RUN (Preview only — you MUST call stage_mutations with every proposed delete/update so the user can review the diff list before applying!)' : 'LIVE EXECUTION (all staged mutations are applied to DB on finish).'}
 Active Scope: ${scope} (${scopeCol} = '${scopeKey}')
 Primary links table: ${table} (columns: id, ${scopeCol}, url, title, notes, tags, created_at, manual_edited_at)
 Documents table: uploaded_documents (columns: id, scope, ${scopeCol}, filename, content, created_at)
 Allowed targets: links=${includeLinks}, documents=${includeDocs}.
-Workflow:
-1. Use sql_read to inspect counts, schema/rows, or find candidates. Always scope queries with ${scopeCol} = '${scopeKey}'.
+CRITICAL RULES:
+1. Use sql_read to inspect counts and rows. Always scope queries with ${scopeCol} = '${scopeKey}'.
 2. Use probe_urls whenever checking whether URLs are reachable, redirect, return images (.jpg/.png), or are unavailable t.me links.
-3. Use stage_mutations to stage deletions or updates (never delete all rows in a duplicate group; keep the best accessible canonical row).
-4. Call finish({ summary }) when done.`;
+3. NEVER just describe deletions or updates in prose! You MUST call stage_mutations({ operations: [...] }) for every row you want to delete or update so it appears in the preview diff list. Never delete all rows in a duplicate group; keep the best accessible canonical row.
+4. After staging all mutations, call finish({ summary }) with a clear list/summary of what was staged.`;
 
   const messages = [{ role: 'user', content: job.prompt }];
 
   try {
     let finalSummary = '';
+    let nudged = 0;
     for (let step = 1; step <= AGENT_MAX_STEPS; step++) {
       const cur = await env.DB.prepare('SELECT status FROM cleaner_agent_jobs WHERE id = ?').bind(jobId).first();
       if (!cur || cur.status === 'stopping' || cur.status === 'stopped') {
@@ -313,6 +315,16 @@ Workflow:
       }
 
       if (!turn.calls.length) {
+        if (stagedMap.size === 0 && nudged < 2 && step < AGENT_MAX_STEPS) {
+          nudged++;
+          logs.push(`Step ${step}: Nudging agent to stage mutations or finish…`);
+          messages.push({
+            role: 'user',
+            content: 'If you found rows to delete or update, you MUST call stage_mutations({ operations: [...] }) now so they appear in the preview diff list, then call finish({ summary }). If no changes are needed, call finish({ summary }) explaining why.',
+          });
+          await saveProgress();
+          continue;
+        }
         finalSummary = turn.text || 'Completed.';
         logs.push(`Step ${step}: Agent finished.`);
         break;

@@ -9106,6 +9106,9 @@ document.addEventListener('DOMContentLoaded', () => {
           summaryEl.textContent = logText ? `${head}\n\n${logText}` : head;
         }
         if (['done', 'stopped', 'error'].includes(job.status)) {
+          if (!job.diffs?.length && $('cleanerDiffList')) {
+            $('cleanerDiffList').innerHTML = `<div class="cleaner-empty">Agent ${escapeHtml(job.status)} with 0 staged changes.</div>`;
+          }
           if (job.status === 'error') {
             showToast(job.error || 'Agent failed', true);
           } else if (dryRun && job.staged_count > 0 && applyBtn) {
