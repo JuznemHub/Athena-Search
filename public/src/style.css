@@ -1133,7 +1133,7 @@ body, .g-result, .side-drawer, .search-bar-box, .modal, #toast { transition: bac
   padding: 0 28px 0 10px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 999px;
+  border-radius: var(--radius-sm, 8px);
   color: var(--text-main, #eef0f6);
   outline: none;
   cursor: pointer;
@@ -1499,7 +1499,7 @@ body.public-wiki-only .brand-logo {
   padding: 0 26px 0 10px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 999px;
+  border-radius: var(--radius-sm, 8px);
   color: var(--text-main);
   outline: none;
   appearance: auto;
@@ -1535,7 +1535,7 @@ body.public-wiki-only .brand-logo {
   height: 34px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 999px;
+  border-radius: var(--radius-sm, 8px);
   padding: 0 32px 0 34px;
   font-size: 0.82rem;
   color: var(--text-main);
@@ -1868,7 +1868,7 @@ body.public-wiki-only .brand-logo {
   gap: 8px;
   background: rgba(255, 255, 255, 0.035);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 999px;
+  border-radius: var(--radius-sm, 8px);
   padding: 4px 14px 4px 12px;
   transition: all var(--dur-1) var(--ease);
 }
@@ -5097,14 +5097,14 @@ body.feed-active .scope-switch-container,
   .wiki-ctrl-group select {
     width: 100%;
     min-height: 44px;
-    border-radius: 10px;
+    border-radius: var(--radius-sm, 8px);
   }
   .wiki-search-wrap {
     flex: 1 1 200px;
   }
   .wiki-sub-select-wrap {
     width: 100%;
-    border-radius: 10px;
+    border-radius: var(--radius-sm, 8px);
   }
   .wiki-sub-select {
     flex: 1;
