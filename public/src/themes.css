@@ -1089,3 +1089,12 @@ html body .wiki-sub-select-wrap .wiki-sub-select {
   line-height: 1;
   font-weight: 400;
 }
+
+/* Phones: DB sits next to the bell, so it drops the outline the bell
+   never had and both read as plain header icons. */
+@media (max-width: 720px) {
+  .top-bar #adminDbNavBtn:not(:hover):not(:focus-visible) {
+    border-color: transparent !important;
+    background: transparent !important;
+  }
+}
