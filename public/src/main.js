@@ -977,15 +977,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const aiLock = $('aiLockBadge');
     const aiDesc = $('aiSettingsDesc');
     const aiPill = $('aiModePill');
+    // Owner-only forms are hidden, not shown faded: a disabled form at 45%
+    // opacity is unreadable and offers nothing the member can do.
     if (aiBody) {
-      aiBody.classList.toggle('ui-locked', !aiCfg);
+      aiBody.classList.toggle('hidden', !aiCfg);
       aiBody.querySelectorAll('input, select, button').forEach(el => { el.disabled = !aiCfg; });
     }
-    if (aiLock) aiLock.classList.toggle('hidden', aiCfg);
+    if (aiLock) aiLock.classList.add('hidden');
     if (aiDesc) {
       aiDesc.textContent = aiCfg
-        ? 'GOD: set instance AI credentials (used by all ranks on site + /ai).'
-        : 'AI chat is available. Credentials are set by GOD rank only (read-only here).';
+        ? 'Set the AI provider and key for this instance. Everyone uses it on the site and with /ai.'
+        : 'AI answers work for everyone. The instance owner sets the provider and key.';
     }
     if (aiPill) {
       aiPill.classList.toggle('mode-pill-locked', !aiOk);
@@ -998,14 +1000,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const botDesc = $('botSettingsDesc');
     if (botSec) botSec.classList.remove('hidden');
     if (botBody) {
-      botBody.classList.toggle('ui-locked', !god);
+      botBody.classList.toggle('hidden', !god);
       botBody.querySelectorAll('input, select, button').forEach(el => { el.disabled = !god; });
     }
-    if (botBadge) botBadge.classList.toggle('hidden', god);
+    if (botBadge) botBadge.classList.add('hidden');
+    $('botStatus')?.classList.toggle('hidden', !god);
     if (botDesc) {
       botDesc.textContent = god
-        ? 'GOD: register Telegram bot (token + DM /id). Communities: /community_verify in group.'
-        : 'Read-only. Only GOD rank can add or change the bot.';
+        ? 'Register a Telegram bot with its token and your DM chat ID. In a group, run /community_verify.'
+        : 'The instance owner adds and changes bots.';
     }
     if (personalScopeBtn) {
       personalScopeBtn.classList.toggle('scope-locked', !god);
@@ -1024,8 +1027,19 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }
     const backendInput = $('backendUrl');
-    if (backendInput) backendInput.disabled = !god;
+    if (backendInput) {
+      backendInput.disabled = !god;
+      backendInput.classList.toggle('hidden', !god);
+    }
+    document.querySelector('label[for="backendUrl"]')?.classList.toggle('hidden', !god);
+    const backendDesc = document.querySelector('#backendSection .section-desc');
+    if (backendDesc) {
+      backendDesc.textContent = god
+        ? 'One API backend for this instance. Every account uses it and its storage.'
+        : 'Set by the instance owner.';
+    }
     $('defaultBackendBtn')?.classList.toggle('hidden', !god);
+    $('storageSection')?.classList.toggle('hidden', !god);
   }
 
   /**

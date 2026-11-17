@@ -1068,8 +1068,8 @@
         </div>
         <div class="form-group">
           <label for="aiModel">Model</label>
-          <div style="display:flex;gap:8px;">
-            <input type="text" id="aiModel" placeholder="deepseek-v4-flash" style="flex:1;">
+          <div style="display:flex;flex-wrap:wrap;gap:8px;">
+            <input type="text" id="aiModel" placeholder="deepseek-v4-flash" style="flex:1 1 100%;">
              <button type="button" id="aiLoadModelsBtn" class="btn btn-secondary" title="Fetch the model list from the provider (GOD)">Models…</button>
              <button type="button" id="aiRefreshModelsBtn" class="btn btn-secondary" title="Refresh the live model list (GOD)" aria-label="Refresh model list">↻</button>
              <button type="button" id="aiPingProviderBtn" class="btn btn-secondary" title="Measure provider endpoint latency">Ping</button>
