@@ -2820,6 +2820,12 @@ body.feed-active .scope-switch-container,
   outline: none;
 }
 
+/* The whole bar shows the focus ring via :focus-within, so a second ring
+   on the input inside it is dropped. */
+.freshrss-view .freshrss-search-stick input:focus-visible {
+  outline: none;
+}
+
 .freshrss-search-stick input::placeholder {
   color: var(--frss-text-muted);
 }
@@ -2874,6 +2880,11 @@ body.feed-active .scope-switch-container,
   .freshrss-search-stick .freshrss-search-help-btn {
     width: 44px;
     height: 44px;
+  }
+  /* The input was 27px tall in a 44px bar, so taps near its edge missed. */
+  .freshrss-search-stick input {
+    align-self: stretch;
+    min-height: 44px;
   }
 }
 
