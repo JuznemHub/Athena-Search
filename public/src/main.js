@@ -2227,7 +2227,10 @@ document.addEventListener('DOMContentLoaded', () => {
       ? `<div class="g-actions">
           <button type="button" class="vote-btn up ${item.myVote === 1 ? 'active' : ''}" data-id="${escapeHtml(item.id)}" data-vote="1" title="Upvote">▲ <span>${item.upvotes || 0}</span></button>
           <button type="button" class="vote-btn down ${item.myVote === -1 ? 'active' : ''}" data-id="${escapeHtml(item.id)}" data-vote="-1" title="Downvote">▼ <span>${item.downvotes || 0}</span></button>
-          <button type="button" class="report-btn" data-id="${escapeHtml(item.id)}" title="Report">Report</button>
+          <button type="button" class="report-btn" data-id="${escapeHtml(item.id)}" title="Report this link">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 22V4"/><path d="M4 4h13l-2 4 2 4H4"/></svg>
+            <span>Report</span>
+          </button>
         </div>`
       : `<div class="g-meta">${escapeHtml(when)}${(item.tags || []).length ? ' · ' + item.tags.map(t => '#' + escapeHtml(t)).join(' ') : ''}</div>`;
 

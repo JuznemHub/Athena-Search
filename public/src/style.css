@@ -663,6 +663,7 @@ body {
 .plat-tag { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 7px; border-radius: 999px; font-weight: 600; }
 .plat-telegram { background: rgba(42,171,238,0.2); color: #6ec9f5; }
 .g-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.report-btn { display: inline-flex; align-items: center; gap: 4px; }
 .vote-btn, .report-btn { background: rgba(255,255,255,0.04); border: 1px solid var(--border-color, rgba(255,255,255,0.1)); color: var(--text-muted, #8e95b0); border-radius: 8px; padding: 4px 10px; font-size: 0.8rem; cursor: pointer; }
 .vote-btn:hover, .report-btn:hover { color: var(--text-main, #eef0f6); border-color: var(--accent-border); }
 .vote-btn.active.up { color: var(--success-color, #00e676); border-color: rgba(0,230,118,0.4); }
@@ -4931,7 +4932,8 @@ body.feed-active .scope-switch-container,
     gap: 6px;
   }
   /* Icon-only on phones so the footer fits one line; the label stays for screen readers. */
-  .g-card-actions .btn-sm > span {
+  .g-card-actions .btn-sm > span,
+  .g-card-footer .report-btn > span {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -4945,20 +4947,11 @@ body.feed-active .scope-switch-container,
   .vote-btn,
   .report-btn {
     position: relative;
-    min-height: 32px;
-    height: 32px;
-    padding: 0 9px;
-    font-size: 0.72rem;
+    height: auto;
+    padding: 0 12px;
+    font-size: 0.8rem;
     gap: 4px;
-  }
-  .g-card-actions .btn-sm::before,
-  .g-card-actions .edit-link-btn::before,
-  .g-card-actions .del-link-btn::before,
-  .vote-btn::before,
-  .report-btn::before {
-    content: "";
-    position: absolute;
-    inset: -6px -2px;
+    justify-content: center;
   }
   .admin-card-del-btn,
   .admin-panel-del-btn,
@@ -5078,13 +5071,33 @@ body.feed-active .scope-switch-container,
   }
 }
 
+/* Touch screens: every control is at least 44px. Tag chips stay at 32px
+   (there can be ten per card) with 8px gaps so neighbours aren't hit by mistake. */
 @media (pointer: coarse) {
   .icon-btn,
   .theme-bar .theme-chip,
+  .theme-switcher .theme-chip,
   .vote-btn,
   .report-btn,
   .nav_entries button,
-  .btn-sm {
+  .btn,
+  .btn-sm,
+  .download-doc-btn,
+  .bar-action-btn,
+  .bar-submit-btn,
+  .brand-logo {
     min-height: 44px;
+  }
+  .vote-btn,
+  .report-btn,
+  .bar-action-btn,
+  .bar-submit-btn,
+  .g-card-actions .btn-sm {
+    min-width: 44px;
+  }
+  .g-card-tags { gap: 8px; }
+  .g-tag-chip {
+    min-height: 32px;
+    padding: 0 10px;
   }
 }
