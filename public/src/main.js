@@ -2057,8 +2057,21 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  // Notes and documents often hold raw markdown; cards show plain text.
+  function stripMarkdown(text) {
+    return String(text || '')
+      .replace(/```[\s\S]*?```/g, ' ')
+      .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/^[ \t]*(#{1,6}|>+|[-*+]|\d+[.)])[ \t]+/gm, '')
+      .replace(/(^|\s)#{2,6}[ \t]+/g, '$1')
+      .replace(/(\*\*|__|~~)(?=\S)([\s\S]*?\S)\1/g, '$2')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/^[ \t]*([-*_][ \t]*){3,}$/gm, '');
+  }
+
   function documentSnippet(content, query, maxLength = 260) {
-    const text = String(content || '').replace(/\s+/g, ' ').trim();
+    const text = stripMarkdown(content).replace(/\s+/g, ' ').trim();
     if (!text) return '';
     const terms = (query || '').toLowerCase().split(/\s+/).filter(Boolean);
     let index = -1;
@@ -2217,7 +2230,7 @@ document.addEventListener('DOMContentLoaded', () => {
       : 'note · local brain';
     const href = item.url || '#';
     const site = item.siteName || '';
-    const desc = (item.notes || '').slice(0, 220) || (item.tags || []).map(t => `#${t}`).join(' ');
+    const desc = stripMarkdown(item.notes).trim().slice(0, 220) || (item.tags || []).map(t => `#${t}`).join(' ');
     const who = item.addedBy || item.added_by || '';
     const plat = providerLabel(item.addedByProvider);
     const when = formatDateTime(item.createdAt);
@@ -5038,7 +5051,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     ${l.url ? `<button type="button" class="wiki-copy-url-btn" data-url="${escapeHtml(l.url)}" title="Copy URL" aria-label="Copy URL"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>` : ''}
                   </div>
                   ${renderLinkPreview(l)}
-                  ${l.notes ? `<p class="wiki-card-desc">${escapeHtml(l.notes)}</p>` : ''}
+                  ${l.notes ? `<p class="wiki-card-desc">${escapeHtml(stripMarkdown(l.notes).trim())}</p>` : ''}
                   <div class="wiki-card-footer">
                     <div class="wiki-card-tags">
                       ${tagPills}
