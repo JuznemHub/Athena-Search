@@ -1080,3 +1080,12 @@ html body .wiki-sub-select-wrap .wiki-sub-select {
   border: 0 !important;
   box-shadow: none !important;
 }
+
+/* Text-glyph close buttons (the × character) inherited the 13px button
+   font and read as a speck. Draw them at icon size so they match the
+   20px line icons next to them. */
+.icon-btn[aria-label^="Close"] {
+  font-size: 1.5rem;
+  line-height: 1;
+  font-weight: 400;
+}

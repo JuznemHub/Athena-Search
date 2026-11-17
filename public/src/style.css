@@ -692,7 +692,7 @@ body.results-active .search-wrapper { align-items: stretch; }
 .accent-color-input::-webkit-color-swatch { border: none; border-radius: 8px; }
 .accent-color-input::-moz-color-swatch { border: none; border-radius: 8px; }
 .accent-current-label { font-family: ui-monospace, monospace; font-size: 0.82rem; color: var(--text-muted, #8e95b0); flex: 1; }
-.accent-swatches { display: flex; flex-wrap: wrap; gap: 2px; margin: 0 -6px; }
+.accent-swatches { display: grid; grid-template-columns: repeat(4, 1fr); justify-items: center; gap: 2px; margin: 0 -6px; }
 /* 44px tap area, 30px visible dot: padding + content-box clip keep the dot small */
 .accent-swatch {
   width: 44px; height: 44px; padding: 7px; border-radius: 50%; border: 2px solid transparent;
