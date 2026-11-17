@@ -2291,13 +2291,15 @@ document.addEventListener('DOMContentLoaded', () => {
           <span class="g-favicon ${favicon ? 'hidden' : ''}"></span>
           <cite class="g-cite">${site ? escapeHtml(site) + ' · ' : ''}${highlight(displayUrl, query)}</cite>
         </div>
-        ${cardActionsHtml}
       </div>
       <a class="g-title" href="${safeHref(href)}" ${item.url ? 'target="_blank" rel="noopener noreferrer"' : ''}>${highlight(item.title || 'Untitled', query)}</a>
       ${preview}
       ${desc ? `<p class="g-snippet">${highlight(desc, query)}</p>` : ''}
       ${tagsHtml}
-      ${voteRow}
+      <div class="g-card-footer">
+        ${voteRow}
+        ${cardActionsHtml}
+      </div>
       ${editAuditHtml}
     `;
     return card;

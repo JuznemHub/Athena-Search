@@ -292,9 +292,16 @@ body {
 .g-result.editing { background: var(--accent-surface); box-shadow: inset 0 0 0 1px var(--accent-border); }
 .g-result.edited-flash { background: rgba(255,92,124,0.12); box-shadow: inset 0 0 0 1px rgba(255,92,124,0.45); }
 
+/* Card footer: votes and report on the left, Save/Edit/Delete on the right. */
+.g-card-footer {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px;
+}
+.g-card-footer > .g-actions,
+.g-card-footer > .g-meta { margin-top: 0; }
+
 /* Edit & Delete Action Buttons */
 .g-card-actions {
-  display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+  display: flex; align-items: center; gap: 6px; flex-shrink: 0; margin-left: auto;
 }
 .g-card-actions .edit-link-btn,
 .g-card-actions .del-link-btn {
@@ -4921,10 +4928,16 @@ body.feed-active .scope-switch-container,
   }
   /* Compact visual card action pills while keeping >=44px vertical hit-boxes */
   .g-card-actions {
-    width: 100%;
-    flex-wrap: wrap;
     gap: 6px;
-    margin-top: 2px;
+  }
+  /* Icon-only on phones so the footer fits one line; the label stays for screen readers. */
+  .g-card-actions .btn-sm > span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
   .g-card-actions .btn-sm,
   .g-card-actions .edit-link-btn,
