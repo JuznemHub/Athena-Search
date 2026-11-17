@@ -1848,6 +1848,7 @@ document.addEventListener('DOMContentLoaded', () => {
       mode = 'search';
     }
     state.mode = mode;
+    document.body.dataset.mode = mode;
     uploadActions.classList.add('hidden');
     barActionBtn.setAttribute('aria-expanded', 'false');
     document.querySelectorAll('.mode-pill').forEach(p => {
@@ -5977,6 +5978,9 @@ document.addEventListener('DOMContentLoaded', () => {
   function switchFeedScope(nextCommunityId) {
     if (!nextCommunityId) return;
     feedState.communityId = nextCommunityId;
+    feedState.sourcesLoaded = false;
+    feedState.sourcesScope = '';
+    feedState.categories = [];
     localStorage.setItem('freshrss_community_id', nextCommunityId);
     feedState.stream = 'all';
     feedState.category = '';
@@ -6089,13 +6093,15 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function loadFeedSources() {
-    if (!feedState.communityId) return;
+    const reqCommId = feedState.communityId;
+    if (!reqCommId) return;
     try {
-      const { data } = await api(`/api/feed/sources?community_id=${encodeURIComponent(feedState.communityId)}`);
-      if (!data?.success) return;
+      const { data } = await api(`/api/feed/sources?community_id=${encodeURIComponent(reqCommId)}`);
+      if (!data?.success || reqCommId !== feedState.communityId) return;
 
       feedState.categories = data.categories || [];
       feedState.sourcesLoaded = true;
+      feedState.sourcesScope = reqCommId;
       feedState.totalUnread = data.total_unread || 0;
       feedState.totalImportantUnread = data.total_important_unread ?? 0;
       feedState.totalStarred = data.total_starred || 0;
@@ -6573,7 +6579,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const listEl = $('freshrssArticlesList');
     if (!listEl) return;
 
-    if (!feedState.articles.length && feedState.sourcesLoaded && !feedState.categories.length && !feedState.search) {
+    if (!feedState.articles.length && feedState.sourcesLoaded && feedState.sourcesScope === feedState.communityId && !feedState.categories.length && !feedState.search) {
       const where = feedState.communityId === 'personal' ? 'your Personal feeds' : 'this community';
       listEl.innerHTML = `
         <div class="freshrss-empty-state">

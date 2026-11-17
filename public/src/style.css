@@ -4992,9 +4992,16 @@ body.feed-active .scope-switch-container,
   .top-bar .bookmarks-nav-btn {
     display: none !important;
   }
-  /* Scope is in the Filters panel on phones; the floating pill covered results. */
-  .scope-switch-container {
+  /* Search keeps Scope in Filters so results stay clear; Dump/AI/Delete hide Filters so keep the scope pill above nav. */
+  body:not([data-mode="dump"]):not([data-mode="ai"]):not([data-mode="delete"]) .scope-switch-container {
     display: none !important;
+  }
+  .scope-switch-container {
+    left: 50% !important;
+    right: auto !important;
+    transform: translateX(-50%);
+    bottom: calc(70px + env(safe-area-inset-bottom, 0px)) !important;
+    z-index: 940 !important;
   }
   .main-db-controls {
     grid-template-columns: repeat(2, minmax(0, 1fr));
