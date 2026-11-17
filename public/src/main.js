@@ -936,11 +936,19 @@ document.addEventListener('DOMContentLoaded', () => {
     userName.textContent = u.displayName || u.username;
     const roleTag = isGod() ? ' · GOD' : (state.isElevated ? ' · staff' : ' · member');
     userEmail.textContent = `${u.provider || 'oauth'} · @${u.username}${roleTag}`;
-    userAvatar.textContent = (u.displayName || u.username || '?').charAt(0).toUpperCase();
+    const initial = (u.displayName || u.username || '?').charAt(0).toUpperCase();
+    userAvatar.textContent = initial;
+    userAvatar.style.backgroundImage = '';
     if (u.avatarUrl) {
-      userAvatar.style.backgroundImage = `url(${u.avatarUrl})`;
-      userAvatar.style.backgroundSize = 'cover';
-      userAvatar.textContent = '';
+      // Only swap the initial for the photo once it has loaded, so a dead link keeps the letter.
+      const img = new Image();
+      img.onload = () => {
+        if (state.currentUser !== u) return;
+        userAvatar.style.backgroundImage = `url("${String(u.avatarUrl).replace(/"/g, '%22')}")`;
+        userAvatar.style.backgroundSize = 'cover';
+        userAvatar.textContent = '';
+      };
+      img.src = u.avatarUrl;
     }
     applyRoleUI();
   }
@@ -2237,6 +2245,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const preview = renderLinkPreview(item);
     const host = preview ? '' : previewUrl(item.url)?.hostname;
     const favicon = host ? `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64` : '';
+    const siteInitial = escapeHtml((site || previewUrl(item.url)?.hostname?.replace(/^www\./, '') || 'N').charAt(0).toUpperCase());
 
     const authorLine = ctx.isCommunity
       ? `<div class="g-author">${plat ? `<span class="plat-tag plat-${plat.toLowerCase()}">${escapeHtml(plat)}</span>` : ''}
@@ -2312,7 +2321,7 @@ document.addEventListener('DOMContentLoaded', () => {
           ${favicon
             ? `<img class="g-favicon-img" src="${safeHref(favicon)}" alt="" width="18" height="18" loading="lazy" decoding="async" referrerpolicy="no-referrer">`
             : ''}
-          <span class="g-favicon ${favicon ? 'hidden' : ''}"></span>
+          <span class="g-favicon ${favicon ? 'hidden' : ''}" aria-hidden="true">${siteInitial}</span>
           <cite class="g-cite">${site ? escapeHtml(site) + ' · ' : ''}${highlight(displayUrl, query)}</cite>
         </div>
       </div>
