@@ -542,10 +542,12 @@ body::before {
   padding: 3px;
   background: var(--surface) !important;
   border: 1px solid var(--hairline) !important;
-  border-radius: 999px !important;
+  border-radius: 10px !important;
+  width: fit-content;
+  align-self: flex-start;
 }
 .mode-pill {
-  border-radius: 999px !important;
+  border-radius: 7px !important;
   border: none !important;
   background: transparent !important;
   color: var(--text-dim) !important;
@@ -566,8 +568,23 @@ body::before {
   border-color: transparent !important;
   box-shadow: 0 2px 8px rgba(0,0,0,0.25) !important;
 }
+/* Delete is a destructive mode, so it sits apart from the everyday tabs. */
+.mode-pill-delete {
+  position: relative;
+  margin-left: 7px;
+}
+.mode-pill-delete::before {
+  content: "";
+  position: absolute;
+  left: -5px;
+  top: 25%;
+  bottom: 25%;
+  width: 1px;
+  background: var(--hairline-strong);
+}
+.mode-pill-delete:hover { color: var(--danger-color, #f87171) !important; }
 .mode-pill-delete.active {
-  background: linear-gradient(135deg, #c03050, #701028) !important;
+  background: #b4233f !important;
   color: #fff !important;
 }
 [data-theme="material"] .mode-pill { box-shadow: none; }
@@ -743,8 +760,7 @@ body::before {
   .form-group input, .form-group textarea, .form-group select,
   .edit-panel input, .edit-panel textarea,
   .input, .chat-followup-input { font-size: 16px !important; }
-  .mode-pills { width: 100%; }
-  .mode-pill { flex: 1; text-align: center; font-size: 0.8rem; min-height: 44px; }
+  .mode-pill { flex: 0 0 auto; text-align: center; font-size: 0.85rem !important; min-height: 44px; min-width: 52px; padding: 0 14px !important; }
   .notif-panel { right: max(12px, env(safe-area-inset-right)) !important; left: max(12px, env(safe-area-inset-left)); width: auto !important; }
 }
 
@@ -787,7 +803,6 @@ body::before {
   .main-content { max-width: 680px; }
   .side-drawer { width: min(400px, 88vw) !important; }
   .top-bar { padding: 12px 20px; }
-  .mode-pills { max-width: 480px; }
 }
 
 /* Phones: roomier search bar, taller tap targets, and result rows that
