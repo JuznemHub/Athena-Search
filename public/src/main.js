@@ -5762,31 +5762,66 @@ document.addEventListener('DOMContentLoaded', () => {
     activeArticleIndex: -1
   };
 
+  const FEED_DROP_TAGS = new Set([
+    'script', 'style', 'iframe', 'frame', 'frameset', 'object', 'embed',
+    'applet', 'link', 'meta', 'base', 'form', 'input', 'button', 'textarea',
+    'select', 'option', 'svg', 'math', 'template', 'noscript'
+  ]);
+
   function sanitizeFeedHtml(html) {
     if (!html) return '';
-    return String(html)
-      .replace(/<script[\s\S]*?<\/script>/gi, '')
-      .replace(/<iframe[\s\S]*?<\/iframe>/gi, '')
-      .replace(/<style[\s\S]*?<\/style>/gi, '')
-      .replace(/<object[\s\S]*?<\/object>/gi, '')
-      .replace(/<embed[\s\S]*?>/gi, '')
-      .replace(/on\w+\s*=\s*["'][^"']*["']/gi, '')
-      .replace(/on\w+\s*=\s*[^\s>]+/gi, '')
-      .replace(/href\s*=\s*["']\s*javascript:[^"']*["']/gi, 'href="#"');
+    if (typeof DOMParser !== 'function') return escapeHtml(String(html));
+    const doc = new DOMParser().parseFromString(String(html), 'text/html');
+    if (!doc?.body) return '';
+    const walk = (root) => {
+      for (const node of Array.from(root.childNodes)) {
+        if (node.nodeType === 8) { node.remove(); continue; }
+        if (node.nodeType !== 1) continue;
+        const tag = node.tagName.toLowerCase();
+        if (FEED_DROP_TAGS.has(tag)) {
+          node.remove();
+          continue;
+        }
+        for (const attr of Array.from(node.attributes || [])) {
+          const name = attr.name.toLowerCase();
+          const val = String(attr.value || '').trim();
+          if (name.startsWith('on') || name === 'style' || name === 'srcdoc' || name === 'formaction') {
+            node.removeAttribute(attr.name);
+            continue;
+          }
+          if (name === 'href' || name === 'src' || name === 'poster') {
+            let safe;
+            try {
+              const parsed = new URL(val, window.location.origin);
+              safe = parsed.protocol === 'http:' || parsed.protocol === 'https:';
+            } catch (_) {
+              safe = false;
+            }
+            if (!safe) node.removeAttribute(attr.name);
+          }
+        }
+        if (tag === 'a' && node.getAttribute('href')) {
+          node.setAttribute('target', '_blank');
+          node.setAttribute('rel', 'noopener noreferrer');
+        }
+        walk(node);
+      }
+    };
+    walk(doc.body);
+    return doc.body.innerHTML;
   }
 
   function stripHtmlSnippet(html, maxLen = 150) {
     if (!html) return '';
-    const text = String(html)
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/gi, ' ')
-      .replace(/&amp;/gi, '&')
-      .replace(/&lt;/gi, '<')
-      .replace(/&gt;/gi, '>')
-      .replace(/&quot;/gi, '"')
-      .replace(/&#39;/gi, "'")
-      .replace(/\s+/g, ' ')
-      .trim();
+    let rawText;
+    if (typeof DOMParser === 'function') {
+      const doc = new DOMParser().parseFromString(String(html), 'text/html');
+      doc?.body?.querySelectorAll('script, style, noscript').forEach((el) => el.remove());
+      rawText = doc?.body?.textContent || '';
+    } else {
+      rawText = String(html);
+    }
+    const text = rawText.replace(/\s+/g, ' ').trim();
     if (text.length <= maxLen) return text;
     return text.slice(0, maxLen).trim() + '…';
   }
