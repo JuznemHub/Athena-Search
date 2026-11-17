@@ -2860,6 +2860,23 @@ body.feed-active .scope-switch-container,
   margin-right: 4px;
 }
 
+/* .btn padding left the glyph 2px of room; keep it a square matching Search. */
+.freshrss-search-stick .freshrss-search-help-btn {
+  flex: none;
+  width: 27px;
+  height: 27px;
+  min-width: 0;
+  padding: 0;
+  border-color: var(--frss-border);
+}
+
+@media (max-width: 768px) {
+  .freshrss-search-stick .freshrss-search-help-btn {
+    width: 44px;
+    height: 44px;
+  }
+}
+
 .freshrss-search-help-btn:hover {
   color: var(--frss-text);
   border-color: var(--frss-accent);
