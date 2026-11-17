@@ -8,13 +8,17 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Athena | Second Brain Search</title>
-  <link rel="manifest" href="./manifest.json">
-  <link rel="apple-touch-icon" href="./src/assets/athena-icon-192.png">
-  <link rel="icon" type="image/png" sizes="64x64" href="./src/assets/athena-favicon.png?v=1.0.70">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="apple-touch-icon" href="/src/assets/athena-icon-192.png">
+  <link rel="icon" type="image/png" sizes="64x64" href="/src/assets/athena-favicon.png?v=1.0.70">
   <meta name="description" content="One bar: search, dump, and AI answers from your markdown brain.">
   <script>
     (function () {
       try {
+        var params = new URLSearchParams(window.location.search);
+        if (params.get('share')) {
+          document.documentElement.setAttribute('data-public-wiki', '1');
+        }
         var t = localStorage.getItem('athena_theme') || 'dark';
         if (t === 'minimal' || !['dark', 'light', 'material', 'glass'].includes(t)) t = 'dark';
         document.documentElement.setAttribute('data-theme', t);
@@ -30,15 +34,20 @@
         if (accent && /^#[0-9a-fA-F]{6}$/.test(accent)) {
           document.documentElement.style.setProperty('--accent', accent);
         }
+        var dScale = localStorage.getItem('athena_display_scale');
+        if (dScale !== null && /^\d+$/.test(dScale)) {
+          var clampedScale = Math.max(85, Math.min(115, Number(dScale)));
+          document.documentElement.style.setProperty('--ui-scale', String(clampedScale / 100));
+        }
       } catch (e) {
         document.documentElement.setAttribute('data-theme', 'dark');
       }
     })();
   </script>
-<link rel="stylesheet" href="./src/style.css?v=1.0.70">
-<link rel="stylesheet" href="./src/themes.css?v=1.0.70">
-<link rel="stylesheet" href="./src/tour.css?v=1.0.70">
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="/src/style.css?v=1.0.70">
+<link rel="stylesheet" href="/src/themes.css?v=1.0.70">
+<link rel="stylesheet" href="/src/tour.css?v=1.0.70">
+  <script defer src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
   <div id="authGate" class="auth-gate">
@@ -50,6 +59,17 @@
       <h1>Welcome</h1>
       <p class="auth-gate-sub">Sign in with Telegram or Discord to use Athena.</p>
       <div class="oauth-buttons">
+        <button type="button" id="telegramAppChooserBtn" class="btn btn-telegram btn-block hidden">Choose Telegram Client</button>
+        <div id="telegramChooserCard" class="telegram-chooser hidden" role="region" aria-label="Telegram client options">
+          <div class="telegram-chooser-grid">
+            <a id="tgChoiceOfficial" class="btn btn-secondary btn-sm telegram-choice-link" href="#" rel="noopener noreferrer">Official Telegram</a>
+            <a id="tgChoiceTme" class="btn btn-secondary btn-sm telegram-choice-link" href="#" target="_blank" rel="noopener noreferrer">App Chooser (t.me)</a>
+            <a id="tgChoiceWeb" class="btn btn-secondary btn-sm telegram-choice-link" href="#" target="_blank" rel="noopener noreferrer">Telegram Web</a>
+            <button type="button" id="tgChoiceCopyBtn" class="btn btn-secondary btn-sm">Copy /start Code</button>
+          </div>
+          <code id="tgChooserCommand" class="telegram-chooser-cmd"></code>
+          <p class="telegram-chooser-hint">If Firefox still jumps straight into one client (such as exteraGram), set Firefox <strong>Settings &rarr; Open links in apps &rarr; Ask before opening</strong> or clear that app's <strong>Open by default</strong> links in Android Settings, or paste the copied <code>/start</code> command into any Telegram app.</p>
+        </div>
         <button type="button" id="telegramWebLoginBtn" class="btn btn-telegram btn-block hidden">Log in with Telegram Web</button>
         <button type="button" id="telegramLoginBtn" class="btn btn-telegram btn-block" disabled>Continue with Telegram</button>
         <div id="telegramWidgetContainer" class="telegram-widget-wrap"></div>
@@ -977,6 +997,14 @@
           <input type="range" id="glassBlurInput" min="0" max="40" step="1" value="24" aria-describedby="glassBlurHint">
           <p class="section-desc" id="glassBlurHint">Applies to the Glass theme. Reduced transparency takes precedence where supported.</p>
         </div>
+        <div class="glass-blur-control display-scale-control">
+          <div class="glass-blur-heading">
+            <label for="displayScaleInput">Display density</label>
+            <output id="displayScaleValue" for="displayScaleInput">100%</output>
+          </div>
+          <input type="range" id="displayScaleInput" min="85" max="115" step="5" value="100" aria-describedby="displayScaleHint">
+          <p class="section-desc" id="displayScaleHint">Scales controls, buttons, and cards across phone and tablet screens.</p>
+        </div>
       </div>
 
       <div class="drawer-section">
@@ -1183,6 +1211,8 @@
           <div class="wiki-share-field">
             <label for="wikiShareDuration">Expiration Time Frame</label>
             <select id="wikiShareDuration" class="input">
+              <option value="1h">1 Hour</option>
+              <option value="1d">24 Hours (1 Day)</option>
               <option value="7d">7 Days</option>
               <option value="15d">15 Days</option>
               <option value="1m" selected>1 Month (30 Days)</option>
@@ -1351,9 +1381,9 @@
     </div>
   </div>
 
-  <script src="./src/lib/dedupe.js?v=1.0.70"></script>
-  <script src="./src/lib/search.js?v=1.0.70"></script>
-  <script src="./src/lib/ai.js?v=1.0.70"></script>
-  <script src="./src/main.js?v=1.0.70"></script>
+  <script src="/src/lib/dedupe.js?v=1.0.70"></script>
+  <script src="/src/lib/search.js?v=1.0.70"></script>
+  <script src="/src/lib/ai.js?v=1.0.70"></script>
+  <script src="/src/main.js?v=1.0.70"></script>
 </body>
 </html>

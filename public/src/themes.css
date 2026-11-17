@@ -226,6 +226,7 @@ body::before {
   inset: 0;
   z-index: 0;
   pointer-events: none;
+  transform: translateZ(0);
   /* One ambient wash, anchored behind the search bar. */
   background:
     radial-gradient(70% 45% at 50% -5%, var(--body-glow-1), transparent 70%),
@@ -272,13 +273,12 @@ body::before {
 .drawer-overlay {
   position: fixed !important;
   inset: 0 !important;
-  z-index: 200 !important;
-  background: rgba(0, 0, 0, 0.6) !important;
-  backdrop-filter: blur(8px);
+  z-index: 960 !important;
+  background: rgba(0, 0, 0, 0.62) !important;
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
-  transition: opacity 0.3s, visibility 0.3s;
+  transition: opacity 0.22s, visibility 0.22s;
 }
 .drawer-overlay.active {
   opacity: 1 !important;
@@ -293,7 +293,7 @@ body::before {
   width: min(400px, 100vw) !important;
   height: 100% !important;
   max-height: 100dvh !important;
-  z-index: 210 !important;
+  z-index: 970 !important;
   background: var(--drawer-bg) !important;
   border-right: 1px solid var(--hairline) !important;
   backdrop-filter: blur(var(--blur)) saturate(180%);
@@ -363,22 +363,22 @@ body::before {
 }
 
 .theme-switcher {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(92px, 100%), 1fr));
+  gap: clamp(6px, 1.8cqi, 8px);
 }
 .theme-switcher .theme-chip {
-  flex: 1 1 calc(50% - 8px);
-  padding: 10px 12px;
-  border-radius: 12px;
+  padding: calc(clamp(6px, 1.8cqi, 9px) * var(--ui-scale, 1)) clamp(8px, 2cqi, 11px);
+  border-radius: 10px;
   border: 1px solid var(--hairline);
   background: var(--surface);
   color: var(--text-dim);
-  font-size: 0.8rem;
+  font-size: calc(clamp(0.74rem, 2.1cqi, 0.82rem) * var(--ui-scale, 1));
   font-weight: 600;
   font-family: var(--font-sans);
   cursor: pointer;
   white-space: nowrap;
+  min-height: calc(34px * var(--ui-scale, 1));
   transition: color var(--dur-1) var(--ease), background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
 }
 .theme-switcher .theme-chip:hover {
@@ -430,7 +430,7 @@ body::before {
   border-color: var(--hairline);
 }
 
-/* ========== Glass surfaces ========== */
+/* ========== Glass surfaces (blur restricted to .top-bar and .side-drawer for 60Hz) ========== */
 .search-bar-box,
 .ai-answer-card,
 .auth-gate-card,
@@ -439,8 +439,6 @@ body::before {
 .toast {
   background: var(--glass-bg) !important;
   border: 1px solid var(--hairline) !important;
-  backdrop-filter: blur(var(--blur)) saturate(180%);
-  -webkit-backdrop-filter: blur(var(--blur)) saturate(180%);
   box-shadow: var(--shadow-main);
 }
 
@@ -458,13 +456,13 @@ body::before {
   background: var(--surface) !important;
 }
 
-/* Glass is reserved for the controls floating above content. */
+/* Translucent chrome controls without per-box backdrop blur churn */
 [data-theme="glass"] .search-bar-box,
 [data-theme="glass"] .auth-gate-card,
 [data-theme="glass"] .scope-switch,
 [data-theme="glass"] .notif-panel,
 [data-theme="glass"] .toast {
-  background: rgba(26, 30, 39, 0.82) !important;
+  background: rgba(24, 29, 39, 0.88) !important;
   border-color: rgba(255, 255, 255, 0.2) !important;
   box-shadow: inset 0 1px rgba(255,255,255,0.12), 0 8px 24px rgba(0,0,0,0.3);
 }
@@ -516,8 +514,6 @@ body::before {
   background: var(--surface) !important;
   border: 1px solid var(--hairline) !important;
   border-radius: 999px !important;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
 }
 .mode-pill {
   border-radius: 999px !important;
@@ -529,7 +525,7 @@ body::before {
   font-weight: 500 !important;
   min-height: 32px;
   padding: 5px 16px !important;
-  transition: all var(--dur-1) var(--ease);
+  transition: color var(--dur-1) var(--ease), background-color var(--dur-1) var(--ease);
 }
 .mode-pill:hover {
   color: var(--text-main) !important;
@@ -569,8 +565,23 @@ body::before {
 .scope-switch-container {
   position: fixed !important;
   z-index: 50 !important;
-  bottom: max(16px, env(safe-area-inset-bottom)) !important;
-  right: max(16px, env(safe-area-inset-right)) !important;
+}
+@media (min-width: 769px) {
+  .scope-switch-container {
+    bottom: max(16px, env(safe-area-inset-bottom)) !important;
+    right: max(16px, env(safe-area-inset-right)) !important;
+    left: auto !important;
+    transform: none !important;
+  }
+}
+@media (max-width: 768px) {
+  .scope-switch-container {
+    left: 50% !important;
+    right: auto !important;
+    transform: translateX(-50%) !important;
+    bottom: calc(76px + env(safe-area-inset-bottom, 0px)) !important;
+    z-index: 940 !important;
+  }
 }
 .scope-btn.active {
   background: var(--accent-gradient) !important;
@@ -586,16 +597,14 @@ body::before {
 
 .g-result {
   border-radius: 14px;
-  padding: 16px 18px;
+  padding: 14px 16px;
   border: 1px solid var(--hairline);
   background: var(--surface);
-  transition: all var(--dur-1) var(--ease);
+  transition: background-color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
 }
 .g-result:hover {
   background: var(--surface-2);
   border-color: var(--hairline-strong);
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-main);
 }
 @media (prefers-reduced-motion: reduce) {
   .g-result:hover { transform: none; }
@@ -678,8 +687,7 @@ body::before {
 }
 
 .auth-gate {
-  background: color-mix(in srgb, var(--ink) 85%, transparent) !important;
-  backdrop-filter: blur(20px);
+  background: color-mix(in srgb, var(--ink) 88%, transparent) !important;
 }
 .auth-gate-card {
   border-radius: var(--radius-lg) !important;
@@ -706,8 +714,8 @@ body::before {
   .theme-bar { display: none !important; }
   .mode-badge { display: none !important; }
   .brand-logo .logo-text { font-size: 0.95rem !important; }
-  .scope-switch { width: min(300px, calc(100vw - 28px)); }
-  .scope-btn { flex: 1; justify-content: center; min-height: 44px; }
+  .scope-switch { width: auto; max-width: calc(100vw - 24px); }
+  .scope-btn { flex: 0 1 auto; justify-content: center; min-height: 36px; padding: 5px 14px; font-size: 0.78rem; }
   .side-drawer { width: 100% !important; }
   /* Under 16px, iOS Safari zooms the page on focus and never zooms back. */
   .search-bar-box input, .search-bar-box #searchInput,
@@ -764,12 +772,10 @@ body::before {
 /* Phones: roomier search bar, taller tap targets, and result rows that
    don't crush the favicon + action row against 320px screens. */
 @media (max-width: 720px) {
-  .search-bar-box { padding: var(--s-2) var(--s-2); border-radius: var(--radius-md, 14px); }
-  .search-bar-box #searchInput { min-height: 44px; }
-  .g-result { padding: var(--s-2) var(--s-2); }
-  .g-title { font-size: 1rem; }
+  .search-bar-box { padding: calc(var(--s-2) * var(--ui-scale, 1)); border-radius: var(--radius-md, 14px); }
+  .search-bar-box #searchInput { min-height: 40px; }
   .g-cite { white-space: normal; overflow-wrap: anywhere; }
-  .hero-sub { font-size: 0.95rem !important; }
+  .hero-sub { font-size: calc(0.88rem * var(--ui-scale, 1)) !important; }
   /* Bottom scope bar must never overlap the last result on short phones. */
   .main-content { padding-bottom: max(140px, env(safe-area-inset-bottom) + 110px) !important; }
   .chat-answer-content table { display: block; overflow-x: auto; }
@@ -800,9 +806,7 @@ body::before {
   box-shadow: inset -1px 0 rgba(255,255,255,0.1), 8px 0 32px rgba(0,0,0,0.3);
 }
 [data-theme="glass"] .mode-pills {
-  background: rgba(26, 30, 39, 0.82) !important;
-  backdrop-filter: blur(var(--blur)) saturate(130%);
-  -webkit-backdrop-filter: blur(var(--blur)) saturate(130%);
+  background: rgba(26, 30, 39, 0.88) !important;
   box-shadow: inset 0 1px rgba(255,255,255,0.1);
 }
 [data-theme="glass"] .main-tags-card,
@@ -845,34 +849,35 @@ body::before {
     inset 0 -9px 20px -18px rgba(3, 7, 14, 0.85),
     0 14px 34px rgba(0, 0, 0, 0.27);
 }
+/* Glass backdrop-blur strictly scoped to 2 floating chrome surfaces (.top-bar and .side-drawer). */
 [data-theme="glass"] .top-bar,
-[data-theme="glass"] .side-drawer,
-[data-theme="glass"] :is(
-  .search-bar-box, .scope-switch, .mode-pills, .auth-gate-card,
-  .notif-panel, .toast, .main-tags-card, .admin-db-header,
-  .edit-panel, .g-result, .wiki-link-card, .athena-tour,
-  .freshrss-header, .freshrss-nav-menu, .freshrss-sidebar, .freshrss-stream-pane
-) {
+[data-theme="glass"] .side-drawer {
   background-image: var(--glass-sheen) !important;
   border-color: rgba(217, 230, 249, 0.37) !important;
   box-shadow: var(--glass-rim);
   backdrop-filter: blur(var(--blur)) saturate(145%);
   -webkit-backdrop-filter: blur(var(--blur)) saturate(145%);
 }
+/* Scrolling cards and inline panels use crisp translucent surfaces without per-card blur overhead. */
 [data-theme="glass"] :is(
   .search-bar-box, .scope-switch, .mode-pills, .auth-gate-card,
   .notif-panel, .toast, .main-tags-card, .admin-db-header,
   .edit-panel, .g-result, .wiki-link-card, .athena-tour,
-  .freshrss-header, .freshrss-nav-menu
-) { background-color: var(--glass-face) !important; }
+  .freshrss-header, .freshrss-nav-menu, .freshrss-sidebar, .freshrss-stream-pane
+) {
+  background-color: rgba(26, 31, 41, 0.78) !important;
+  background-image: linear-gradient(155deg, rgba(255, 255, 255, 0.08), transparent 48%) !important;
+  border-color: rgba(217, 230, 249, 0.24) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 4px 16px rgba(0, 0, 0, 0.22);
+}
 
 [data-theme="glass"] :is(.wiki-link-card, .g-result) {
   border-radius: var(--radius-lg);
   transition: background-color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
 }
 [data-theme="glass"] :is(.wiki-link-card, .g-result):is(:hover, :focus-within) {
-  background-color: rgba(52, 63, 80, 0.53) !important;
-  border-color: rgba(232, 242, 255, 0.58) !important;
+  background-color: rgba(44, 53, 68, 0.84) !important;
+  border-color: rgba(232, 242, 255, 0.45) !important;
   transform: none;
 }
 [data-theme="glass"] .search-bar-box input::placeholder { opacity: 1; }
@@ -984,7 +989,7 @@ body::before {
 .wiki-link-card,
 .main-tags-card {
   border-color: var(--hairline);
-  transition: border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
+  transition: border-color 150ms ease, background-color 150ms ease;
 }
 .btn-primary,
 .btn-secondary {
