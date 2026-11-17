@@ -5118,10 +5118,30 @@ body.feed-active .scope-switch-container,
   .freshrss-state-tab .icon {
     display: none;
   }
-  .freshrss-nav-menu .btn:not(.freshrss-state-tab) {
-    width: 42px;
-    min-width: 42px;
+  /* The seven icon buttons share one row edge to edge, so it lines up
+     with the tabs above and the sort bar below. */
+  .freshrss-nav-menu .group:not(.freshrss-state-tabs):not(.freshrss-sort-group) {
+    display: contents;
+  }
+  .freshrss-nav-menu .btn:not(.freshrss-state-tab):not(#freshrssSortToggleBtn) {
+    flex: 1 1 0;
+    width: auto;
+    min-width: 0;
     padding: 0 !important;
+  }
+  /* Add Feed takes the free width, settings sits beside it, tour link last. */
+  .freshrss-header-actions {
+    justify-content: flex-start !important;
+  }
+  #freshrssAddFeedBtn {
+    flex: 1 1 auto;
+  }
+  #freshrssSettingsDropdown,
+  #freshrssSettingsDropdown > button {
+    min-width: 44px;
+  }
+  #feedTourBtn {
+    margin-left: 4px;
   }
   .freshrss-sort-group,
   .freshrss-sort-dropdown {
