@@ -5093,6 +5093,44 @@ body.feed-active .scope-switch-container,
     justify-content: flex-start;
     padding: 0 12px !important;
   }
+  /* Wiki: Scope and Community sit side by side with labels above, and the
+     bottom nav replaces the close button. */
+  #wikiCloseBtn {
+    display: none !important;
+  }
+  .wiki-controls-bar {
+    gap: 10px;
+  }
+  .wiki-ctrl-group {
+    flex: 1 1 140px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    min-width: 0;
+  }
+  .wiki-ctrl-group select {
+    width: 100%;
+    min-height: 44px;
+    border-radius: 10px;
+  }
+  .wiki-search-wrap {
+    flex: 1 1 200px;
+  }
+  .wiki-sub-select-wrap {
+    width: 100%;
+    border-radius: 10px;
+  }
+  .wiki-sub-select {
+    flex: 1;
+    min-width: 0;
+    max-width: none;
+    min-height: 40px;
+    text-overflow: ellipsis;
+  }
+  .wiki-search-wrap input,
+  .wiki-mobile-cat-btn {
+    min-height: 44px;
+  }
   /* Saved opens as a full-screen sheet above the bottom nav, like the other tabs. */
   #bookmarksModal {
     padding: 0;

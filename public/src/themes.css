@@ -436,7 +436,10 @@ body::before {
   --accent-text: color-mix(in srgb, var(--accent) 55%, var(--text));
 }
 [data-theme="light"] .main-ctrl-group select,
-[data-theme="light"] .main-tag-toggle-btn {
+[data-theme="light"] .main-tag-toggle-btn,
+[data-theme="light"] .wiki-ctrl-group select,
+[data-theme="light"] .wiki-search-wrap input,
+[data-theme="light"] .wiki-sub-select-wrap {
   background-color: var(--surface);
   border-color: var(--control-border);
 }

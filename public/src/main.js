@@ -4781,6 +4781,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (blocksEl) {
       blocksEl.innerHTML = '<div class="wiki-loading">Loading links for category…</div>';
     }
+    $('wikiHeroCount')?.classList.add('hidden');
+    $('wikiSubCountBadge')?.classList.add('hidden');
 
     try {
       const qParams = new URLSearchParams({
@@ -4844,7 +4846,10 @@ document.addEventListener('DOMContentLoaded', () => {
         heroDesc.textContent = curCat.description || '';
       }
     }
-    if (heroCount) heroCount.textContent = `${(wikiState.totalCategoryLinks || curCat.count || 0).toLocaleString()} links`;
+    if (heroCount) {
+      heroCount.textContent = `${(wikiState.totalCategoryLinks || curCat.count || 0).toLocaleString()} links`;
+      heroCount.classList.remove('hidden');
+    }
 
     // 2. Subheading Scroll-down Selection & Pills
     const subSelect = $('wikiSubSelect');
@@ -4855,6 +4860,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (subBadge) {
       subBadge.textContent = subs.length ? `${subs.length} subheadings` : '';
+      subBadge.classList.toggle('hidden', !subs.length);
     }
 
     // Build scroll-down select options
