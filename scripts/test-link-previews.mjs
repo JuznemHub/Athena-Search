@@ -47,6 +47,7 @@ function renderFixture(link) {
   });
   vm.runInContext(`
     ${section('escapeHtml', 'normalizeLink')}
+    ${section('stripMarkdown', 'documentSnippet')}
     ${section('renderGoogleResults', 'runSearch')}
     ${section('renderWikiContent', 'setupWikiShareModal')}
   `, context);

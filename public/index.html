@@ -10,7 +10,7 @@
   <title>Athena | Second Brain Search</title>
   <link rel="manifest" href="/manifest.json">
   <link rel="apple-touch-icon" href="/src/assets/athena-icon-192.png">
-  <link rel="icon" type="image/png" sizes="64x64" href="/src/assets/athena-favicon.png?v=1.0.70">
+  <link rel="icon" type="image/png" sizes="64x64" href="/src/assets/athena-favicon.png?v=1.0.71">
   <meta name="description" content="One bar: search, dump, and AI answers from your markdown brain.">
   <script>
     (function () {
@@ -44,9 +44,9 @@
       }
     })();
   </script>
-<link rel="stylesheet" href="/src/style.css?v=1.0.70">
-<link rel="stylesheet" href="/src/themes.css?v=1.0.70">
-<link rel="stylesheet" href="/src/tour.css?v=1.0.70">
+<link rel="stylesheet" href="/src/style.css?v=1.0.71">
+<link rel="stylesheet" href="/src/themes.css?v=1.0.71">
+<link rel="stylesheet" href="/src/tour.css?v=1.0.71">
   <script defer src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -57,31 +57,30 @@
         <span class="logo-text">Athena<span class="highlight">Search</span></span>
       </div>
       <h1>Welcome</h1>
-      <p class="auth-gate-sub">Sign in with Telegram or Discord to use Athena.</p>
+      <p class="auth-gate-sub">Sign in to use Athena.</p>
       <div class="oauth-buttons">
-        <button type="button" id="telegramAppChooserBtn" class="btn btn-telegram btn-block hidden">Choose Telegram Client</button>
-        <div id="telegramChooserCard" class="telegram-chooser hidden" role="region" aria-label="Telegram client options">
-          <div class="telegram-chooser-grid">
-            <a id="tgChoiceOfficial" class="btn btn-secondary btn-sm telegram-choice-link" href="#" rel="noopener noreferrer">Official Telegram</a>
-            <a id="tgChoiceTme" class="btn btn-secondary btn-sm telegram-choice-link" href="#" target="_blank" rel="noopener noreferrer">App Chooser (t.me)</a>
-            <a id="tgChoiceWeb" class="btn btn-secondary btn-sm telegram-choice-link" href="#" target="_blank" rel="noopener noreferrer">Telegram Web</a>
-            <button type="button" id="tgChoiceCopyBtn" class="btn btn-secondary btn-sm">Copy /start Code</button>
-          </div>
-          <code id="tgChooserCommand" class="telegram-chooser-cmd"></code>
-          <p class="telegram-chooser-hint">If Firefox still jumps straight into one client (such as exteraGram), set Firefox <strong>Settings &rarr; Open links in apps &rarr; Ask before opening</strong> or clear that app's <strong>Open by default</strong> links in Android Settings, or paste the copied <code>/start</code> command into any Telegram app.</p>
-        </div>
-        <button type="button" id="telegramWebLoginBtn" class="btn btn-telegram btn-block hidden">Log in with Telegram Web</button>
         <button type="button" id="telegramLoginBtn" class="btn btn-telegram btn-block" disabled>Continue with Telegram</button>
-        <div id="telegramWidgetContainer" class="telegram-widget-wrap"></div>
-        <button type="button" id="discordLoginBtn" class="btn btn-discord btn-block" disabled>Continue with Discord</button>
+        <button type="button" id="discordLoginBtn" class="btn btn-discord btn-block hidden" disabled>Continue with Discord</button>
+        <details id="authMoreWays" class="auth-more hidden">
+          <summary>Other ways to sign in</summary>
+          <div class="auth-more-body">
+            <button type="button" id="telegramAppChooserBtn" class="btn btn-secondary btn-block hidden">Choose Telegram Client</button>
+            <div id="telegramChooserCard" class="telegram-chooser hidden" role="region" aria-label="Telegram client options">
+              <div class="telegram-chooser-grid">
+                <a id="tgChoiceOfficial" class="btn btn-secondary btn-sm telegram-choice-link" href="#" rel="noopener noreferrer">Official Telegram</a>
+                <a id="tgChoiceTme" class="btn btn-secondary btn-sm telegram-choice-link" href="#" target="_blank" rel="noopener noreferrer">App Chooser (t.me)</a>
+                <a id="tgChoiceWeb" class="btn btn-secondary btn-sm telegram-choice-link" href="#" target="_blank" rel="noopener noreferrer">Telegram Web</a>
+                <button type="button" id="tgChoiceCopyBtn" class="btn btn-secondary btn-sm">Copy /start Code</button>
+              </div>
+              <code id="tgChooserCommand" class="telegram-chooser-cmd"></code>
+              <p class="telegram-chooser-hint">If Firefox still jumps straight into one client (such as exteraGram), set Firefox <strong>Settings &rarr; Open links in apps &rarr; Ask before opening</strong> or clear that app's <strong>Open by default</strong> links in Android Settings, or paste the copied <code>/start</code> command into any Telegram app.</p>
+            </div>
+            <button type="button" id="telegramWebLoginBtn" class="btn btn-secondary btn-block hidden">Log in with Telegram Web</button>
+            <div id="telegramWidgetContainer" class="telegram-widget-wrap"></div>
+          </div>
+        </details>
       </div>
       <p id="authGateError" class="auth-error hidden"></p>
-      <div class="theme-switcher auth-theme-switcher" role="group" aria-label="Theme">
-        <button type="button" class="theme-chip" data-theme="dark">Dark</button>
-        <button type="button" class="theme-chip" data-theme="light">Light</button>
-        <button type="button" class="theme-chip" data-theme="material">Material</button>
-        <button type="button" class="theme-chip" data-theme="glass">Glass</button>
-      </div>
       <p class="auth-gate-note">Communities are optional; configure later in Settings.</p>
     </div>
   </div>
@@ -95,12 +94,6 @@
         <span class="athena-mark" aria-hidden="true"></span>
         <span class="logo-text">Athena<span class="highlight">Search</span></span>
       </a>
-      <div class="theme-bar" id="themeBar" role="group" aria-label="Theme">
-        <button type="button" class="theme-chip" data-theme="dark" title="Dark">Dark</button>
-        <button type="button" class="theme-chip" data-theme="light" title="Light">Light</button>
-        <button type="button" class="theme-chip" data-theme="material" title="Material">Mat</button>
-        <button type="button" class="theme-chip" data-theme="glass" title="Glass">Glass</button>
-      </div>
       <button type="button" id="notifBellBtn" class="icon-btn notif-bell" title="Notifications" aria-label="Notifications">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
         <span id="notifBadge" class="notif-badge hidden">0</span>
@@ -125,7 +118,7 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>
         <span class="bookmarks-nav-label">Saved</span>
       </button>
-      <div class="mode-badge" id="modeBadge">
+      <div class="mode-badge hidden" id="modeBadge" aria-hidden="true">
         <span class="pulse-dot" id="modePulse"></span>
         <span id="modeBadgeText">Search</span>
       </div>
@@ -185,6 +178,12 @@
         <!-- Main Database & Filter Controls Panel -->
         <div class="main-db-panel" id="mainDbPanel">
           <div class="main-db-controls">
+            <button type="button" id="mainFiltersToggleBtn" class="btn btn-secondary btn-sm main-tag-toggle-btn main-filters-toggle-btn" aria-expanded="false" aria-controls="mainFilterFields">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"></line><line x1="7" y1="12" x2="17" y2="12"></line><line x1="10" y1="18" x2="14" y2="18"></line></svg>
+              <span>Filters</span>
+              <span class="main-filters-count hidden" id="mainFiltersCount"></span>
+            </button>
+            <div class="main-filter-fields" id="mainFilterFields">
             <div class="main-ctrl-group">
               <label for="mainScopeSelect">Scope</label>
               <select id="mainScopeSelect" class="input input-sm">
@@ -212,6 +211,7 @@
                 <option value="created_asc">Oldest added</option>
                 <option value="title_asc">Title (A–Z)</option>
               </select>
+            </div>
             </div>
             <button type="button" id="mainTagsToggleBtn" class="btn btn-secondary btn-sm main-tag-toggle-btn" aria-expanded="true" aria-controls="mainTagsCard" title="Toggle tag cloud">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg>
@@ -395,7 +395,7 @@
               <label for="wikiCommunitySelect">Community</label>
               <select id="wikiCommunitySelect" class="input input-sm"></select>
             </div>
-            <div class="wiki-ctrl-group wiki-ctrl-subheading-group" id="wikiCtrlSubWrap">
+            <div class="wiki-ctrl-group wiki-ctrl-subheading-group hidden" id="wikiCtrlSubWrap">
               <label for="wikiCtrlSubSelect">Subheading</label>
               <select id="wikiCtrlSubSelect" class="input input-sm wiki-sub-dropdown" aria-label="Jump to Subheading">
                 <option value="">All Subheadings</option>
@@ -436,7 +436,7 @@
                   <h3 id="wikiHeroTitle">Video &amp; Streaming</h3>
                   <p id="wikiHeroDesc">Free streaming sites, movies, TV series, anime, live TV, and video tools.</p>
                 </div>
-                <span class="wiki-hero-badge" id="wikiHeroCount">0 links</span>
+                <span class="wiki-hero-badge hidden" id="wikiHeroCount"></span>
               </div>
               <div class="wiki-sub-nav" id="wikiSubNav">
                 <div class="wiki-sub-select-row">
@@ -449,7 +449,7 @@
                       <option value="">All Subheadings</option>
                     </select>
                   </div>
-                  <span id="wikiSubCountBadge" class="wiki-sub-count-badge">…</span>
+                  <span id="wikiSubCountBadge" class="wiki-sub-count-badge hidden"></span>
                 </div>
                 <div class="wiki-sub-pills" id="wikiSubPills"></div>
               </div>
@@ -505,11 +505,11 @@
           <div class="item configure freshrss-header-actions">
             <!-- Explicit Personal DB vs Community DB Switcher -->
             <div class="freshrss-scope-switcher" role="group" aria-label="Feed Database Scope">
-              <button type="button" id="freshrssScopePersonalBtn" class="freshrss-scope-btn" data-scope="personal" title="Personal Feeds (saved to your private personal_links DB)">
+              <button type="button" id="freshrssScopePersonalBtn" class="freshrss-scope-btn" data-scope="personal" title="Personal feeds, saved to your private collection">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
                 <span>Personal Feeds</span>
               </button>
-              <button type="button" id="freshrssScopeCommunityBtn" class="freshrss-scope-btn" data-scope="community" title="Community Feeds (saved to shared community links DB)">
+              <button type="button" id="freshrssScopeCommunityBtn" class="freshrss-scope-btn" data-scope="community" title="Community feeds, shared with every member">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
                 <span>Community</span>
               </button>
@@ -557,7 +557,7 @@
 
             <button type="button" id="freshrssCloseBtn" class="btn freshrss-close-btn" title="Return to Athena Search" aria-label="Back to Search">
               <img class="icon" src="/assets/freshrss/close.svg" alt="">
-              <span class="close-label">Search</span>
+              <span class="close-label">Back to search</span>
             </button>
           </div>
         </header>
@@ -573,7 +573,7 @@
             </div>
 
             <div id="nav_menu_actualize" class="group">
-              <button type="button" id="freshrssRefreshBtn" class="btn" title="Fetch latest articles and ingest into Athena DB (r)">
+              <button type="button" id="freshrssRefreshBtn" class="btn" title="Fetch the latest articles (r)">
                 <img class="icon" src="/assets/freshrss/refresh.svg" loading="lazy" alt="">
                 <span class="toolbar-btn-label">Refresh</span>
               </button>
@@ -726,12 +726,12 @@
                 <span id="freshrssActiveFilterPill" class="freshrss-filter-pill hidden"></span>
               </div>
               <div class="banner-right">
-                <span id="freshrssActiveDbPill" class="freshrss-db-pill" title="Target database table where feed articles are indexed">
-                  Personal DB (personal_links)
+                <span id="freshrssActiveDbPill" class="freshrss-db-pill" title="Where new feed articles are saved">
+                  Saving to Personal
                 </span>
-                <span class="pzp-sync-tag" title="Articles are automatically indexed into your Athena knowledge base with taxonomy tags">
+                <span class="pzp-sync-tag" title="New articles are tagged and saved automatically">
                   <span class="live-dot"></span>
-                  <span>Auto-Ingest Active</span>
+                  <span>Auto-saving</span>
                 </span>
               </div>
             </div>
@@ -773,7 +773,7 @@
               <div class="form-group">
                 <label for="freshrssScopeInput">Destination Database</label>
                 <select id="freshrssScopeInput" class="input"></select>
-                <span class="form-hint" id="freshrssScopeHint">Personal feeds store articles in your private Personal DB (personal_links).</span>
+                <span class="form-hint" id="freshrssScopeHint">Articles from personal feeds go to your private Personal collection.</span>
               </div>
               <div class="form-group">
                 <label for="freshrssFeedUrlInput">Feed URL (RSS, Atom, or JSON Feed) *</label>
@@ -973,6 +973,8 @@
             <span class="user-role" id="userEmail">-</span>
           </div>
         </div>
+        <button type="button" id="drawerSessionTokenBtn" class="btn btn-secondary btn-sm">Copy CLI session token</button>
+        <p class="section-desc">For signing in to athena-tui from a terminal.</p>
         <button id="logoutBtn" class="btn btn-danger btn-sm">Logout</button>
         <div id="wipePersonalWrap" class="mt-2" style="display:block">
           <button type="button" id="wipePersonalBtn" class="btn btn-danger btn-block">Wipe all personal data</button>
@@ -982,7 +984,6 @@
 
       <div class="drawer-section">
         <h3>Appearance</h3>
-        <p class="section-desc">Theme adapts for phone, tablet, and desktop.</p>
         <div class="theme-switcher" id="themeSwitcher" role="group" aria-label="Theme">
           <button type="button" class="theme-chip" data-theme="dark">Dark</button>
           <button type="button" class="theme-chip" data-theme="light">Light</button>
@@ -995,7 +996,7 @@
             <output id="glassBlurValue" for="glassBlurInput">24 px</output>
           </div>
           <input type="range" id="glassBlurInput" min="0" max="40" step="1" value="24" aria-describedby="glassBlurHint">
-          <p class="section-desc" id="glassBlurHint">Applies to the Glass theme. Reduced transparency takes precedence where supported.</p>
+          <p class="section-desc" id="glassBlurHint">If your system asks for reduced transparency, that setting wins.</p>
         </div>
         <div class="glass-blur-control display-scale-control">
           <div class="glass-blur-heading">
@@ -1018,20 +1019,16 @@
         <div class="accent-swatches" id="accentSwatches">
           <button type="button" class="accent-swatch" data-color="#8e70f6" title="Purple" style="--sw:#8e70f6"></button>
           <button type="button" class="accent-swatch" data-color="#3b82f6" title="Blue" style="--sw:#3b82f6"></button>
-          <button type="button" class="accent-swatch" data-color="#ef4444" title="Red" style="--sw:#ef4444"></button>
-          <button type="button" class="accent-swatch" data-color="#22c55e" title="Green" style="--sw:#22c55e"></button>
-          <button type="button" class="accent-swatch" data-color="#f97316" title="Orange" style="--sw:#f97316"></button>
-          <button type="button" class="accent-swatch" data-color="#ec4899" title="Pink" style="--sw:#ec4899"></button>
           <button type="button" class="accent-swatch" data-color="#14b8a6" title="Teal" style="--sw:#14b8a6"></button>
+          <button type="button" class="accent-swatch" data-color="#22c55e" title="Green" style="--sw:#22c55e"></button>
           <button type="button" class="accent-swatch" data-color="#eab308" title="Amber" style="--sw:#eab308"></button>
-          <button type="button" class="accent-swatch" data-color="#6366f1" title="Indigo" style="--sw:#6366f1"></button>
-          <button type="button" class="accent-swatch" data-color="#06b6d4" title="Cyan" style="--sw:#06b6d4"></button>
-          <button type="button" class="accent-swatch" data-color="#8b5cf6" title="Violet" style="--sw:#8b5cf6"></button>
-          <button type="button" class="accent-swatch" data-color="#f59e0b" title="Gold" style="--sw:#f59e0b"></button>
+          <button type="button" class="accent-swatch" data-color="#f97316" title="Orange" style="--sw:#f97316"></button>
+          <button type="button" class="accent-swatch" data-color="#ef4444" title="Red" style="--sw:#ef4444"></button>
+          <button type="button" class="accent-swatch" data-color="#ec4899" title="Pink" style="--sw:#ec4899"></button>
         </div>
       </div>
 
-      <div class="drawer-section" id="backendSection">
+      <div class="drawer-section" id="backendSection" data-collapsible>
         <h3>Backend</h3>
         <p class="section-desc">GOD sets one API backend for this instance. Every account uses that backend and its storage.</p>
         <label class="field-label" for="backendUrl">Backend URL</label>
@@ -1040,7 +1037,7 @@
         <div id="backendStatus" class="status-msg mt-2"></div>
       </div>
 
-      <div class="drawer-section auth-only" id="storageSection">
+      <div class="drawer-section auth-only" id="storageSection" data-collapsible>
         <h3>Storage backend <span id="storageGodBadge" class="lock-badge hidden">GOD</span></h3>
         <p class="section-desc" id="storageDesc">PostgreSQL is the only store. Set <code>DATABASE_URL</code> on the server.</p>
         <div id="storageSettingsBody">
@@ -1053,8 +1050,8 @@
         <div id="storageStatus" class="status-msg mt-2"></div>
       </div>
 
-      <div class="drawer-section auth-only" id="aiSettingsSection">
-        <h3>AI assistant <span id="aiLockBadge" class="lock-badge hidden" title="GOD only credentials">GOD only</span></h3>
+      <div class="drawer-section auth-only" id="aiSettingsSection" data-collapsible>
+        <h3>AI assistant <span id="aiLockBadge" class="lock-badge hidden" title="Only the instance owner can change these">Owner only</span></h3>
         <p class="section-desc" id="aiSettingsDesc">Chat available to all ranks. API credentials are set by GOD rank (instance host) only.</p>
         <div id="aiSettingsBody">
         <div class="form-group">
@@ -1081,10 +1078,10 @@
         </div>
         <div class="form-group">
           <label for="aiModel">Model</label>
-          <div style="display:flex;gap:8px;">
-            <input type="text" id="aiModel" placeholder="deepseek-v4-flash" style="flex:1;">
-             <button type="button" id="aiLoadModelsBtn" class="btn btn-secondary" title="Fetch the model list from the provider (GOD)">Models…</button>
-             <button type="button" id="aiRefreshModelsBtn" class="btn btn-secondary" title="Refresh the live model list (GOD)" aria-label="Refresh model list">↻</button>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;">
+            <input type="text" id="aiModel" placeholder="deepseek-v4-flash" style="flex:1 1 100%;">
+             <button type="button" id="aiLoadModelsBtn" class="btn btn-secondary" title="Fetch the model list from the provider">Models…</button>
+             <button type="button" id="aiRefreshModelsBtn" class="btn btn-secondary" title="Refresh the live model list" aria-label="Refresh model list">↻</button>
              <button type="button" id="aiPingProviderBtn" class="btn btn-secondary" title="Measure provider endpoint latency">Ping</button>
           </div>
           <div id="aiModelPicker" class="hidden" style="margin-top:8px;">
@@ -1134,8 +1131,8 @@
         </div>
       </div>
 
-      <div class="drawer-section auth-only" id="botSettingsSection">
-        <h3>Bot (personal) <span id="botGodBadge" class="lock-badge hidden" title="GOD only edit">GOD only</span></h3>
+      <div class="drawer-section auth-only" id="botSettingsSection" data-collapsible>
+        <h3>Bot (personal) <span id="botGodBadge" class="lock-badge hidden" title="Only the instance owner can edit these">Owner only</span></h3>
         <p class="section-desc" id="botSettingsDesc">Visible to all ranks. Only GOD rank can add/change the bot. Communities: <code>/community_verify</code> in group.</p>
         <div id="botSettingsBody">
         <div class="form-group">
@@ -1154,7 +1151,7 @@
         <div id="botStatus" class="status-msg mt-2">1) DM the bot → /id  2) Paste token + chat ID  3) Add bot to a group → /community_verify</div>
       </div>
 
-      <div class="drawer-section auth-only">
+      <div class="drawer-section auth-only" data-collapsible>
         <h3>Communities</h3>
         <p class="section-desc">Linked via Telegram: add bot to group, owner sends <code>/community_verify</code>. Select one to browse on the site.</p>
         <div class="form-group">
@@ -1381,9 +1378,9 @@
     </div>
   </div>
 
-  <script src="/src/lib/dedupe.js?v=1.0.70"></script>
-  <script src="/src/lib/search.js?v=1.0.70"></script>
-  <script src="/src/lib/ai.js?v=1.0.70"></script>
-  <script src="/src/main.js?v=1.0.70"></script>
+  <script src="/src/lib/dedupe.js?v=1.0.71"></script>
+  <script src="/src/lib/search.js?v=1.0.71"></script>
+  <script src="/src/lib/ai.js?v=1.0.71"></script>
+  <script src="/src/main.js?v=1.0.71"></script>
 </body>
 </html>

@@ -19,7 +19,7 @@
       mode: 'openai',
       model: 'deepseek-v4-flash',
       tier: 'Free Tier',
-      rateNote: 'Free gateway preset — use free models like deepseek-v4-flash'
+      rateNote: 'Free gateway. Use free models like deepseek-v4-flash'
     },
     opencode_zen: {
       label: 'OpenCode Zen',
@@ -261,7 +261,7 @@ INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on 
     const display = docs.slice(0, 8);
     const lines = display.map((d, i) => {
       const label = d.title || d.url || 'Note';
-      return `${i + 1}. **${label}**${d.url ? ` — ${d.url}` : ''}`;
+      return `${i + 1}. **${label}**${d.url ? `: ${d.url}` : ''}`;
     });
     return {
       answer: `Closest matches in your brain:\n\n${lines.join('\n\n')}`,
@@ -392,7 +392,7 @@ INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on 
         clearInterval(stallTimer);
       }
       if (!full && !thinkingBuf) {
-        if (stalled) throw new Error('AI provider stalled (no data for 60s) — try again or check provider status');
+        if (stalled) throw new Error('The AI provider sent nothing for 60 seconds. Try again, or check the provider status.');
         throw new Error('Empty response from AI provider');
       }
       return { text: full, thinking: thinkingBuf };
@@ -502,8 +502,8 @@ INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on 
     if (!hasLocalKey && !serverConfigured) {
       const local = answerLocal(q, docs, corpusSize);
       const hint = isGod
-        ? 'No AI credentials configured — GOD: Settings → AI → Save API key'
-        : 'No instance AI credentials — GOD must configure in Settings → AI';
+        ? 'No AI key yet. Add one in Settings, AI, then Save.'
+        : 'AI is not set up yet. The instance owner adds the key in Settings.';
       return { ...local, mode: 'local', thinking: '', error: hint };
     }
 
@@ -513,13 +513,13 @@ INSTRUCTION: Brain is empty. You MUST output exactly "You have no saved link on 
         ...local,
         mode: 'local',
         thinking: '',
-        error: 'Instance AI not configured — GOD rank must save credentials in Settings → AI (server has no key, possibly decryption failed or not synced)'
+        error: 'AI is not set up on the server. The instance owner needs to save the key again in Settings.'
       };
     }
 
     if (isGod && !hasLocalKey && !serverConfigured) {
       const local = answerLocal(q, docs, corpusSize);
-      return { ...local, mode: 'local', thinking: '', error: 'GOD: No local key in browser and no instance key on server — save in Settings → AI' };
+      return { ...local, mode: 'local', thinking: '', error: 'No AI key in this browser or on the server. Add one in Settings, AI.' };
     }
 
     try {

@@ -633,6 +633,13 @@ document.addEventListener('DOMContentLoaded', () => {
       return { officialUrl, tmeUrl, tgWebUrl, command: `/start ${startParam}` };
     }
 
+    const moreWays = $('authMoreWays');
+    if (moreWays && (cfg.telegramBotEnabled || cfg.botUsername)) {
+      moreWays.classList.remove('hidden');
+      if (!cfg.telegramEnabled) moreWays.open = true;
+    }
+    if (!cfg.telegramEnabled && telegramLoginBtn) telegramLoginBtn.classList.add('hidden');
+
     const chooserBtn = $('telegramAppChooserBtn');
     const chooserCard = $('telegramChooserCard');
     const choiceOfficial = $('tgChoiceOfficial');
@@ -772,6 +779,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (cfg.discordEnabled && discordLoginBtn) {
       discordLoginBtn.disabled = false;
+      discordLoginBtn.classList.remove('hidden');
       discordLoginBtn.onclick = () => { window.location.assign(`${API_BASE}/api/auth/discord`); };
     }
   }
@@ -800,7 +808,7 @@ document.addEventListener('DOMContentLoaded', () => {
         telegram_missing: 'Telegram did not return a full login response. Try again.',
         discord_state: 'Login session expired or was started in another browser. Click Continue with Discord once, in this tab.',
         discord_state_store: 'Could not start login (server). Try again in a moment.',
-        banned: 'You are banned from all communities (no remaining memberships). If you still belong to another community, contact support — otherwise rejoin a group then /community_join <id>.'
+        banned: 'You are banned from all communities (no remaining memberships). If you still belong to another community, contact support. Otherwise rejoin a group then /community_join <id>.'
       };
       showAuthError(hints[authErr] || `Login failed (${authErr})`);
       history.replaceState({}, '', window.location.pathname);
@@ -814,11 +822,11 @@ document.addEventListener('DOMContentLoaded', () => {
       // (athena-tui) log in via this URL and must be able to copy the token.
       if (navigator.clipboard?.writeText) {
         navigator.clipboard.writeText(fromOAuth).then(
-          () => showToast('Session ready — token copied. Paste it into athena-tui.'),
-          () => showToast('Session ready — copy the session= token from the address bar.')
+          () => showToast('Session ready. Token copied, paste it into athena-tui.'),
+          () => showToast('Session ready. Copy the session= token from the address bar.')
         );
       } else {
-        showToast('Session ready — copy the session= token from the address bar.');
+        showToast('Session ready. Copy the session= token from the address bar.');
       }
     }
     // Cookie fallback. Only useful same-origin: a SameSite=Lax cookie is not
@@ -874,7 +882,7 @@ document.addEventListener('DOMContentLoaded', () => {
           return false;
         }
         showLoggedOut();
-        showAuthError(`Backend returned ${res.status}. Your login is still saved — retry, or check Settings → Backend.`);
+        showAuthError(`Backend returned ${res.status}. Your login is still saved. Retry, or check Settings → Backend.`);
         return false;
       }
       state.currentUser = data.user;
@@ -890,7 +898,7 @@ document.addEventListener('DOMContentLoaded', () => {
       // self-hosted backend than it ever was same-origin.
       console.warn('[athena] /api/auth/me unreachable:', err);
       showLoggedOut();
-      showAuthError('Could not reach the backend. Your login is saved — reload to retry, or switch backend in Settings.');
+      showAuthError('Could not reach the backend. Your login is saved. Reload to retry, or switch backend in Settings.');
       return false;
     }
   }
@@ -933,11 +941,19 @@ document.addEventListener('DOMContentLoaded', () => {
     userName.textContent = u.displayName || u.username;
     const roleTag = isGod() ? ' · GOD' : (state.isElevated ? ' · staff' : ' · member');
     userEmail.textContent = `${u.provider || 'oauth'} · @${u.username}${roleTag}`;
-    userAvatar.textContent = (u.displayName || u.username || '?').charAt(0).toUpperCase();
+    const initial = (u.displayName || u.username || '?').charAt(0).toUpperCase();
+    userAvatar.textContent = initial;
+    userAvatar.style.backgroundImage = '';
     if (u.avatarUrl) {
-      userAvatar.style.backgroundImage = `url(${u.avatarUrl})`;
-      userAvatar.style.backgroundSize = 'cover';
-      userAvatar.textContent = '';
+      // Only swap the initial for the photo once it has loaded, so a dead link keeps the letter.
+      const img = new Image();
+      img.onload = () => {
+        if (state.currentUser !== u) return;
+        userAvatar.style.backgroundImage = `url("${String(u.avatarUrl).replace(/"/g, '%22')}")`;
+        userAvatar.style.backgroundSize = 'cover';
+        userAvatar.textContent = '';
+      };
+      img.src = u.avatarUrl;
     }
     applyRoleUI();
   }
@@ -976,21 +992,23 @@ document.addEventListener('DOMContentLoaded', () => {
       wipeBtn.disabled = !god;
       wipeBtn.style.display = god ? 'block' : 'none';
       wipeBtn.style.opacity = god ? '1' : '0.45';
-      wipeBtn.title = god ? 'Wipe your personal links (GOD)' : 'GOD rank only';
+      wipeBtn.title = god ? 'Wipe your personal links' : 'Instance owner only';
     }
     const aiBody = $('aiSettingsBody');
     const aiLock = $('aiLockBadge');
     const aiDesc = $('aiSettingsDesc');
     const aiPill = $('aiModePill');
+    // Owner-only forms are hidden, not shown faded: a disabled form at 45%
+    // opacity is unreadable and offers nothing the member can do.
     if (aiBody) {
-      aiBody.classList.toggle('ui-locked', !aiCfg);
+      aiBody.classList.toggle('hidden', !aiCfg);
       aiBody.querySelectorAll('input, select, button').forEach(el => { el.disabled = !aiCfg; });
     }
-    if (aiLock) aiLock.classList.toggle('hidden', aiCfg);
+    if (aiLock) aiLock.classList.add('hidden');
     if (aiDesc) {
       aiDesc.textContent = aiCfg
-        ? 'GOD: set instance AI credentials (used by all ranks on site + /ai).'
-        : 'AI chat is available. Credentials are set by GOD rank only (read-only here).';
+        ? 'Set the AI provider and key for this instance. Everyone uses it on the site and with /ai.'
+        : 'AI answers work for everyone. The instance owner sets the provider and key.';
     }
     if (aiPill) {
       aiPill.classList.toggle('mode-pill-locked', !aiOk);
@@ -1003,18 +1021,21 @@ document.addEventListener('DOMContentLoaded', () => {
     const botDesc = $('botSettingsDesc');
     if (botSec) botSec.classList.remove('hidden');
     if (botBody) {
-      botBody.classList.toggle('ui-locked', !god);
+      botBody.classList.toggle('hidden', !god);
       botBody.querySelectorAll('input, select, button').forEach(el => { el.disabled = !god; });
     }
-    if (botBadge) botBadge.classList.toggle('hidden', god);
+    if (botBadge) botBadge.classList.add('hidden');
+    $('botStatus')?.classList.toggle('hidden', !god);
     if (botDesc) {
       botDesc.textContent = god
-        ? 'GOD: register Telegram bot (token + DM /id). Communities: /community_verify in group.'
-        : 'Read-only. Only GOD rank can add or change the bot.';
+        ? 'Register a Telegram bot with its token and your DM chat ID. In a group, run /community_verify.'
+        : 'The instance owner adds and changes bots.';
     }
+    // Members can only use Community scope, so the switch has nothing to switch.
+    document.querySelector('.scope-switch-container')?.classList.toggle('is-member', !god);
     if (personalScopeBtn) {
       personalScopeBtn.classList.toggle('scope-locked', !god);
-      personalScopeBtn.title = god ? 'Personal' : 'Personal locked — GOD rank only';
+      personalScopeBtn.title = god ? 'Personal' : 'Personal is for the instance owner only';
       if (!god && state.scope === 'personal') {
         state.scope = 'community';
         updateScopeUI();
@@ -1025,12 +1046,23 @@ document.addEventListener('DOMContentLoaded', () => {
       const personalOpt = mainScopeSelect.querySelector('option[value="personal"]');
       if (personalOpt) {
         personalOpt.disabled = !god;
-        personalOpt.textContent = god ? 'Personal (GOD)' : 'Personal (GOD locked)';
+        personalOpt.textContent = god ? 'Personal' : 'Personal (owner only)';
       }
     }
     const backendInput = $('backendUrl');
-    if (backendInput) backendInput.disabled = !god;
+    if (backendInput) {
+      backendInput.disabled = !god;
+      backendInput.classList.toggle('hidden', !god);
+    }
+    document.querySelector('label[for="backendUrl"]')?.classList.toggle('hidden', !god);
+    const backendDesc = document.querySelector('#backendSection .section-desc');
+    if (backendDesc) {
+      backendDesc.textContent = god
+        ? 'One API backend for this instance. Every account uses it and its storage.'
+        : 'Set by the instance owner.';
+    }
     $('defaultBackendBtn')?.classList.toggle('hidden', !god);
+    $('storageSection')?.classList.toggle('hidden', !god);
   }
 
   /**
@@ -1391,7 +1423,7 @@ document.addEventListener('DOMContentLoaded', () => {
         state.communities.forEach(c => {
           const opt = document.createElement('option');
           opt.value = c.id;
-          opt.textContent = `${c.name}${c.link_count != null ? ` (${c.link_count})` : ''}`;
+          opt.textContent = `${c.name}${c.link_count != null ? ` (${Number(c.link_count).toLocaleString()})` : ''}`;
           if (c.id === state.activeCommunity) opt.selected = true;
           mainCommSel.appendChild(opt);
         });
@@ -1550,7 +1582,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function uploadDocuments(files) {
     if (!files.length) return;
-    if (state.scope === 'personal' && !isGod()) return showToast('Personal uploads are GOD only', true);
+    if (state.scope === 'personal' && !isGod()) return showToast('Personal uploads are for the instance owner only', true);
     if (state.scope === 'community' && !state.activeCommunity) return showToast('Select a community first', true);
     uploadFileBtn.disabled = true;
     let uploaded = 0;
@@ -1635,7 +1667,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function saveDump(raw) {
     if (state.scope === 'personal' && !isGod()) {
-      showToast('Personal dump is GOD only. Join a community first.', true);
+      showToast('Personal is for the instance owner only. Join a community first.', true);
       return;
     }
     if (state.scope === 'community' && !state.activeCommunity) {
@@ -1794,7 +1826,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
     } else {
-      showToast('Was not in DB — adding now');
+      showToast('Not saved yet, adding it now');
       await saveDump(parsed.url);
       return;
     }
@@ -1808,7 +1840,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function setMode(mode) {
     if (state.publicWikiMode) return;
     if (mode === 'ai' && !state.authReady) {
-      showToast('Auth is still loading — wait a second and click AI again', true);
+      showToast('Still signing you in. Wait a second and click AI again', true);
       return;
     }
     if (mode === 'delete' && state.scope === 'community' && !isCommunityStaff()) {
@@ -1816,6 +1848,7 @@ document.addEventListener('DOMContentLoaded', () => {
       mode = 'search';
     }
     state.mode = mode;
+    document.body.dataset.mode = mode;
     uploadActions.classList.add('hidden');
     barActionBtn.setAttribute('aria-expanded', 'false');
     document.querySelectorAll('.mode-pill').forEach(p => {
@@ -1841,8 +1874,8 @@ document.addEventListener('DOMContentLoaded', () => {
       searchInput.placeholder = 'Search your brain…';
       searchInput.enterKeyHint = 'search';
       scopeSubtitle.textContent = state.scope === 'personal'
-        ? 'Search personal notes & links'
-        : 'Search community set';
+        ? 'Search your personal notes and links'
+        : 'Search everything shared in this community';
       aiAnswerCard.classList.add('hidden');
       if (state.authReady) {
         if (hasActiveMainFilters()) runSearch();
@@ -1853,7 +1886,7 @@ document.addEventListener('DOMContentLoaded', () => {
       modePulse.style.background = 'var(--success-color)';
       searchInput.placeholder = 'Paste a link or any text to save…';
       searchInput.enterKeyHint = 'done';
-      scopeSubtitle.textContent = 'Save into markdown brain';
+      scopeSubtitle.textContent = 'Paste a link or a note to save it';
       aiAnswerCard.classList.add('hidden');
       resultsList.innerHTML = '';
       resultsMeta.classList.add('hidden');
@@ -1864,7 +1897,7 @@ document.addEventListener('DOMContentLoaded', () => {
       modePulse.style.background = 'var(--danger-color)';
       searchInput.placeholder = 'Paste a link to delete (or it will be added if missing)…';
       searchInput.enterKeyHint = 'go';
-      scopeSubtitle.textContent = 'Prohibited mode — deletes matching URLs from DB';
+      scopeSubtitle.textContent = 'Delete mode: removes matching links';
       aiAnswerCard.classList.add('hidden');
       resultsList.innerHTML = '';
       resultsMeta.classList.add('hidden');
@@ -1875,7 +1908,7 @@ document.addEventListener('DOMContentLoaded', () => {
       modePulse.style.background = 'var(--primary-purple)';
       searchInput.placeholder = 'Ask anything about your brain…';
       searchInput.enterKeyHint = 'go';
-      scopeSubtitle.textContent = 'Answers from your .md / links only';
+      scopeSubtitle.textContent = 'Answers come only from your saved notes and links';
       emptyState.classList.add('hidden');
     }
     searchInput.setAttribute('aria-label', searchInput.placeholder.replace(/…$/, ''));
@@ -1894,8 +1927,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (state.mode === 'search') {
       scopeSubtitle.textContent = state.scope === 'personal'
-        ? 'Search personal notes & links'
-        : 'Search community set';
+        ? 'Search your personal notes and links'
+        : 'Search everything shared in this community';
     }
     updateDeleteModeVisibility();
   }
@@ -2041,8 +2074,21 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  // Notes and documents often hold raw markdown; cards show plain text.
+  function stripMarkdown(text) {
+    return String(text || '')
+      .replace(/```[\s\S]*?```/g, ' ')
+      .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/^[ \t]*(#{1,6}|>+|[-*+]|\d+[.)])[ \t]+/gm, '')
+      .replace(/(^|\s)#{2,6}[ \t]+/g, '$1')
+      .replace(/(\*\*|__|~~)(?=\S)([\s\S]*?\S)\1/g, '$2')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/^[ \t]*([-*_][ \t]*){3,}$/gm, '');
+  }
+
   function documentSnippet(content, query, maxLength = 260) {
-    const text = String(content || '').replace(/\s+/g, ' ').trim();
+    const text = stripMarkdown(content).replace(/\s+/g, ' ').trim();
     if (!text) return '';
     const terms = (query || '').toLowerCase().split(/\s+/).filter(Boolean);
     let index = -1;
@@ -2108,6 +2154,7 @@ document.addEventListener('DOMContentLoaded', () => {
           state.filterTag = '';
           state.filterStatus = 'all';
           if ($('mainStatusSelect')) $('mainStatusSelect').value = 'all';
+          updateFiltersCount();
           renderMainTags();
           renderHome();
         });
@@ -2200,13 +2247,14 @@ document.addEventListener('DOMContentLoaded', () => {
       : 'note · local brain';
     const href = item.url || '#';
     const site = item.siteName || '';
-    const desc = (item.notes || '').slice(0, 220) || (item.tags || []).map(t => `#${t}`).join(' ');
+    const desc = stripMarkdown(item.notes).trim().slice(0, 220) || (item.tags || []).map(t => `#${t}`).join(' ');
     const who = item.addedBy || item.added_by || '';
     const plat = providerLabel(item.addedByProvider);
     const when = formatDateTime(item.createdAt);
     const preview = renderLinkPreview(item);
     const host = preview ? '' : previewUrl(item.url)?.hostname;
     const favicon = host ? `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64` : '';
+    const siteInitial = escapeHtml((site || previewUrl(item.url)?.hostname?.replace(/^www\./, '') || 'N').charAt(0).toUpperCase());
 
     const authorLine = ctx.isCommunity
       ? `<div class="g-author">${plat ? `<span class="plat-tag plat-${plat.toLowerCase()}">${escapeHtml(plat)}</span>` : ''}
@@ -2218,7 +2266,10 @@ document.addEventListener('DOMContentLoaded', () => {
       ? `<div class="g-actions">
           <button type="button" class="vote-btn up ${item.myVote === 1 ? 'active' : ''}" data-id="${escapeHtml(item.id)}" data-vote="1" title="Upvote">▲ <span>${item.upvotes || 0}</span></button>
           <button type="button" class="vote-btn down ${item.myVote === -1 ? 'active' : ''}" data-id="${escapeHtml(item.id)}" data-vote="-1" title="Downvote">▼ <span>${item.downvotes || 0}</span></button>
-          <button type="button" class="report-btn" data-id="${escapeHtml(item.id)}" title="Report">Report</button>
+          <button type="button" class="report-btn" data-id="${escapeHtml(item.id)}" title="Report this link">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 22V4"/><path d="M4 4h13l-2 4 2 4H4"/></svg>
+            <span>Report</span>
+          </button>
         </div>`
       : `<div class="g-meta">${escapeHtml(when)}${(item.tags || []).length ? ' · ' + item.tags.map(t => '#' + escapeHtml(t)).join(' ') : ''}</div>`;
 
@@ -2236,7 +2287,7 @@ document.addEventListener('DOMContentLoaded', () => {
           ${tagsList.map(t => `<button type="button" class="g-tag-chip" data-tag="${escapeHtml(t)}">#${escapeHtml(t)}</button>`).join('')}
          </div>`
       : `<div class="g-card-tags">
-          <button type="button" class="g-tag-chip g-tag-empty" data-tag="notags" title="Untagged link — click to filter">#notags</button>
+          <button type="button" class="g-tag-chip g-tag-empty" data-tag="notags" title="Untagged link. Click to filter">#notags</button>
          </div>`;
 
     const bmActive = typeof isUrlBookmarked === 'function' && isUrlBookmarked(item.url);
@@ -2247,7 +2298,7 @@ document.addEventListener('DOMContentLoaded', () => {
       </button>` : '';
 
     const aiStarBtnHtml = (typeof isGod === 'function' && isGod()) ? `
-      <button type="button" class="btn btn-secondary btn-sm ai-enrich-btn" data-id="${escapeHtml(item.id)}" title="Re-scrape URL and enrich metadata with AI (GOD only)">
+      <button type="button" class="btn btn-secondary btn-sm ai-enrich-btn" data-id="${escapeHtml(item.id)}" title="Re-scrape URL and enrich metadata with AI (instance owner only)">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/></svg>
         <span>AI</span>
       </button>` : '';
@@ -2279,16 +2330,18 @@ document.addEventListener('DOMContentLoaded', () => {
           ${favicon
             ? `<img class="g-favicon-img" src="${safeHref(favicon)}" alt="" width="18" height="18" loading="lazy" decoding="async" referrerpolicy="no-referrer">`
             : ''}
-          <span class="g-favicon ${favicon ? 'hidden' : ''}"></span>
+          <span class="g-favicon ${favicon ? 'hidden' : ''}" aria-hidden="true">${siteInitial}</span>
           <cite class="g-cite">${site ? escapeHtml(site) + ' · ' : ''}${highlight(displayUrl, query)}</cite>
         </div>
-        ${cardActionsHtml}
       </div>
       <a class="g-title" href="${safeHref(href)}" ${item.url ? 'target="_blank" rel="noopener noreferrer"' : ''}>${highlight(item.title || 'Untitled', query)}</a>
       ${preview}
       ${desc ? `<p class="g-snippet">${highlight(desc, query)}</p>` : ''}
       ${tagsHtml}
-      ${voteRow}
+      <div class="g-card-footer">
+        ${voteRow}
+        ${cardActionsHtml}
+      </div>
       ${editAuditHtml}
     `;
     return card;
@@ -2300,7 +2353,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const q = resultsRenderState.query;
     const filterSummary = state.filterTag ? ` in #${state.filterTag}` : '';
     const total = resultsRenderState.corpusTotal;
-    resultsMeta.textContent = `${count} link${count === 1 ? '' : 's'}${q ? ` for “${q}”` : filterSummary}${total != null && total !== count ? ` · ${total} total in scope` : ''}`;
+    resultsMeta.textContent = `${count.toLocaleString()} link${count === 1 ? '' : 's'}${q ? ` for “${q}”` : filterSummary}${total != null && total !== count ? ` · ${Number(total).toLocaleString()} total in scope` : ''}`;
   }
 
   function appendNextResultBatch() {
@@ -2656,7 +2709,7 @@ document.addEventListener('DOMContentLoaded', () => {
             body: JSON.stringify({ link_id: reportBtn.dataset.id, reason })
           });
           if (data.success) {
-            showToast('Reported — owners/admins notified');
+            showToast('Reported. Admins have been notified');
             await loadNotifications();
           } else {
             showToast(data.error || 'Report failed', true);
@@ -2800,7 +2853,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (summaryEl && state.tagStats) {
-      summaryEl.textContent = `${state.tagStats.uniqueTags} tags · ${state.tagStats.total} total links`;
+      // The link total is already in the results line, so only the tag count goes here.
+      const tagCount = state.tagStats.uniqueTags;
+      summaryEl.textContent = tagCount > 0 ? `${tagCount.toLocaleString()} tags` : '';
     }
 
     if (!state.tags || !state.tags.length) {
@@ -2956,7 +3011,7 @@ document.addEventListener('DOMContentLoaded', () => {
               : 'PostgreSQL';
           label.textContent = `AI · grounded in ${engine}`;
         } else {
-          const errHint = result.error ? ` — ${result.error}` : '';
+          const errHint = result.error ? `: ${result.error}` : '';
           label.textContent = `AI · ${errHint ? 'local fallback' : 'local brain'}${errHint ? '' : ' (add API key in Settings for full assistant)'}`;
           if (result.error) {
             showToast(result.error, true);
@@ -3080,15 +3135,15 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!res.ok) return;
       const _provider = data.provider || 'postgres';
       if (storageProvider) {
-        storageProvider.innerHTML = `<option value="postgres" selected>PostgreSQL — ${escapeHtml(data.db_engine || 'PostgreSQL')}</option>`;
+        storageProvider.innerHTML = `<option value="postgres" selected>${escapeHtml(data.db_engine || 'PostgreSQL')}</option>`;
         storageProvider.value = 'postgres';
         storageProvider.disabled = true;
       }
       if (storageStatus) {
-        storageStatus.innerHTML = `<span style="color:var(--success-color)">${escapeHtml(data.db_engine || 'PostgreSQL')} — PostgreSQL only (D1/GitHub removed)</span>`;
+        storageStatus.innerHTML = `<span style="color:var(--success-color)">Stored in ${escapeHtml(data.db_engine || 'PostgreSQL')}</span>`;
       }
       if (storageDesc) {
-        storageDesc.textContent = `PostgreSQL — the only store. MCP memory uses the same DB via postgres-mcp (DATABASE_URL).`;
+        storageDesc.textContent = 'Everything is stored in PostgreSQL. To move it, change DATABASE_URL on the server.';
       }
     } catch (_) { /* offline / not logged in */ }
   }
@@ -3141,15 +3196,15 @@ document.addEventListener('DOMContentLoaded', () => {
       if (serverOk) {
         html = `<span style="color:var(--success-color)">API ready · ${escapeHtml(cfg.model || model?.value || 'model')} · synced for bot /ai</span>`;
       } else if (hasLocal && isGodUser) {
-        html = `<span style="color:var(--warning-color)">Local key present (${escapeHtml(cfg.model || model?.value || 'model')}) — not synced to server. Click Save to sync bot & enable AI for all users. If Save fails, check GOD rank and STORAGE_KEY.</span>`;
+        html = `<span style="color:var(--warning-color)">Local key present (${escapeHtml(cfg.model || model?.value || 'model')}) is only in this browser. Click Save to use it for the bot and for everyone. If Save fails, check that STORAGE_KEY is set on the server.</span>`;
       } else if (hasLocal && !isGodUser) {
-        html = `<span style="color:var(--warning-color)">Local key saved in browser but you are not GOD — instance has no key. GOD must configure in Settings → AI.</span>`;
+        html = `<span style="color:var(--warning-color)">A key is saved in this browser, but only the instance owner can set the shared key in Settings, AI.</span>`;
       } else {
-        html = '<span style="color:var(--text-muted)">No API key — GOD: Settings → AI → Save</span>';
+        html = '<span style="color:var(--text-muted)">No API key yet. Add one above and click Save.</span>';
       }
       const lastCfg = window.AthenaAI?.getLastServerAiConfig?.();
       if (lastCfg && lastCfg.configured && !lastCfg.hasKey) {
-        html += `<br><span style="color:var(--danger-color)">Server row exists but key unreadable — STORAGE_KEY missing/rotated? Re-save credentials.</span>`;
+        html += `<br><span style="color:var(--danger-color)">The saved key can't be read, likely because STORAGE_KEY changed. Save the key again.</span>`;
       }
       status.innerHTML = html;
     }
@@ -3265,7 +3320,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const AI_MODEL_PAGE_SIZE = 100;
 
   async function loadAiModels(force = false) {
-    if (!canEditAiConfig()) return showToast('Model picker is GOD only', true);
+    if (!canEditAiConfig()) return showToast('Only the instance owner can pick the model', true);
     const list = $('aiModelList');
     const picker = $('aiModelPicker');
     if (!picker) return;
@@ -3363,7 +3418,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const count = $('aiErrorCount');
       if (count) count.textContent = errors.length ? `(${errors.length})` : '';
       if (!errors.length) {
-        if (list) list.innerHTML = '<div class="model-item status-msg">No recent errors — in-memory log clears on restart.</div>';
+        if (list) list.innerHTML = '<div class="model-item status-msg">No recent errors. This list clears when the server restarts.</div>';
         return;
       }
       if (list) {
@@ -3510,7 +3565,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     root.style.setProperty('--accent', hex);
     const rgb = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255);
-    const luminance = rgb.map(c => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2)
+    const luminance = rgb.map(c => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)
       .reduce((sum, c, i) => sum + c * [0.2126, 0.7152, 0.0722][i], 0);
     const fg = (luminance + 0.05) / 0.05 >= 1.05 / (luminance + 0.05) ? '#000000' : '#ffffff';
     root.style.setProperty('--accent-fg', fg);
@@ -3835,7 +3890,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const active = adminDbState.tag.toLowerCase() === t.name.toLowerCase();
       return `<button type="button" class="admin-tag-chip ${active ? 'active' : ''}" data-tag="${escapeHtml(t.name)}">
         <span>#${escapeHtml(t.name)}</span>
-        <span class="admin-tag-count">(${t.count})</span>
+        <span class="admin-tag-count">(${Number(t.count).toLocaleString()})</span>
       </button>`;
     }).join('');
 
@@ -3929,7 +3984,7 @@ document.addEventListener('DOMContentLoaded', () => {
           ${item.tags.map(t => `<span class="admin-card-tag" data-tag="${escapeHtml(t)}">#${escapeHtml(t)}</span>`).join('')}
          </div>`
       : `<div class="admin-card-tags">
-          <span class="admin-card-tag admin-card-notag" data-tag="notags" title="Untagged link — click to view untagged" style="opacity:0.65;font-style:italic;">#notags</span>
+          <span class="admin-card-tag admin-card-notag" data-tag="notags" title="Untagged link. Click to see all untagged links" style="opacity:0.65;font-style:italic;">#notags</span>
          </div>`;
 
     card.innerHTML = `
@@ -3943,7 +3998,7 @@ document.addEventListener('DOMContentLoaded', () => {
           ${item.url ? `<button type="button" class="btn btn-secondary btn-sm admin-card-bm-btn ${isUrlBookmarked(item.url) ? 'is-bookmarked' : ''}" data-id="${escapeHtml(item.id)}" data-url="${escapeHtml(item.url)}" data-title="${escapeHtml(item.title || '')}" title="Bookmark link">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="${isUrlBookmarked(item.url) ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" style="vertical-align:middle;"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
           </button>` : ''}
-          ${isGod() ? `<button type="button" class="btn btn-secondary btn-sm admin-card-ai-btn ai-enrich-btn" data-id="${escapeHtml(item.id)}" title="Re-scrape URL and enrich metadata with AI (GOD only)">
+          ${isGod() ? `<button type="button" class="btn btn-secondary btn-sm admin-card-ai-btn ai-enrich-btn" data-id="${escapeHtml(item.id)}" title="Re-scrape URL and enrich metadata with AI (instance owner only)">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px;"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/></svg>
             AI
           </button>` : ''}
@@ -4377,6 +4432,19 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // Mobile hides the filter dropdowns; the count keeps a narrowed search visible.
+  function updateFiltersCount() {
+    const badge = $('mainFiltersCount');
+    if (!badge) return;
+    const changed = [
+      ($('mainStatusSelect')?.value || 'all') !== 'all',
+      ($('mainSortSelect')?.value || 'created_desc') !== 'created_desc'
+    ].filter(Boolean).length;
+    badge.textContent = changed ? String(changed) : '';
+    badge.classList.toggle('hidden', !changed);
+    $('mainFiltersToggleBtn')?.setAttribute('aria-label', changed ? `Filters, ${changed} active` : 'Filters');
+  }
+
   function setupMainDbEvents() {
     const scopeSel = $('mainScopeSelect');
     if (scopeSel) {
@@ -4384,7 +4452,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const val = e.target.value;
         if (val === 'personal') {
           if (!isGod()) {
-            showToast('Personal mode is GOD only', true);
+            showToast('Personal is for the instance owner only', true);
             scopeSel.value = state.scope;
             return;
           }
@@ -4437,6 +4505,18 @@ document.addEventListener('DOMContentLoaded', () => {
         state.filterSort = e.target.value;
         runSearch();
       });
+    }
+
+    const filtersBtn = $('mainFiltersToggleBtn');
+    const filterFields = $('mainFilterFields');
+    if (filtersBtn && filterFields) {
+      filterFields.classList.add('is-collapsed');
+      filtersBtn.addEventListener('click', () => {
+        const collapsed = filterFields.classList.toggle('is-collapsed');
+        filtersBtn.setAttribute('aria-expanded', String(!collapsed));
+      });
+      filterFields.addEventListener('change', updateFiltersCount);
+      updateFiltersCount();
     }
 
     const tagsToggleBtn = $('mainTagsToggleBtn');
@@ -4783,6 +4863,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (blocksEl) {
       blocksEl.innerHTML = '<div class="wiki-loading">Loading links for category…</div>';
     }
+    $('wikiHeroCount')?.classList.add('hidden');
+    $('wikiSubCountBadge')?.classList.add('hidden');
 
     try {
       const qParams = new URLSearchParams({
@@ -4846,7 +4928,10 @@ document.addEventListener('DOMContentLoaded', () => {
         heroDesc.textContent = curCat.description || '';
       }
     }
-    if (heroCount) heroCount.textContent = `${(wikiState.totalCategoryLinks || curCat.count || 0).toLocaleString()} links`;
+    if (heroCount) {
+      heroCount.textContent = `${(wikiState.totalCategoryLinks || curCat.count || 0).toLocaleString()} links`;
+      heroCount.classList.remove('hidden');
+    }
 
     // 2. Subheading Scroll-down Selection & Pills
     const subSelect = $('wikiSubSelect');
@@ -4857,6 +4942,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (subBadge) {
       subBadge.textContent = subs.length ? `${subs.length} subheadings` : '';
+      subBadge.classList.toggle('hidden', !subs.length);
     }
 
     // Build scroll-down select options
@@ -5069,7 +5155,7 @@ document.addEventListener('DOMContentLoaded', () => {
           ${wikiActionsHtml}
         </div>
         ${renderLinkPreview(l)}
-        ${l.notes ? `<p class="wiki-card-desc">${escapeHtml(l.notes)}</p>` : ''}
+        ${l.notes ? `<p class="wiki-card-desc">${escapeHtml(stripMarkdown(l.notes).trim())}</p>` : ''}
         <div class="wiki-card-footer">
           <div class="wiki-card-tags">
             ${tagPills}
@@ -5849,12 +5935,12 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!selectElem) return;
     const opts = [];
     opts.push(
-      `<option value="personal" ${currentScope === 'personal' ? 'selected' : ''}>Personal Second Brain (personal_links)</option>`
+      `<option value="personal" ${currentScope === 'personal' ? 'selected' : ''}>Personal</option>`
     );
     if (Array.isArray(state.communities) && state.communities.length > 0) {
       for (const c of state.communities) {
         opts.push(
-          `<option value="${escapeHtml(c.id)}" ${c.id === currentScope ? 'selected' : ''}>${escapeHtml(c.name || c.id)} (Community links)</option>`
+          `<option value="${escapeHtml(c.id)}" ${c.id === currentScope ? 'selected' : ''}>${escapeHtml(c.name || c.id)}</option>`
         );
       }
     }
@@ -5876,15 +5962,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const dbPill = $('freshrssActiveDbPill');
     if (dbPill) {
       if (isPersonal) {
-        dbPill.textContent = 'Personal DB (personal_links)';
+        dbPill.textContent = 'Saving to Personal';
         dbPill.classList.remove('is-community');
-        dbPill.title = 'Subscriptions and articles in this view are stored in your private Personal DB (personal_links)';
+        dbPill.title = 'Feeds and articles here are saved to your private Personal collection';
       } else {
         const commObj = (state.communities || []).find((c) => c.id === feedState.communityId);
         const commName = commObj ? (commObj.name || commObj.id) : 'Community';
-        dbPill.textContent = `Community DB (${commName} -> links)`;
+        dbPill.textContent = `Saving to ${commName}`;
         dbPill.classList.add('is-community');
-        dbPill.title = 'Subscriptions and articles in this view are stored in the shared Community DB (links)';
+        dbPill.title = 'Feeds and articles here are saved to this community, where every member can see them';
       }
     }
   }
@@ -5892,6 +5978,9 @@ document.addEventListener('DOMContentLoaded', () => {
   function switchFeedScope(nextCommunityId) {
     if (!nextCommunityId) return;
     feedState.communityId = nextCommunityId;
+    feedState.sourcesLoaded = false;
+    feedState.sourcesScope = '';
+    feedState.categories = [];
     localStorage.setItem('freshrss_community_id', nextCommunityId);
     feedState.stream = 'all';
     feedState.category = '';
@@ -6004,12 +6093,15 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function loadFeedSources() {
-    if (!feedState.communityId) return;
+    const reqCommId = feedState.communityId;
+    if (!reqCommId) return;
     try {
-      const { data } = await api(`/api/feed/sources?community_id=${encodeURIComponent(feedState.communityId)}`);
-      if (!data?.success) return;
+      const { data } = await api(`/api/feed/sources?community_id=${encodeURIComponent(reqCommId)}`);
+      if (!data?.success || reqCommId !== feedState.communityId) return;
 
       feedState.categories = data.categories || [];
+      feedState.sourcesLoaded = true;
+      feedState.sourcesScope = reqCommId;
       feedState.totalUnread = data.total_unread || 0;
       feedState.totalImportantUnread = data.total_important_unread ?? 0;
       feedState.totalStarred = data.total_starred || 0;
@@ -6019,6 +6111,8 @@ document.addEventListener('DOMContentLoaded', () => {
       renderFeedSidebar();
       if (feedState.viewMode === 'global') {
         renderFeedGlobalView();
+      } else if (!feedState.articles.length) {
+        renderFeedArticles();
       }
     } catch (err) {
       console.warn('[feed] loadFeedSources failed:', err);
@@ -6079,12 +6173,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (!feedState.categories.length) {
       const targetDesc = feedState.communityId === 'personal'
-        ? 'your Personal Second Brain (personal_links)'
-        : 'this Community Archive (links)';
+        ? 'your Personal'
+        : 'this community';
       tree.innerHTML = `
         <div class="freshrss-loading-feeds">
           <p style="margin:0 0 8px;">No feeds in ${escapeHtml(targetDesc)} yet.</p>
-          <p style="margin:0;font-size:0.78rem;">Click <strong>+ Add subscription</strong> above to subscribe and auto-ingest articles.</p>
+          <p style="margin:0;font-size:0.78rem;">Click <strong>+ Add subscription</strong> above to start getting articles.</p>
         </div>
       `;
       return;
@@ -6485,6 +6579,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const listEl = $('freshrssArticlesList');
     if (!listEl) return;
 
+    if (!feedState.articles.length && feedState.sourcesLoaded && feedState.sourcesScope === feedState.communityId && !feedState.categories.length && !feedState.search) {
+      const where = feedState.communityId === 'personal' ? 'your Personal feeds' : 'this community';
+      listEl.innerHTML = `
+        <div class="freshrss-empty-state">
+          <h3>No feeds yet</h3>
+          <p>Nothing is subscribed in ${escapeHtml(where)}. Add a site's RSS feed and new articles will show up here.</p>
+          <button type="button" class="btn btn-secondary btn-sm" id="freshrssEmptyAddBtn">+ Add subscription</button>
+        </div>
+      `;
+      $('freshrssEmptyAddBtn')?.addEventListener('click', () => $('freshrssSidebarAddBtn')?.click());
+      return;
+    }
+
     if (!feedState.articles.length) {
       const isUnreadOnly = feedState.stateFilter === 'unread';
       listEl.innerHTML = `
@@ -6583,11 +6690,11 @@ document.addEventListener('DOMContentLoaded', () => {
               </div>
               <footer>
                 <div class="footer-left">
-                  <span class="pzp-brain-badge" title="${isPersonalFeed ? 'Indexed in your private Personal DB (personal_links)' : 'Indexed in shared Community DB (links)'}">
-                    <span>${isPersonalFeed ? 'In Personal DB (personal_links)' : 'In Community DB (links)'}</span>
+                  <span class="pzp-brain-badge" title="${isPersonalFeed ? 'Saved in your private Personal collection' : 'Saved in this community'}">
+                    <span>${isPersonalFeed ? 'In Personal' : 'In community'}</span>
                   </span>
                   ${!isPersonalFeed ? `
-                    <button type="button" class="pzp-save-personal-btn ${art.saved_to_personal ? 'is-saved' : ''}" data-action="save-personal" title="Save a copy of this article to your private Personal DB (personal_links)">
+                    <button type="button" class="pzp-save-personal-btn ${art.saved_to_personal ? 'is-saved' : ''}" data-action="save-personal" title="Save a copy of this article to your private Personal collection">
                       <span>${art.saved_to_personal ? 'Saved to Personal DB' : '+ Save to Personal DB'}</span>
                     </button>
                   ` : ''}
@@ -6708,7 +6815,7 @@ document.addEventListener('DOMContentLoaded', () => {
           });
           if (res?.ok && data?.success) {
             article.saved_to_personal = true;
-            showToast('Saved article to your Personal DB (personal_links)');
+            showToast('Article saved to Personal');
             renderFeedArticles();
             refreshAthenaLinksAfterFeedSync('personal');
           } else {
@@ -6862,8 +6969,8 @@ document.addEventListener('DOMContentLoaded', () => {
       });
       if (res?.ok && data?.success) {
         const count = data.new_articles_count || 0;
-        const targetLabel = feedState.communityId === 'personal' ? 'Personal DB (personal_links)' : 'Community DB (links)';
-        showToast(count > 0 ? `Synced feeds: ${count} new articles indexed into ${targetLabel}` : 'All feeds up to date');
+        const targetLabel = feedState.communityId === 'personal' ? 'Personal' : 'this community';
+        showToast(count > 0 ? `Synced feeds: ${count} new articles saved to ${targetLabel}` : 'All feeds up to date');
         loadFeedSources();
         loadFeedArticles();
         if (count > 0) {
@@ -7390,11 +7497,11 @@ document.addEventListener('DOMContentLoaded', () => {
       const note = $('freshrssIngestNoteText');
       const hint = $('freshrssScopeHint');
       if (scopeVal === 'personal') {
-        if (hint) hint.textContent = 'Personal feeds store articles in your private Personal DB (personal_links).';
-        if (note) note.textContent = 'Articles are automatically parsed, tagged with Athena taxonomy facts, and saved to your private Personal DB (personal_links).';
+        if (hint) hint.textContent = 'Articles from personal feeds go to your private Personal collection.';
+        if (note) note.textContent = 'New articles are tagged and saved to your private Personal collection.';
       } else {
-        if (hint) hint.textContent = 'Community feeds store articles in the shared Community DB (links).';
-        if (note) note.textContent = 'Articles are automatically parsed, tagged with Athena taxonomy facts, and saved to the shared Community DB (links).';
+        if (hint) hint.textContent = 'Articles from community feeds are shared with every member.';
+        if (note) note.textContent = 'New articles are tagged and saved to the community for every member.';
       }
     }
 
@@ -7445,7 +7552,7 @@ document.addEventListener('DOMContentLoaded', () => {
           })
         });
         if (res?.ok && data?.success) {
-          const targetName = targetCommunityId === 'personal' ? 'Personal DB (personal_links)' : 'Community DB (links)';
+          const targetName = targetCommunityId === 'personal' ? 'Personal' : 'this community';
           showToast(`Subscribed to "${data.feed.title}" (${data.feed.articles_count} articles saved to ${targetName})`);
           closeAddModal();
           if (feedState.communityId !== targetCommunityId) {
@@ -7604,7 +7711,7 @@ document.addEventListener('DOMContentLoaded', () => {
           })
         });
         if (res?.ok && data?.success) {
-          const targetName = targetCommunityId === 'personal' ? 'Personal DB (personal_links)' : 'Community DB (links)';
+          const targetName = targetCommunityId === 'personal' ? 'Personal' : 'this community';
           showToast(`Imported ${data.imported_count} feeds to ${targetName}`);
           closeOpmlModal();
           if (feedState.communityId !== targetCommunityId) {
@@ -7734,7 +7841,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return [
         {
           title: 'Switch between Personal & Community feeds',
-          description: 'Choose Personal Feeds to route subscriptions and articles into your private library (personal_links), or choose Community to share feeds in a community library (links).',
+          description: 'Choose Personal Feeds to route subscriptions and articles into your private Personal collection, or Community to share them with every member.',
           label: 'Use Personal Feeds',
           run: () => $('freshrssScopePersonalBtn')?.focus()
         },
@@ -7852,6 +7959,32 @@ document.addEventListener('DOMContentLoaded', () => {
     update();
   }
 
+  // Long settings groups start collapsed; the heading becomes a real button
+  // so keyboard and screen-reader users can expand them.
+  function setupCollapsibleDrawerSections() {
+    document.querySelectorAll('.drawer-section[data-collapsible]').forEach((section, i) => {
+      const heading = section.querySelector(':scope > h3');
+      if (!heading || heading.querySelector('.drawer-section-toggle')) return;
+      const body = document.createElement('div');
+      body.className = 'drawer-section-body';
+      body.id = section.id ? `${section.id}Body` : `drawerSectionBody${i}`;
+      while (heading.nextSibling) body.appendChild(heading.nextSibling);
+      section.appendChild(body);
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'drawer-section-toggle';
+      toggle.setAttribute('aria-expanded', 'false');
+      toggle.setAttribute('aria-controls', body.id);
+      while (heading.firstChild) toggle.appendChild(heading.firstChild);
+      heading.appendChild(toggle);
+      section.classList.add('is-collapsed');
+      toggle.addEventListener('click', () => {
+        const open = section.classList.toggle('is-collapsed') === false;
+        toggle.setAttribute('aria-expanded', String(open));
+      });
+    });
+  }
+
   function setupEventListeners() {
     initThemeUI();
     initDisplayScale();
@@ -7884,35 +8017,35 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (closeDrawerBtn) closeDrawerBtn.addEventListener('click', closeDrawer);
     if (drawerOverlay) drawerOverlay.addEventListener('click', closeDrawer);
+    setupCollapsibleDrawerSections();
 
-    const sessionTokenBtn = $('sessionTokenBtn');
-    if (sessionTokenBtn) {
-      sessionTokenBtn.addEventListener('click', async () => {
-        if (!state.currentUser) {
+    const copySessionToken = async () => {
+      if (!state.currentUser) {
+        showToast('Login required to copy a session token', true);
+        return;
+      }
+      try {
+        const res = await fetch(`${API_BASE}/api/auth/session-token`, {
+          method: 'GET',
+          headers: authHeaders(),
+        });
+        const data = await res.json();
+        if (!res.ok || !data?.token) {
           showToast('Login required to copy a session token', true);
           return;
         }
-        try {
-          const res = await fetch(`${API_BASE}/api/auth/session-token`, {
-            method: 'GET',
-            headers: authHeaders(),
-          });
-          const data = await res.json();
-          if (!res.ok || !data?.token) {
-            showToast('Login required to copy a session token', true);
-            return;
-          }
-          if (navigator.clipboard?.writeText) {
-            await navigator.clipboard.writeText(data.token);
-          } else {
-            prompt('Session token (for athena-tui):', data.token);
-          }
-          showToast('Session token copied — paste it into athena-tui');
-        } catch {
-          showToast('Could not reach the server', true);
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(data.token);
+        } else {
+          prompt('Session token (for athena-tui):', data.token);
         }
-      });
-    }
+        showToast('Session token copied. Paste it into athena-tui.');
+      } catch {
+        showToast('Could not reach the server', true);
+      }
+    };
+    $('sessionTokenBtn')?.addEventListener('click', copySessionToken);
+    $('drawerSessionTokenBtn')?.addEventListener('click', copySessionToken);
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') closeDrawer();
     });
@@ -7939,7 +8072,7 @@ document.addEventListener('DOMContentLoaded', () => {
           return;
         }
         if (!isGod()) {
-          showToast('Wipe personal is GOD only', true);
+          showToast('Only the instance owner can wipe Personal', true);
           return;
         }
         if (!(await showModal({ title: 'Wipe personal data', message: 'Delete ALL your personal data on this instance? This cannot be undone.', confirmText: 'Continue', danger: true }))) return;
@@ -8053,7 +8186,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     personalScopeBtn.addEventListener('click', async () => {
       if (!isGod()) {
-        showToast('Personal mode is GOD only. Join a community via bot: /community_join <id>', true);
+        showToast('Personal is for the instance owner only. Join a community through the bot: /community_join <id>', true);
         return;
       }
       state.scope = 'personal';
@@ -8114,7 +8247,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Publishing the default is a property of the SITE, so it is stored on the
     // origin serving this page — not on whichever backend is currently selected.
     $('defaultBackendBtn')?.addEventListener('click', async () => {
-      if (!canEditAiConfig()) { showToast('GOD rank only', true); return; }
+      if (!canEditAiConfig()) { showToast('Instance owner only', true); return; }
       const raw = (backendUrl?.value || '').trim().replace(/\/+$/, '');
       if (backendStatus) backendStatus.textContent = 'Publishing…';
       try {
@@ -8140,11 +8273,11 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
-        showToast(raw ? `Backend set for everyone: ${raw}` : 'Backend choice cleared — using this site');
+        showToast(raw ? `Backend set for everyone: ${raw}` : 'Backend cleared. Using this site.');
         setTimeout(() => window.location.reload(), 900);
       } catch (err) {
         const hint = /401|403|Login required|GOD/i.test(err.message)
-          ? 'The site origin did not accept this GOD session.'
+          ? 'This site did not accept your owner session.'
           : err.message;
         if (backendStatus) backendStatus.innerHTML = `<span style="color:var(--danger-color)">${escapeHtml(hint)}</span>`;
         showToast(hint, true);
@@ -8153,10 +8286,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Storage is PostgreSQL-only — sync/save kept as no-ops for compat.
     saveStorageBtn?.addEventListener('click', async () => {
-      showToast('PostgreSQL is the only store — no switch needed. Set DATABASE_URL on server.', true);
+      showToast('Storage is always PostgreSQL. To change the database, set DATABASE_URL on the server.', true);
     });
     syncStorageBtn?.addEventListener('click', async () => {
-      showToast('Sync removed — PostgreSQL only (D1/GitHub deprecated)', true);
+      showToast('Nothing to sync. Everything is already in PostgreSQL.', true);
     });
 
     logoutBtn.addEventListener('click', async () => {
@@ -8185,7 +8318,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const bot_username = botUsernameInput.value.trim();
       const bot_token = $('botTokenInput')?.value.trim() || '';
       const group_id = groupIdInput.value.trim();
-      if (!group_id) return showToast('Chat ID required — open bot DM, send /id', true);
+      if (!group_id) return showToast('Chat ID needed. Send /id to the bot in a DM to get it.', true);
       if (botPlatform.value === 'telegram' && !bot_token) {
         return showToast('Bot token required (from @BotFather)', true);
       }
@@ -8293,7 +8426,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     if (saveAiConfigBtn) {
       saveAiConfigBtn.addEventListener('click', async () => {
-        if (!canEditAiConfig()) { showToast('AI credentials: GOD rank only', true); return; }
+        if (!canEditAiConfig()) { showToast('Only the instance owner can change AI keys', true); return; }
         let baseUrl = $('aiBaseUrl')?.value.trim() || '';
         let model = $('aiModel')?.value.trim() || '';
         // normalize OpenCode URLs / model ids (strip trailing dots/slashes)
@@ -8335,7 +8468,7 @@ document.addEventListener('DOMContentLoaded', () => {
             showToast('Saved locally; bot sync failed: ' + err.message, true);
           }
         } else {
-          showToast('Saved — add a key to enable LLM');
+          showToast('Saved. Add an API key to turn on AI.');
         }
         await loadAiForm();
       });
@@ -8356,14 +8489,14 @@ document.addEventListener('DOMContentLoaded', () => {
     if (steroidToggle) {
       steroidToggle.addEventListener('change', async () => {
         if (!canEditAiConfig()) {
-          showToast('GOD only', true);
+          showToast('Instance owner only', true);
           steroidToggle.checked = !steroidToggle.checked;
           return;
         }
         try {
           await api('/api/ai/steroid', { method: 'POST', body: JSON.stringify({ steroid: steroidToggle.checked }) });
           window.__athenaSteroid = !!steroidToggle.checked;
-          showToast(steroidToggle.checked ? 'Steroid mode ON — unlimited' : 'Steroid mode OFF — throttled');
+          showToast(steroidToggle.checked ? 'Steroid mode on: no rate limit' : 'Steroid mode off: rate limited');
         } catch (err) {
           showToast(err.message || 'Failed', true);
           steroidToggle.checked = !steroidToggle.checked;
@@ -8379,14 +8512,16 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function loadBookmarks() {
-    if (!state.currentUser) return;
+    if (!state.currentUser) return false;
     try {
       const { res, data } = await api('/api/bookmarks');
       if (res?.ok && data?.success && Array.isArray(data.bookmarks)) {
         state.bookmarks = data.bookmarks;
         state.bookmarkedUrls = new Set(data.bookmarks.map((b) => String(b.url || '').trim().toLowerCase()).filter(Boolean));
+        return true;
       }
     } catch (_) {}
+    return false;
   }
 
   async function toggleBookmark({ link_id, scope, scope_key, url, title }, btn) {
@@ -8470,13 +8605,22 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!modal) return;
     modal.classList.remove('hidden');
     syncMobileBottomNav('bookmarks');
-    await loadBookmarks();
+    const listEl = $('bookmarksModalList');
+    const hadCache = (state.bookmarks || []).length > 0;
+    if (hadCache) renderBookmarksModal();
+    else if (listEl) listEl.innerHTML = '<div class="empty-state" role="status"><p>Loading your saved links…</p></div>';
+    const ok = await loadBookmarks();
+    if (!ok && !hadCache && listEl) {
+      listEl.innerHTML = '<div class="empty-state" role="alert"><p>Could not load your saved links. Check your connection and try again.</p><div class="empty-state-action"><button type="button" class="btn btn-secondary btn-sm" id="bookmarksRetryBtn">Try again</button></div></div>';
+      $('bookmarksRetryBtn')?.addEventListener('click', openBookmarksModal);
+      return;
+    }
     renderBookmarksModal();
   }
 
   async function enrichLinkWithAi(id, scope, btn, viewKind) {
     if (!isGod()) {
-      showToast('GOD rank required for single-card AI enrich', true);
+      showToast('Only the instance owner can enrich a link with AI', true);
       return;
     }
     if (btn) {
@@ -8675,7 +8819,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function scanCleanerCandidates() {
-    if (!isGod()) return showToast('GOD rank only', true);
+    if (!isGod()) return showToast('Instance owner only', true);
     const scope = $('cleanerScopeSelect')?.value || 'community';
     const communityId = $('cleanerCommunitySelect')?.value || '';
     const filter = $('cleanerFilterSelect')?.value || 'unedited';
@@ -8762,7 +8906,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function runCleanerBatches(resume = false) {
-    if (!isGod()) return showToast('GOD rank only', true);
+    if (!isGod()) return showToast('Instance owner only', true);
     if (cleanerState.running) return;
     if (resume) {
       const saved = loadCleanerCheckpoint();
@@ -8800,7 +8944,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const onOffline = () => {
       if (cleanerState.running && !cleanerState.paused) {
         cleanerState.paused = true;
-        updateCleanerProgressUI('Offline — paused safely with checkpoint');
+        updateCleanerProgressUI('Offline. Paused, progress is saved.');
       }
     };
     window.addEventListener('offline', onOffline);
@@ -8820,7 +8964,7 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             if (res?.status === 429 || (res?.status >= 500 && res.status < 600)) {
               const waitSec = Math.min(15, Math.max(1, parseInt(res.headers?.get('Retry-After') || String(2 ** attempt), 10) || (2 ** attempt)));
-              updateCleanerProgressUI(`Rate limit / server busy (${res.status}) — retrying in ${waitSec}s…`);
+              updateCleanerProgressUI(`Rate limit / server busy (${res.status}). Retrying in ${waitSec}s…`);
               await new Promise((r) => setTimeout(r, waitSec * 1000));
               continue;
             }
@@ -8887,7 +9031,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function openDbCleanerModal() {
-    if (!isGod()) return showToast('DB Cleaner is GOD rank only', true);
+    if (!isGod()) return showToast('Only the instance owner can run the cleaner', true);
     const modal = $('dbCleanerModal');
     if (!modal) return;
     populateCleanerCommunities();
@@ -8949,7 +9093,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function openBlacklistModal() {
-    if (!isGod() && !isStaffRank()) return showToast('Admin or GOD required', true);
+    if (!isGod() && !isStaffRank()) return showToast('Admins only', true);
     const modal = $('blacklistModal');
     const scopeSel = $('blacklistScopeSelect');
     if (scopeSel) {
@@ -8963,7 +9107,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function syncMobileBottomNav(explicitTab) {
     const nav = $('mobileBottomNav');
-    if (!nav) return;
     let active = explicitTab;
     if (!active) {
       if (!$('bookmarksModal')?.classList.contains('hidden')) active = 'bookmarks';
@@ -8972,8 +9115,16 @@ document.addEventListener('DOMContentLoaded', () => {
       else if ($('wikiView') && !$('wikiView').classList.contains('hidden')) active = 'wiki';
       else active = 'search';
     }
-    nav.querySelectorAll('button[data-mnav]').forEach((btn) => {
+    nav?.querySelectorAll('button[data-mnav]').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.mnav === active);
+    });
+    // Saved is a modal over the current view, so it never takes the desktop highlight.
+    const desktopNav = { db: 'adminDbNavBtn', wiki: 'wikiNavBtn', feed: 'feedNavBtn' };
+    Object.entries(desktopNav).forEach(([view, id]) => {
+      const btn = $(id);
+      if (!btn) return;
+      if (view === active) btn.setAttribute('aria-current', 'page');
+      else if (active !== 'bookmarks' && active !== 'settings') btn.removeAttribute('aria-current');
     });
   }
 
@@ -8990,7 +9141,7 @@ document.addEventListener('DOMContentLoaded', () => {
       clearSearchBtn?.classList.remove('hidden');
       searchInput.focus();
     }
-    showToast('Shared item ready in Dump bar — press Enter to save');
+    showToast('Shared item is in the Dump bar. Press Enter to save.');
     params.delete('share_url');
     params.delete('share_text');
     params.delete('share_title');
@@ -9009,6 +9160,15 @@ document.addEventListener('DOMContentLoaded', () => {
       syncMobileBottomNav();
     });
     $('bookmarksFilterInput')?.addEventListener('input', renderBookmarksModal);
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      const open = ['bookmarksModal', 'dbCleanerModal', 'blacklistModal']
+        .map((id) => $(id))
+        .find((el) => el && !el.classList.contains('hidden'));
+      if (!open) return;
+      open.classList.add('hidden');
+      if (open.id === 'bookmarksModal') syncMobileBottomNav();
+    });
 
     $('adminCleanerOpenBtn')?.addEventListener('click', openDbCleanerModal);
     $('dbCleanerCloseBtn')?.addEventListener('click', () => $('dbCleanerModal')?.classList.add('hidden'));
