@@ -2943,6 +2943,23 @@ body.feed-active .scope-switch-container,
   gap: 8px;
   flex-shrink: 0;
 }
+/* On narrower desktops the header actions spilled past the panel edge.
+   Let them drop to a second line, right-aligned, instead. */
+@media (min-width: 861px) {
+  .freshrss-header {
+    flex-wrap: wrap;
+    row-gap: 10px;
+  }
+  .freshrss-header-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    margin-left: auto;
+  }
+}
+/* Prev / top / next have nothing to move between in an empty stream. */
+#feedView:has(.freshrss-empty-state) .nav_entries {
+  display: none;
+}
 
 .freshrss-scope-switcher {
   display: inline-flex;
@@ -4199,7 +4216,7 @@ body.feed-active .scope-switch-container,
 .nav_entries {
   position: fixed;
   bottom: 24px;
-  right: 28px;
+  right: 52px;
   z-index: 950;
   display: flex;
   flex-direction: column;

@@ -5593,7 +5593,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (Array.isArray(state.communities) && state.communities.length > 0) {
       for (const c of state.communities) {
         opts.push(
-          `<option value="${escapeHtml(c.id)}" ${c.id === currentScope ? 'selected' : ''}>${escapeHtml(c.name || c.id)} (Community links)</option>`
+          `<option value="${escapeHtml(c.id)}" ${c.id === currentScope ? 'selected' : ''}>${escapeHtml(c.name || c.id)}</option>`
         );
       }
     }
