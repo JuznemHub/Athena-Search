@@ -261,6 +261,7 @@ export function createUcloneManager(env, deps) {
               topic.counters = tc || emptyCloneCounters();
             }
             if (run.state.commandSource === '/clone') {
+              run.state.wholeForum = true;
               run.state.chosen = run.state.topics;
               await destinations(run, token);
             } else {
@@ -712,6 +713,7 @@ export function createUcloneManager(env, deps) {
         const topic = run.state.topics[index];
         await edit(run, context.token, renderCloneStatistics({ sourceName: run.state.sourceName, chatId: run.chat_id, username: run.state.username, members: run.state.members, topic, counters: topic.counters, complete: true, measurement: 'accessible-history' }), [[button(run, 'Choose this topic', 'topic', index), button(run, 'Back', 'page', run.state.page)]], true);
       } else if (action === 'all' || (action === 'topic' && run.state.topics[index])) {
+        run.state.wholeForum = action === 'all';
         run.state.chosen = action === 'all' ? run.state.topics : [run.state.topics[index]];
         await destinations(run, context.token);
       }
@@ -733,7 +735,7 @@ export function createUcloneManager(env, deps) {
       const stored = await load(run.id);
       if (stored.state.stage !== 'destination' || stored.state.revision !== run.state.revision) return true;
       const previous = JSON.stringify(stored.state);
-      const selectedTopic = run.state.isForum && run.state.chosen.length === 1 ? String(run.state.chosen[0].id || '') : '';
+      const selectedTopic = run.state.isForum && !run.state.wholeForum && run.state.chosen.length === 1 ? String(run.state.chosen[0].id || '') : '';
       await deps.ensureFollow?.({ chatId: run.chat_id, threadId: selectedTopic, label: run.state.label, communityId: run.community_id || '', target: run.target, createdBy: run.requester_user_id });
       run.state.stage = 'queued'; run.state.revision++;
       const result = await db.prepare('UPDATE pending_clones SET stats_json=?,target=?,community_id=? WHERE id=? AND stats_json=?').bind(JSON.stringify(run.state), run.target, run.community_id || null, run.id, previous).run();

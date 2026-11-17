@@ -1306,19 +1306,35 @@
             <select id="cleanerModeSelect" class="input input-sm">
               <option value="ai">AI-Native + Rules (recommended)</option>
               <option value="script">Deterministic Script Only</option>
+              <option value="custom">Custom Prompt (AI Agent)</option>
             </select>
           </div>
           <div class="admin-ctrl-group">
             <label for="cleanerFilterSelect">Filter</label>
             <select id="cleanerFilterSelect" class="input input-sm">
               <option value="unedited">All non-manual rows</option>
-              <option value="backfill">#backfill &amp; Telegram imports</option>
               <option value="untagged">Untagged / unedited rows</option>
               <option value="all">All rows in scope</option>
             </select>
           </div>
         </div>
-        <div class="cleaner-action-bar">
+        <div id="cleanerCustomPage" class="cleaner-custom-page hidden">
+          <div class="cleaner-custom-header">
+            <strong>Custom AI DB Agent</strong>
+            <span>Write any instruction — the AI agent will plan and run it on the selected scope (links and/or documents).</span>
+          </div>
+          <textarea id="cleanerCustomPromptInput" class="input cleaner-custom-textarea" rows="5" placeholder="Example: Delete all .md files, add #opensource to GitHub links, rewrite vague descriptions in one concise sentence, or ask a question about the DB..."></textarea>
+          <div class="cleaner-custom-targets">
+            <label class="cleaner-custom-check"><input type="checkbox" id="cleanerCustomIncludeLinks" checked /> Include Links</label>
+            <label class="cleaner-custom-check"><input type="checkbox" id="cleanerCustomIncludeDocs" checked /> Include Documents (.md, etc.)</label>
+          </div>
+          <div class="cleaner-action-bar">
+            <button type="button" id="cleanerCustomPreviewBtn" class="btn btn-secondary btn-sm">Preview Plan (Dry Run)</button>
+            <button type="button" id="cleanerCustomRunBtn" class="btn btn-primary btn-sm">Execute on DB</button>
+          </div>
+          <div id="cleanerCustomSummary" class="cleaner-custom-summary hidden"></div>
+        </div>
+        <div id="cleanerActionBar" class="cleaner-action-bar">
           <button type="button" id="cleanerScanBtn" class="btn btn-secondary btn-sm">Scan Candidates</button>
           <button type="button" id="cleanerBackupBtn" class="btn btn-secondary btn-sm" disabled>Export Backup JSON</button>
           <button type="button" id="cleanerStartBtn" class="btn btn-primary btn-sm" disabled>Start Live Clean</button>

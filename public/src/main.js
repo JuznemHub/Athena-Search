@@ -9030,11 +9030,160 @@ document.addEventListener('DOMContentLoaded', () => {
     updateCleanerProgressUI();
   }
 
+  function syncCleanerModeUI() {
+    const mode = $('cleanerModeSelect')?.value || 'ai';
+    const isCustom = mode === 'custom';
+    $('cleanerCustomPage')?.classList.toggle('hidden', !isCustom);
+    $('cleanerActionBar')?.classList.toggle('hidden', isCustom);
+    const listEl = $('cleanerDiffList');
+    if (listEl && !cleanerState.diffs.length) {
+      listEl.innerHTML = isCustom
+        ? '<div class="cleaner-empty">Write a custom prompt above and click Preview Plan or Execute on DB.</div>'
+        : '<div class="cleaner-empty">No diffs previewed yet. Click Scan Candidates first.</div>';
+    }
+  }
+
+  async function runCustomCleaner(dryRun) {
+    if (!isGod()) return showToast('Instance owner only', true);
+    if (cleanerState.running) return;
+    const scope = $('cleanerScopeSelect')?.value || 'community';
+    const communityId = $('cleanerCommunitySelect')?.value || '';
+    const filter = $('cleanerFilterSelect')?.value || 'unedited';
+    const prompt = String($('cleanerCustomPromptInput')?.value || '').trim();
+    const includeLinks = $('cleanerCustomIncludeLinks')?.checked !== false;
+    const includeDocs = $('cleanerCustomIncludeDocs')?.checked !== false;
+    if (!prompt) return showToast('Write a custom prompt first', true);
+    if (!includeLinks && !includeDocs) return showToast('Select at least Links or Documents', true);
+
+    const previewBtn = $('cleanerCustomPreviewBtn');
+    const runBtn = $('cleanerCustomRunBtn');
+    const summaryEl = $('cleanerCustomSummary');
+    if (previewBtn) previewBtn.disabled = true;
+    if (runBtn) runBtn.disabled = true;
+    if (summaryEl) {
+      summaryEl.classList.remove('hidden');
+      summaryEl.textContent = dryRun ? 'AI agent is analyzing DB and planning…' : 'AI agent is executing on DB…';
+    }
+
+    try {
+      const { res, data } = await api('/api/admin/cleaner/custom', {
+        method: 'POST',
+        body: JSON.stringify({
+          scope,
+          community_id: communityId,
+          filter,
+          prompt,
+          include_links: includeLinks,
+          include_docs: includeDocs,
+          dry_run: Boolean(dryRun)
+        })
+      });
+      if (!res?.ok || !data?.success) throw new Error(data?.error || 'Custom cleaner failed');
+
+      const items = Array.isArray(data.items) ? data.items : [];
+      cleanerState.diffs = items;
+      renderCleanerDiffs(items);
+
+      if (data.kind === 'answer') {
+        if (summaryEl) {
+          summaryEl.textContent = data.answer || data.explanation || 'Done.';
+        }
+        showToast('AI analysis complete');
+        return;
+      }
+
+      if (data.kind === 'bulk_rule') {
+        const matchedTotal = Number(data.matched_links || 0) + Number(data.matched_docs || 0);
+        const appliedTotal = Number(data.fixed || 0) + Number(data.deleted || 0);
+        if (summaryEl) {
+          summaryEl.textContent = dryRun
+            ? `Plan: ${data.explanation || 'Bulk rule'}\nMatched: ${data.matched_links || 0} link(s), ${data.matched_docs || 0} document(s). Review below and click Execute on DB.`
+            : `Executed: ${data.explanation || 'Bulk rule'}\nUpdated: ${data.fixed || 0} · Deleted: ${data.deleted || 0} · Failed: ${data.failed || 0}`;
+        }
+        if (!dryRun && appliedTotal > 0) {
+          loadAdminDbLinks();
+          loadMainTags();
+        }
+        showToast(dryRun ? `Preview ready (${matchedTotal} matched)` : `Custom clean done: ${appliedTotal} affected`);
+        return;
+      }
+
+      if (data.kind === 'ai_transform_rows') {
+        const ids = Array.isArray(data.ids) ? data.ids : [];
+        if (dryRun || !ids.length) {
+          if (summaryEl) {
+            summaryEl.textContent = `Plan: ${data.explanation || 'Per-row AI transform'}\nTarget rows: ${ids.length}${ids.length ? ' (previewing first 10 below)' : ''}.`;
+          }
+          showToast(`Preview ready (${ids.length} target rows)`);
+          return;
+        }
+
+        cleanerState.ids = ids;
+        cleanerState.scopeKey = data.scope_key || communityId;
+        cleanerState.offset = 0;
+        cleanerState.processed = 0;
+        cleanerState.updated = 0;
+        cleanerState.failed = 0;
+        cleanerState.diffs = [];
+        cleanerState.running = true;
+        cleanerState.paused = false;
+        updateCleanerProgressUI();
+
+        try {
+          while (cleanerState.offset < ids.length) {
+            if (cleanerState.paused) break;
+            const chunk = ids.slice(cleanerState.offset, cleanerState.offset + 10);
+            const { res: bRes, data: bData } = await api('/api/admin/cleaner/custom-batch', {
+              method: 'POST',
+              body: JSON.stringify({
+                scope,
+                community_id: cleanerState.scopeKey,
+                prompt,
+                dry_run: false,
+                ids: chunk
+              })
+            });
+            if (!bRes?.ok || !bData?.success) throw new Error(bData?.error || 'Custom batch failed');
+            const batchItems = Array.isArray(bData.items) ? bData.items : [];
+            cleanerState.offset += chunk.length;
+            cleanerState.processed += Number(bData.processed ?? chunk.length);
+            cleanerState.updated += Number(bData.fixed || 0) + Number(bData.deleted || 0);
+            cleanerState.failed += Number(bData.failed || 0);
+            const changedItems = batchItems.filter((it) => it.changed || it.error);
+            if (changedItems.length) {
+              cleanerState.diffs = [...cleanerState.diffs, ...changedItems].slice(-60);
+              renderCleanerDiffs(cleanerState.diffs);
+            }
+            updateCleanerProgressUI();
+          }
+        } finally {
+          cleanerState.running = false;
+          updateCleanerProgressUI();
+        }
+        if (summaryEl) {
+          summaryEl.textContent = `Executed: ${data.explanation || 'Per-row AI transform'}\nProcessed: ${cleanerState.offset}/${ids.length} · Updated/Deleted: ${cleanerState.updated} · Failed: ${cleanerState.failed}`;
+        }
+        if (cleanerState.updated > 0) {
+          loadAdminDbLinks();
+          loadMainTags();
+        }
+        showToast(`Custom clean finished: ${cleanerState.updated} rows affected`);
+      }
+    } catch (err) {
+      if (summaryEl) summaryEl.textContent = `Error: ${err.message || 'Custom cleaner failed'}`;
+      showToast(err.message || 'Custom cleaner failed', true);
+    } finally {
+      if (previewBtn) previewBtn.disabled = false;
+      if (runBtn) runBtn.disabled = false;
+    }
+  }
+
   function openDbCleanerModal() {
     if (!isGod()) return showToast('Only the instance owner can run the cleaner', true);
     const modal = $('dbCleanerModal');
     if (!modal) return;
     populateCleanerCommunities();
+    syncCleanerModeUI();
     updateCleanerProgressUI();
     modal.classList.remove('hidden');
   }
@@ -9174,6 +9323,9 @@ document.addEventListener('DOMContentLoaded', () => {
     $('dbCleanerCloseBtn')?.addEventListener('click', () => $('dbCleanerModal')?.classList.add('hidden'));
     $('dbCleanerBackdrop')?.addEventListener('click', () => $('dbCleanerModal')?.classList.add('hidden'));
     $('cleanerScopeSelect')?.addEventListener('change', populateCleanerCommunities);
+    $('cleanerModeSelect')?.addEventListener('change', syncCleanerModeUI);
+    $('cleanerCustomPreviewBtn')?.addEventListener('click', () => runCustomCleaner(true));
+    $('cleanerCustomRunBtn')?.addEventListener('click', () => runCustomCleaner(false));
     $('cleanerScanBtn')?.addEventListener('click', scanCleanerCandidates);
     $('cleanerBackupBtn')?.addEventListener('click', exportCleanerBackup);
     $('cleanerStartBtn')?.addEventListener('click', () => runCleanerBatches(false));

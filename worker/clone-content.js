@@ -13,7 +13,7 @@ function positiveId(value) {
   return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
-function topicOf(message) {
+export function topicOf(message) {
   const thread = positiveId(message?.message_thread_id);
   if (thread) return String(thread);
   const reply = message?.replyTo;
