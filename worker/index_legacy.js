@@ -9086,29 +9086,56 @@ function resolvePublicWebsiteUrl(env) {
   return String(env?.ATHENA_FRONTEND_URL || env?.PUBLIC_ORIGIN || '').trim().replace(/\/+$/, '');
 }
 
+function trimUtf8ToBytes(str, maxBytes) {
+  const s = String(str || '');
+  const enc = new TextEncoder();
+  if (enc.encode(s).length <= maxBytes) return s;
+  let end = s.length;
+  while (end > 0) {
+    // Avoid splitting surrogate pairs.
+    if (end > 1 && s.charCodeAt(end - 1) >= 0xdc00 && s.charCodeAt(end - 1) <= 0xdfff) end--;
+    const cand = s.slice(0, end);
+    if (enc.encode(cand).length <= maxBytes) return cand;
+    end = Math.max(0, end - Math.max(1, Math.ceil((enc.encode(cand).length - maxBytes) / 3)));
+  }
+  return '';
+}
+
 function encodeWidgetPayloadWithinLimit(payload, maxBytes = 1000) {
   const clone = structuredClone(payload);
-  const byteLen = (v) => new TextEncoder().encode(JSON.stringify(v)).length;
+  const enc = new TextEncoder();
+  const byteLen = (v) => enc.encode(JSON.stringify(v)).length;
   if (byteLen(clone) <= maxBytes) return JSON.stringify(clone);
   if (Array.isArray(clone.r)) {
     for (const row of clone.r) {
-      if (row.n) row.n = String(row.n).slice(0, 48);
+      if (row.n) row.n = trimUtf8ToBytes(row.n, 48);
     }
     if (byteLen(clone) <= maxBytes) return JSON.stringify(clone);
     for (const row of clone.r) {
       row.n = '';
-      if (Array.isArray(row.g)) row.g = row.g.slice(0, 2);
-      if (row.t) row.t = String(row.t).slice(0, 34);
+      if (Array.isArray(row.g)) row.g = row.g.slice(0, 2).map((g) => trimUtf8ToBytes(g, 18));
+      if (row.t) row.t = trimUtf8ToBytes(row.t, 44);
     }
     if (byteLen(clone) <= maxBytes) return JSON.stringify(clone);
     for (const row of clone.r) {
       row.e = '';
-      if (row.u && String(row.u).length > 96) row.u = String(row.u).slice(0, 96);
+      row.g = [];
+      if (row.u && enc.encode(String(row.u)).length > 180) row.u = '';
+    }
+    if (byteLen(clone) <= maxBytes) return JSON.stringify(clone);
+    while (clone.r.length > 1 && byteLen(clone) > maxBytes) {
+      clone.r.pop();
+    }
+    if (byteLen(clone) <= maxBytes) return JSON.stringify(clone);
+    if (clone.r[0]) {
+      clone.r[0].u = '';
+      clone.r[0].h = trimUtf8ToBytes(clone.r[0].h, 24);
+      clone.r[0].t = trimUtf8ToBytes(clone.r[0].t, 36);
     }
   }
   const encoded = JSON.stringify(clone);
-  if (new TextEncoder().encode(encoded).length <= 1024) return encoded;
-  return JSON.stringify({ ok: clone.ok ? 1 : 0, rev: clone.rev || 1, p: clone.p || 0, tp: clone.tp || 1, t: clone.t || 0, r: [] });
+  if (enc.encode(encoded).length <= 1024) return encoded;
+  return JSON.stringify({ ok: clone.ok ? 1 : 0, rev: clone.rev || 1, p: clone.p || 0, tp: clone.tp || 1, t: clone.t || 0, r: clone.r?.slice(0, 1) || [] });
 }
 
 async function canMutateSearchHit(env, scope, scopeKey, tgUserId, athenaUser, hit) {
@@ -9141,19 +9168,21 @@ function compactWidgetRow(row, perms = {}) {
     : titleFromUrl(row.url || row.filename || '');
   let host = '';
   try { if (row.url) host = new URL(row.url).hostname.replace(/^www\./, ''); } catch (_) {}
-  const url = row.url && /^https?:\/\//i.test(row.url) ? String(row.url).slice(0, 180) : '';
-  const notes = String(row.notes || row.content || '').replace(/\s+/g, ' ').trim().slice(0, 88);
+  const rawUrl = row.url && /^https?:\/\//i.test(row.url) ? String(row.url) : '';
+  // TelegramWidget.openLink rejects URLs >256 chars; never slice mid-URL.
+  const url = rawUrl && rawUrl.length <= 256 ? rawUrl : '';
+  const notes = trimUtf8ToBytes(String(row.notes || row.content || '').replace(/\s+/g, ' ').trim(), 120);
   return {
     id: String(row.id || ''),
-    t: String(titleRaw || row.filename || 'Untitled').slice(0, 56),
+    t: trimUtf8ToBytes(titleRaw || row.filename || 'Untitled', 72),
     u: url,
-    h: isDoc ? (row.filename || 'doc').slice(0, 26) : host.slice(0, 28),
+    h: trimUtf8ToBytes(isDoc ? (row.filename || 'doc') : host, 32),
     n: notes,
-    g: Array.isArray(tags) ? tags.map((x) => String(x)).filter(Boolean).slice(0, 3) : [],
-    e: row.last_edited_by_name ? String(row.last_edited_by_name).slice(0, 20) : '',
+    g: Array.isArray(tags) ? tags.map((x) => trimUtf8ToBytes(String(x), 22)).filter(Boolean).slice(0, 3) : [],
+    e: row.last_edited_by_name ? trimUtf8ToBytes(row.last_edited_by_name, 24) : '',
     ce: perms.canEdit ? 1 : 0,
     cd: perms.canDelete ? 1 : 0,
-    ca: (perms.canAi && url) ? 1 : 0
+    ca: (perms.canAi && rawUrl) ? 1 : 0
   };
 }
 
@@ -9244,11 +9273,11 @@ function applyData(raw){
     var d=JSON.parse(raw);
     if(d.rev&&d.rev<REV)return;
     if(d.rev)REV=d.rev;
-    if(d.p!=null)S.p=d.p;
+    if(d.p!=null&&d.i==null)S.p=d.p;
     if(d.tp!=null)S.tp=d.tp;
     if(d.t!=null)S.t=d.t;
     if(d.r)S.r=d.r;
-    if(d.i!=null&&d.row&&S.r[d.i])S.r[d.i]=d.row;
+    if(d.i!=null&&d.row&&S.r[d.i]&&(d.p==null||d.p===S.p))S.r[d.i]=d.row;
     if(d.m!=null)MSG=d.m;
     CF=-1;
     draw();
@@ -9259,17 +9288,18 @@ document.getElementById('app').addEventListener('click',function(ev){
   while(b&&b.tagName!=='BUTTON')b=b.parentNode;
   if(!b)return;
   var op=b.getAttribute('data-op'),idx=Number(b.getAttribute('data-i'));
-  if(op==='o'){var u=S.r[idx]&&S.r[idx].u;if(u&&TW){try{TW.openLink(u);}catch(_){MSG='HTTPS links only';draw();}}return;}
+  if(op==='o'){var u=S.r[idx]&&S.r[idx].u;if(u&&TW){try{TW.openLink(u);}catch(_){MSG='Open in web view';draw();}}return;}
   if(op==='w'){if(S.w&&TW){try{TW.openLink(S.w);}catch(_){}}return;}
   if(op==='d'){CF=idx;MSG='Tap Del? to confirm';draw();return;}
   if(op==='dx'){CF=-1;MSG='';draw();return;}
   if(!TW||BUSY)return;
+  var rid=(S.r[idx]&&S.r[idx].id)?String(S.r[idx].id).slice(0,8):'';
   var cmd='';
   if(op==='n')cmd='w:'+S.s+':n:'+S.p+':0';
   else if(op==='p')cmd='w:'+S.s+':p:'+S.p+':0';
-  else if(op==='e')cmd='w:'+S.s+':e:'+S.p+':'+idx;
-  else if(op==='dc')cmd='w:'+S.s+':d:'+S.p+':'+idx;
-  else if(op==='a')cmd='w:'+S.s+':a:'+S.p+':'+idx;
+  else if(op==='e')cmd='w:'+S.s+':e:'+S.p+':'+idx+(rid?':'+rid:'');
+  else if(op==='dc')cmd='w:'+S.s+':d:'+S.p+':'+idx+(rid?':'+rid:'');
+  else if(op==='a')cmd='w:'+S.s+':a:'+S.p+':'+idx+(rid?':'+rid:'');
   if(!cmd)return;
   BUSY=1;MSG=op==='a'?'AI rewriting...':(op==='dc'?'Deleting...':'Loading...');draw();
   TW.request(cmd).then(function(ans){BUSY=0;MSG='';applyData(ans&&ans.result);},function(err){BUSY=0;MSG=(err&&err.code)||'Error';draw();});
@@ -9394,6 +9424,26 @@ async function fetchSearchSessionWidgetPage(env, session, tgUserId, athenaUser, 
       `SELECT * FROM ${tbl} WHERE ${col} = ? AND id IN (${placeholders})`
     ).bind(session.scope_key, ...docIds).all().catch(() => ({ results: [] }));
     const byId = new Map((results || []).map((r) => [String(r.id), r]));
+    const missingIds = docIds.map((x) => String(x)).filter((id) => !byId.has(id));
+    if (missingIds.length) {
+      const docPlaceholders = missingIds.map(() => '?').join(',');
+      const docScope = session.scope === 'personal' ? 'personal' : 'community';
+      const { results: docRows } = await env.DB.prepare(
+        `SELECT id, filename, content, uploaded_by, created_at FROM uploaded_documents WHERE scope = ? AND ${col} = ? AND id IN (${docPlaceholders})`
+      ).bind(docScope, session.scope_key, ...missingIds).all().catch(() => ({ results: [] }));
+      for (const dr of (docRows || [])) {
+        byId.set(String(dr.id), {
+          id: dr.id,
+          title: dr.filename || 'Document',
+          filename: dr.filename || 'Document',
+          url: '',
+          notes: String(dr.content || '').replace(/\s+/g, ' ').trim().slice(0, 220),
+          tags: ['document'],
+          created_at: dr.created_at,
+          isDocument: true
+        });
+      }
+    }
     const ordered = docIds.map((id) => byId.get(String(id))).filter(Boolean);
     total = ordered.length;
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -9435,7 +9485,9 @@ async function fetchSearchSessionWidgetPage(env, session, tgUserId, athenaUser, 
 
   const widgetRows = [];
   for (const h of rankedHits) {
-    const perms = await canMutateSearchHit(env, session.scope, session.scope_key, tgUserId, athenaUser, h);
+    const perms = h.isDocument
+      ? { canEdit: false, canDelete: false, canAi: false }
+      : await canMutateSearchHit(env, session.scope, session.scope_key, tgUserId, athenaUser, h);
     widgetRows.push(compactWidgetRow(h, perms));
   }
   return { page, total, totalPages, rows: widgetRows, rawHits: rankedHits };
@@ -9460,7 +9512,7 @@ async function handleTelegramWidgetQuery(wq, env, corsHeaders) {
   };
 
   if (!data.startsWith('w:')) return await replyJson({ ok: 0, m: 'Unknown action' });
-  const [, sessionId, op, rawPage, rawIdx] = data.split(':');
+  const [, sessionId, op, rawPage, rawIdx, rawRid] = data.split(':');
   await ensureTelegramSearchTable(env);
   const session = sessionId
     ? await env.DB.prepare('SELECT * FROM telegram_search_sessions WHERE id = ? AND expires_at > ?').bind(sessionId, Date.now()).first()
@@ -9493,8 +9545,11 @@ async function handleTelegramWidgetQuery(wq, env, corsHeaders) {
 
   const idx = Number(rawIdx || 0);
   const hit = await resolveSearchHit(env, session, idx);
-  if (!hit) {
-    return await replyJson({ ok: 0, m: 'Result removed — refresh' });
+  const stalePage = pageNum !== Number(session.page || 0);
+  const staleRow = Boolean(rawRid && hit?.id && !String(hit.id).startsWith(rawRid));
+  if (!hit || stalePage || staleRow) {
+    const view = await fetchSearchSessionWidgetPage(env, session, tgUserId, tgUser);
+    return await replyJson({ ok: 1, rev: Date.now(), m: 'Refreshed stale view', p: view.page, tp: view.totalPages, t: view.total, r: view.rows });
   }
   const perms = await canMutateSearchHit(env, session.scope, session.scope_key, tgUserId, tgUser, hit);
 
@@ -9512,14 +9567,25 @@ async function handleTelegramWidgetQuery(wq, env, corsHeaders) {
 
   if (op === 'a') {
     if (!perms.canAi || !hit.url) return await replyJson({ ok: 0, m: 'AI rewrite: GOD only' });
-    try {
-      const updatedHit = await aiEnrichSearchHitRow(env, session, hit, tgUser, wq.from);
-      const updatedRow = compactWidgetRow(updatedHit, perms);
-      const out = { ok: 1, rev: Date.now(), m: 'AI updated', i: idx, row: updatedRow };
-      return await replyJson(out);
-    } catch (_) {
-      return await replyJson({ ok: 0, m: 'AI enrich failed' });
+    // Answer within Telegram's 15s widget_query window first; push result via editMessageWidgetData.
+    const job = (async () => {
+      try {
+        const updatedHit = await aiEnrichSearchHitRow(env, session, hit, tgUser, wq.from);
+        const updatedRow = compactWidgetRow(updatedHit, perms);
+        const out = { ok: 1, rev: Date.now(), m: 'AI updated', p: pageNum, i: idx, row: updatedRow };
+        if (chatId && msgId) {
+          await editTelegramWidgetData(token, chatId, msgId, encodeWidgetPayloadWithinLimit(out));
+        }
+      } catch (_) {
+        if (chatId && msgId) {
+          await editTelegramWidgetData(token, chatId, msgId, encodeWidgetPayloadWithinLimit({ ok: 0, rev: Date.now(), m: 'AI enrich failed' }));
+        }
+      }
+    })();
+    if (env.__ctx && typeof env.__ctx.waitUntil === 'function') {
+      env.__ctx.waitUntil(job);
     }
+    return await replyJson({ ok: 1, m: 'AI enriching...' });
   }
 
   if (op === 'e') {
@@ -12521,7 +12587,15 @@ async function handleTelegramCallbackQuery(cq, env, corsHeaders) {
     if (action === 'edit' || action === 'del' || action === 'ef' || action === 'esv' || action === 'ecx') {
       const parts = data.split(':');
       const idxHit = Number(parts[3]);
-      const targetHit = action === 'del' || action === 'edit' ? await resolveSearchHit(env, session, idxHit) : null;
+      let targetHit = null;
+      if (action === 'del' || action === 'edit') {
+        targetHit = await resolveSearchHit(env, session, idxHit);
+      } else if (session.edit_hit_id) {
+        const editTbl = session.scope === 'personal' ? 'personal_links' : 'links';
+        const editCol = session.scope === 'personal' ? 'user_id' : 'community_id';
+        targetHit = await env.DB.prepare(`SELECT * FROM ${editTbl} WHERE id = ? AND ${editCol} = ?`)
+          .bind(session.edit_hit_id, session.scope_key).first().catch(() => null);
+      }
       const perms = await canMutateSearchHit(env, session.scope, session.scope_key, tgUserId, callbackUser, targetHit);
       if (!perms.canEdit) {
         await telegramApi(token, 'answerCallbackQuery', {
@@ -19495,6 +19569,7 @@ Rules:
        } catch (_) {}
 
        let widgetSent = false;
+       let widgetMsgId = null;
        const isPrivateAi = !String(chatId).startsWith('-');
        if (isPrivateAi && aiSessionId && docs.length) {
          try {
@@ -19521,8 +19596,9 @@ Rules:
              const sentW = await sendTelegramWidget(token, chatId, { html: widgetHtml, caption, chatData, threadId: forumThreadId, allowQueries: true });
              if (sentW?.ok && sentW.result?.message_id) {
                widgetSent = true;
+               widgetMsgId = Number(sentW.result.message_id);
                await env.DB.prepare('UPDATE telegram_search_sessions SET widget_msg_id = ? WHERE id = ?')
-                 .bind(Number(sentW.result.message_id), aiSessionId).run().catch(() => {});
+                 .bind(widgetMsgId, aiSessionId).run().catch(() => {});
              }
            }
          } catch (_) {
@@ -19534,7 +19610,8 @@ Rules:
 
         // Keep full AI prose in thinkMsgId when longer than the compact widget summary,
         // or replace thinkMsgId cleanly with the widget alone when concise.
-        if (widgetSent && String(content || '').trim().length <= 420) {
+        const conciseWidgetOnly = widgetSent && String(content || '').trim().length <= 420;
+        if (conciseWidgetOnly) {
           await telegramApi(token, 'deleteMessage', { chat_id: chatId, message_id: thinkMsgId }).catch(() => {});
         } else {
           const richAnswer = richTextToRich(msg);
@@ -19545,13 +19622,14 @@ Rules:
           }
         }
         // Remember the thread so replying to this message is a follow-up.
+        const threadAnchorMsgId = (conciseWidgetOnly && widgetMsgId) ? widgetMsgId : thinkMsgId;
         try {
           conversationHistory.push({ role: 'user', content: q }, { role: 'assistant', content: content || '' });
           const trimmed = JSON.stringify(conversationHistory.slice(-8));
           await env.DB.prepare(
             `INSERT INTO tg_ai_threads (key, ai_msg_id, history, updated_at) VALUES (?, ?, ?, ?)
              ON CONFLICT(key) DO UPDATE SET ai_msg_id = excluded.ai_msg_id, history = excluded.history, updated_at = excluded.updated_at`
-          ).bind(aiThreadKey(chatId, forumThreadId), thinkMsgId, trimmed, Date.now()).run();
+          ).bind(aiThreadKey(chatId, forumThreadId), threadAnchorMsgId, trimmed, Date.now()).run();
         } catch (_) {}
         try { console.log(`[ai] done in ${Date.now() - t0}ms scope=${scope} docs=${docs.length}`); } catch (_) {}
       } catch (err) {

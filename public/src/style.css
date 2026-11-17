@@ -815,14 +815,14 @@ dialog.modal-dialog::backdrop {
 /* Defer off-screen rendering for long result, admin & wiki lists */
 .results-list > .g-result:nth-child(n+8),
 .admin-db-list > .admin-card:nth-child(n+8),
-.wiki-links-grid > .wiki-link-card:nth-child(n+12) {
+.wiki-link-list > .wiki-link-card:nth-child(n+12) {
   content-visibility: auto;
   contain-intrinsic-size: auto none auto 156px;
 }
 @supports not (content-visibility: auto) {
   .results-list > .g-result:nth-child(n+8),
   .admin-db-list > .admin-card:nth-child(n+8),
-  .wiki-links-grid > .wiki-link-card:nth-child(n+12) {
+  .wiki-link-list > .wiki-link-card:nth-child(n+12) {
     contain: layout style paint;
   }
 }
