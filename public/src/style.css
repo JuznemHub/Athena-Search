@@ -582,13 +582,18 @@ body {
 .auth-gate-card h1 { font-size: 1.4rem; margin-bottom: 8px; }
 .auth-gate-sub { color: var(--text-muted, #8e95b0); font-size: 0.92rem; margin-bottom: 24px; line-height: 1.45; }
 .oauth-buttons { display: flex; flex-direction: column; gap: 14px; align-items: center; }
-.btn-telegram { background: #2AABEE !important; color: #fff !important; border: none !important; font-weight: 600; }
+.btn-telegram { background: #1c76a8 !important; color: #fff !important; border: none !important; font-weight: 600; }
 .btn-telegram:hover:not(:disabled) { filter: brightness(1.08); }
 .btn-telegram:disabled { opacity: 0.45; }
 .btn-discord { background: #5865F2 !important; color: #fff !important; border: none !important; font-weight: 600; }
 .btn-discord:hover:not(:disabled) { filter: brightness(1.08); }
 .btn-discord:disabled { opacity: 0.45; }
-.telegram-widget-wrap { display: flex; justify-content: center; min-height: 40px; margin: 4px 0; }
+.telegram-widget-wrap { display: flex; justify-content: center; }
+.telegram-widget-wrap:empty { display: none; }
+.auth-more { width: 100%; text-align: center; }
+.auth-more > summary { display: inline-flex; align-items: center; min-height: 44px; padding: 0 8px; cursor: pointer; color: var(--text-dim); font-size: 0.88rem; text-decoration: underline; text-underline-offset: 3px; }
+.auth-more > summary:hover { color: var(--text); }
+.auth-more-body { display: flex; flex-direction: column; gap: 10px; align-items: center; margin-top: 8px; }
 .telegram-chooser {
   width: 100%;
   padding: 12px;

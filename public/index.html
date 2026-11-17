@@ -52,31 +52,30 @@
         <span class="logo-text">Athena<span class="highlight">Search</span></span>
       </div>
       <h1>Welcome</h1>
-      <p class="auth-gate-sub">Sign in with Telegram or Discord to use Athena.</p>
+      <p class="auth-gate-sub">Sign in to use Athena.</p>
       <div class="oauth-buttons">
-        <button type="button" id="telegramAppChooserBtn" class="btn btn-telegram btn-block hidden">Choose Telegram Client</button>
-        <div id="telegramChooserCard" class="telegram-chooser hidden" role="region" aria-label="Telegram client options">
-          <div class="telegram-chooser-grid">
-            <a id="tgChoiceOfficial" class="btn btn-secondary btn-sm telegram-choice-link" href="#" rel="noopener noreferrer">Official Telegram</a>
-            <a id="tgChoiceTme" class="btn btn-secondary btn-sm telegram-choice-link" href="#" target="_blank" rel="noopener noreferrer">App Chooser (t.me)</a>
-            <a id="tgChoiceWeb" class="btn btn-secondary btn-sm telegram-choice-link" href="#" target="_blank" rel="noopener noreferrer">Telegram Web</a>
-            <button type="button" id="tgChoiceCopyBtn" class="btn btn-secondary btn-sm">Copy /start Code</button>
-          </div>
-          <code id="tgChooserCommand" class="telegram-chooser-cmd"></code>
-          <p class="telegram-chooser-hint">If Firefox still jumps straight into one client (such as exteraGram), set Firefox <strong>Settings &rarr; Open links in apps &rarr; Ask before opening</strong> or clear that app's <strong>Open by default</strong> links in Android Settings, or paste the copied <code>/start</code> command into any Telegram app.</p>
-        </div>
-        <button type="button" id="telegramWebLoginBtn" class="btn btn-telegram btn-block hidden">Log in with Telegram Web</button>
         <button type="button" id="telegramLoginBtn" class="btn btn-telegram btn-block" disabled>Continue with Telegram</button>
-        <div id="telegramWidgetContainer" class="telegram-widget-wrap"></div>
-        <button type="button" id="discordLoginBtn" class="btn btn-discord btn-block" disabled>Continue with Discord</button>
+        <button type="button" id="discordLoginBtn" class="btn btn-discord btn-block hidden" disabled>Continue with Discord</button>
+        <details id="authMoreWays" class="auth-more hidden">
+          <summary>Other ways to sign in</summary>
+          <div class="auth-more-body">
+            <button type="button" id="telegramAppChooserBtn" class="btn btn-secondary btn-block hidden">Choose Telegram Client</button>
+            <div id="telegramChooserCard" class="telegram-chooser hidden" role="region" aria-label="Telegram client options">
+              <div class="telegram-chooser-grid">
+                <a id="tgChoiceOfficial" class="btn btn-secondary btn-sm telegram-choice-link" href="#" rel="noopener noreferrer">Official Telegram</a>
+                <a id="tgChoiceTme" class="btn btn-secondary btn-sm telegram-choice-link" href="#" target="_blank" rel="noopener noreferrer">App Chooser (t.me)</a>
+                <a id="tgChoiceWeb" class="btn btn-secondary btn-sm telegram-choice-link" href="#" target="_blank" rel="noopener noreferrer">Telegram Web</a>
+                <button type="button" id="tgChoiceCopyBtn" class="btn btn-secondary btn-sm">Copy /start Code</button>
+              </div>
+              <code id="tgChooserCommand" class="telegram-chooser-cmd"></code>
+              <p class="telegram-chooser-hint">If Firefox still jumps straight into one client (such as exteraGram), set Firefox <strong>Settings &rarr; Open links in apps &rarr; Ask before opening</strong> or clear that app's <strong>Open by default</strong> links in Android Settings, or paste the copied <code>/start</code> command into any Telegram app.</p>
+            </div>
+            <button type="button" id="telegramWebLoginBtn" class="btn btn-secondary btn-block hidden">Log in with Telegram Web</button>
+            <div id="telegramWidgetContainer" class="telegram-widget-wrap"></div>
+          </div>
+        </details>
       </div>
       <p id="authGateError" class="auth-error hidden"></p>
-      <div class="theme-switcher auth-theme-switcher" role="group" aria-label="Theme">
-        <button type="button" class="theme-chip" data-theme="dark">Dark</button>
-        <button type="button" class="theme-chip" data-theme="light">Light</button>
-        <button type="button" class="theme-chip" data-theme="material">Material</button>
-        <button type="button" class="theme-chip" data-theme="glass">Glass</button>
-      </div>
       <p class="auth-gate-note">Communities are optional; configure later in Settings.</p>
     </div>
   </div>

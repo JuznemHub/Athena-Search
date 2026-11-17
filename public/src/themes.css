@@ -390,8 +390,6 @@ body::before {
   background: var(--accent-gradient);
   border-color: transparent;
 }
-.auth-theme-switcher { margin-top: 18px; }
-.auth-theme-switcher .theme-chip { flex: 1 1 calc(50% - 8px); }
 
 /* Light theme overrides for theme bar & switcher */
 [data-theme="light"] .theme-bar {

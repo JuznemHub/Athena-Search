@@ -628,6 +628,13 @@ document.addEventListener('DOMContentLoaded', () => {
       return { officialUrl, tmeUrl, tgWebUrl, command: `/start ${startParam}` };
     }
 
+    const moreWays = $('authMoreWays');
+    if (moreWays && (cfg.telegramBotEnabled || cfg.botUsername)) {
+      moreWays.classList.remove('hidden');
+      if (!cfg.telegramEnabled) moreWays.open = true;
+    }
+    if (!cfg.telegramEnabled && telegramLoginBtn) telegramLoginBtn.classList.add('hidden');
+
     const chooserBtn = $('telegramAppChooserBtn');
     const chooserCard = $('telegramChooserCard');
     const choiceOfficial = $('tgChoiceOfficial');
@@ -767,6 +774,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (cfg.discordEnabled && discordLoginBtn) {
       discordLoginBtn.disabled = false;
+      discordLoginBtn.classList.remove('hidden');
       discordLoginBtn.onclick = () => { window.location.assign(`${API_BASE}/api/auth/discord`); };
     }
   }
