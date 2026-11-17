@@ -1045,3 +1045,38 @@ body::before {
   outline: 2px solid var(--shadcn-ring);
   outline-offset: 2px;
 }
+
+/* ========== Dropdowns ==========
+   The browser's own select arrow ignores padding and sits against the
+   right edge. Every single-line select draws one chevron in the text
+   colour instead, 12px in from the edge, so it reads in every theme. */
+html body select:not([multiple]):not([size]) {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  padding-right: 32px !important;
+  background-image:
+    linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%) !important;
+  background-position:
+    right 17px center,
+    right 12px center !important;
+  background-size: 5px 5px, 5px 5px !important;
+  background-repeat: no-repeat !important;
+  text-overflow: ellipsis;
+}
+
+/* The subheading picker lives inside an outlined pill. The pill is the
+   control, so the select is transparent and fills the rest of it. */
+html body .wiki-sub-select-wrap {
+  padding-right: 4px;
+}
+html body .wiki-sub-select-wrap .wiki-sub-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+  height: auto;
+  padding: 4px 32px 4px 0 !important;
+  background-color: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+}
