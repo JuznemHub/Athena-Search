@@ -820,6 +820,7 @@ body::before {
   -webkit-backdrop-filter: none;
 }
 .glass-blur-control { margin-top: 16px; }
+:root:not([data-theme="glass"]) .glass-blur-control { display: none; }
 .glass-blur-heading { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; color: var(--text); font-size: 0.875rem; }
 .glass-blur-heading output { color: var(--text-dim); font-variant-numeric: tabular-nums; }
 .glass-blur-control input[type="range"] { display: block; width: 100%; min-height: 44px; accent-color: var(--accent); cursor: pointer; }
